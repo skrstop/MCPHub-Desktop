@@ -1,0 +1,238 @@
+import { getApiUrl, getApiBaseUrl } from './runtime';
+import { isTauri, mapRestToCommand, invokeMapped } from './tauriClient';
+
+// Define the interceptor interface
+export interface FetchInterceptor {
+  request?: (url: string, config: RequestInit) => Promise<{ url: string; config: RequestInit }>;
+  response?: (response: Response) => Promise<Response>;
+  error?: (error: Error) => Promise<Error>;
+}
+
+// Define the enhanced fetch response interface
+export interface ApiResponse<T = any> {
+  success: boolean;
+  data?: T;
+  message?: string;
+  error?: string;
+}
+
+// Global interceptors store
+const interceptors: FetchInterceptor[] = [];
+
+// --- Global UI Tracking for Network Requests ---
+let lastClickedButton: HTMLButtonElement | null = null;
+let clickTimeoutId: ReturnType<typeof setTimeout> | null = null;
+const activeRequests = new WeakMap<HTMLButtonElement, number>();
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    const btn = target?.closest('button');
+    if (btn) {
+      lastClickedButton = btn as HTMLButtonElement;
+      if (clickTimeoutId) clearTimeout(clickTimeoutId);
+      // Give enough time for synchronous event handlers to initiate a fetch
+      clickTimeoutId = setTimeout(() => {
+        lastClickedButton = null;
+      }, 100);
+    }
+  }, true);
+}
+// -----------------------------------------------
+
+// Add an interceptor
+export const addInterceptor = (interceptor: FetchInterceptor): void => {
+  interceptors.push(interceptor);
+};
+
+// Remove an interceptor
+export const removeInterceptor = (interceptor: FetchInterceptor): void => {
+  const index = interceptors.indexOf(interceptor);
+  if (index > -1) {
+    interceptors.splice(index, 1);
+  }
+};
+
+// Clear all interceptors
+export const clearInterceptors = (): void => {
+  interceptors.length = 0;
+};
+
+// Enhanced fetch function with interceptors
+export const fetchWithInterceptors = async (
+  input: string | URL | Request,
+  init: RequestInit = {},
+): Promise<Response> => {
+  let url = input.toString();
+  let config = { ...init };
+
+  // Capture button for UI feedback before any await suspends execution
+  const btn = lastClickedButton;
+  if (btn) {
+    const count = activeRequests.get(btn) || 0;
+    activeRequests.set(btn, count + 1);
+    btn.classList.add('is-loading');
+  }
+
+  try {
+    // Apply request interceptors
+    for (const interceptor of interceptors) {
+      if (interceptor.request) {
+        const result = await interceptor.request(url, config);
+        url = result.url;
+        config = result.config;
+      }
+    }
+
+    // Make the actual fetch request
+    let response = await fetch(url, config);
+
+    // Apply response interceptors
+    for (const interceptor of interceptors) {
+      if (interceptor.response) {
+        response = await interceptor.response(response);
+      }
+    }
+
+    return response;
+  } catch (error) {
+    let processedError = error as Error;
+
+    // Apply error interceptors
+    for (const interceptor of interceptors) {
+      if (interceptor.error) {
+        processedError = await interceptor.error(processedError);
+      }
+    }
+
+    throw processedError;
+  } finally {
+    // UI feedback cleanup
+    if (btn) {
+      const count = activeRequests.get(btn) || 0;
+      if (count <= 1) {
+        activeRequests.delete(btn);
+        btn.classList.remove('is-loading');
+      } else {
+        activeRequests.set(btn, count - 1);
+      }
+    }
+  }
+};
+
+// Convenience function for API calls with automatic URL construction
+export const apiRequest = async <T = any>(endpoint: string, init: RequestInit = {}): Promise<T> => {
+  // --- Tauri desktop: route to invoke() instead of HTTP fetch ---
+  if (isTauri()) {
+    try {
+      const method = init.method || 'GET';
+      // Strip the /api prefix that getApiBaseUrl() would add, keep just the path
+      const apiBase = getApiBaseUrl(); // e.g. "/api" or "/basepath/api"
+      const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : '/' + endpoint;
+      // Remove apiBase prefix if already included, otherwise use as-is
+      const cleanPath = normalizedEndpoint.startsWith(apiBase)
+        ? normalizedEndpoint.slice(apiBase.length)
+        : normalizedEndpoint;
+      let body: unknown;
+      if (init.body) {
+        try { body = JSON.parse(init.body as string); } catch { body = init.body; }
+      }
+      const { command, args } = mapRestToCommand(method, cleanPath, body);
+      return await invokeMapped<T>(command, args);
+    } catch (error) {
+      console.error('[Tauri] invoke error:', error);
+      return { success: false, message: error instanceof Error ? error.message : String(error) } as T;
+    }
+  }
+  // --- Web: normal HTTP fetch ---
+  try {
+    const url = getApiUrl(endpoint);
+    const response = await fetchWithInterceptors(url, init);
+
+    // Try to parse JSON response
+    let data: T;
+    try {
+      data = await response.json();
+    } catch (parseError) {
+      // If JSON parsing fails, create a generic response
+      const genericResponse = {
+        success: response.ok,
+        message: response.ok
+          ? 'Request successful'
+          : `HTTP ${response.status}: ${response.statusText}`,
+      };
+      data = genericResponse as T;
+    }
+
+    // If response is not ok, but no explicit error in parsed data
+    if (!response.ok && typeof data === 'object' && data !== null) {
+      const responseObj = data as any;
+      if (responseObj.success !== false) {
+        responseObj.success = false;
+        responseObj.message =
+          responseObj.message || `HTTP ${response.status}: ${response.statusText}`;
+      }
+    }
+
+    return data;
+  } catch (error) {
+    console.error('API request error:', error);
+    const errorResponse = {
+      success: false,
+      message: error instanceof Error ? error.message : 'An unknown error occurred',
+    };
+    return errorResponse as T;
+  }
+};
+
+// Convenience methods for common HTTP methods
+export const apiGet = <T = any>(endpoint: string, init: Omit<RequestInit, 'method'> = {}) =>
+  apiRequest<T>(endpoint, { ...init, method: 'GET' });
+
+export const apiPost = <T = any>(
+  endpoint: string,
+  data?: any,
+  init: Omit<RequestInit, 'method' | 'body'> = {},
+) =>
+  apiRequest<T>(endpoint, {
+    ...init,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...init.headers,
+    },
+    body: data ? JSON.stringify(data) : undefined,
+  });
+
+export const apiPut = <T = any>(
+  endpoint: string,
+  data?: any,
+  init: Omit<RequestInit, 'method' | 'body'> = {},
+) =>
+  apiRequest<T>(endpoint, {
+    ...init,
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...init.headers,
+    },
+    body: data ? JSON.stringify(data) : undefined,
+  });
+
+export const apiDelete = <T = any>(endpoint: string, init: Omit<RequestInit, 'method'> = {}) =>
+  apiRequest<T>(endpoint, { ...init, method: 'DELETE' });
+
+export const apiPatch = <T = any>(
+  endpoint: string,
+  data?: any,
+  init: Omit<RequestInit, 'method' | 'body'> = {},
+) =>
+  apiRequest<T>(endpoint, {
+    ...init,
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      ...init.headers,
+    },
+    body: data ? JSON.stringify(data) : undefined,
+  });

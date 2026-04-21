@@ -1,0 +1,642 @@
+/* Use project's custom Tailwind import */
+@import 'tailwindcss';
+
+/* ── Server Card: badge atoms ───────────────────────────── */
+.server-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.5;
+  transition: background-color 0.15s;
+  user-select: none;
+}
+
+.server-badge-gray  { background-color: #f3f4f6; color: #374151; }
+.server-badge-blue  { background-color: #eff6ff; color: #1d4ed8; }
+.server-badge-blue:hover,
+.server-badge-blue-active { background-color: #dbeafe; color: #1e40af; }
+.server-badge-purple { background-color: #f5f3ff; color: #6d28d9; }
+.server-badge-purple:hover,
+.server-badge-purple-active { background-color: #ede9fe; color: #5b21b6; }
+.server-badge-emerald { background-color: #ecfdf5; color: #047857; }
+.server-badge-emerald:hover,
+.server-badge-emerald-active { background-color: #d1fae5; color: #065f46; }
+
+/* dark mode badge overrides */
+.dark .server-badge-gray    { background-color: #374151; color: #d1d5db; }
+.dark .server-badge-blue    { background-color: rgba(59,130,246,0.15); color: #93c5fd; }
+.dark .server-badge-blue:hover,
+.dark .server-badge-blue-active { background-color: rgba(59,130,246,0.25); color: #bfdbfe; }
+.dark .server-badge-purple  { background-color: rgba(139,92,246,0.15); color: #c4b5fd; }
+.dark .server-badge-purple:hover,
+.dark .server-badge-purple-active { background-color: rgba(139,92,246,0.25); color: #ddd6fe; }
+.dark .server-badge-emerald { background-color: rgba(16,185,129,0.15); color: #6ee7b7; }
+.dark .server-badge-emerald:hover,
+.dark .server-badge-emerald-active { background-color: rgba(16,185,129,0.25); color: #a7f3d0; }
+
+/* ── Server Card: action button atoms ───────────────────── */
+.server-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0.25rem 0.625rem;
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s;
+  cursor: pointer;
+  border: none;
+}
+.server-btn-primary   { background-color: #dbeafe; color: #1e40af; }
+.server-btn-primary:hover { background-color: #bfdbfe; }
+.server-btn-secondary { background-color: #f3f4f6; color: #374151; }
+.server-btn-secondary:hover { background-color: #e5e7eb; }
+.server-btn-danger    { background-color: #fee2e2; color: #991b1b; }
+.server-btn-danger:hover { background-color: #fecaca; }
+.server-btn-disabled  { background-color: #e5e7eb; color: #9ca3af; cursor: default; }
+
+/* dark mode button overrides */
+.dark .server-btn-primary   { background-color: rgba(59,130,246,0.2); color: #93c5fd; }
+.dark .server-btn-primary:hover { background-color: rgba(59,130,246,0.3); }
+.dark .server-btn-secondary { background-color: #374151; color: #d1d5db; }
+.dark .server-btn-secondary:hover { background-color: #4b5563; }
+.dark .server-btn-danger    { background-color: rgba(239,68,68,0.2); color: #fca5a5; }
+.dark .server-btn-danger:hover { background-color: rgba(239,68,68,0.3); }
+.dark .server-btn-disabled  { background-color: #374151; color: #6b7280; }
+
+/* Add some custom styles to verify CSS is working correctly */
+body {
+  margin: 0;
+  font-family:
+    'Inter',
+    'PingFang SC',
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'Roboto',
+    'Oxygen',
+    'Ubuntu',
+    'Cantarell',
+    'Fira Sans',
+    'Droid Sans',
+    'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Dark mode override styles - these will apply when dark class is on html element */
+.dark body {
+  background-color: #1f2a37;
+  color: #e5e7eb;
+}
+
+.dark .bg-white {
+  background-color: #1f2937 !important;
+}
+
+.dark .text-gray-900 {
+  color: #f9fafb !important;
+}
+
+.dark .text-gray-800 {
+  color: #f3f4f6 !important;
+}
+
+.dark .text-gray-700 {
+  color: #e5e7eb !important;
+}
+
+.dark .text-gray-600 {
+  color: #d1d5db !important;
+}
+
+/* .dark .text-gray-500 {
+  color: #9ca3af !important;
+} */
+
+.dark .border-gray-300 {
+  border-color: #2f3b4c !important;
+}
+
+.dark .border-gray-200 {
+  border-color: #2f3b4c !important;
+}
+
+.dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #2f3b4c !important;
+}
+
+.dark .bg-gray-100 {
+  background-color: #374151 !important;
+}
+
+/* Specific hover effects for dark mode */
+.dark .hover\:bg-gray-100:hover {
+  background-color: rgba(110, 127, 156, 0.15) !important;
+}
+
+.dark .hover\:text-gray-900:hover {
+  color: rgb(190, 188, 185) !important;
+}
+
+.dark .bg-gray-50 {
+  background-color: #1f2937 !important;
+}
+
+.dark .text-blue-700 {
+  color: white !important;
+}
+
+.dark .bg-blue-50 {
+  background-color: #4b5563 !important;
+}
+
+.dark .bg-blue-200 {
+  background-color: #576476 !important;
+}
+
+.dark .shadow {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.15),
+    0 2px 6px rgba(0, 0, 0, 0.1) !important;
+}
+
+.bg-blue-300 {
+  background-color: var(--color-blue-300);
+}
+
+.bg-custom-blue {
+  background-color: #4a90e2;
+}
+
+.text-custom-white {
+  color: #ffffff;
+}
+
+.status-badge-online {
+  background-color: white !important;
+  color: rgba(129, 199, 132, 0.9) !important;
+  border: 1px solid #a6d7b7;
+}
+
+/* Enhanced status badge styles for dark theme */
+.dark .status-badge-online {
+  background-color: rgba(76, 175, 80, 0.15) !important;
+  color: rgba(129, 199, 132, 0.9) !important;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+.status-badge-offline {
+  background-color: white !important;
+  color: rgba(107, 114, 128, 0.9) !important;
+  border: 1px solid #d1d5db;
+}
+
+.dark .status-badge-offline {
+  background-color: rgba(107, 114, 128, 0.15) !important;
+  color: rgba(156, 163, 175, 0.9) !important;
+  border: 1px solid rgba(107, 114, 128, 0.3);
+}
+
+.status-badge-connecting {
+  background-color: white !important;
+  color: rgba(255, 213, 79, 0.9) !important;
+  border: 1px solid #ffd57f;
+}
+
+.dark .status-badge-connecting {
+  background-color: rgba(255, 193, 7, 0.15) !important;
+  color: rgba(255, 213, 79, 0.9) !important;
+  border: 1px solid rgba(255, 193, 7, 0.3);
+}
+
+.status-badge-oauth-required {
+  background-color: white !important;
+  color: rgba(156, 39, 176, 0.9) !important;
+  border: 1px solid #ba68c8;
+}
+
+.dark .status-badge-oauth-required {
+  background-color: rgba(156, 39, 176, 0.15) !important;
+  color: rgba(186, 104, 200, 0.9) !important;
+  border: 1px solid rgba(156, 39, 176, 0.3);
+}
+
+/* Enhanced status icons for dark theme */
+.dark .status-icon-blue {
+  background-color: rgba(59, 130, 246, 0.15) !important;
+  color: rgba(96, 165, 250, 0.9) !important;
+}
+
+.dark .status-icon-green {
+  background-color: rgba(76, 175, 80, 0.15) !important;
+  color: rgba(129, 199, 132, 0.9) !important;
+}
+
+.dark .status-icon-red {
+  background-color: rgba(244, 67, 54, 0.15) !important;
+  color: rgba(239, 154, 154, 0.9) !important;
+}
+
+.dark .status-icon-yellow {
+  background-color: rgba(255, 193, 7, 0.15) !important;
+  color: rgba(255, 213, 79, 0.9) !important;
+}
+
+/* Enhanced card hover effects */
+.dashboard-card {
+  transition: all 0.3s ease;
+  border-radius: 12px;
+}
+
+.dashboard-card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 8px 25px rgba(0, 0, 0, 0.2),
+    0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Icon container hover effects */
+.icon-container {
+  transition: all 0.3s ease;
+}
+
+.icon-container:hover {
+  transform: scale(1.05);
+  filter: brightness(1.1);
+}
+
+/* Progress bar enhancements */
+.progress-bar-online {
+  background: linear-gradient(90deg, rgba(76, 175, 80, 0.8), rgba(129, 199, 132, 0.6));
+}
+
+.progress-bar-offline {
+  background: linear-gradient(90deg, rgba(244, 67, 54, 0.8), rgba(239, 154, 154, 0.6));
+}
+
+.progress-bar-connecting {
+  background: linear-gradient(90deg, rgba(255, 193, 7, 0.8), rgba(255, 213, 79, 0.6));
+}
+
+/* Table enhancements for dark theme */
+.dark .table-container {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.dark thead {
+  background-color: #252d3a !important;
+}
+
+.dark tbody tr {
+  border-bottom: 1px solid #2f3b4c;
+}
+
+tbody tr:hover {
+  background-color: var(--color-gray-100) !important;
+  transition: background-color 0.2s ease;
+}
+
+.dark tbody tr:hover {
+  background-color: rgba(55, 65, 81, 0.5) !important;
+  transition: background-color 0.2s ease;
+}
+
+/* Error box enhancements for dark theme */
+.dark .error-box {
+  background-color: rgba(244, 67, 54, 0.1) !important;
+  border-color: rgba(244, 67, 54, 0.3) !important;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(244, 67, 54, 0.1);
+}
+
+.dark .error-box h3 {
+  color: rgba(239, 154, 154, 0.9) !important;
+}
+
+.dark .error-box p {
+  color: #d1d5db !important;
+}
+
+/* Loading container enhancements */
+.loading-container {
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+
+.dark .loading-container {
+  background-color: rgba(31, 41, 55, 0.8) !important;
+  border: 1px solid #2f3b4c;
+}
+
+.label-primary {
+  background-color: var(--color-blue-50) !important;
+  color: var(--color-blue-500) !important;
+}
+
+.dark .label-primary {
+  background-color: rgba(59, 130, 246, 0.15) !important;
+  color: rgba(96, 165, 250, 0.9) !important;
+}
+
+.label-secondary {
+  background-color: var(--color-green-50) !important;
+  color: var(--color-green-500) !important;
+}
+
+.dark .label-secondary {
+  background-color: rgba(76, 175, 80, 0.15) !important;
+  color: rgba(129, 199, 132, 0.9) !important;
+}
+
+.btn-primary {
+  background-color: #60a5fa !important;
+  color: #ffffff !important;
+  border: none;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  box-shadow: 0 2px 4px rgba(96, 165, 250, 0.2);
+}
+
+.btn-primary:hover {
+  background-color: #3b82f6 !important;
+  color: #ffffff !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+/* Enhanced button styles for dark theme */
+.dark .btn-primary {
+  background-color: rgba(59, 130, 246, 0.15) !important;
+  color: rgba(96, 165, 250, 0.9) !important;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  transition: all 0.3s ease;
+}
+
+.dark .btn-primary:hover {
+  background-color: rgba(59, 130, 246, 0.25) !important;
+  color: rgba(96, 165, 250, 1) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+}
+
+.btn-secondary {
+  background-color: #f9fafb !important;
+  color: #374151 !important;
+  border: 1px solid #d1d5db !important;
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.btn-secondary:hover {
+  background-color: #e5e7eb !important;
+  color: #374151 !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.dark .btn-secondary {
+  background-color: rgba(107, 114, 128, 0.15) !important;
+  color: rgba(156, 163, 175, 0.9) !important;
+  border: 1px solid rgba(107, 114, 128, 0.3) !important;
+  transition: all 0.3s ease;
+}
+
+.dark .btn-secondary:hover {
+  background-color: rgba(107, 114, 128, 0.25) !important;
+  color: rgba(156, 163, 175, 1) !important;
+  transform: translateY(-1px);
+}
+
+.btn-warning {
+  background-color: var(--color-yellow-100) !important;
+  color: var(--color-yellow-800) !important;
+  border: none;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.btn-warning:hover {
+  background-color: var(--color-yellow-200) !important;
+  color: var(--color-yellow-800) !important;
+}
+
+.dark .btn-warning {
+  background-color: rgba(234, 179, 8, 0.15) !important;
+  color: rgba(250, 204, 21, 0.9) !important;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  transition: all 0.3s ease;
+}
+
+.dark .btn-warning:hover {
+  background-color: rgba(234, 179, 8, 0.25) !important;
+  color: rgba(250, 204, 21, 1) !important;
+  transform: translateY(-1px);
+}
+
+.btn-danger {
+  background-color: var(--color-red-100) !important;
+  color: var(--color-red-800) !important;
+  border: none;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.btn-danger:hover {
+  background-color: var(--color-red-200) !important;
+  color: var(--color-red-800) !important;
+}
+
+.dark .btn-danger {
+  background-color: rgba(244, 67, 54, 0.15) !important;
+  color: rgba(239, 154, 154, 0.9) !important;
+  border: 1px solid rgba(244, 67, 54, 0.3);
+  transition: all 0.3s ease;
+}
+
+.dark .btn-danger:hover {
+  background-color: rgba(244, 67, 54, 0.25) !important;
+  color: rgba(239, 154, 154, 1) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(244, 67, 54, 0.2);
+}
+
+.form-input {
+  background-color: #f9fafb !important;
+  border-color: #d1d5db !important;
+  color: #374151 !important;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.form-input:focus {
+  border-color: rgba(184, 193, 207, 0.5);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* Form input enhancements for dark theme */
+.dark .form-input {
+  background-color: #1f2937 !important;
+  border-color: #2f3b4c !important;
+  color: #e5e7eb !important;
+  border-radius: 8px;
+}
+
+.dark .form-input:focus {
+  border-color: rgba(59, 130, 246, 0.5) !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1) !important;
+}
+
+.dark .form-input::placeholder {
+  color: #9ca3af !important;
+}
+
+/* Card spacing and layout improvements */
+.page-card {
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+.page-card:hover {
+  transform: translateY(-1px);
+}
+
+.dark .page-card {
+  background-color: #1f2937 !important;
+  border: 1px solid #2f3b4c;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.15),
+    0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+/* Custom text color to match status-icon-red */
+.text-status-red {
+  color: #991b1b; /* Tailwind red-800 for light mode */
+}
+
+.dark .text-status-red {
+  color: rgba(239, 154, 154, 0.9) !important;
+}
+
+/* External link styles */
+.external-link {
+  color: #2563eb !important; /* Blue-600 for light mode */
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: all 0.2s ease-in-out;
+  cursor: pointer;
+}
+
+.external-link:hover {
+  color: #1d4ed8 !important; /* Blue-700 for light mode */
+  border-bottom-color: #1d4ed8;
+  text-decoration: none;
+}
+
+.dark .external-link {
+  color: #60a5fa !important; /* Blue-400 for dark mode */
+}
+
+.dark .external-link:hover {
+  color: #93c5fd !important; /* Blue-300 for dark mode */
+  border-bottom-color: #93c5fd;
+}
+
+.border-red {
+  border-color: #937d7d; /* Tailwind red-800 for light mode */
+}
+
+.dark .border-red {
+  border-color: rgba(188, 161, 161, 0.9) !important;
+}
+
+.dark .text-status-green {
+  color: rgba(129, 199, 132, 0.9) !important;
+}
+
+/* Empty state styling */
+.dark .empty-state {
+  background-color: #1f2937 !important;
+  border: 1px solid #2f3b4c;
+  border-radius: 12px;
+  text-align: center;
+  padding: 3rem 2rem;
+}
+
+.dark .empty-state p {
+  color: #9ca3af !important;
+}
+
+/* Login page enhancements for dark theme */
+.dark .login-container {
+  background-color: #1f2a37 !important;
+}
+
+.dark .login-card {
+  background-color: #1f2937 !important;
+  border: 1px solid #2f3b4c;
+  box-shadow:
+    0 8px 25px rgba(0, 0, 0, 0.2),
+    0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+}
+
+
+/* --- Unified Button Click & Loading Feedback --- */
+button {
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+button:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+button.is-loading {
+  position: relative !important;
+  color: transparent !important;
+  pointer-events: none !important;
+}
+
+button.is-loading > * {
+  opacity: 0 !important;
+}
+
+button.is-loading::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1.2rem;
+  height: 1.2rem;
+  margin-left: -0.6rem;
+  margin-top: -0.6rem;
+  border: 2px solid rgba(128, 128, 128, 0.4);
+  border-radius: 50%;
+  border-top-color: #666;
+  animation: button-spinner 0.6s linear infinite;
+  visibility: visible !important;
+}
+
+button.bg-blue-600.is-loading::after,
+button.bg-blue-500.is-loading::after,
+button.bg-red-500.is-loading::after,
+button.bg-red-600.is-loading::after,
+button.btn-primary.is-loading::after,
+button.text-white.is-loading::after {
+  border: 2px solid rgba(255, 255, 255, 0.3) !important;
+  border-top-color: #fff !important;
+}
+
+@keyframes button-spinner {
+  to { transform: rotate(360deg); }
+}

@@ -1,0 +1,6 @@
+[registries.crates-io]
+protocol = "sparse"
+
+[net]
+retry = 3
+git-fetch-with-cli = false

@@ -1,0 +1,116 @@
+[package]
+name = "mcphub"
+version = "0.1.0"
+description = "MCPHub Desktop - A unified hub for MCP servers"
+authors = ["MCPHub Contributors"]
+license = "ISC"
+repository = "https://github.com/samanhappy/mcphub"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "mcphub_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "mcphub"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [
+  "tray-icon",
+  "image-ico",
+  "image-png",
+] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (SSE + Streamable HTTP MCP transports)
+reqwest = { version = "0.12", features = [
+  "json",
+  "stream",
+  "rustls-tls",
+] }
+
+# SQLite database
+sqlx = { version = "0.8", features = [
+  "runtime-tokio",
+  "sqlite",
+  "macros",
+  "migrate",
+  "uuid",
+  "chrono",
+] }
+
+# Authentication
+jsonwebtoken = "9"
+bcrypt = "0.15"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# OS keychain (secure credential storage)
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# HTTP server (expose MCP endpoints when expose_http = true)
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Async trait
+async-trait = "0.1"
+
+# URL parsing
+url = "2"
+
+# Base64
+base64 = "0.22"
+
+# Random generation
+rand = "0.8"
+
+# Futures utilities
+futures-util = "0.3"
+
+# tokio sync primitives (used in MCP connection pool)
+tokio-stream = "0.1"
+
+# macOS: set process display name in Dock during dev
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
