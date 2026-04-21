@@ -4,3 +4,6 @@ dist/
 build/
 *.log
 .DS_Store
+.agent-work
+.agentbridge
+.idea
