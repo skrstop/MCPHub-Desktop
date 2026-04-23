@@ -1,5 +1,8 @@
 /// mcp_manager — loads server configs from DB and connects all enabled servers at startup.
-use crate::{mcp::pool, services::server_service};
+use crate::{
+    mcp::pool,
+    services::{config_service, server_service},
+};
 use anyhow::Result;
 use tauri::AppHandle;
 
@@ -24,6 +27,52 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
             }
         });
     }
+
+    // Background task: auto-reconnect disconnected servers when enableSessionRebuild is true
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let enabled = config_service::get().await.ok()
+                .and_then(|c| c.get("enableSessionRebuild").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            if !enabled {
+                continue;
+            }
+            // Find enabled servers that are currently disconnected
+            let all_statuses = pool::get_all_statuses().await;
+            let disconnected: Vec<String> = all_statuses
+                .into_iter()
+                .filter(|s| !s.connected)
+                .map(|s| s.name)
+                .collect();
+            if disconnected.is_empty() {
+                continue;
+            }
+            let enabled_configs = match server_service::list_all_enabled().await {
+                Ok(cfgs) => cfgs,
+                Err(e) => {
+                    log::warn!("[session_rebuild] Failed to list enabled servers: {}", e);
+                    continue;
+                }
+            };
+            for cfg in enabled_configs {
+                if disconnected.contains(&cfg.name) {
+                    let name = cfg.name.clone();
+                    log::info!("[session_rebuild] Reconnecting server '{}'", name);
+                    tokio::spawn(async move {
+                        let status = pool::connect_server(&cfg).await;
+                        if status.connected {
+                            log::info!("[session_rebuild] Server '{}' reconnected", name);
+                        } else {
+                            log::warn!("[session_rebuild] Server '{}' still failed: {}", name,
+                                status.error.as_deref().unwrap_or("unknown"));
+                        }
+                    });
+                }
+            }
+        }
+    });
+
     Ok(())
 }
 

@@ -4,6 +4,7 @@ pub mod groups;
 pub mod tools;
 pub mod users;
 pub mod config;
+pub mod runtime;
 pub mod logs;
 pub mod bearer_keys;
 pub mod prompts;

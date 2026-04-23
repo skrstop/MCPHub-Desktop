@@ -35,7 +35,7 @@ export const usePermissionCheck = (requiredPermissions: string | string[]): bool
     return false;
   }
 
-  const userPermissions = auth.user.permissions || [];
+  const userPermissions = Array.isArray(auth.user.permissions) ? auth.user.permissions : [];
 
   if (requiredPermissions === 'x' && !userPermissions.includes('x')) {
     return false;
@@ -74,7 +74,7 @@ export const usePermissionCheckAll = (requiredPermissions: string[]): boolean =>
     return false;
   }
 
-  const userPermissions = auth.user.permissions || [];
+  const userPermissions = Array.isArray(auth.user.permissions) ? auth.user.permissions : [];
 
   // If user has '*' permission, they have all permissions
   if (userPermissions.includes('*')) {

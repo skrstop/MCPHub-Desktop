@@ -1,4 +1,5 @@
-import { apiGet, fetchWithInterceptors } from '../utils/fetchInterceptor';
+import { apiGet, apiRequest, fetchWithInterceptors } from '../utils/fetchInterceptor';
+import { isTauri } from '../utils/tauriClient';
 import { getBasePath } from '../utils/runtime';
 
 export interface SystemConfig {
@@ -87,6 +88,17 @@ export const getPublicConfig = async (): Promise<{
   betterAuth?: BetterAuthConfig;
 }> => {
   try {
+    // In Tauri desktop, fetch('/public-config') doesn't reach the Axum server.
+    // Use the invoke-based settings API instead.
+    if (isTauri()) {
+      const data = await apiRequest<any>('/settings');
+      if (data?.success) {
+        const skipAuth = data.data?.systemConfig?.routing?.skipAuth === true;
+        return { skipAuth, permissions: [] };
+      }
+      return { skipAuth: false };
+    }
+
     const basePath = getBasePath();
     const response = await fetchWithInterceptors(`${basePath}/public-config`, {
       method: 'GET',

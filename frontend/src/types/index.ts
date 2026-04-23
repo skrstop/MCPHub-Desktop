@@ -416,6 +416,7 @@ export interface AuthState {
   user: IUser | null;
   loading: boolean;
   error: string | null;
+  skipAuth?: boolean;
 }
 
 export interface LoginCredentials {

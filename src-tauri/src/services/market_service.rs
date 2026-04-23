@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 // Embed the community servers.json catalog at compile time.
-const SERVERS_JSON: &str = include_str!("../../../../servers.json");
+const SERVERS_JSON: &str = include_str!("../../../servers.json");
 
 static SERVERS: OnceLock<Vec<MarketServer>> = OnceLock::new();
 

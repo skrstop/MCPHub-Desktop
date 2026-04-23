@@ -50,6 +50,11 @@ export const getApiUrl = (endpoint: string): string => {
  * Load runtime configuration from server
  */
 export const loadRuntimeConfig = async (): Promise<RuntimeConfig> => {
+  // In Tauri desktop there is no separate HTTP server serving /config — skip the fetch entirely.
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    return { basePath: '', version: 'dev', name: 'mcphub' };
+  }
+
   try {
     // For initial config load, we need to determine the correct path
     // Try different possible paths based on current location

@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod models;
 pub mod services;
 
+use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -16,7 +17,7 @@ pub fn run() {
     // On macOS dev mode, set the process display name so the Dock shows "MCPHub Desktop"
     #[cfg(target_os = "macos")]
     unsafe {
-        use objc::{class, msg_send};
+        use objc::{class, msg_send, sel, sel_impl};
         use objc::runtime::Object;
         let info: *mut Object = msg_send![class!(NSProcessInfo), processInfo];
         let ns_str: *mut Object = msg_send![class!(NSString),
@@ -35,6 +36,23 @@ pub fn run() {
             // Register session state
             app.manage(commands::auth::SessionState(tokio::sync::Mutex::new(None)));
 
+            // Initialize bundled Node.js / Python runtimes.
+            // In production, they live in the app's resource directory.
+            // In development (cargo tauri dev), fall back to src-tauri/runtimes/.
+            {
+                let resource_runtimes = app
+                    .path()
+                    .resource_dir()
+                    .ok()
+                    .map(|d| d.join("runtimes"))
+                    .filter(|p| p.exists());
+
+                let dev_runtimes = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes");
+
+                let runtimes = resource_runtimes.unwrap_or(dev_runtimes);
+                services::runtime_env::init(runtimes);
+            }
+
             // Initialize the database: spawn async task, block current thread via channel
             let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
             let app_handle = app.handle().clone();
@@ -51,6 +69,23 @@ pub fn run() {
             // Start MCP servers and HTTP server in background after DB is ready
             let app_handle2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // Load persisted active runtime versions from DB and apply them
+                if let Ok(cfg) = services::config_service::get().await {
+                    if let Some(node_ver) = cfg
+                        .get("install")
+                        .and_then(|i| i.get("nodeVersion"))
+                        .and_then(|v| v.as_str())
+                    {
+                        services::runtime_env::set_active_node(node_ver.to_string());
+                    }
+                    if let Some(py_ver) = cfg
+                        .get("install")
+                        .and_then(|i| i.get("pythonVersion"))
+                        .and_then(|v| v.as_str())
+                    {
+                        services::runtime_env::set_active_python(py_ver.to_string());
+                    }
+                }
                 if let Err(e) = services::mcp_manager::start_all(&app_handle2).await {
                     log::error!("Failed to start MCP servers: {}", e);
                 }
@@ -186,6 +221,17 @@ pub fn run() {
             commands::http_server::start_http_server,
             commands::http_server::stop_http_server,
             commands::http_server::get_http_server_status,
+            // Runtime version management
+            commands::runtime::list_node_versions,
+            commands::runtime::list_python_versions,
+            commands::runtime::install_node_version,
+            commands::runtime::install_python_version,
+            commands::runtime::uninstall_node_version,
+            commands::runtime::uninstall_python_version,
+            commands::runtime::get_active_node_version,
+            commands::runtime::get_active_python_version,
+            commands::runtime::set_active_node_version,
+            commands::runtime::set_active_python_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCPHub application");

@@ -13,6 +13,8 @@ import { Copy, Check, Download, Edit, Trash2 } from 'lucide-react';
 import type { BearerKey } from '@/types';
 import { useServerContext } from '@/contexts/ServerContext';
 import { useGroupData } from '@/hooks/useGroupData';
+import { isTauri } from '@/utils/tauriClient';
+import RuntimeVersionManager from '@/components/RuntimeVersionManager';
 
 interface BearerKeyRowProps {
   keyData: BearerKey;
@@ -499,6 +501,7 @@ const SettingsPage: React.FC = () => {
   });
 
   const [tempNameSeparator, setTempNameSeparator] = useState<string>('-');
+  const [tempHttpPort, setTempHttpPort] = useState<string>('23333');
   const [showAddBearerKeyForm, setShowAddBearerKeyForm] = useState(false);
 
   const {
@@ -511,6 +514,8 @@ const SettingsPage: React.FC = () => {
     oauthServerConfig,
     nameSeparator,
     enableSessionRebuild,
+    exposeHttp,
+    httpPort,
     loading,
     bearerKeys,
     updateRoutingConfig,
@@ -521,6 +526,8 @@ const SettingsPage: React.FC = () => {
     updateOAuthServerConfig,
     updateNameSeparator,
     updateSessionRebuild,
+    updateExposeHttp,
+    updateHttpPort,
     exportMCPSettings,
     createBearerKey,
     updateBearerKey,
@@ -611,6 +618,11 @@ const SettingsPage: React.FC = () => {
   useEffect(() => {
     setTempNameSeparator(nameSeparator);
   }, [nameSeparator]);
+
+  // Sync tempHttpPort when httpPort changes
+  useEffect(() => {
+    setTempHttpPort(String(httpPort));
+  }, [httpPort]);
 
   // Refresh bearer keys when component mounts
   useEffect(() => {
@@ -1611,6 +1623,12 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.smartRoutingConfig && (
             <div className="space-y-4 pb-4 px-6">
+              {/* Desktop-only notice: Smart Routing requires Node.js backend */}
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-md">
+                <p className="text-sm text-amber-700">
+                  {t('settings.nodeJsOnlyFeatureNotice')}
+                </p>
+              </div>
               <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableSmartRouting')}</h3>
@@ -1626,7 +1644,7 @@ const SettingsPage: React.FC = () => {
               </div>
 
               {/* Smart Routing Required Fields Information */}
-              <div className="p-3 bg-blue-300 border border-blue-200 rounded-md">
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-md">
                 <p className="text-sm text-blue-800">
                   {t('settings.smartRoutingRequiredFields')}
                 </p>
@@ -2037,6 +2055,12 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.oauthServerConfig && (
             <div className="space-y-4 pb-4 px-6">
+              {/* Desktop-only notice: OAuth Server requires Node.js/betterAuth backend */}
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-md">
+                <p className="text-sm text-amber-700">
+                  {t('settings.nodeJsOnlyFeatureNotice')}
+                </p>
+              </div>
               <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableOauthServer')}</h3>
@@ -2344,6 +2368,58 @@ const SettingsPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              <div className="p-3 bg-gray-50 rounded-md">
+                <div className="mb-2">
+                  <h3 className="font-medium text-gray-700">{t('settings.mcpRouterReferer')}</h3>
+                  <p className="text-sm text-gray-500">
+                    {t('settings.mcpRouterRefererDescription')}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={tempMCPRouterConfig.referer}
+                    onChange={(e) => handleMCPRouterConfigChange('referer', e.target.value)}
+                    placeholder="https://www.mcphub.app"
+                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                    disabled={loading}
+                  />
+                  <button
+                    onClick={() => saveMCPRouterConfig('referer')}
+                    disabled={loading}
+                    className="mt-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium disabled:opacity-50 btn-primary"
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 bg-gray-50 rounded-md">
+                <div className="mb-2">
+                  <h3 className="font-medium text-gray-700">{t('settings.mcpRouterTitle')}</h3>
+                  <p className="text-sm text-gray-500">
+                    {t('settings.mcpRouterTitleDescription')}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={tempMCPRouterConfig.title}
+                    onChange={(e) => handleMCPRouterConfigChange('title', e.target.value)}
+                    placeholder="MCPHub"
+                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                    disabled={loading}
+                  />
+                  <button
+                    onClick={() => saveMCPRouterConfig('title')}
+                    disabled={loading}
+                    className="mt-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium disabled:opacity-50 btn-primary"
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -2456,6 +2532,52 @@ const SettingsPage: React.FC = () => {
 
               <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
                 <div>
+                  <h3 className="font-medium text-gray-700">{t('settings.exposeHttp')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.exposeHttpDescription')}</p>
+                </div>
+                <Switch
+                  disabled={loading}
+                  checked={exposeHttp}
+                  onCheckedChange={(checked) => updateExposeHttp(checked)}
+                />
+              </div>
+
+              <div className="p-3 bg-gray-50 rounded-md">
+                <div className="mb-2">
+                  <h3 className="font-medium text-gray-700">{t('settings.httpPort')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.httpPortDescription')}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    value={tempHttpPort}
+                    onChange={(e) => setTempHttpPort(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const v = parseInt(tempHttpPort, 10);
+                        if (!isNaN(v) && v >= 1024 && v <= 65535) updateHttpPort(v);
+                      }
+                    }}
+                    min={1024}
+                    max={65535}
+                    disabled={loading || !exposeHttp}
+                    className="w-32 mt-1 py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input disabled:opacity-50"
+                  />
+                  <button
+                    onClick={() => {
+                      const v = parseInt(tempHttpPort, 10);
+                      if (!isNaN(v) && v >= 1024 && v <= 65535) updateHttpPort(v);
+                    }}
+                    disabled={loading || !exposeHttp}
+                    className="mt-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium disabled:opacity-50 btn-primary"
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+                <div>
                   <h3 className="font-medium text-gray-700">{t('settings.skipAuth')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.skipAuthDescription')}</p>
                 </div>
@@ -2507,6 +2629,12 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.installConfig && (
             <div className="space-y-4 pb-4 px-6">
+              {/* Node.js-only feature notice */}
+              <div className="p-3 mb-2 bg-amber-50 border border-amber-200 rounded-md text-sm text-amber-800">
+                {t('settings.nodeJsOnlyFeatureNotice')}
+              </div>
+              {/* Base URL — only relevant for server deployments, hide in desktop app */}
+              {!isTauri() && (
               <div className="p-3 bg-gray-50 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.baseUrl')}</h3>
@@ -2530,6 +2658,7 @@ const SettingsPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+              )}
 
               <div className="p-3 bg-gray-50 rounded-md">
                 <div className="mb-2">
@@ -2578,13 +2707,33 @@ const SettingsPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              {/* Runtime version management — Tauri (desktop) only */}
+              {isTauri() && (
+                <div className="border-t pt-4 mt-2">
+                  <h3 className="font-medium text-gray-700 mb-1">{t('settings.runtimeVersions')}</h3>
+                  <p className="text-sm text-gray-500 mb-4">{t('settings.runtimeVersionsDescription')}</p>
+
+                  <div className="space-y-4">
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-600 mb-2">{t('settings.nodeVersion')}</h4>
+                      <RuntimeVersionManager runtime="node" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-600 mb-2">{t('settings.pythonVersion')}</h4>
+                      <RuntimeVersionManager runtime="python" />
+                    </div>
+                    <p className="text-xs text-gray-400">{t('settings.runtimeIsolationNote')}</p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
       </PermissionChecker>
 
-      {/* Change Password */}
-      <div className="bg-white shadow rounded-lg mb-6 dashboard-card" data-section="password">
+      {/* Change Password - hidden when skipAuth is enabled */}
+      {!routingConfig?.skipAuth && <div className="bg-white shadow rounded-lg mb-6 dashboard-card" data-section="password">
         <div
           className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
           onClick={() => toggleSection('password')}
@@ -2599,7 +2748,7 @@ const SettingsPage: React.FC = () => {
             <ChangePasswordForm onSuccess={handlePasswordChangeSuccess} />
           </div>
         )}
-      </div>
+      </div>}
 
       {/* Export MCP Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_EXPORT_CONFIG}>

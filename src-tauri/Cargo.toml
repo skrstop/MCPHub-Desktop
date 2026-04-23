@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "0.1.0"
+version = "0.12.12"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -99,6 +99,13 @@ futures-util = "0.3"
 
 # tokio sync primitives (used in MCP connection pool)
 tokio-stream = "0.1"
+
+# Archive extraction for bundled runtime installation
+flate2 = "1"
+tar = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+zip = "2"
 
 # macOS: set process display name in Dock during dev
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { AuthState } from '../types';
 import * as authService from '../services/authService';
 import { getPublicConfig } from '../services/configService';
@@ -20,20 +20,22 @@ const AuthContext = createContext<{
   ) => Promise<{ success: boolean; isUsingDefaultPassword?: boolean; message?: string }>;
   register: (username: string, password: string, isAdmin?: boolean) => Promise<boolean>;
   logout: () => void;
+  reloadAuth: () => Promise<void>;
 }>({
   auth: initialState,
   login: async () => ({ success: false }),
   register: async () => false,
   logout: () => {},
+  reloadAuth: async () => {},
 });
 
 // Auth provider component
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [auth, setAuth] = useState<AuthState>(initialState);
 
-  // Load user if token exists
-  useEffect(() => {
-    const loadUser = async () => {
+  const loadUser = useCallback(async () => {
+    try {
+      setAuth((prev) => ({ ...prev, loading: true }));
       // First check if authentication should be skipped
       const { skipAuth, permissions } = await getPublicConfig();
 
@@ -42,6 +44,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setAuth({
           isAuthenticated: true,
           loading: false,
+          skipAuth: true,
           user: {
             username: 'guest',
             isAdmin: true,
@@ -118,10 +121,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           });
         }
       }
-    };
-
-    loadUser();
+    } catch (outerError) {
+      // Safety net: ensure loading is always cleared even if unexpected error occurs
+      console.error('Unexpected error in loadUser:', outerError);
+      setAuth({ ...initialState, loading: false });
+    }
   }, []);
+
+  // Load user if token exists
+  useEffect(() => {
+    loadUser();
+  }, [loadUser]);
 
   // Login function
   const login = async (
@@ -205,7 +215,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   return (
-    <AuthContext.Provider value={{ auth, login, register, logout }}>
+    <AuthContext.Provider value={{ auth, login, register, logout, reloadAuth: loadUser }}>
       {children}
     </AuthContext.Provider>
   );

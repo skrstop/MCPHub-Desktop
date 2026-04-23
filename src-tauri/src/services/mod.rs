@@ -1,4 +1,5 @@
 pub mod mcp_manager;
+pub mod runtime_env;
 pub mod server_service;
 pub mod user_service;
 pub mod group_service;

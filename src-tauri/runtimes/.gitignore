@@ -1,0 +1,4 @@
+# Ignore all downloaded runtime binaries.
+# Run scripts/download-runtimes.sh to populate this directory.
+*
+!.gitignore

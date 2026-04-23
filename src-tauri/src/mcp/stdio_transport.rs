@@ -2,6 +2,7 @@
 /// using the MCP JSON-RPC protocol framing.
 use super::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
+use crate::services::runtime_env;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -91,9 +92,40 @@ impl StdioTransport {
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn connect(&mut self) -> Result<()> {
-        let mut cmd = Command::new(&self.command);
-        cmd.args(&self.args)
-            .envs(&self.env)
+        // Resolve command to bundled binary if available (node, npx, uv, uvx, python…)
+        let (resolved_cmd, resolved_args) =
+            runtime_env::resolve_command(&self.command, &self.args);
+
+        // Build the merged environment:
+        //   1. Start with runtime overrides (PATH prepend + cache dirs)
+        //   2. Merge user-supplied server env; if user also supplies PATH, append it
+        //      after our prepended dirs so our bundled binaries still take priority.
+        let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        let mut merged_env: HashMap<String, String> =
+            runtime_env::env_overrides(&self.command).into_iter().collect();
+
+        for (k, v) in &self.env {
+            if k.to_ascii_uppercase() == "PATH" {
+                if let Some(existing) = merged_env.get("PATH") {
+                    merged_env.insert("PATH".to_string(), format!("{}{}{}", existing, sep, v));
+                } else {
+                    merged_env.insert(k.clone(), v.clone());
+                }
+            } else {
+                merged_env.insert(k.clone(), v.clone());
+            }
+        }
+
+        log::info!(
+            "[{}] spawning: {} {:?}",
+            self.server_name,
+            resolved_cmd,
+            resolved_args
+        );
+
+        let mut cmd = Command::new(&resolved_cmd);
+        cmd.args(&resolved_args)
+            .envs(&merged_env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

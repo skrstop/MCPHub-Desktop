@@ -8,6 +8,35 @@ import { SettingsProvider } from './contexts/SettingsContext';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
 import LoginPage from './pages/LoginPage';
+
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: unknown }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: unknown) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    console.error('[AppErrorBoundary] Caught render error:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 32, color: '#fff', background: '#111827', minHeight: '100vh' }}>
+          <h2>Something went wrong</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, opacity: 0.7 }}>
+            {String(this.state.error)}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import DashboardPage from './pages/Dashboard';
 import ServersPage from './pages/ServersPage';
 import GroupsPage from './pages/GroupsPage';
@@ -30,6 +59,7 @@ const CloudRedirect: React.FC = () => {
 function App() {
   const basename = getBasePath();
   return (
+    <AppErrorBoundary>
     <ThemeProvider>
       <AuthProvider>
         <ServerProvider>
@@ -70,6 +100,7 @@ function App() {
         </ServerProvider>
       </AuthProvider>
     </ThemeProvider>
+    </AppErrorBoundary>
   );
 }
 

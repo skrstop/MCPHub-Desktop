@@ -42,6 +42,7 @@ interface SmartRoutingConfig {
   azureOpenaiApiKey?: string;
   azureOpenaiApiVersion?: string;
   azureOpenaiEmbeddingDeployment?: string;
+  azureOpenaiEmbeddingModel?: string;
   progressiveDisclosure: boolean;
   embeddingMaxTokens?: number;
 }
@@ -77,6 +78,8 @@ interface SystemSettings {
     nameSeparator?: string;
     oauthServer?: OAuthServerConfig;
     enableSessionRebuild?: boolean;
+    exposeHttp?: boolean;
+    httpPort?: number;
   };
   bearerKeys?: BearerKey[];
 }
@@ -97,6 +100,8 @@ interface SettingsContextValue {
   oauthServerConfig: OAuthServerConfig;
   nameSeparator: string;
   enableSessionRebuild: boolean;
+  exposeHttp: boolean;
+  httpPort: number;
   bearerKeys: BearerKey[];
   loading: boolean;
   error: string | null;
@@ -124,6 +129,8 @@ interface SettingsContextValue {
   ) => Promise<boolean | undefined>;
   updateNameSeparator: (value: string) => Promise<boolean | undefined>;
   updateSessionRebuild: (value: boolean) => Promise<boolean | undefined>;
+  updateExposeHttp: (value: boolean) => Promise<boolean | undefined>;
+  updateHttpPort: (value: number) => Promise<boolean | undefined>;
   exportMCPSettings: (serverName?: string) => Promise<any>;
   // Bearer key management
   refreshBearerKeys: () => Promise<void>;
@@ -167,7 +174,7 @@ interface SettingsProviderProps {
 export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
-  const { auth } = useAuth();
+  const { auth, reloadAuth } = useAuth();
 
   const [routingConfig, setRoutingConfig] = useState<RoutingConfig>({
     enableGlobalRoute: true,
@@ -188,7 +195,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
   const [installConfig, setInstallConfig] = useState<InstallConfig>({
     pythonIndexUrl: '',
     npmRegistry: '',
-    baseUrl: 'http://localhost:3000',
+    baseUrl: 'http://localhost:23333',
   });
 
   const [smartRoutingConfig, setSmartRoutingConfig] = useState<SmartRoutingConfig>({
@@ -221,6 +228,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
 
   const [nameSeparator, setNameSeparator] = useState<string>('-');
   const [enableSessionRebuild, setEnableSessionRebuild] = useState<boolean>(false);
+  const [exposeHttp, setExposeHttp] = useState<boolean>(true);
+  const [httpPort, setHttpPort] = useState<number>(23333);
   const [bearerKeys, setBearerKeys] = useState<BearerKey[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -256,7 +265,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
         setInstallConfig({
           pythonIndexUrl: data.data.systemConfig.install.pythonIndexUrl || '',
           npmRegistry: data.data.systemConfig.install.npmRegistry || '',
-          baseUrl: data.data.systemConfig.install.baseUrl || 'http://localhost:3000',
+          baseUrl: data.data.systemConfig.install.baseUrl || 'http://localhost:23333',
         });
       }
       if (data.success && data.data?.systemConfig?.smartRouting) {
@@ -283,6 +292,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           azureOpenaiApiVersion: data.data.systemConfig.smartRouting.azureOpenaiApiVersion || '',
           azureOpenaiEmbeddingDeployment:
             data.data.systemConfig.smartRouting.azureOpenaiEmbeddingDeployment || '',
+          azureOpenaiEmbeddingModel:
+            data.data.systemConfig.smartRouting.azureOpenaiEmbeddingModel || '',
           progressiveDisclosure: data.data.systemConfig.smartRouting.progressiveDisclosure ?? false,
           embeddingMaxTokens: data.data.systemConfig.smartRouting.embeddingMaxTokens,
         });
@@ -339,6 +350,12 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       if (data.success && data.data?.systemConfig?.enableSessionRebuild !== undefined) {
         setEnableSessionRebuild(data.data.systemConfig.enableSessionRebuild);
       }
+      if (data.success && data.data?.systemConfig?.exposeHttp !== undefined) {
+        setExposeHttp(data.data.systemConfig.exposeHttp);
+      }
+      if (data.success && data.data?.systemConfig?.httpPort !== undefined) {
+        setHttpPort(data.data.systemConfig.httpPort);
+      }
 
       if (data.success && Array.isArray(data.data?.bearerKeys)) {
         setBearerKeys(data.data.bearerKeys);
@@ -370,6 +387,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           [key]: value,
         });
         showToast(t('settings.systemConfigUpdated'));
+        // When skipAuth changes, re-evaluate auth state
+        if (key === 'skipAuth') {
+          await reloadAuth();
+        }
         return true;
       } else {
         setError(data.error || 'Failed to update routing config');
@@ -708,6 +729,55 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     }
   };
 
+  // Update HTTP server settings (exposeHttp and httpPort are top-level config keys)
+  const updateExposeHttp = async (value: boolean) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiPut('/system-config', { exposeHttp: value });
+      if (data.success) {
+        setExposeHttp(value);
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      } else {
+        setError(data.error || 'Failed to update HTTP server setting');
+        showToast(data.error || t('errors.failedToUpdateRoutingConfig'));
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to update exposeHttp', { value, error });
+      setError(error instanceof Error ? error.message : 'Failed to update HTTP server setting');
+      showToast(t('errors.failedToUpdateRoutingConfig'));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateHttpPort = async (value: number) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiPut('/system-config', { httpPort: value });
+      if (data.success) {
+        setHttpPort(value);
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      } else {
+        setError(data.error || 'Failed to update HTTP port');
+        showToast(data.error || t('errors.failedToUpdateRoutingConfig'));
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to update httpPort', { value, error });
+      setError(error instanceof Error ? error.message : 'Failed to update HTTP port');
+      showToast(t('errors.failedToUpdateRoutingConfig'));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const exportMCPSettings = async (serverName?: string) => {
     setLoading(true);
     setError(null);
@@ -824,6 +894,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     oauthServerConfig,
     nameSeparator,
     enableSessionRebuild,
+    exposeHttp,
+    httpPort,
     bearerKeys,
     loading,
     error,
@@ -841,6 +913,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     updateOAuthServerConfigBatch,
     updateNameSeparator,
     updateSessionRebuild,
+    updateExposeHttp,
+    updateHttpPort,
     exportMCPSettings,
     refreshBearerKeys,
     createBearerKey,
