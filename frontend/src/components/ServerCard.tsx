@@ -518,8 +518,24 @@ const ServerCard = ({
               {t('server.delete')}
             </button>
             <button
-              className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
-              onClick={(e) => e.stopPropagation()}
+              type="button"
+              className="p-1 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
+              title={expandedTab ? t('common.collapse') : t('common.expand')}
+              onClick={(e) => {
+                e.stopPropagation();
+                // 已展开则收起；未展开则自动选中第一个有内容的页签，缺省 'tools'
+                if (expandedTab) {
+                  setExpandedTab(null);
+                  return;
+                }
+                let nextTab: 'tools' | 'prompts' | 'resources' = 'tools';
+                if (totalTools === 0 && totalPrompts > 0) {
+                  nextTab = 'prompts';
+                } else if (totalTools === 0 && totalPrompts === 0 && totalResources > 0) {
+                  nextTab = 'resources';
+                }
+                setExpandedTab(nextTab);
+              }}
             >
               {expandedTab ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
             </button>

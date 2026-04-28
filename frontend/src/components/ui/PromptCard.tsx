@@ -206,7 +206,7 @@ const PromptCard = ({ prompt, server, onToggle, onDescriptionUpdate }: PromptCar
   };
 
   return (
-    <div className="bg-white border border-gray-200 shadow rounded-lg mb-4">
+    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow rounded-lg mb-4">
       <div
         className="flex justify-between items-center p-2 cursor-pointer"
         onClick={() => setIsExpanded(!isExpanded)}
@@ -223,7 +223,7 @@ const PromptCard = ({ prompt, server, onToggle, onDescriptionUpdate }: PromptCar
                   <input
                     ref={descriptionInputRef}
                     type="text"
-                    className="px-2 py-1 border border-blue-300 rounded bg-white text-sm focus:outline-none form-input"
+                    className="px-2 py-1 border border-blue-300 rounded bg-white dark:bg-gray-800 text-sm focus:outline-none form-input"
                     value={customDescription}
                     onChange={handleDescriptionChange}
                     onKeyDown={handleDescriptionKeyDown}
@@ -297,8 +297,9 @@ const PromptCard = ({ prompt, server, onToggle, onDescriptionUpdate }: PromptCar
               setIsExpanded(true); // Ensure card is expanded when showing run form
               setShowRunForm(true);
             }}
-            className="flex items-center space-x-1 px-3 py-1 text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors btn-primary"
-            disabled={isRunning || !prompt.enabled}
+            className="flex items-center space-x-1 px-3 py-1 text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+            // prompt.enabled 为 undefined 时视为启用（后端模型未返回 enabled 字段）
+            disabled={isRunning || prompt.enabled === false}
           >
             {isRunning ? <Loader size={14} className="animate-spin" /> : <Play size={14} />}
             <span>{isRunning ? t('tool.running') : t('tool.run')}</span>
@@ -335,7 +336,7 @@ const PromptCard = ({ prompt, server, onToggle, onDescriptionUpdate }: PromptCar
 
           {/* Arguments Display (when not showing form) */}
           {!showRunForm && prompt.arguments && prompt.arguments.length > 0 && (
-            <div className="bg-gray-50 rounded p-3 border border-gray-300">
+            <div className="bg-gray-50 dark:bg-gray-800 rounded p-3 border border-gray-300">
               <h4 className="text-sm font-medium text-gray-900 mb-2">{t('tool.parameters')}</h4>
               <div className="space-y-2">
                 {prompt.arguments.map((arg, index) => (

@@ -93,10 +93,13 @@ export const getPublicConfig = async (): Promise<{
     if (isTauri()) {
       const data = await apiRequest<any>('/settings');
       if (data?.success) {
-        const skipAuth = data.data?.systemConfig?.routing?.skipAuth === true;
+        // 桌面版默认开启免登录：仅当配置中显式将 skipAuth 设置为 false 时才启用鉴权
+        const skipAuthValue = data.data?.systemConfig?.routing?.skipAuth;
+        const skipAuth = skipAuthValue === undefined ? true : skipAuthValue === true;
         return { skipAuth, permissions: [] };
       }
-      return { skipAuth: false };
+      // 接口失败时，桌面版同样默认免登录，避免无法进入系统
+      return { skipAuth: true };
     }
 
     const basePath = getBasePath();

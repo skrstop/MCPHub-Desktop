@@ -956,28 +956,6 @@ jobs:
 
 ---
 
-### 实现优先级总览
-
-| 优先级 | Phase | 功能 | 预计工作量 | 依赖 |
-|--------|-------|------|-----------|------|
-| P0 | A | Schema 修正迁移 | 0.5h | — |
-| P1 | B | Bearer Keys | 2h | A |
-| P1 | C | Builtin Prompts | 2h | A |
-| P1 | D | Builtin Resources | 1.5h | A |
-| P1 | E | Activity Log | 2h | A |
-| P2 | F | Market（本地）| 2h | — |
-| P2 | G | Registry Proxy | 1h | — |
-| P2 | H | Cloud Proxy | 2h | A |
-| P2 | I | Templates | 2h | A |
-| P3 | J | MCPB 安装 | 2h | — |
-| P3 | K | Per-server 工具开关 | 1.5h | A |
-| P3 | L | Smart Routing | 3h | — |
-| P3 | M | OpenAPI 生成 | 2h | — |
-| P4 | N | HTTP 服务端暴露 | 4h | B |
-| P4 | O | CI/CD 打包 | 1h | — |
-
----
-
 ## 7. 已知问题 & 解决方案
 
 ### 问题 1 — Cargo 无法访问 crates.io（GitHub git 协议被阻塞）
@@ -1106,3 +1084,101 @@ CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check
 - [ ] 前端对应页面不再显示存根数据或"不支持"错误
 - [ ] `tauriClient.ts` 中对应存根已被真实命令替换
 - [ ] SQLite 数据持久化正常（重启后数据不丢失）
+
+---
+
+## N. 上游 mcphub-origin 同步记录
+
+> 此章节用于追踪桌面端从上游 `samanhappy/mcphub` 同步代码的进度。
+> 每次执行同步后，必须在此处更新「最近同步基线」并追加新的「同步条目」。
+
+### 同步策略
+
+1. `mcphub-origin/` 是 git 子模块，仅作为代码参考与 diff 来源，**桌面端永远不直接修改子模块内容**。
+2. 桌面端 `frontend/`、`locales/` 是 origin 对应目录的**有改造副本**：
+   - 大部分文件保持与 origin 一致；
+   - desktop 主动改造的文件（fetch → `tauriClient.ts`、`AuthContext`、`SettingsContext`、`PermissionChecker`、`ProtectedRoute`、`AboutDialog`、`UserProfileMenu`、`ServerCard`、`App.tsx`、`runtime.ts`、`version.ts`、各 `services/*` 等）保留差异，**同步时需手动合并**。
+3. 后端（`src/`、`tests/`、`package.json` 依赖、Express/Hono、PostgreSQL、Smart Routing、Better-Auth 等）由 Rust 重写在 `src-tauri/`，**Node 后端代码不直接同步**，但需评估安全相关 fix 是否要在 Rust 端镜像实现。
+4. `package.json`、`pnpm-lock.yaml`、`docs/`、`Dockerfile`、`docker-compose*.yml`、`bin/cli.js`、`scripts/`、`mcp_settings.json` 等部署/文档文件**不同步**。
+
+### 同步操作流程（标准 SOP）
+
+```bash
+# 1. 更新 origin 子模块到 latest main
+cd mcphub-origin && git fetch origin && git checkout origin/main && cd ..
+
+# 2. 列出待同步提交（基线 = 上次记录的 commit）
+cd mcphub-origin && git --no-pager log --oneline <last-sync-sha>..HEAD
+
+# 3. 生成 frontend + locales 综合 patch
+git --no-pager diff <last-sync-sha>..HEAD -- frontend/ locales/ > /tmp/origin_frontend.patch
+
+# 4. dry-run 检查冲突
+cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin_frontend.patch
+
+# 5. 对未冲突文件直接 cp 覆盖；对冲突文件手动合并；后端逻辑改动评估后用 Rust 重写到 src-tauri/
+# 6. 升级 package.json / frontend/package.json / src-tauri/Cargo.toml / src-tauri/tauri.conf.json 的版本号到最新 origin tag
+# 7. cd frontend && npm run build 验证
+# 8. 更新本章节「最近同步基线」与「同步条目」
+```
+
+### 最近同步基线
+
+| 项 | 值 |
+|------|-----|
+| **当前已同步到 origin commit** | `3ea0bbe` (origin/main, 2026-04-28) |
+| **对应 origin tag** | `v0.12.14` (commit `f08dcc1`) |
+| **桌面端版本号** | `0.12.14` |
+| **同步执行日期** | 2026-04-28 |
+
+> 下次同步时，使用 `3ea0bbe` 作为新的基线 SHA 起点（命令：`git --no-pager log --oneline 3ea0bbe..HEAD`）。
+
+### 同步条目历史
+
+#### 2026-04-28：同步 `af5b013` → `3ea0bbe`（21 个 commit）
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+|------|------|------|
+| `b05c87f` | Dark mode 增强（38 个组件文件） | 大部分文件 desktop 副本已与 origin 一致；`index.css` 删除 3 处冗余 dark 颜色覆写（`.dark .text-blue-700` / `.bg-blue-50` / `.bg-blue-200`）。`ServerCard.tsx`、`UserProfileMenu.tsx` 因 desktop 已重构（`server-badge` 工具类、`!auth.skipAuth` 条件渲染、移除 sponsor / wechat / discord 入口）保留 desktop 版本，origin 的 className 改动已隐式包含。 |
+| `6d44d82` | `resetTimeoutOnProgress` 默认改为 true | `frontend/src/components/ServerForm.tsx` 应用 2 个 hunk；`frontend/src/utils/serverFormPayload.ts` 直接覆盖；`locales/{en,fr,tr,zh}.json` 直接覆盖。 |
+| `005b563` | Registry version 路由改用 query 参数避免编码斜杠 | `frontend/src/hooks/useRegistryData.ts` 直接覆盖。**注意**：Rust 端 registry 代理需同步支持新的 query 参数路径风格（详见下方 TODO）。 |
+| `f08dcc1` | tag `v0.12.14` 发布 | 升级桌面端版本号到 `0.12.14`（`package.json` × 3 + `Cargo.toml`）。 |
+
+**未同步（后端 / 不适用）**
+
+| 来源 commit | 类型 | 处理决策 |
+|------|------|------|
+| `3ea0bbe` | fix: harden auth & ownership checks（authController/serverController/oauth/middleware） | **Rust 端 TODO**：评估 `src-tauri/` 中是否存在等价路径并补齐所有权与权限校验。 |
+| `216cca7` | fix: enforce group ownership on mutating endpoints（groupService） | **Rust 端 TODO**：在 group 写操作命令中校验 owner。 |
+| `952610a` | fix: validate redirect_uri in OAuth authorize POST flow | **Rust 端 TODO**：若桌面端实现了 OAuth Server，需镜像该校验。 |
+| `f745af4` | feat: enhance OAuth redirect URI handling（新增 `oauthRedirectUri.ts`） | **Rust 端 TODO**：评估桌面端 OAuth 客户端注册逻辑，必要时移植 redirect URI 选择算法。 |
+| `02a5d9a` | feat: HTTP 4xx 可恢复错误重连 | **Rust 端 TODO**：在 `mcpService` Rust 等价实现里补充 4xx 重连。 |
+| `6d44d82` (后端部分) | `mcpService` 默认启用 `resetTimeoutOnProgress` | **Rust 端 TODO**：在 Rust MCP 客户端构造请求选项时同步默认值。 |
+| `9280242` | Use process cwd for stdio MCP transports | **Rust 端 TODO**：检查 stdio 子进程启动是否传入正确的 cwd。 |
+| `3741e1b` | 避免 Smart Routing 安装 onnxruntime（`tokenTruncation.ts`） | 桌面端 Smart Routing 尚未实现（见 P3-L），后续实现时直接采用新方案。 |
+| `61280ca` (后端部分) | uuid 11→14 的 GroupDao/groupService 改动 | Rust 端使用独立 `uuid` crate，无需同步。 |
+| `f08dcc1` (依赖)、`135ceca`、`2d03bd0`、`f5541a6`、`6b8e505`、`a4a1d1d`、`cb60292`、`88ba5a2`、`f1b4551`、`61280ca` (依赖) | npm/pnpm 安全/版本升级（uuid、postcss、@node-oauth/oauth2-server、next、axios、protobufjs、follow-redirects、hono、i18next-fs-backend） | **不同步**：桌面端 `frontend/package.json` 不依赖这些包；Rust 端用独立依赖体系。 |
+| `71057f2` | Postgres 镜像 pg17 升级（docker-compose） | **不同步**：桌面端无 Postgres。 |
+
+### 后端同步 TODO（需在 Rust 端补齐的 origin 安全增强）
+
+> 以下条目按优先级排序，建议在 P0/P1 阶段补强时一并处理。
+
+- [ ] **OAuth/Auth 加固**（来源：`3ea0bbe`、`216cca7`、`952610a`）
+  - 所有 mutating endpoint 校验请求用户与资源 owner；
+  - OAuth authorize POST 流程严格校验 `redirect_uri`；
+  - bearer key / oauth client 接口的越权检查。
+- [ ] **OAuth redirect URI 工具**（来源：`f745af4`）
+  - 移植 `src/utils/oauthRedirectUri.ts` 到 `src-tauri/src/.../oauth_redirect_uri.rs`。
+- [ ] **MCP 请求选项默认值**（来源：`6d44d82`）
+  - Rust MCP client 默认 `reset_timeout_on_progress = true`。
+- [ ] **MCP 4xx 重连**（来源：`02a5d9a`）
+  - 在连接管理层为 4xx 可恢复错误增加重连。
+- [ ] **stdio cwd**（来源：`9280242`）
+  - 子进程启动使用 `std::env::current_dir()` 而非自定义路径。
+- [ ] **Registry 路由支持 query 版本号**（来源：`005b563`）
+  - 与前端 `useRegistryData.ts` 的 query 参数风格保持一致。
+
+

@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BookOpen } from 'lucide-react';
+import { BookOpen, Link as LinkIcon } from 'lucide-react';
 import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
+import AccessUrlDialog from '@/components/AccessUrlDialog';
 import { useEmbeddingSync } from '@/contexts/EmbeddingSyncContext';
 
 interface HeaderProps {
@@ -13,6 +14,8 @@ interface HeaderProps {
 const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
   const { t } = useTranslation();
   const { activeSyncs } = useEmbeddingSync();
+  // 服务访问地址弹框开关
+  const [accessUrlOpen, setAccessUrlOpen] = useState(false);
 
   return (
     <header className="bg-white dark:bg-gray-800 shadow-sm z-10">
@@ -21,7 +24,7 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
           {/* 侧边栏切换按钮 */}
           <button
             onClick={onToggleSidebar}
-            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none"
+            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 focus:outline-none"
             aria-label={t('app.toggleSidebar')}
           >
             <svg
@@ -81,19 +84,25 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
           )}
         </div>
 
-        {/* Theme Switch and Language Switcher and Version */}
+        {/* Theme Switch and Language Switcher */}
         <div className="flex items-center space-x-1 shrink-0">
-          <span className="text-sm text-gray-500 dark:text-gray-400 mr-2">
-            {import.meta.env.PACKAGE_VERSION === 'dev'
-              ? import.meta.env.PACKAGE_VERSION
-              : `v${import.meta.env.PACKAGE_VERSION}`}
-          </span>
+
+          {/* 服务访问地址按钮 */}
+          <button
+            type="button"
+            onClick={() => setAccessUrlOpen(true)}
+            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+            aria-label={t('accessUrl.title', '服务访问地址')}
+            title={t('accessUrl.title', '服务访问地址')}
+          >
+            <LinkIcon className="h-5 w-5" />
+          </button>
 
           <a
-            href="https://github.com/samanhappy/mcphub"
+            href="https://github.com/skrstop/MCPHub-Desktop"
             target="_blank"
             rel="noopener noreferrer"
-            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
             aria-label="GitHub Repository"
           >
             <GitHubIcon className="h-5 w-5" />
@@ -103,7 +112,7 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
             href="https://docs.mcphub.app"
             target="_blank"
             rel="noopener noreferrer"
-            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+            className="p-2 rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
             aria-label="Documentation"
           >
             <BookOpen className="h-5 w-5" />
@@ -113,6 +122,8 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
           <LanguageSwitch />
         </div>
       </div>
+
+      <AccessUrlDialog open={accessUrlOpen} onClose={() => setAccessUrlOpen(false)} />
     </header>
   );
 };

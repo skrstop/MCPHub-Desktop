@@ -1,4 +1,5 @@
 use crate::services::server_tool_config_service;
+use crate::mcp::pool;
 
 /// Toggle a tool/prompt/resource enabled state for a server.
 /// POST /servers/:serverName/tools/:toolName/toggle
@@ -43,6 +44,8 @@ pub async fn update_server_item_description(
 }
 
 /// Reset tool/prompt/resource description override (DELETE).
+/// 重置后会从连接池缓存中读取该 item 的原始描述并返回，
+/// 避免前端在恢复默认时把字段误清空。
 #[tauri::command]
 pub async fn reset_server_item_description(
     server_name: String,
@@ -52,7 +55,26 @@ pub async fn reset_server_item_description(
     server_tool_config_service::reset_description(&server_name, &item_type, &item_name)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "success": true }))
+
+    // 取回该 item 的原始描述（仅 tool 类型支持，prompt/resource 暂返回 null）
+    let original_description = if item_type == "tool" {
+        pool::list_tools_for(&server_name)
+            .await
+            .ok()
+            .and_then(|tools| {
+                tools
+                    .into_iter()
+                    .find(|t| t.name == item_name)
+                    .and_then(|t| t.description)
+            })
+    } else {
+        None
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "description": original_description,
+    }))
 }
 
 /// List all tool config overrides for a server.

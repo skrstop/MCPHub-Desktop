@@ -1,0 +1,23 @@
+{
+  "version": "0.12.13",
+  "notes": "MCPHub Desktop 0.12.13 — release notes go here.\n\n- 修复：资源 / 提示词面板提示 Not authenticated\n- 改进：检查更新改用 Tauri Updater 插件\n- 同步上游暗色模式样式优化",
+  "pub_date": "2026-04-23T00:00:00Z",
+  "platforms": {
+    "darwin-x86_64": {
+      "signature": "REPLACE_WITH_SIGNATURE_FROM_.sig_FILE",
+      "url": "https://github.com/samanhappy/mcphub-desktop/releases/download/v0.12.13/MCPHub.Desktop_0.12.13_x64.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "REPLACE_WITH_SIGNATURE_FROM_.sig_FILE",
+      "url": "https://github.com/samanhappy/mcphub-desktop/releases/download/v0.12.13/MCPHub.Desktop_0.12.13_aarch64.app.tar.gz"
+    },
+    "linux-x86_64": {
+      "signature": "REPLACE_WITH_SIGNATURE_FROM_.sig_FILE",
+      "url": "https://github.com/samanhappy/mcphub-desktop/releases/download/v0.12.13/mcphub-desktop_0.12.13_amd64.AppImage.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "REPLACE_WITH_SIGNATURE_FROM_.sig_FILE",
+      "url": "https://github.com/samanhappy/mcphub-desktop/releases/download/v0.12.13/MCPHub.Desktop_0.12.13_x64-setup.nsis.zip"
+    }
+  }
+}

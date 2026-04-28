@@ -107,17 +107,17 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
       </button>
 
       {isOpen && (
-        <div className="absolute top-0 transform -translate-y-full left-0 w-full min-w-max bg-white border border-gray-200 dark:bg-gray-800 z-50">
+        <div className="absolute top-0 transform -translate-y-full left-0 w-full min-w-max bg-white border border-gray-200 dark:border-gray-700 dark:bg-gray-800 z-50">
           <button
             onClick={handleSettingsClick}
-            className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+            className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
           >
             <Settings className="h-4 w-4 mr-2" />
             {t('nav.settings')}
           </button>
           <button
             onClick={handleAboutClick}
-            className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 relative"
+            className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 relative"
           >
             <Info className="h-4 w-4 mr-2" />
             {t('about.title')}
@@ -132,7 +132,7 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
 
               <button
                 onClick={handleLogoutClick}
-                className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
               >
                 <LogOut className="h-4 w-4 mr-2" />
                 {t('app.logout')}

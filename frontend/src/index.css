@@ -1,6 +1,8 @@
 /* Use project's custom Tailwind import */
 @import 'tailwindcss';
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* ── Server Card: badge atoms ───────────────────────────── */
 .server-badge {
   display: inline-flex;
@@ -151,17 +153,6 @@ body {
   background-color: #1f2937 !important;
 }
 
-.dark .text-blue-700 {
-  color: white !important;
-}
-
-.dark .bg-blue-50 {
-  background-color: #4b5563 !important;
-}
-
-.dark .bg-blue-200 {
-  background-color: #576476 !important;
-}
 
 .dark .shadow {
   box-shadow:

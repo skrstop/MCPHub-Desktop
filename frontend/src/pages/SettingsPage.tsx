@@ -173,8 +173,8 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
   if (isEditing) {
     return (
       <tr>
-        <td colSpan={5} className="p-0 border-b border-gray-200">
-          <div className="bg-gray-50 p-5">
+        <td colSpan={5} className="p-0 border-b border-gray-200 dark:border-gray-700">
+          <div className="bg-gray-50 dark:bg-gray-800 p-5">
             <div className="grid grid-cols-1 md:grid-cols-12 gap-4 mb-4">
               <div className="md:col-span-3">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -207,7 +207,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {t('settings.bearerKeyEnabled') || 'Status'}
                 </label>
-                <div className="flex items-center h-[38px] px-3 bg-white border border-gray-300 rounded-md">
+                <div className="flex items-center h-[38px] px-3 bg-white dark:bg-gray-800 border border-gray-300 rounded-md">
                   <span
                     className={`text-sm mr-3 ${enabled ? 'text-green-600 font-medium' : 'text-gray-500'}`}
                   >
@@ -226,7 +226,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                   {t('settings.bearerKeyAccessType') || 'Access scope'}
                 </label>
                 <select
-                  className="block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                  className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
                   value={accessType}
                   onChange={(e) =>
                     setAccessType(e.target.value as 'all' | 'groups' | 'servers' | 'custom')
@@ -304,7 +304,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsEditing(false)}
-                  className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
+                  className="px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
                 >
                   {t('common.cancel') || 'Cancel'}
                 </button>
@@ -325,7 +325,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
   }
 
   return (
-    <tr className="hover:bg-gray-50">
+    <tr className="hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700">
       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
         {keyData.name}
       </td>
@@ -1244,7 +1244,7 @@ const SettingsPage: React.FC = () => {
 
       {/* Bearer Keys Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_ROUTE_CONFIG}>
-        <div className="bg-white shadow rounded-lg mb-6 page-card dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 page-card dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('bearerKeys')}
@@ -1259,7 +1259,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.bearerKeys && (
             <div className="space-y-4 pb-4 px-6">
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableBearerAuth') || 'Enable Bearer Authentication'}
@@ -1278,7 +1278,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.bearerAuthHeaderName')}
@@ -1348,8 +1348,8 @@ const SettingsPage: React.FC = () => {
                 </p>
               ) : (
                 <div className="mt-2 overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200 border border-gray-200 rounded-lg">
-                    <thead className="bg-gray-50">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+                    <thead className="bg-gray-50 dark:bg-gray-800">
                       <tr>
                         <th
                           scope="col"
@@ -1383,7 +1383,7 @@ const SettingsPage: React.FC = () => {
                         </th>
                       </tr>
                     </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
+                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       {bearerKeys.map((key) => (
                         <BearerKeyRow
                           key={key.id}
@@ -1402,8 +1402,8 @@ const SettingsPage: React.FC = () => {
 
               {/* New key form */}
               {showAddBearerKeyForm && (
-                <div className="mt-6 border-t border-gray-200 pt-6">
-                  <div className="bg-gray-50 rounded-lg p-5 border border-gray-200">
+                <div className="mt-6 border-t border-gray-200 dark:border-gray-700 pt-6">
+                  <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
                     <h3 className="font-medium text-gray-900 mb-4 flex items-center gap-2">
                       <span className="bg-blue-100 text-blue-600 p-1 rounded">
                         <svg
@@ -1459,7 +1459,7 @@ const SettingsPage: React.FC = () => {
                               setNewBearerKey((prev) => ({ ...prev, token: generateRandomKey() }))
                             }
                             disabled={loading}
-                            className="relative -ml-[5px] inline-flex items-center px-4 py-2 border border-gray-300 bg-gray-100 text-gray-700 text-sm font-medium rounded-r-md rounded-l-none hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200 z-10"
+                            className="relative -ml-[5px] inline-flex items-center px-4 py-2 border border-gray-300 bg-gray-100 dark:bg-gray-800 text-gray-700 text-sm font-medium rounded-r-md rounded-l-none hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors duration-200 z-10"
                           >
                             {t('settings.generate') || 'Generate'}
                           </button>
@@ -1472,7 +1472,7 @@ const SettingsPage: React.FC = () => {
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           {t('settings.bearerKeyEnabled') || 'Status'}
                         </label>
-                        <div className="flex items-center h-[38px] px-3 bg-white border border-gray-300 rounded-md">
+                        <div className="flex items-center h-[38px] px-3 bg-white dark:bg-gray-800 border border-gray-300 rounded-md">
                           <span
                             className={`text-sm mr-3 ${newBearerKey.enabled ? 'text-green-600 font-medium' : 'text-gray-500'}`}
                           >
@@ -1493,7 +1493,7 @@ const SettingsPage: React.FC = () => {
                           {t('settings.bearerKeyAccessType') || 'Access scope'}
                         </label>
                         <select
-                          className="block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                          className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
                           value={newBearerKey.accessType}
                           onChange={(e) =>
                             setNewBearerKey((prev) => ({
@@ -1586,7 +1586,7 @@ const SettingsPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => setShowAddBearerKeyForm(false)}
-                          className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
+                          className="px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
                         >
                           {t('common.cancel') || 'Cancel'}
                         </button>
@@ -1610,7 +1610,7 @@ const SettingsPage: React.FC = () => {
 
       {/* Smart Routing Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
-        <div className="bg-white shadow rounded-lg mb-6 page-card dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 page-card dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('smartRoutingConfig')}
@@ -1623,13 +1623,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.smartRoutingConfig && (
             <div className="space-y-4 pb-4 px-6">
-              {/* Desktop-only notice: Smart Routing requires Node.js backend */}
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-md">
-                <p className="text-sm text-amber-700">
-                  {t('settings.nodeJsOnlyFeatureNotice')}
-                </p>
-              </div>
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableSmartRouting')}</h3>
                   <p className="text-sm text-gray-500">
@@ -1652,7 +1646,7 @@ const SettingsPage: React.FC = () => {
 
               {/* hide when DB_URL env is set */}
               {smartRoutingConfig.dbUrl !== '${DB_URL}' && (
-                <div className="p-3 bg-gray-50 rounded-md">
+                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                   <div className="mb-2">
                     <h3 className="font-medium text-gray-700">
                       <span className="text-red-500 px-1">*</span>
@@ -1672,7 +1666,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               )}
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingProvider') || 'Embedding Provider'}
@@ -1680,7 +1674,7 @@ const SettingsPage: React.FC = () => {
                 </div>
                 <div className="flex items-center gap-3">
                   <select
-                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
+                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
                     value={tempSmartRoutingConfig.embeddingProvider}
                     onChange={(e) =>
                       handleSmartRoutingConfigChange(
@@ -1698,7 +1692,7 @@ const SettingsPage: React.FC = () => {
 
               {tempSmartRoutingConfig.embeddingProvider === 'openai' ? (
                 <>
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1719,7 +1713,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1741,7 +1735,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1765,7 +1759,7 @@ const SettingsPage: React.FC = () => {
                 </>
               ) : (
                 <>
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1789,7 +1783,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1810,7 +1804,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1833,7 +1827,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1861,7 +1855,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -1895,7 +1889,7 @@ const SettingsPage: React.FC = () => {
                 </>
               )}
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.basePacingDelayMs')}
@@ -1936,7 +1930,7 @@ const SettingsPage: React.FC = () => {
 
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingEncodingFormat')}
@@ -1966,7 +1960,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingMaxTokens')}
@@ -2009,8 +2003,8 @@ const SettingsPage: React.FC = () => {
                   })()}
                 </p>
               </div>
-              
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.progressiveDisclosure')}
@@ -2044,7 +2038,7 @@ const SettingsPage: React.FC = () => {
 
       {/* OAuth Server Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_OAUTH_SERVER}>
-        <div className="bg-white shadow rounded-lg mb-6 dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('oauthServerConfig')}
@@ -2055,13 +2049,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.oauthServerConfig && (
             <div className="space-y-4 pb-4 px-6">
-              {/* Desktop-only notice: OAuth Server requires Node.js/betterAuth backend */}
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-md">
-                <p className="text-sm text-amber-700">
-                  {t('settings.nodeJsOnlyFeatureNotice')}
-                </p>
-              </div>
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableOauthServer')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2075,7 +2063,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.requireClientSecret')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2091,7 +2079,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.requireState')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.requireStateDescription')}</p>
@@ -2103,7 +2091,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.accessTokenLifetime')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2131,7 +2119,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.refreshTokenLifetime')}
@@ -2161,7 +2149,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.authorizationCodeLifetime')}
@@ -2191,7 +2179,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.allowedScopes')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.allowedScopesDescription')}</p>
@@ -2215,7 +2203,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md space-y-4">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md space-y-4">
                 <div className="flex justify-between items-center">
                   <div>
                     <h3 className="font-medium text-gray-700">
@@ -2304,7 +2292,7 @@ const SettingsPage: React.FC = () => {
 
       {/* MCPRouter Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_INSTALL_CONFIG}>
-        <div className="bg-white shadow rounded-lg mb-6 page-card dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 page-card dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('mcpRouterConfig')}
@@ -2317,7 +2305,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.mcpRouterConfig && (
             <div className="space-y-4 pb-4 px-6">
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpRouterApiKey')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2343,7 +2331,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpRouterBaseUrl')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2369,7 +2357,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpRouterReferer')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2395,7 +2383,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpRouterTitle')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2427,7 +2415,7 @@ const SettingsPage: React.FC = () => {
 
       {/* System Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_SYSTEM_CONFIG}>
-        <div className="bg-white shadow rounded-lg mb-6 dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('nameSeparator')}
@@ -2438,7 +2426,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.nameSeparator && (
             <div className="space-y-4 pb-4 px-6">
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.nameSeparatorLabel')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.nameSeparatorDescription')}</p>
@@ -2463,7 +2451,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableSessionRebuild')}
@@ -2485,7 +2473,7 @@ const SettingsPage: React.FC = () => {
 
       {/* Route Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_ROUTE_CONFIG}>
-        <div className="bg-white shadow rounded-lg mb-6 dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('routingConfig')}
@@ -2496,7 +2484,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.routingConfig && (
             <div className="space-y-4 pb-4 px-6">
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableGlobalRoute')}</h3>
                   <p className="text-sm text-gray-500">
@@ -2512,7 +2500,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableGroupNameRoute')}
@@ -2530,7 +2518,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.exposeHttp')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.exposeHttpDescription')}</p>
@@ -2542,7 +2530,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.httpPort')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.httpPortDescription')}</p>
@@ -2576,7 +2564,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.skipAuth')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.skipAuthDescription')}</p>
@@ -2588,7 +2576,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.jsonBodyLimit')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.jsonBodyLimitDescription')}</p>
@@ -2618,7 +2606,7 @@ const SettingsPage: React.FC = () => {
 
       {/* Installation Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_INSTALL_CONFIG}>
-        <div className="bg-white shadow rounded-lg mb-6 dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('installConfig')}
@@ -2629,13 +2617,9 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.installConfig && (
             <div className="space-y-4 pb-4 px-6">
-              {/* Node.js-only feature notice */}
-              <div className="p-3 mb-2 bg-amber-50 border border-amber-200 rounded-md text-sm text-amber-800">
-                {t('settings.nodeJsOnlyFeatureNotice')}
-              </div>
               {/* Base URL — only relevant for server deployments, hide in desktop app */}
               {!isTauri() && (
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.baseUrl')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.baseUrlDescription')}</p>
@@ -2660,7 +2644,7 @@ const SettingsPage: React.FC = () => {
               </div>
               )}
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.pythonIndexUrl')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.pythonIndexUrlDescription')}</p>
@@ -2684,7 +2668,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.npmRegistry')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.npmRegistryDescription')}</p>
@@ -2733,7 +2717,7 @@ const SettingsPage: React.FC = () => {
       </PermissionChecker>
 
       {/* Change Password - hidden when skipAuth is enabled */}
-      {!routingConfig?.skipAuth && <div className="bg-white shadow rounded-lg mb-6 dashboard-card" data-section="password">
+      {!routingConfig?.skipAuth && <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 dashboard-card" data-section="password">
         <div
           className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
           onClick={() => toggleSection('password')}
@@ -2752,7 +2736,7 @@ const SettingsPage: React.FC = () => {
 
       {/* Export MCP Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_EXPORT_CONFIG}>
-        <div className="bg-white shadow rounded-lg mb-6 dashboard-card">
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg mb-6 dashboard-card">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors duration-200 hover:text-blue-600 py-4 px-6"
             onClick={() => toggleSection('exportConfig')}
@@ -2763,7 +2747,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.exportConfig && (
             <div className="space-y-4 pb-4 px-6">
-              <div className="p-3 bg-gray-50 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-4">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpSettingsJson')}</h3>
                   <p className="text-sm text-gray-500">

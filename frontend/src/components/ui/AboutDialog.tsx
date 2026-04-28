@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, RefreshCw } from 'lucide-react';
-import { checkLatestVersion, compareVersions } from '@/utils/version';
+import { X, RefreshCw, Download } from 'lucide-react';
+import { checkForAppUpdate, installAppUpdate } from '@/utils/version';
 
 interface AboutDialogProps {
   isOpen: boolean;
@@ -12,21 +12,51 @@ interface AboutDialogProps {
 const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose, version }) => {
   const { t } = useTranslation();
   const [hasNewVersion, setHasNewVersion] = useState(false);
-  const [latestVersion, setLatestVersion] = useState("");
+  const [latestVersion, setLatestVersion] = useState('');
   const [isChecking, setIsChecking] = useState(false);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<{ downloaded: number; total: number } | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
 
   const checkForUpdates = async () => {
     setIsChecking(true);
+    setInstallError(null);
     try {
-      const latest = await checkLatestVersion();
-      if (latest) {
-        setLatestVersion(latest);
-        setHasNewVersion(compareVersions(version, latest) > 0);
+      const update = await checkForAppUpdate();
+      if (update) {
+        setLatestVersion(update.version);
+        setHasNewVersion(true);
+      } else {
+        setHasNewVersion(false);
+        setLatestVersion('');
       }
     } catch (error) {
       console.error('Failed to check for updates:', error);
     } finally {
       setIsChecking(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    setIsInstalling(true);
+    setInstallError(null);
+    setDownloadProgress({ downloaded: 0, total: 0 });
+    try {
+      await installAppUpdate((event) => {
+        if (event.event === 'Started') {
+          setDownloadProgress({ downloaded: 0, total: event.data.contentLength ?? 0 });
+        } else if (event.event === 'Progress') {
+          setDownloadProgress((prev) => ({
+            downloaded: (prev?.downloaded ?? 0) + event.data.chunkLength,
+            total: prev?.total ?? 0,
+          }));
+        }
+      });
+    } catch (error) {
+      console.error('Failed to install update:', error);
+      setInstallError(error instanceof Error ? error.message : String(error));
+      setIsInstalling(false);
+      setDownloadProgress(null);
     }
   };
 
@@ -75,16 +105,33 @@ const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose, version }) =
                   </div>
                   <div className="ml-3 flex-1 text-sm text-blue-700 dark:text-blue-300">
                     <p>{t('about.newVersionAvailable', { version: latestVersion })}</p>
-                    <p className="mt-1">
+                    <div className="mt-2 flex items-center gap-3">
+                      <button
+                        onClick={handleInstallUpdate}
+                        disabled={isInstalling}
+                        className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-medium disabled:opacity-60"
+                      >
+                        <Download className={`h-3.5 w-3.5 ${isInstalling ? 'animate-pulse' : ''}`} />
+                        {isInstalling
+                          ? downloadProgress && downloadProgress.total > 0
+                            ? `${t('about.downloading')} ${Math.round((downloadProgress.downloaded / downloadProgress.total) * 100)}%`
+                            : t('about.installing')
+                          : t('about.downloadAndInstall')}
+                      </button>
                       <a
-                        href="https://github.com/samanhappy/mcphub"
+                        href="https://github.com/samanhappy/mcphub-desktop/releases"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-blue-600 dark:text-blue-400 hover:underline"
+                        className="text-blue-600 dark:text-blue-400 hover:underline text-xs"
                       >
                         {t('about.viewOnGitHub')}
                       </a>
-                    </p>
+                    </div>
+                    {installError && (
+                      <p className="mt-2 text-xs text-red-600 dark:text-red-400">
+                        {t('about.updateError')}: {installError}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>

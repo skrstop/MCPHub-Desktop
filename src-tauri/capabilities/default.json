@@ -21,6 +21,8 @@
     "fs:allow-remove",
     "fs:scope-appconfig-recursive",
     "fs:scope-appdata-recursive",
-    "fs:scope-home-recursive"
+    "fs:scope-home-recursive",
+    "updater:default",
+    "process:default"
   ]
 }

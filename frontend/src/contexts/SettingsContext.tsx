@@ -183,7 +183,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     bearerAuthKey: '',
     bearerAuthHeaderName: 'Authorization',
     jsonBodyLimit: '1mb',
-    skipAuth: false,
+    // 桌面版默认开启免登录，避免本地用户每次都要输入账号密码
+    skipAuth: true,
   });
 
   const [tempRoutingConfig, setTempRoutingConfig] = useState<TempRoutingConfig>({
@@ -258,7 +259,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           bearerAuthHeaderName:
             data.data.systemConfig.routing.bearerAuthHeaderName || 'Authorization',
           jsonBodyLimit: data.data.systemConfig.routing.jsonBodyLimit || '1mb',
-          skipAuth: data.data.systemConfig.routing.skipAuth ?? false,
+          // 桌面版默认开启免登录
+          skipAuth: data.data.systemConfig.routing.skipAuth ?? true,
         });
       }
       if (data.success && data.data?.systemConfig?.install) {
