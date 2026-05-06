@@ -19,14 +19,28 @@ mkdir -p "$DEST"
 
 # ---------------------------------------------------------------------------
 # Platform detection
+# TARGET_ARCH 环境变量可覆盖自动检测的架构（ci 交叉编译使用）
+# 取值: arm64 | x64
 # ---------------------------------------------------------------------------
 OS=$(uname -s)
 ARCH=$(uname -m)
 
+# 允许通过 TARGET_ARCH 覆盖（CI 交叉编译时使用）
+if [[ -n "${TARGET_ARCH:-}" ]]; then
+  ARCH_OVERRIDE="${TARGET_ARCH}"
+else
+  # 将 uname -m 的输出统一为 arm64 / x64
+  if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+    ARCH_OVERRIDE="arm64"
+  else
+    ARCH_OVERRIDE="x64"
+  fi
+fi
+
 case "$OS" in
   Darwin)
     PLATFORM="darwin"
-    if [[ "$ARCH" == "arm64" ]]; then
+    if [[ "$ARCH_OVERRIDE" == "arm64" ]]; then
       NODE_ARCH="arm64"
       UV_ARCH="aarch64-apple-darwin"
     else
@@ -37,7 +51,7 @@ case "$OS" in
     ;;
   Linux)
     PLATFORM="linux"
-    if [[ "$ARCH" == "aarch64" ]]; then
+    if [[ "$ARCH_OVERRIDE" == "arm64" ]]; then
       NODE_ARCH="arm64"
       UV_ARCH="aarch64-unknown-linux-gnu"
     else

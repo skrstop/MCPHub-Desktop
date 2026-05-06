@@ -5,7 +5,9 @@
 param(
     [string]$NodeVersion = "22.14.0",
     [string]$UvVersion = "0.6.12",
-    [string]$PythonVersion = "3.12"
+    [string]$PythonVersion = "3.12",
+    # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
+    [string]$TargetArch = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,15 +21,25 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 
 # ---------------------------------------------------------------------------
 # Detect architecture
+# TargetArch 参数可覆盖自动检测（CI 交叉编译时使用）
 # ---------------------------------------------------------------------------
-$Arch = (Get-CimInstance Win32_Processor).Architecture
-# 9 = x64, 12 = ARM64
-if ($Arch -eq 12) {
-    $NodeArch = "arm64"
-    $UvArch = "aarch64-pc-windows-msvc"
+if ($TargetArch -ne "") {
+    $NodeArch = $TargetArch
+    if ($TargetArch -eq "arm64") {
+        $UvArch = "aarch64-pc-windows-msvc"
+    } else {
+        $UvArch = "x86_64-pc-windows-msvc"
+    }
 } else {
-    $NodeArch = "x64"
-    $UvArch = "x86_64-pc-windows-msvc"
+    $Arch = (Get-CimInstance Win32_Processor).Architecture
+    # 9 = x64, 12 = ARM64
+    if ($Arch -eq 12) {
+        $NodeArch = "arm64"
+        $UvArch = "aarch64-pc-windows-msvc"
+    } else {
+        $NodeArch = "x64"
+        $UvArch = "x86_64-pc-windows-msvc"
+    }
 }
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,273 @@
+name: Release
+
+# 触发条件：推送 v* 格式的 tag 或手动触发
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本号 (例如 v0.12.14.1)'
+        required: true
+        type: string
+
+# 允许写入 release
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (arm64) — native
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            runtime-arch: arm64
+
+          # macOS Intel (x64) — native
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            runtime-arch: x64
+
+          # Linux x64 — native
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            runtime-arch: x64
+
+          # Linux arm64 — GitHub 托管 ARM runner
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            runtime-arch: arm64
+
+          # Windows x64 — native
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            runtime-arch: x64
+
+          # Windows arm64 — 在 x64 runner 上交叉编译
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            runtime-arch: arm64
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      # ─── 检出代码 ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ─── 安装 Node.js ──────────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # ─── 安装 Rust + 目标 triple ───────────────────────────────────────────
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ─── Rust 构建缓存 ─────────────────────────────────────────────────────
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      # ─── Linux 系统依赖 ────────────────────────────────────────────────────
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            pkg-config
+
+      # ─── 安装根目录依赖（tauri-cli）────────────────────────────────────────
+      - name: Install root deps
+        run: npm install
+
+      # ─── 安装前端依赖 ──────────────────────────────────────────────────────
+      - name: Install frontend deps
+        run: cd frontend && npm install
+
+      # ─── 下载 bundled runtimes（Unix）─────────────────────────────────────
+      - name: Download bundled runtimes (Unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/download-runtimes.sh
+        env:
+          TARGET_ARCH: ${{ matrix.runtime-arch }}
+
+      # ─── 下载 bundled runtimes（Windows）──────────────────────────────────
+      - name: Download bundled runtimes (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
+
+      # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
+      - name: Build Tauri app
+        run: npm run tauri build -- --target ${{ matrix.target }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # ─── 收集产物 ──────────────────────────────────────────────────────────
+      # macOS: .dmg + .app.tar.gz（updater）+ .app.tar.gz.sig（updater 签名）
+      - name: Collect artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist-artifacts
+          find src-tauri/target/${{ matrix.target }}/release/bundle \
+            \( -name "*.dmg" \
+               -o -name "*.app.tar.gz" \
+               -o -name "*.app.tar.gz.sig" \) \
+            -exec cp {} dist-artifacts/ \;
+
+      # Linux: .deb + .AppImage（直接安装）
+      #        + .AppImage.tar.gz + .AppImage.tar.gz.sig（updater 专用）
+      - name: Collect artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist-artifacts
+          find src-tauri/target/${{ matrix.target }}/release/bundle \
+            \( -name "*.deb" \
+               -o -name "*.AppImage" \
+               -o -name "*.AppImage.tar.gz" \
+               -o -name "*.AppImage.tar.gz.sig" \
+               -o -name "*.rpm" \) \
+            -exec cp {} dist-artifacts/ \;
+
+      # Windows: NSIS 安装包 + .nsis.zip + .nsis.zip.sig（updater 专用）
+      - name: Collect artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-artifacts | Out-Null
+          Get-ChildItem -Recurse `
+            -Path "src-tauri/target/${{ matrix.target }}/release/bundle" `
+            -Include "*.exe","*.msi","*.nsis.zip","*.nsis.zip.sig" `
+            | Copy-Item -Destination dist-artifacts/
+
+      # ─── 上传产物到 Actions Artifacts ─────────────────────────────────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcphub-desktop-${{ matrix.target }}
+          path: dist-artifacts/
+          if-no-files-found: warn
+
+  # ─── 创建 GitHub Release + 生成 latest.json ──────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    # 只在 push tag 时执行
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 下载全部平台产物
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+          pattern: mcphub-desktop-*
+          merge-multiple: false
+
+      - name: List artifacts
+        run: find all-artifacts -type f | sort
+
+      # 从各平台 .sig 文件自动生成 latest.json
+      - name: Generate latest.json
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, glob
+          from datetime import datetime, timezone
+
+          tag      = os.environ['RELEASE_TAG']          # e.g. v0.12.14.1
+          repo     = os.environ['REPO']                 # e.g. skrstop/MCPHub-Desktop
+          version  = tag.lstrip('v')                    # e.g. 0.12.14.1
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+          pub_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+          def classify(filename: str):
+              """根据文件名推断 Tauri updater 平台 key"""
+              n = filename.lower()
+              if '.app.tar.gz' in n:
+                  return 'darwin-aarch64' if 'aarch64' in n else 'darwin-x86_64'
+              if 'appimage.tar.gz' in n:
+                  return 'linux-aarch64' if ('arm64' in n or 'aarch64' in n) else 'linux-x86_64'
+              if 'nsis.zip' in n:
+                  return 'windows-aarch64' if ('arm64' in n or 'aarch64' in n) else 'windows-x86_64'
+              return None
+
+          platforms = {}
+          for sig_path in sorted(glob.glob('all-artifacts/**/*.sig', recursive=True)):
+              # 去掉末尾 .sig 得到资源文件名
+              asset_name = os.path.basename(sig_path[:-4])
+              platform   = classify(asset_name)
+              if platform is None:
+                  print(f'  [skip] {asset_name} — 无法识别平台')
+                  continue
+              sig_content = open(sig_path).read().strip()
+              # GitHub releases 会把文件名中的空格替换为 '.' 生成下载 URL
+              url_name = asset_name.replace(' ', '.')
+              platforms[platform] = {
+                  'signature': sig_content,
+                  'url': f"{base_url}/{url_name}",
+              }
+              print(f'  [ok] {platform} -> {url_name}')
+
+          if not platforms:
+              print('WARNING: 未找到任何 .sig 文件，latest.json 的 platforms 为空。')
+              print('         请确认已配置 TAURI_SIGNING_PRIVATE_KEY secret。')
+
+          data = {
+              'version': version,
+              'notes': f'MCPHub Desktop {version}\n\nSee release page for full changelog.',
+              'pub_date': pub_date,
+              'platforms': platforms,
+          }
+
+          os.makedirs('release-meta', exist_ok=True)
+          out_path = 'release-meta/latest.json'
+          with open(out_path, 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2, ensure_ascii=False)
+
+          print(f'\nGenerated latest.json with {len(platforms)} platform(s):')
+          print(json.dumps(data, indent=2, ensure_ascii=False))
+          PYEOF
+
+      # 验证生成结果
+      - name: Show latest.json
+        run: cat release-meta/latest.json
+
+      # 创建 draft Release，上传全部产物 + latest.json
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MCPHub Desktop ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            all-artifacts/**/*
+            release-meta/latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
