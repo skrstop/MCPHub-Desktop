@@ -20,6 +20,10 @@
 - [SIGNING_SETUP.md](./SIGNING_SETUP.md) - 签名密钥配置指南
 - [GENERATE_KEYS.md](./GENERATE_KEYS.md) - 密钥生成说明
 
+### 📋 版本管理
+
+- [VERSION_CONFIG.md](./VERSION_CONFIG.md) - 版本号配置说明
+
 ### 📝 更新日志
 
 - [FIXES_SUMMARY.md](./FIXES_SUMMARY.md) - 修复总结

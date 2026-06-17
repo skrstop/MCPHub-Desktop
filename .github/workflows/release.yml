@@ -220,11 +220,31 @@ jobs:
           import os, json, glob
           from datetime import datetime, timezone
 
-          tag      = os.environ['RELEASE_TAG']          # e.g. v0.12.14.1
+          tag      = os.environ['RELEASE_TAG']          # e.g. v1.0.17
           repo     = os.environ['REPO']                 # e.g. skrstop/MCPHub-Desktop
-          version  = tag.lstrip('v')                    # e.g. 0.12.14.1
           base_url = f"https://github.com/{repo}/releases/download/{tag}"
           pub_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+          # 从 tauri.conf.json 读取版本号
+          tauri_conf_path = 'src-tauri/tauri.conf.json'
+          try:
+              with open(tauri_conf_path, 'r', encoding='utf-8') as f:
+                  tauri_conf = json.load(f)
+              version = tauri_conf.get('version', '')
+              if not version:
+                  print(f'WARNING: version not found in {tauri_conf_path}, using tag name')
+                  version = tag.lstrip('v')
+              else:
+                  print(f'✅ Version from tauri.conf.json: {version}')
+          except Exception as e:
+              print(f'WARNING: Failed to read {tauri_conf_path}: {e}')
+              version = tag.lstrip('v')
+
+          # 验证 tag 和版本号是否一致
+          expected_tag = f'v{version}'
+          if tag != expected_tag:
+              print(f'WARNING: Tag "{tag}" does not match version "v{version}"')
+              print(f'         Expected tag: {expected_tag}')
 
           def classify(filename: str):
               """根据文件名推断 Tauri updater 平台 key"""
