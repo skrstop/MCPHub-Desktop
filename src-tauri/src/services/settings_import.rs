@@ -35,6 +35,7 @@ struct RawUser {
     username: String,
     password: Option<String>,
     #[serde(rename = "passwordHash")]
+    #[allow(dead_code)]
     password_hash: Option<String>,
     admin: Option<bool>,
 }

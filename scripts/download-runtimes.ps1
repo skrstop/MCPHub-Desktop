@@ -106,12 +106,18 @@ if (-not (Test-Path $UvExe)) {
     Invoke-WebRequest -Uri $UvUrl -OutFile $TmpZip
     Expand-Archive -Path $TmpZip -DestinationPath $TmpDir
 
+    # uv zip may contain a subdirectory or have files directly at the root
     $Extracted = Get-ChildItem $TmpDir -Directory | Select-Object -First 1
+    if ($null -eq $Extracted) {
+        $ExtractedDir = $TmpDir
+    } else {
+        $ExtractedDir = $Extracted.FullName
+    }
 
     New-Item -ItemType Directory -Force -Path $UvDest | Out-Null
-    Copy-Item (Join-Path $Extracted.FullName "uv.exe") $UvDest
-    if (Test-Path (Join-Path $Extracted.FullName "uvx.exe")) {
-        Copy-Item (Join-Path $Extracted.FullName "uvx.exe") $UvDest
+    Copy-Item (Join-Path $ExtractedDir "uv.exe") $UvDest
+    if (Test-Path (Join-Path $ExtractedDir "uvx.exe")) {
+        Copy-Item (Join-Path $ExtractedDir "uvx.exe") $UvDest
     }
 
     Remove-Item $TmpZip -Force

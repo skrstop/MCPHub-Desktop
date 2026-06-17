@@ -200,7 +200,6 @@ impl McpTransport for SseTransport {
         log::info!("[{}] Connecting to SSE endpoint: {}", self.server_name, sse_url);
 
         // Try GET first (traditional SSE), then POST (Streamable HTTP with SSE response)
-        let mut response = None;
 
         // Try GET request first
         let mut req = self.client.get(&sse_url)
@@ -217,8 +216,8 @@ impl McpTransport for SseTransport {
 
         log::info!("[{}] GET response: status={}, content-type={}", self.server_name, status, content_type);
 
-        if status.is_success() && content_type.contains("text/event-stream") {
-            response = Some(get_resp);
+        let response = if status.is_success() && content_type.contains("text/event-stream") {
+            get_resp
         } else {
             // GET didn't return SSE, try POST
             log::info!("[{}] GET didn't return SSE, trying POST", self.server_name);
@@ -239,13 +238,11 @@ impl McpTransport for SseTransport {
             log::info!("[{}] POST response: status={}, content-type={}", self.server_name, status, content_type);
 
             if status.is_success() && content_type.contains("text/event-stream") {
-                response = Some(post_resp);
+                post_resp
             } else {
                 return Err(anyhow!("SSE connect failed: Neither GET nor POST returned SSE stream (url: {})", sse_url));
             }
-        }
-
-        let response = response.unwrap();
+        };
 
         // The first SSE event contains the endpoint URL for JSON-RPC POSTs
         // MCP protocol sends: event: endpoint\ndata: /messages?sessionId=xxx

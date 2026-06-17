@@ -138,7 +138,9 @@ struct ServerInfo {
 
 #[derive(Deserialize)]
 struct SmartCallRequest {
+    #[allow(dead_code)]
     server: Option<String>,
+    #[allow(dead_code)]
     group: Option<String>,
     tool: String,
     arguments: Option<Value>,
@@ -429,7 +431,9 @@ fn jsonrpc_error(id: Option<Value>, code: i32, message: impl Into<String>) -> Re
 struct ServerFilter {
     name: String,
     tools: Option<Vec<String>>,  // None = all tools, Some = specific tools
+    #[allow(dead_code)]
     prompts: Option<Vec<String>>,
+    #[allow(dead_code)]
     resources: Option<Vec<String>>,
 }
 
@@ -472,6 +476,7 @@ fn extract_filter_list(value: Option<&serde_json::Value>) -> Option<Vec<String>>
 /// - "" or "$smart"              → all connected servers
 /// - "$smart/{group}"            → servers in that group
 /// - "{name}"                    → group by name/id, or single server
+#[allow(dead_code)]
 async fn mcp_scope_servers(scope: &str) -> Vec<String> {
     let scope = scope.trim_start_matches('/').trim();
     if scope.is_empty() || scope == "$smart" {
