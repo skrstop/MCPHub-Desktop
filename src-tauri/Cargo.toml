@@ -24,6 +24,7 @@ tauri = { version = "2", features = [
   "tray-icon",
   "image-ico",
   "image-png",
+  "devtools",
 ] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"

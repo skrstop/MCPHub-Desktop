@@ -3,99 +3,35 @@
 > 本文档是 Tauri 桌面客户端迁移的**完整参考**，供 AI Agent 和开发者续接工作使用。
 > 包含：原项目架构、桌面端架构、已完成内容、待办事项及所有关键技术细节。
 
-> ⚠️ **核心约束（MUST FOLLOW）**：**禁止修改 `mcphub/frontend/`、`mcphub/src/` 等原始源文件**。
-> 所有修改必须在 `tauri/` 目录内进行。前端代码需先拷贝到 `tauri/frontend/`，再在副本上修改。目的：保留原始代码可供问题溯源，桌面端改动与 Web 端完全隔离。
-> 做任何较大修改后，必须更新agent.md文档，用来记录。目的：为了方便后续维护和理解项目结构。
+> ⚠️ **核心约束（MUST FOLLOW）**：**禁止修改 `mcphub-origin/frontend/`、`mcphub-origin/src/` 等原始源文件**。
+> 所有修改必须在 `frontend/`、`src-tauri/`、`locales/` 目录内进行。
+> 做任何较大修改后，必须更新 agent.md 文档，用来记录。目的：为了方便后续维护和理解项目结构。
+
 ---
 
 ## 1. 项目概览
 
-### 1.1 原项目（mcphub — Node.js/Express + React/Vite）
+### 1.1 原项目（mcphub-origin — Node.js/Express + React/Vite）
 
 | 属性 | 值 |
 |------|-----|
 | 包名 | `@samanhappy/mcphub` |
 | 技术栈 | Express.js + TypeScript ESM + React/Vite + Tailwind CSS |
-| 入口 | `src/index.ts` → `src/server.ts` |
-| 前端 | `frontend/` (React + Vite，端口 5173，代理到后端 3000) |
-| 认证 | JWT + bcrypt，admin 用户由 `ADMIN_PASSWORD` 环境变量控制 |
-| 数据存储 | JSON 文件 (`mcp_settings.json`) 或 PostgreSQL (USE_DB=true) |
+| 前端 | `mcphub-origin/frontend/` (React + Vite) |
+| 认证 | JWT + bcrypt + Better-Auth（OAuth/OIDC） |
+| 数据存储 | JSON 文件 (`mcp_settings.json`) 或 PostgreSQL |
 | MCP 连接 | `src/services/mcpService.ts` 管理所有 MCP 服务端连接 |
 | 路由 | `/mcp/{group\|server}`、`/mcp/$smart`、REST API `/api/*` |
 | i18n | react-i18next，翻译文件在 `locales/` |
-| 部署 | Docker 多阶段构建 + NPM 包 CLI (`bin/cli.js`) |
 
-#### 原项目目录结构
-
-```
-mcphub/
-├── src/
-│   ├── index.ts              # 应用入口
-│   ├── server.ts             # Express 服务器设置
-│   ├── betterAuth.ts         # OAuth/Better-Auth 集成
-│   ├── controllers/          # HTTP 请求处理器
-│   ├── routes/               # 路由定义
-│   ├── services/
-│   │   └── mcpService.ts     # 核心 MCP 服务器管理逻辑
-│   ├── dao/                  # 数据访问层（JSON 文件 + PostgreSQL 双实现）
-│   ├── db/                   # TypeORM 实体 & Repository（PostgreSQL 模式）
-│   ├── middlewares/          # Express 中间件
-│   ├── config/               # 配置管理
-│   ├── types/                # TypeScript 类型定义 & DTO
-│   └── utils/                # 工具函数
-├── frontend/
-│   ├── src/
-│   │   ├── pages/            # 页面组件（11个页面）
-│   │   │   ├── Dashboard.tsx
-│   │   │   ├── ServersPage.tsx
-│   │   │   ├── GroupsPage.tsx
-│   │   │   ├── UsersPage.tsx
-│   │   │   ├── SettingsPage.tsx
-│   │   │   ├── LogsPage.tsx
-│   │   │   ├── ActivityPage.tsx
-│   │   │   ├── LoginPage.tsx
-│   │   │   ├── MarketPage.tsx
-│   │   │   ├── PromptsPage.tsx
-│   │   │   └── ResourcesPage.tsx
-│   │   ├── components/       # 可复用 UI 组件
-│   │   ├── utils/
-│   │   │   ├── fetchInterceptor.ts   # HTTP 请求拦截器（需替换为 Tauri invoke）
-│   │   │   ├── runtime.ts            # 运行时配置（basePath、apiUrl）
-│   │   │   └── api.ts                # API 工具函数
-│   │   ├── services/         # 前端服务层
-│   │   ├── hooks/            # React hooks
-│   │   └── contexts/         # React contexts
-│   └── dist/                 # Vite 构建输出（占位文件已创建）
-├── locales/                  # i18n 翻译（en/zh/fr/tr）
-├── mcp_settings.json         # MCP 服务器定义 + 用户账户（原项目配置）
-├── package.json              # 根包（pnpm workspace）
-└── tauri/                    # ← 桌面端代码（本文档范围）
-```
-
-#### 原项目数据模型（DAO 层）
-
-| 模型 | DAO 接口 | DB 实体 | JSON 路径 |
-|------|----------|---------|-----------|
-| IUser | UserDao | User | settings.users[] |
-| ServerConfig | ServerDao | Server | settings.mcpServers{} |
-| IGroup | GroupDao | Group | settings.groups[] |
-| SystemConfig | SystemConfigDao | SystemConfig | settings.systemConfig |
-| BearerKey | BearerKeyDao | BearerKey | settings.bearerKeys[] |
-| IOAuthClient | OAuthClientDao | OAuthClient | settings.oauthClients[] |
-| BuiltinPrompt | BuiltinPromptDao | BuiltinPrompt | settings.prompts[] |
-| BuiltinResource | BuiltinResourceDao | BuiltinResource | settings.resources[] |
-
----
-
-### 1.2 桌面端项目（tauri/ — Rust/Tauri 2 + 复用原 React 前端）
+### 1.2 桌面端项目（mcphub-desktop — Rust/Tauri 2 + 复用原 React 前端）
 
 | 属性 | 值 |
 |------|-----|
-| 位置 | `tauri/` 子目录（不在项目根目录） |
+| 位置 | 项目根目录 |
 | Tauri 版本 | v2 |
-| Rust crate | `tauri/src-tauri/` |
-| 包名(Rust) | `mcphub`，lib crate: `mcphub_lib` |
-| 前端复用 | `frontend/dist/`（原项目 React/Vite 构建产物） |
+| Rust crate | `src-tauri/` |
+| 前端 | `frontend/`（原 mcphub-origin/frontend 的副本，有改造） |
 | 数据存储 | SQLite（`$APPDATA/mcphub.db`，通过 sqlx 0.8） |
 | 认证 | jsonwebtoken 9 + bcrypt 0.15，密钥存 OS 钥匙串(keyring 3) |
 | 异步运行时 | tokio 1 full |
@@ -109,72 +45,97 @@ mcphub/
 ### 2.1 目录结构
 
 ```
-tauri/
-├── package.json              # @tauri-apps/cli devDependency，npm install 已完成
-├── frontend/                 # ⚠️ 原 frontend/ 的副本（Phase 6 创建），所有前端修改在此进行
-│   ├── package.json          # 继承自原 frontend/package.json，新增 @tauri-apps/api
-│   ├── vite.config.ts        # 继承自原 frontend/vite.config.ts
+mcphub-desktop/
+├── frontend/                   # 原 mcphub-origin/frontend/ 的副本（有改造）
 │   ├── src/
-│   │   └── utils/
-│   │       ├── tauriClient.ts        # 新建：isTauri() 检测 + invoke() 封装
-│   │       └── fetchInterceptor.ts   # 修改：拦截 /api/ 请求转为 invoke()
-│   └── dist/                 # Vite 构建输出（tauri.conf.json 指向此处）
-├── src-tauri/
-│   ├── Cargo.toml            # Rust 包清单（所有依赖）
-│   ├── Cargo.lock            # 锁定依赖版本
-│   ├── build.rs              # tauri-build 构建脚本
-│   ├── tauri.conf.json       # Tauri 应用配置
-│   ├── .cargo/
-│   │   └── config.toml       # sparse 注册表配置（解决 GitHub 访问问题）
-│   ├── icons/                # 应用图标（占位 PNG/ICO/ICNS，需替换为真实图标）
-│   │   ├── 32x32.png
-│   │   ├── 128x128.png
-│   │   ├── 128x128@2x.png
-│   │   ├── icon.png
-│   │   ├── icon.icns
-│   │   └── icon.ico
+│   │   ├── pages/              # 页面组件（11个页面）
+│   │   ├── components/         # 可复用 UI 组件
+│   │   │   ├── layout/         # Header, Sidebar, Content
+│   │   │   ├── ui/             # 通用 UI 组件
+│   │   │   ├── icons/          # SVG 图标组件
+│   │   │   ├── ServerCard.tsx   # ⚠️ 本地修改：移除 sponsor/wechat/discord
+│   │   │   ├── ServerForm.tsx   # ⚠️ 本地修改：使用 hub-* 样式 + 保留 visibility/OAuth2
+│   │   │   └── RuntimeVersionManager.tsx  # 🆕 桌面端新增：运行时版本管理
+│   │   ├── utils/
+│   │   │   ├── tauriClient.ts  # 🆕 isTauri() + invoke() 封装 + REST→invoke 路由映射
+│   │   │   ├── fetchInterceptor.ts  # ⚠️ 修改：拦截请求转为 invoke()
+│   │   │   └── runtime.ts      # 运行时配置
+│   │   ├── contexts/
+│   │   │   ├── AuthContext.tsx  # ⚠️ 修改：支持 skipAuth/guest 模式
+│   │   │   └── ...
+│   │   └── services/
+│   │       └── configService.ts # ⚠️ 修改：getPublicConfig 使用 apiGet
+│   ├── dist/                   # Vite 构建输出
+│   └── package.json
+├── locales/                    # i18n 翻译（en/zh/fr/tr）
+│   ├── en.json                 # ⚠️ 本地修改：添加 runtime* 翻译
+│   └── zh.json                 # ⚠️ 本地修改：添加 runtime* 翻译
+├── mcphub-origin/              # git 子模块，仅作代码参考
+├── src-tauri/                  # Rust 后端
+│   ├── Cargo.toml
+│   ├── tauri.conf.json
 │   ├── migrations/
-│   │   └── 0001_initial.sql  # SQLite 完整 schema
+│   │   ├── 0001_initial.sql
+│   │   ├── 0002_schema_fix.sql
+│   │   ├── 0003_config_json.sql
+│   │   ├── 0004_default_admin.sql
+│   │   └── 0005_default_skip_auth.sql  # 🆕 桌面端：默认开启免登录
 │   └── src/
-│       ├── main.rs           # Rust 二进制入口（调用 lib::run()）
-│       ├── lib.rs            # 应用核心：插件注册、setup hook、invoke_handler
+│       ├── main.rs
+│       ├── lib.rs              # 应用核心：插件注册、setup hook、invoke_handler
 │       ├── auth/
-│       │   └── mod.rs        # JWT 签发/验证 + bcrypt 密码哈希
+│       │   └── mod.rs          # JWT + bcrypt + guest token 签发
 │       ├── db/
-│       │   └── mod.rs        # SQLite 连接池初始化（OnceLock<SqlitePool>）
+│       │   └── mod.rs          # SQLite 连接池
 │       ├── models/
-│       │   ├── mod.rs
-│       │   ├── server.rs     # ServerType, ServerConfig, ServerStatus, Tool, ServerInfo
-│       │   ├── user.rs       # User, UserRole, UserInfo, UserPayload
-│       │   ├── group.rs      # Group, GroupPayload
-│       │   ├── config.rs     # SystemConfig
-│       │   ├── auth.rs       # LoginRequest, AuthToken, Claims
-│       │   └── log.rs        # LogEntry, ActivityEntry, LogQuery
+│       │   ├── server.rs       # ServerType, ServerConfig, ServerStatus, Tool
+│       │   ├── user.rs         # User, UserRole(Admin|User|Guest), UserInfo
+│       │   ├── group.rs
+│       │   ├── config.rs
+│       │   ├── auth.rs
+│       │   ├── bearer_key.rs
+│       │   └── log.rs
 │       ├── mcp/
-│       │   ├── mod.rs
-│       │   ├── client.rs     # McpTransport trait + McpClient 封装
-│       │   ├── stdio_transport.rs  # 子进程 JSON-RPC over stdin/stdout
-│       │   ├── sse_transport.rs    # HTTP SSE 传输（含自动重连）
+│       │   ├── client.rs       # McpTransport trait + McpClient
+│       │   ├── stdio_transport.rs
+│       │   ├── sse_transport.rs    # ⚠️ 本地修改：改进 SSE 事件解析
 │       │   ├── http_transport.rs   # Streamable HTTP POST 传输
-│       │   └── pool.rs       # 全局连接池（OnceLock<Arc<RwLock<HashMap>>>）
+│       │   └── pool.rs         # 全局连接池
 │       ├── services/
 │       │   ├── mod.rs
-│       │   ├── mcp_manager.rs      # 启动时连接所有 enabled server
-│       │   ├── server_service.rs   # CRUD for servers (SQLite)
-│       │   ├── user_service.rs     # CRUD for users + ensure_default_admin
-│       │   ├── group_service.rs    # CRUD for groups
-│       │   ├── config_service.rs   # 读写 system_config
-│       │   ├── log_service.rs      # 写入/查询 app_log & activity_log
-│       │   └── settings_import.rs  # 从 mcp_settings.json 导入服务器+用户
+│       │   ├── mcp_manager.rs
+│       │   ├── server_service.rs
+│       │   ├── user_service.rs
+│       │   ├── group_service.rs
+│       │   ├── config_service.rs
+│       │   ├── log_service.rs
+│       │   ├── settings_import.rs
+│       │   ├── bearer_key_service.rs
+│       │   ├── http_server.rs      # 内置 HTTP 服务器（expose_http 模式）
+│       │   ├── runtime_env.rs      # 🆕 运行时环境管理（Node.js/Python 版本隔离）
+│       │   ├── server_tool_config_service.rs
+│       │   └── market_service.rs
 │       └── commands/
 │           ├── mod.rs
-│           ├── auth.rs       # login, logout, get_current_user, change_password
-│           ├── servers.rs    # list_servers, get_server, add_server, update_server, delete_server, toggle_server, reload_server
-│           ├── groups.rs     # list_groups, add_group, update_group, delete_group
-│           ├── tools.rs      # list_tools, call_tool
-│           ├── users.rs      # list_users, add_user, update_user, delete_user
-│           ├── config.rs     # get_system_config, update_system_config, import_settings, export_settings
-│           └── logs.rs       # get_logs, get_activity_logs
+│           ├── auth.rs         # login/logout/get_current_user/change_password
+│           ├── servers.rs      # list/get/add/update/delete/toggle/reload
+│           ├── groups.rs
+│           ├── tools.rs
+│           ├── users.rs
+│           ├── config.rs       # 🆕 新增 get_public_config 命令
+│           ├── logs.rs
+│           ├── bearer_keys.rs
+│           ├── prompts.rs
+│           ├── resources.rs
+│           ├── market.rs
+│           ├── registry.rs
+│           ├── cloud.rs
+│           ├── server_tool_config.rs
+│           ├── http_server.rs
+│           └── runtime.rs      # 🆕 运行时版本管理命令
+├── servers.json                # 本地 MCP 市场数据
+├── package.json
+└── agent.md                    # 本文档
 ```
 
 ### 2.2 数据流架构
@@ -182,8 +143,7 @@ tauri/
 ```
 React Frontend (frontend/dist/)
         │
-        │  window.__TAURI__.invoke("command_name", args)
-        │  (替代原来的 fetch("/api/..."))
+        │  isTauri() ? invoke() : fetch()
         ▼
 Tauri IPC Bridge
         │
@@ -194,914 +154,264 @@ commands/ (Tauri commands = 原 controllers/)
 services/ (业务逻辑 = 原 services/)
         │
         ├─▶ db/ (SQLite via sqlx = 原 dao/ + TypeORM)
-        └─▶ mcp/ (MCP 连接池 = 原 mcpService.ts)
-                │
-                ├─▶ stdio_transport (子进程)
-                ├─▶ sse_transport (HTTP SSE)
-                └─▶ http_transport (Streamable HTTP)
-```
-
-### 2.3 SQLite Schema（`migrations/0001_initial.sql`）
-
-| 表名 | 说明 |
-|------|------|
-| `users` | 用户账户（id TEXT PK, username UNIQUE, password_hash, role） |
-| `servers` | MCP 服务器配置（id TEXT PK, name UNIQUE, server_type, command/args/env/url/headers/options JSON） |
-| `groups` | 服务器分组（id TEXT PK, name UNIQUE, servers TEXT = JSON数组） |
-| `system_config` | 单行系统配置（id=1, proxy, registry, log_level, expose_http, http_port） |
-| `bearer_keys` | Bearer 认证密钥 |
-| `activity_log` | 用户操作日志（user_id, action, resource, detail JSON） |
-| `app_log` | 应用日志（level, message, server_name） |
-| `builtin_prompts` | 内置 Prompt |
-| `builtin_resources` | 内置 Resource |
-
-### 2.4 Tauri Commands 映射表（原 REST API → Tauri invoke）
-
-| 原 REST API | Tauri Command | 文件 |
-|-------------|---------------|------|
-| POST /api/auth/login | `login` | commands/auth.rs |
-| POST /api/auth/logout | `logout` | commands/auth.rs |
-| GET /api/auth/me | `get_current_user` | commands/auth.rs |
-| PUT /api/auth/password | `change_password` | commands/auth.rs |
-| GET /api/servers | `list_servers` | commands/servers.rs |
-| GET /api/servers/:name | `get_server` | commands/servers.rs |
-| POST /api/servers | `add_server` | commands/servers.rs |
-| PUT /api/servers/:name | `update_server` | commands/servers.rs |
-| DELETE /api/servers/:name | `delete_server` | commands/servers.rs |
-| PUT /api/servers/:name/toggle | `toggle_server` | commands/servers.rs |
-| POST /api/servers/:name/reload | `reload_server` | commands/servers.rs |
-| GET /api/groups | `list_groups` | commands/groups.rs |
-| POST /api/groups | `add_group` | commands/groups.rs |
-| PUT /api/groups/:id | `update_group` | commands/groups.rs |
-| DELETE /api/groups/:id | `delete_group` | commands/groups.rs |
-| GET /api/tools | `list_tools` | commands/tools.rs |
-| POST /api/tools/call | `call_tool` | commands/tools.rs |
-| GET /api/users | `list_users` | commands/users.rs |
-| POST /api/users | `add_user` | commands/users.rs |
-| PUT /api/users/:id | `update_user` | commands/users.rs |
-| DELETE /api/users/:id | `delete_user` | commands/users.rs |
-| GET /api/config | `get_system_config` | commands/config.rs |
-| PUT /api/config | `update_system_config` | commands/config.rs |
-| POST /api/config/import | `import_settings` | commands/config.rs |
-| GET /api/config/export | `export_settings` | commands/config.rs |
-| GET /api/logs | `get_logs` | commands/logs.rs |
-| GET /api/logs/activity | `get_activity_logs` | commands/logs.rs |
-
----
-
-## 3. 关键依赖与版本
-
-### Rust 依赖（Cargo.toml）
-
-```toml
-tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
-tauri-plugin-shell = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-reqwest = { version = "0.12", features = ["json","stream","rustls-tls"] }
-sqlx = { version = "0.8", features = ["runtime-tokio","sqlite","macros","migrate","uuid","chrono"] }
-jsonwebtoken = "9"
-bcrypt = "0.15"
-uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
-keyring = { version = "3", features = ["apple-native","windows-native","sync-secret-service"] }
-anyhow = "1"
-thiserror = "1"
-async-trait = "0.1"
-log = "0.4"
-env_logger = "0.11"
-```
-
-### 工具链
-
-| 工具 | 版本 |
-|------|------|
-| Rust | 1.83.0（`asdf set rust 1.83.0`） |
-| Node.js | v22.12.0 |
-| pnpm | 8.15.4 |
-| Tauri CLI | ^2（安装在 `tauri/node_modules`） |
-
----
-
-## 4. 开发环境配置
-
-### 4.1 关键注意事项
-
-```bash
-# ⚠️ 必须使用 sparse 协议运行 cargo（绕过 GitHub git 访问限制）
-cd tauri/src-tauri
-CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check
-
-# .cargo/config.toml 已配置（无需手动设置环境变量时也生效）
-# tauri/src-tauri/.cargo/config.toml:
-# [registries.crates-io]
-# protocol = "sparse"
-```
-
-### 4.2 sqlx 使用规则（重要）
-
-```rust
-// ✅ 正确：使用 sqlx::query() 非宏 API
-use sqlx::Row;
-let rows = sqlx::query("SELECT id, name FROM servers")
-    .fetch_all(db::pool())
-    .await?;
-let id: String = rows[0].try_get("id")?;
-
-// ❌ 禁止：sqlx::query!() 宏（需要 DATABASE_URL 编译时检查，桌面应用无法提供）
-let rows = sqlx::query!("SELECT id FROM servers").fetch_all(pool).await?;
-
-// ✅ 例外：sqlx::migrate!() 是嵌入文件宏，不需要 DATABASE_URL，可以使用
-sqlx::migrate!("./migrations").run(&pool).await?;
-```
-
-### 4.3 开发命令
-
-```bash
-# 安装 Tauri CLI
-cd tauri && npm install
-
-# 开发模式（启动 frontend dev server + Tauri 窗口）
-cd tauri && npm run dev
-# 等价于：tauri dev（会先执行 beforeDevCommand: cd .. && pnpm frontend:dev）
-
-# 生产构建
-cd tauri && npm run build
-# 等价于：tauri build（会先执行 beforeBuildCommand: cd .. && pnpm frontend:build）
-
-# 仅检查 Rust 编译
-cd tauri/src-tauri && CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check
-
-# 仅检查 Rust 编译并查看所有警告
-cd tauri/src-tauri && CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check 2>&1
+        ├─▶ mcp/ (MCP 连接池 = 原 mcpService.ts)
+        │       ├─▶ stdio_transport (子进程，使用 runtime_env 解析命令)
+        │       ├─▶ sse_transport (HTTP SSE)
+        │       └─▶ http_transport (Streamable HTTP)
+        └─▶ runtime_env/ (管理下载的 Node.js/Python 版本)
 ```
 
 ---
 
-## 5. 已完成工作（✅）
+## 3. 桌面端本地自定义功能（与 origin 的差异）
 
-### Phase 1 — 项目骨架
-- [x] `tauri/src-tauri/Cargo.toml` — 完整依赖清单
-- [x] `tauri/src-tauri/build.rs` — tauri-build 构建脚本
-- [x] `tauri/src-tauri/tauri.conf.json` — Tauri 应用配置
-- [x] `tauri/src-tauri/src/main.rs` / `lib.rs` — 应用核心
-- [x] `tauri/src-tauri/.cargo/config.toml` — sparse 注册表配置
+> 以下是桌面端相对于 mcphub-origin 的所有自定义修改，同步时需保留这些差异。
 
-### Phase 2 — 数据模型
-- [x] `models/server.rs` / `user.rs` / `group.rs` / `config.rs` / `auth.rs` / `log.rs`
+### 3.1 核心架构差异
 
-### Phase 3 — 数据库层
-- [x] `migrations/0001_initial.sql` — SQLite schema（users, servers, groups, system_config, bearer_keys, activity_log, app_log, builtin_prompts, builtin_resources）
-- [x] `db/mod.rs` — 连接池 + 自动迁移
+#### 3.1.1 Tauri IPC 通信层
+**文件**：`frontend/src/utils/tauriClient.ts`
 
-### Phase 4 — MCP 传输层 & 核心服务
-- [x] `mcp/` — McpTransport trait, StdioTransport, SseTransport, HttpTransport, Pool
-- [x] `services/mcp_manager.rs` / `server_service.rs` / `user_service.rs` / `group_service.rs` / `config_service.rs` / `log_service.rs` / `settings_import.rs`
-- [x] `auth/mod.rs` — JWT + bcrypt
+- 新增 `isTauri()` 函数：检测是否在 Tauri 环境运行
+- 新增 `mapRestToCommand()` 函数：将 REST API 路径映射到 Tauri 命令
+- 新增 `invokeMapped()` 函数：调用 Tauri 命令并处理响应
+- 新增 `transformTauriResponse()` 函数：将 Tauri 响应转换为前端期望格式
+- 新增 `public-config` 路由映射（`get_public_config` 命令）
+- 新增 `get_public_config` 响应转换
 
-### Phase 5 — Tauri Commands（核心）
-- [x] `commands/auth.rs` — login/register/logout/get_current_user/change_password
-- [x] `commands/servers.rs` — list/get/add/update/delete/toggle/reload
-- [x] `commands/groups.rs` — list/add/update/delete
-- [x] `commands/tools.rs` — list_tools/call_tool
-- [x] `commands/users.rs` — list/add/update/delete
-- [x] `commands/config.rs` — get/update system_config, import/export settings
-- [x] `commands/logs.rs` — get_logs/get_activity_logs/clear_logs
+#### 3.1.2 请求拦截器
+**文件**：`frontend/src/utils/fetchInterceptor.ts`
 
-### Phase 6 — 前端适配器
-- [x] `tauri/frontend/` — 原 frontend/ 的副本（完整 React 前端）
-- [x] `tauri/frontend/src/utils/tauriClient.ts` — 全量 REST→invoke 路由映射（mapRestToCommand + invokeMapped + transformTauriResponse）
-- [x] `tauri/frontend/src/utils/fetchInterceptor.ts` — apiRequest() 已集成 isTauri() 检测，自动路由到 invoke()
+- `apiRequest()` 函数集成 `isTauri()` 检测
+- 在 Tauri 环境下自动路由到 `invoke()` 而非 HTTP fetch
+- 保留 Web 环境的正常 HTTP 请求能力
 
-### Phase 7 — 系统托盘
-- [x] `lib.rs` — 托盘图标 + Show/Quit 菜单
-- [x] 关闭窗口最小化到托盘（CloseRequested → window.hide()）
+#### 3.1.3 认证上下文
+**文件**：`frontend/src/contexts/AuthContext.tsx`
 
----
+- 支持 `skipAuth` 模式（免登录模式）
+- 当 `skipAuth=true` 时，自动创建 guest 用户（`username: '免登陆模式'`, `isAdmin: true`）
+- 默认启用免登录模式（桌面端不需要登录）
 
-## 6. 待完成功能实现计划
+#### 3.1.4 配置服务
+**文件**：`frontend/src/services/configService.ts`
 
-> **原则**：除 PostgreSQL 外，所有原项目功能均需在桌面端实现。SQLite 是唯一数据存储。
-> **约束**：所有修改仅在 `tauri/` 目录内。非宏 sqlx API（见第 4.2 节）。
+- `getPublicConfig()` 使用 `apiGet` 而非 `fetchWithInterceptors`（适配 Tauri IPC）
+- 默认返回 `skipAuth: true`（桌面端默认免登录）
 
-### 当前存根（`__stub__`）清单
+### 3.2 UI/样式差异
 
-以下路由在 `tauriClient.ts` 中返回静态存根，需替换为真实 Rust 命令：
+#### 3.2.1 ServerForm（服务器表单）
+**文件**：`frontend/src/components/ServerForm.tsx`
 
-| 前端路由 | 当前存根状态 | 目标 Tauri 命令 |
-|---------|------------|----------------|
-| GET /auth/keys | 返回空数组 | `list_bearer_keys` |
-| POST/PUT/DELETE /auth/keys | 返回不支持错误 | `create/update/delete_bearer_key` |
-| GET /prompts | 返回空数组 | `list_builtin_prompts` |
-| POST/PUT/DELETE /prompts | 返回不支持错误 | `create/update/delete_builtin_prompt` |
-| POST /prompts/call | 返回不支持错误 | `call_prompt` |
-| GET /resources | 返回空数组 | `list_builtin_resources` |
-| POST/PUT/DELETE /resources | 返回不支持错误 | `create/update/delete_builtin_resource` |
-| GET /activities | 返回空+available:false | `get_tool_activities` |
-| GET /activities/available | 返回 available:false | `get_activity_available` |
-| GET /market/servers | 返回空数组 | `list_market_servers` |
-| GET /registry/servers | 返回空数组 | `list_registry_servers` |
-| GET /cloud/servers | 返回空数组 | `list_cloud_servers` |
-| GET/POST /templates | 返回不支持错误 | `list/export/import_template` |
-| POST /mcpb | 返回不支持错误 | `install_mcpb` |
-| servers/:n/tools/:t/toggle | 返回 success:true 存根 | `toggle_server_tool` |
+- 使用 mcphub-origin 的 `hub-*` 设计系统样式（`hub-card`, `hub-btn`, `hub-icon-btn` 等）
+- **隐藏了可见性选择器**（Private/Group/Public）——桌面端默认所有服务器为公开
+- 可见性默认值从 `private` 改为 `public`
+- 保留桌面端新增的 OAuth2 完整配置（`oauth2TokenUrl`, `oauth2ClientId`, `oauth2ClientSecret`）
+- 使用 lucide-react 的 `X` 图标作为关闭按钮
 
----
+#### 3.2.1.1 ServerCard（服务器卡片）
+**文件**：`frontend/src/components/ServerCard.tsx`
 
-### Phase A — Schema 修正迁移（所有后续 Phase 的前提）
+- **隐藏了可见性列**——桌面端不需要私有/公开区分，所有服务器默认公开
+- 可见性相关的 UI 元素（下拉选择器/徽章）已移除，用空 `div` 占位保持网格布局
 
-**文件**：`src-tauri/migrations/0002_schema_fix.sql`
+#### 3.2.2 Header（顶部导航）
+**文件**：`frontend/src/components/layout/Header.tsx`
 
-**需要修正的问题**：
+- GitHub 链接改为 `https://github.com/skrstop/mcphub-desktop`
+- 移除了文档按钮（BookOpen 图标）
 
-| 表 | 问题 | 修正方案 |
-|----|------|---------|
-| `bearer_keys` | 当前是 user_id/key_hash 结构，与原项目不符 | DROP + CREATE 新结构 |
-| `builtin_prompts` | 缺少 `title TEXT` 和 `template TEXT` | ALTER TABLE ADD COLUMN |
-| `builtin_resources` | 缺少 `content TEXT` | ALTER TABLE ADD COLUMN |
-| `activity_log` | 通用操作日志结构，不适合 tool call 监控 | DROP + CREATE 新结构 |
-| `system_config` | 缺少 mcpRouter 配置字段 | ALTER TABLE ADD COLUMN |
+#### 3.2.3 UserProfileMenu（用户菜单）
+**文件**：`frontend/src/components/ui/UserProfileMenu.tsx`
 
-**新结构定义**：
+- 移除了赞助按钮（SponsorIcon）
+- 移除了微信按钮（WeChatIcon）
+- 移除了 Discord 按钮（DiscordIcon）
+- 保留了：设置、关于、退出登录
 
-```sql
--- 0002_schema_fix.sql
+#### 3.2.4 AboutDialog（关于对话框）
+**文件**：`frontend/src/components/ui/AboutDialog.tsx`
 
--- 1. 重建 bearer_keys 表（与原项目一致）
-DROP TABLE IF EXISTS bearer_keys;
-CREATE TABLE IF NOT EXISTS bearer_keys (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    token           TEXT NOT NULL UNIQUE,
-    enabled         INTEGER NOT NULL DEFAULT 1,
-    access_type     TEXT NOT NULL DEFAULT 'all', -- all | groups | servers | custom
-    allowed_groups  TEXT NOT NULL DEFAULT '[]',  -- JSON 数组
-    allowed_servers TEXT NOT NULL DEFAULT '[]',  -- JSON 数组
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
-);
+- 添加了 "MCPHub Desktop" 标识文字
 
--- 2. 修复 builtin_prompts（补充缺失字段）
-ALTER TABLE builtin_prompts ADD COLUMN title TEXT;
-ALTER TABLE builtin_prompts ADD COLUMN template TEXT NOT NULL DEFAULT '';
+#### 3.2.5 Dashboard（仪表盘）
+**文件**：`frontend/src/pages/Dashboard.tsx`
 
--- 3. 修复 builtin_resources（补充缺失字段）
-ALTER TABLE builtin_resources ADD COLUMN content TEXT NOT NULL DEFAULT '';
+- 隐藏了 SMART 接入点（智能路由未实现）
+- 隐藏了 Docs 文档链接
 
--- 4. 重建 activity_log（tool call 监控，对应原 ActivityLoggingService）
-DROP TABLE IF EXISTS activity_log;
-CREATE TABLE IF NOT EXISTS activity_log (
-    id            TEXT PRIMARY KEY,
-    timestamp     TEXT NOT NULL DEFAULT (datetime('now')),
-    server        TEXT NOT NULL,
-    tool          TEXT NOT NULL,
-    duration_ms   INTEGER,
-    status        TEXT NOT NULL DEFAULT 'success', -- success | error
-    input         TEXT,   -- JSON string
-    output        TEXT,   -- JSON string
-    group_name    TEXT,
-    key_id        TEXT,
-    key_name      TEXT,
-    error_message TEXT
-);
+#### 3.2.6 LoginPage（登录页）
+**文件**：`frontend/src/pages/LoginPage.tsx`
 
--- 5. 扩展 system_config（MCPRouter 集成）
-ALTER TABLE system_config ADD COLUMN mcprouter_api_key TEXT;
-ALTER TABLE system_config ADD COLUMN mcprouter_base_url TEXT;
+- GitHub 链接改为 `https://github.com/skrstop/mcphub-desktop`
+- 移除了文档按钮
+- 用户名默认填充 `admin`，且设为只读（`readOnly`），用户不能修改
+  - 桌面端默认使用 admin 账户登录，简化登录流程
+  - 样式使用 `opacity: 0.7` 和 `cursor: not-allowed` 提示不可编辑
+- 登录表单下方显示默认密码提示：`默认密码: admin`（英文：`Default password: admin`）
+  - 使用 `t('auth.defaultPasswordHint')` 国际化
+- **Logo 使用应用图标**：用 `/assets/logo.png`（来自 `src-tauri/icons/icon.png`）替代原来的 CSS 样式 "M" 字母
 
--- 6. 新增 templates 表
-CREATE TABLE IF NOT EXISTS templates (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL UNIQUE,
-    description TEXT,
-    content     TEXT NOT NULL,  -- JSON 序列化的 ConfigTemplate
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
+#### 3.2.6.1 Sidebar（侧边栏）
+**文件**：`frontend/src/components/layout/Sidebar.tsx`
 
--- 7. 新增 server_tool_config 表（per-server 工具开关/描述覆盖）
-CREATE TABLE IF NOT EXISTS server_tool_config (
-    id          TEXT PRIMARY KEY,
-    server_name TEXT NOT NULL,
-    item_type   TEXT NOT NULL DEFAULT 'tool', -- tool | prompt | resource
-    item_name   TEXT NOT NULL,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    description TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(server_name, item_type, item_name)
-);
-```
+- **Logo 使用应用图标**：用 `/assets/logo.png` 替代原来的 CSS 样式 "M" 字母
+- 统一登录页和首页左上角的 logo 显示
 
----
+#### 3.2.7 SettingsPage（设置页）
+**文件**：`frontend/src/pages/SettingsPage.tsx`
 
-### Phase B — Bearer Keys（API 访问控制）
+- 导入了 `isTauri` 函数
+- 导入了 `RuntimeVersionManager` 组件
+- 隐藏了以下未实现的功能模块：
+  - Smart Routing（智能路由）
+  - Tool Result Compression（工具结果压缩）
+  - OAuth Server（OAuth 服务器）
+  - MCP Router（MCPRouter 配置）
+  - Better Auth（社交登录配置）
+- 在安装配置部分添加了 Node.js 版本管理（RuntimeVersionManager）
+- 在安装配置部分添加了 Python 版本管理（RuntimeVersionManager）
+- **隐藏了安装配置中的"基础地址"字段**（baseUrl）——端口在路由配置中设置
+- **在路由配置中新增了 HTTP 服务端口设置**：
+  - `exposeHttp`：启用/禁用 HTTP 服务开关
+  - `httpPort`：HTTP 服务监听端口（默认 23333）
+  - 修改端口后提示用户需要重启应用
+- **默认 baseUrl 从 `http://localhost:3000` 改为 `http://localhost:23333`**（与 HTTP 服务器默认端口一致）
+- 更新了所有语言的 `baseUrlPlaceholder` 翻译
+- 添加了 `exposeHttp`、`httpPort` 相关的国际化翻译
 
-**目标**：允许外部工具/脚本通过 Bearer token 访问 MCP 服务（当 HTTP 暴露启用时）。
+#### 3.2.7.1 SettingsContext（设置上下文）
+**文件**：`frontend/src/contexts/SettingsContext.tsx`
 
-**涉及文件**：
+- `RoutingConfig` 接口新增 `httpPort: number` 和 `exposeHttp: boolean` 字段
+- 默认值：`httpPort: 23333`，`exposeHttp: true`
 
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `models/bearer_key.rs` | 新建 | `BearerKey`, `BearerKeyPayload` 结构体 |
-| `services/bearer_key_service.rs` | 新建 | CRUD：list_all / create / update / delete / find_by_token |
-| `commands/bearer_keys.rs` | 新建 | `list_bearer_keys`, `create_bearer_key`, `update_bearer_key`, `delete_bearer_key` |
-| `models/mod.rs` | 修改 | 导出 bearer_key 模块 |
-| `services/mod.rs` | 修改 | 导出 bearer_key_service |
-| `commands/mod.rs` | 修改 | 导出 bearer_keys |
-| `lib.rs` | 修改 | 注册 4 个命令 |
-| `tauriClient.ts` | 修改 | 替换 `/auth/keys` 存根为真实命令 |
+### 3.3 国际化差异
 
-**BearerKey 数据模型**：
-```rust
-pub struct BearerKey {
-    pub id: String,
-    pub name: String,
-    pub token: String,
-    pub enabled: bool,
-    pub access_type: String,       // "all" | "groups" | "servers" | "custom"
-    pub allowed_groups: Vec<String>,
-    pub allowed_servers: Vec<String>,
-    pub created_at: String,
+#### 3.3.1 中文翻译
+**文件**：`locales/zh.json`
+
+新增的翻译键：
+```json
+{
+  "settings": {
+    "nodeVersion": "Node.js 版本",
+    "nodeVersionDescription": "选择或安装特定的 Node.js 版本用于运行 MCP 服务器",
+    "pythonVersion": "Python 版本",
+    "pythonVersionDescription": "选择或安装特定的 Python 版本用于运行 MCP 服务器",
+    "runtimeSystemDefault": "系统默认",
+    "runtimeInstalled": "已安装",
+    "runtimeBroken": "异常",
+    "runtimeBrokenWarning": "版本 {{version}} 安装不完整，建议重新安装",
+    "runtimeReinstall": "重新安装",
+    "runtimeReinstallTip": "强制重新安装当前选中的版本",
+    "runtimeUninstall": "卸载",
+    "runtimePhase.started": "开始",
+    "runtimePhase.downloading": "下载中",
+    "runtimePhase.extracting": "解压中",
+    "runtimePhase.verifying": "验证中",
+    "runtimePhase.running": "执行中",
+    "runtimePhase.done": "完成",
+    "runtimePhase.error": "错误"
+  }
 }
 ```
 
-**命令签名**：
-```rust
-list_bearer_keys() -> Result<Vec<BearerKey>, String>
-create_bearer_key(payload: BearerKeyPayload) -> Result<BearerKey, String>
-update_bearer_key(id: String, payload: BearerKeyPayload) -> Result<BearerKey, String>
-delete_bearer_key(id: String) -> Result<(), String>
-```
+#### 3.3.2 英文翻译
+**文件**：`locales/en.json`
 
-**tauriClient.ts 映射**：
-```typescript
-if (segs[0] === 'auth' && segs[1] === 'keys') {
-  if (m === 'GET') return { command: 'list_bearer_keys', args: {} };
-  if (m === 'POST') return { command: 'create_bearer_key', args: { payload: body } };
-  if (m === 'PUT') return { command: 'update_bearer_key', args: { id: segs[2], payload: body } };
-  if (m === 'DELETE') return { command: 'delete_bearer_key', args: { id: segs[2] } };
-}
-```
+新增的翻译键（同上，英文版本）
 
----
+### 3.4 Rust 后端差异
 
-### Phase C — Builtin Prompts（内置提示词管理）
+#### 3.4.1 免登录模式
+**文件**：`src-tauri/src/commands/config.rs`
 
-**目标**：用户可以创建/管理内置提示词模板，供 MCP 客户端调用。
+- 新增 `get_public_config` 命令：返回 `skipAuth` 和 `permissions` 配置
+- 默认 `skipAuth: true`（桌面端默认免登录）
 
-**涉及文件**：
+**文件**：`src-tauri/src/lib.rs`
 
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `models/prompt.rs` | 新建 | `BuiltinPrompt`, `BuiltinPromptPayload`, `PromptArgument` |
-| `services/prompt_service.rs` | 新建 | CRUD + call（渲染模板） |
-| `commands/prompts.rs` | 新建 | 6 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/prompts` 存根 |
+- 注册了 `get_public_config` 命令
 
-**BuiltinPrompt 数据模型**：
-```rust
-pub struct BuiltinPrompt {
-    pub id: String,
-    pub name: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub template: String,
-    pub arguments: Vec<PromptArgument>,  // JSON 序列化存储
-    pub enabled: bool,
-    pub created_at: String,
-}
-pub struct PromptArgument {
-    pub name: String,
-    pub description: Option<String>,
-    pub required: bool,
-}
-```
+**文件**：`src-tauri/migrations/0005_default_skip_auth.sql`
 
-**命令签名**：
-```rust
-list_builtin_prompts() -> Result<Vec<BuiltinPrompt>, String>
-get_builtin_prompt(id: String) -> Result<Option<BuiltinPrompt>, String>
-create_builtin_prompt(payload: BuiltinPromptPayload) -> Result<BuiltinPrompt, String>
-update_builtin_prompt(id: String, payload: BuiltinPromptPayload) -> Result<BuiltinPrompt, String>
-delete_builtin_prompt(id: String) -> Result<(), String>
-call_builtin_prompt(id: String, args: serde_json::Value) -> Result<String, String>
-```
+- 数据库迁移：默认设置 `routing.skipAuth = true`
 
----
+#### 3.4.2 Guest 用户支持
+**文件**：`src-tauri/src/models/user.rs`
 
-### Phase D — Builtin Resources（内置资源管理）
+- `UserRole` 枚举新增 `Guest` 变体
 
-**目标**：用户可以定义静态资源，供 MCP 客户端通过 URI 读取。
+**文件**：`src-tauri/src/commands/auth.rs`
 
-**涉及文件**：
+- `login` 命令处理 `UserRole::Guest` 匹配
+- `get_current_user` 命令在无 token 且 skipAuth 启用时返回 guest 用户
 
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `models/resource.rs` | 新建 | `BuiltinResource`, `BuiltinResourcePayload` |
-| `services/resource_service.rs` | 新建 | CRUD |
-| `commands/resources.rs` | 新建 | 5 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/resources` 存根 |
+**文件**：`src-tauri/src/auth/mod.rs`
 
-**BuiltinResource 数据模型**：
-```rust
-pub struct BuiltinResource {
-    pub id: String,
-    pub uri: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub mime_type: String,
-    pub content: String,
-    pub enabled: bool,
-    pub created_at: String,
-}
-```
+- 新增 `issue_guest_token()` 函数：签发 guest JWT token
+
+#### 3.4.3 SSE 传输改进
+**文件**：`src-tauri/src/mcp/sse_transport.rs`
+
+改进内容：
+- 正确跟踪 SSE 事件类型（`event:` 行）
+- 支持多种 endpoint 格式：
+  - `event: endpoint\ndata: /messages`（标准 MCP SSE）
+  - `data: {"endpoint": "/messages"}`（JSON 格式）
+  - `data: /messages`（无 event 类型）
+- 不自动添加 `/sse` 后缀（使用用户提供的 URL 原样连接）
+- 改进后台 SSE 响应读取（使用缓冲区处理不完整行）
+- 添加详细日志输出
+
+#### 3.4.4 运行时环境管理
+**文件**：`src-tauri/src/services/runtime_env.rs`
+
+- 管理下载的 Node.js 和 Python 版本
+- 解析命令到下载的版本（而非系统环境）
+- 支持设置活跃版本（`set_active_node`, `set_active_python`）
+- 提供环境变量覆盖（`UV_DEFAULT_INDEX`, `npm_config_registry`）
+
+**文件**：`src-tauri/src/mcp/stdio_transport.rs`
+
+- 使用 `runtime_env::resolve_command()` 解析命令
+- 使用 `runtime_env::env_overrides()` 获取环境变量
+
+**文件**：`src-tauri/src/commands/runtime.rs`
+
+- 新增运行时版本管理命令：
+  - `list_node_versions` / `list_python_versions`
+  - `install_node_version` / `install_python_version`
+  - `uninstall_node_version` / `uninstall_python_version`
+  - `set_active_node_version` / `set_active_python_version`
+  - `get_active_node_version` / `get_active_python_version`
+
+#### 3.4.5 内置 HTTP 服务器
+**文件**：`src-tauri/src/services/http_server.rs`
+
+- 使用 Axum 框架实现内置 HTTP 服务器
+- 支持 MCP Streamable HTTP 协议（JSON-RPC 2.0）
+- 支持 Bearer Key 认证
+- 支持 Smart 路由（`/mcp`, `/mcp/$smart`, `/mcp/$smart/{group}`）
+- 支持分组路由（`/mcp/{group}`）
+- 支持单服务器路由（`/mcp/{server}`）
 
 ---
 
-### Phase E — Activity Log（工具调用监控）
+## 4. 上游 mcphub-origin 同步记录
 
-**目标**：记录每次 `call_tool` 的调用信息（耗时、状态、输入/输出），支持 ActivityPage 展示。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `models/log.rs` | 修改 | 更新 `ActivityEntry` 字段（server, tool, duration_ms, status, input, output）|
-| `services/log_service.rs` | 修改 | 新增 `write_activity()` 函数 |
-| `commands/tools.rs` | 修改 | call_tool 执行后异步写入 activity_log |
-| `commands/logs.rs` | 修改 | get_activity_logs 支持完整过滤（server, tool, status, 时间范围，分页）|
-| `tauriClient.ts` | 修改 | 替换 `/activities` 存根：available:true，真实数据 |
-
-**新增 tauriClient 命令映射**：
-```typescript
-if (p === 'activities/available') return { command: 'get_activity_available', args: {} };
-if (p === 'activities' && m === 'GET') return { command: 'get_tool_activities', args: { ...queryParams } };
-if (p === 'activities' && m === 'DELETE') return { command: 'clear_activities', args: {} };
-```
-
-**ActivityEntry 数据结构**（对应原 `IActivity`）：
-```rust
-pub struct ActivityEntry {
-    pub id: String,
-    pub timestamp: String,
-    pub server: String,
-    pub tool: String,
-    pub duration_ms: Option<i64>,
-    pub status: String,  // "success" | "error"
-    pub input: Option<String>,
-    pub output: Option<String>,
-    pub group_name: Option<String>,
-    pub key_id: Option<String>,
-    pub key_name: Option<String>,
-    pub error_message: Option<String>,
-}
-```
-
----
-
-### Phase F — Market（本地 MCP 市场）
-
-**目标**：读取打包的 `servers.json` 展示 MCP 服务市场，支持一键安装到服务器列表。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `tauri.conf.json` | 修改 | 将 `servers.json` 加入 `resources` 数组 |
-| `models/market.rs` | 新建 | `MarketServer` 结构体 |
-| `services/market_service.rs` | 新建 | 读取 servers.json（从 app resources 或文件系统）|
-| `commands/market.rs` | 新建 | 6 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/market` 存根 |
-
-**servers.json 读取路径**（优先级）：
-1. `app.path().resource_dir() / "servers.json"` — 打包时内嵌
-2. 应用工作目录下的 `servers.json` — 开发模式 fallback
-
-**命令签名**：
-```rust
-list_market_servers(app: AppHandle) -> Result<Vec<MarketServer>, String>
-get_market_server(app: AppHandle, name: String) -> Result<Option<MarketServer>, String>
-search_market_servers(app: AppHandle, query: String) -> Result<Vec<MarketServer>, String>
-get_market_categories(app: AppHandle) -> Result<Vec<String>, String>
-get_market_tags(app: AppHandle) -> Result<Vec<String>, String>
-// 一键安装：创建 ServerConfig 并加入数据库
-install_market_server(app: AppHandle, name: String) -> Result<ServerConfig, String>
-```
-
----
-
-### Phase G — Registry Proxy（官方 MCP 注册表代理）
-
-**目标**：代理对 `https://registry.modelcontextprotocol.io/v0.1` 的请求，避免前端 CORS 问题。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `commands/registry.rs` | 新建 | HTTP 请求转发 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/registry` 存根 |
-
-**命令签名**：
-```rust
-// cursor: 分页游标，limit: 每页数量，search: 关键词
-list_registry_servers(cursor: Option<String>, limit: Option<u32>, search: Option<String>)
-  -> Result<serde_json::Value, String>
-get_registry_server_versions(server_name: String) -> Result<serde_json::Value, String>
-```
-
-**实现说明**：使用 `reqwest` 直接 GET `https://registry.modelcontextprotocol.io/v0.1/servers`，将响应透传给前端。Tauri 应用有完整网络访问权，无需额外配置。
-
----
-
-### Phase H — Cloud Proxy（MCPRouter 云服务代理）
-
-**目标**：对接 MCPRouter API，支持云端 MCP 服务器的浏览和工具调用。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `models/cloud.rs` | 新建 | `CloudServer`, `CloudTool` |
-| `services/cloud_service.rs` | 新建 | MCPRouter API 调用逻辑 |
-| `commands/cloud.rs` | 新建 | 云服务命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/cloud` 存根 |
-
-**MCPRouter API base URL**：`https://api.mcprouter.to/v1`（从 system_config.mcprouter_base_url 覆盖）
-
-**命令签名**：
-```rust
-list_cloud_servers() -> Result<Vec<CloudServer>, String>
-get_cloud_server(name: String) -> Result<Option<CloudServer>, String>
-get_cloud_server_tools(server_key: String) -> Result<Vec<CloudTool>, String>
-call_cloud_tool(server_key: String, tool_name: String, arguments: serde_json::Value) -> Result<serde_json::Value, String>
-get_cloud_categories() -> Result<Vec<String>, String>
-get_cloud_tags() -> Result<Vec<String>, String>
-```
-
----
-
-### Phase I — Templates（配置模板导入导出）
-
-**目标**：将当前服务器+分组配置导出为可分享的 JSON 模板，或从模板导入。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `models/template.rs` | 新建 | `ConfigTemplate`, `TemplateServer`, `TemplateGroup` |
-| `services/template_service.rs` | 新建 | 导出（从 DB 读取）/ 导入（写入 DB）|
-| `commands/templates.rs` | 新建 | 5 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/templates` 存根 |
-
-**命令签名**：
-```rust
-list_templates() -> Result<Vec<TemplateInfo>, String>
-export_template(options: TemplateExportOptions) -> Result<ConfigTemplate, String>
-import_template(template: ConfigTemplate) -> Result<TemplateImportResult, String>
-save_template(name: String, description: Option<String>, template: ConfigTemplate) -> Result<(), String>
-delete_template(id: String) -> Result<(), String>
-```
-
-**ConfigTemplate 结构**（与原项目兼容）：
-```rust
-pub struct ConfigTemplate {
-    pub version: String,      // "1.0"
-    pub name: String,
-    pub description: Option<String>,
-    pub servers: Vec<TemplateServer>,
-    pub groups: Vec<TemplateGroup>,
-    pub exported_at: String,
-}
-```
-
----
-
-### Phase J — MCPB/DXT 文件安装
-
-**目标**：通过文件选择对话框安装 `.mcpb` 格式的 MCP server 包（ZIP 格式，含 manifest.json）。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `commands/mcpb.rs` | 新建 | 文件选择 + 解压 + 注册服务器 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 `/mcpb` 存根 |
-| `Cargo.toml` | 修改 | 添加 `zip = "2"` 依赖 |
-
-**实现流程**：
-1. 使用 `tauri-plugin-dialog` 打开文件选择器（筛选 `.mcpb`）
-2. 使用 `zip` crate 解压到 `$APPDATA/mcphub/servers/{name}/`
-3. 读取 `manifest.json` 获取服务器名称、命令、args
-4. 调用 `server_service::create()` 注册服务器
-5. 调用 `mcp_manager` 连接新服务器
-
-**命令签名**：
-```rust
-install_mcpb_from_dialog(app: AppHandle) -> Result<ServerConfig, String>
-install_mcpb_from_path(app: AppHandle, file_path: String) -> Result<ServerConfig, String>
-```
-
----
-
-### Phase K — Per-Server 工具/提示/资源开关
-
-**目标**：允许用户在服务器详情页对单个工具/提示/资源进行启用/禁用和描述覆盖。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `services/server_config_service.rs` | 新建 | CRUD for server_tool_config 表 |
-| `commands/server_config.rs` | 新建 | 3 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 替换 servers/:n/tools/:t/toggle 存根 |
-
-**命令签名**：
-```rust
-toggle_server_item(server_name: String, item_type: String, item_name: String, enabled: bool) -> Result<(), String>
-update_server_item_description(server_name: String, item_type: String, item_name: String, description: Option<String>) -> Result<(), String>
-get_server_item_configs(server_name: String) -> Result<Vec<ServerItemConfig>, String>
-```
-
----
-
-### Phase L — Smart Routing（智能路由）
-
-**目标**：提供 `$smart` 路由，根据查询内容通过工具描述自动选择合适的 MCP 服务器和工具。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `services/smart_routing.rs` | 新建 | 基于关键词匹配/向量搜索的工具选择 |
-| `commands/smart_routing.rs` | 新建 | 2 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 添加 smart routing 相关映射 |
-
-**实现策略**（桌面端简化版）：
-- 第一期：关键词匹配（工具名/描述包含查询词）
-- 第二期（可选）：嵌入 embedding 模型做向量搜索
-
-**命令签名**：
-```rust
-get_smart_routing_tools(group: Option<String>, query: Option<String>) -> Result<Vec<Tool>, String>
-smart_call_tool(query: String, tool_name: String, arguments: serde_json::Value) -> Result<serde_json::Value, String>
-```
-
----
-
-### Phase M — OpenAPI 生成
-
-**目标**：将当前所有连接的 MCP 工具生成 OpenAPI 3.0 规范，供 OpenWebUI 等工具集成。
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `services/openapi_service.rs` | 新建 | 从 mcp pool 读取工具列表，生成 OpenAPI JSON |
-| `commands/openapi.rs` | 新建 | 2 个命令 |
-| `lib.rs` | 修改 | 注册命令 |
-| `tauriClient.ts` | 修改 | 添加 openapi 映射 |
-
-**命令签名**：
-```rust
-get_openapi_spec(group_filter: Option<String>, server_filter: Option<Vec<String>>) -> Result<serde_json::Value, String>
-get_openapi_servers() -> Result<Vec<String>, String>
-```
-
----
-
-### Phase N — HTTP 服务端暴露（可选高级功能）
-
-**目标**：当 `system_config.expose_http = true` 时，在桌面应用内启动 Axum HTTP 服务器，将本地 MCP 服务器通过 SSE/HTTP 端点暴露给外部 AI 客户端。
-
-**依赖**：
-```toml
-axum = { version = "0.7", features = ["json"] }
-```
-
-**涉及文件**：
-
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `services/http_server.rs` | 新建 | Axum 路由：`/mcp/{server}`, `/mcp/{group}`, `/health` |
-| `lib.rs` | 修改 | 根据 system_config 启动/停止 HTTP 服务器 |
-| `commands/config.rs` | 修改 | update_system_config 时动态启停 HTTP 服务器 |
-
-**HTTP 端点**：
-- `GET /health` — 健康检查
-- `GET/POST /mcp/{server}` — 单服务器 SSE/HTTP MCP 端点
-- `GET/POST /mcp/{group}` — 分组聚合 MCP 端点
-- Bearer Key 认证中间件
-
----
-
-### Phase O — CI/CD & 打包配置
-
-**需要创建**：`.github/workflows/tauri-build.yml`
-
-```yaml
-name: Tauri Desktop Build
-on:
-  push:
-    tags: ['desktop-v*']
-  workflow_dispatch:
-jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '22' }
-      - uses: pnpm/action-setup@v3
-        with: { version: 8 }
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "${{ matrix.target }}" }
-      - name: Linux deps
-        if: matrix.os == 'ubuntu-22.04'
-        run: sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - run: pnpm install
-      - run: cd tauri && npm install
-      - run: cd tauri && npm run build -- --target ${{ matrix.target }}
-        env: { CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mcphub-desktop-${{ matrix.target }}
-          path: tauri/src-tauri/target/${{ matrix.target }}/release/bundle/
-```
-
----
-
-## 7. 已知问题 & 解决方案
-
-### 问题 1 — Cargo 无法访问 crates.io（GitHub git 协议被阻塞）
-- **根因**：网络环境阻断 `https://github.com/rust-lang/crates.io-index`
-- **解决**：`tauri/src-tauri/.cargo/config.toml` 配置 sparse 协议
-- **运行命令时**：`CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check`
-
-### 问题 2 — sqlx::query!() 宏需要 DATABASE_URL
-- **根因**：编译时 SQL 验证宏需要连接真实数据库
-- **解决**：全部使用 `sqlx::query()` 非宏 API（见第 4.2 节）
-- **状态**：所有 service 文件已完成转换，`cargo check` 通过
-
-### 问题 3 — stdio_transport.rs UB（无效引用转型）
-- **根因**：`&ChildStdin as *const _ as *mut ChildStdin` 是未定义行为
-- **解决**：将 `stdin` 字段改为 `Arc<Mutex<Option<ChildStdin>>>`，通过锁获取可变引用
-
-### 问题 4 — tauri::generate_context!() 找不到 frontendDist
-- **根因**：`frontend/dist/` 目录不存在
-- **解决**：创建占位 `frontend/dist/index.html`（实际构建时由 `pnpm frontend:build` 生成）
-
-### 问题 5 — 图标文件不存在 / 非 RGBA 格式
-- **解决**：用 Python 生成最小有效 RGBA PNG 占位图标（实际发布需替换）
-
----
-
-## 8. 前端 API 调用架构（已完成）
-
-> 此节说明 Phase 6 完成后的 tauriClient.ts 架构，用于新增命令时参考。
-
-### 调用链（简化版）
-
-```
-React 组件 → apiRequest(url, options)      # fetchInterceptor.ts
-                  │
-                  ├─ isTauri() === true
-                  │   └─ mapRestToCommand(url, options)  # tauriClient.ts
-                  │       └─ invokeMapped(cmd, args)
-                  │           └─ invoke(command, args)   # @tauri-apps/api/core
-                  │               └─ Rust command handler
-                  │
-                  └─ isTauri() === false
-                      └─ fetch(url, options)  # 标准 HTTP 请求（Web 版）
-```
-
-### 添加新命令的步骤模板
-
-```typescript
-// tauriClient.ts 中，在 mapRestToCommand() 函数内添加：
-if (segs[0] === 'new_feature') {
-  if (m === 'GET') return { command: 'list_new_feature', args: {} };
-  if (m === 'POST') return { command: 'create_new_feature', args: { payload: body } };
-  if (m === 'PUT') return { command: 'update_new_feature', args: { id: segs[1], payload: body } };
-  if (m === 'DELETE') return { command: 'delete_new_feature', args: { id: segs[1] } };
-}
-```
-
-### transformTauriResponse() 返回格式规范
-
-| 返回类型 | transformTauriResponse() 期望格式 |
-|---------|----------------------------------|
-| 列表 | `{ data: T[], total: number }` 或直接 `T[]` |
-| 单项 | `T` 对象直接返回 |
-| 操作成功 | `{ success: true }` 或 `{ id: "..." }` |
-| 操作失败 | Rust 返回 `Err(String)` → 自动变成 `{ error: "..." }` |
-
----
-
-## 9. 启动顺序（运行时）
-
-```
-1. main.rs → lib::run()
-2. tauri::Builder::default()
-   ├── 注册所有 tauri-plugin-*
-   ├── setup hook:
-   │   ├── app.manage(SessionState) — 注册会话状态
-   │   └── tokio::spawn:
-   │       ├── db::initialize(app) — 创建 SQLite 连接池，运行 migrations
-   │       └── services::mcp_manager::start_all(app) — 连接所有 enabled MCP server
-   └── invoke_handler — 注册 28 个 Tauri commands
-3. tauri::generate_context!() — 加载 tauri.conf.json
-4. 打开 Webview 窗口，加载 frontend/dist/index.html
-5. 前端初始化，通过 invoke() 与 Rust 通信
-```
-
----
-
-## 10. 下一步行动计划（当前状态）
-
-> Phase 1-7 已全部完成。现在开始实现缺失功能。
-
-### 立即执行（P0）
-
-```bash
-# 第一步：创建 schema 修正迁移（Phase A）
-# 文件：tauri/src-tauri/migrations/0002_schema_fix.sql
-# 内容见第 6 节 Phase A 详细定义
-
-# 第二步：验证迁移能被加载
-cd tauri/src-tauri
-CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check
-```
-
-### 实现路线图
-
-| 阶段 | Phase | 功能 | 依赖 | 预计工时 |
-|------|-------|------|------|---------|
-| **P0** | A | Schema 修正迁移 | — | 0.5h |
-| **P1** | B | Bearer Keys（API 密钥管理）| A | 2h |
-| **P1** | C | Builtin Prompts（内置提示词）| A | 2h |
-| **P1** | D | Builtin Resources（内置资源）| A | 1.5h |
-| **P1** | E | Activity Log（工具调用监控）| A | 2h |
-| **P2** | F | Market（本地 MCP 市场）| — | 2h |
-| **P2** | G | Registry Proxy（注册表代理）| — | 1h |
-| **P2** | H | Cloud Proxy（MCPRouter 集成）| A | 2h |
-| **P2** | I | Templates（配置模板）| A | 2h |
-| **P3** | J | MCPB 文件安装 | — | 2h |
-| **P3** | K | Per-server 工具开关 | A | 1.5h |
-| **P3** | L | Smart Routing | — | 3h |
-| **P3** | M | OpenAPI 生成 | — | 2h |
-| **P4** | N | HTTP 服务端暴露（可选）| B | 4h |
-| **P4** | O | CI/CD 打包 | — | 1h |
-
-### 每个 Phase 完成的验收标准
-
-- [ ] `cargo check` 无新错误
-- [ ] 前端对应页面不再显示存根数据或"不支持"错误
-- [ ] `tauriClient.ts` 中对应存根已被真实命令替换
-- [ ] SQLite 数据持久化正常（重启后数据不丢失）
-
----
-
-## N. 上游 mcphub-origin 同步记录
-
-> 此章节用于追踪桌面端从上游 `samanhappy/mcphub` 同步代码的进度。
-> 每次执行同步后，必须在此处更新「最近同步基线」并追加新的「同步条目」。
-
-### 同步策略
+### 4.1 同步策略
 
 1. `mcphub-origin/` 是 git 子模块，仅作为代码参考与 diff 来源，**桌面端永远不直接修改子模块内容**。
 2. 桌面端 `frontend/`、`locales/` 是 origin 对应目录的**有改造副本**：
    - 大部分文件保持与 origin 一致；
-   - desktop 主动改造的文件（fetch → `tauriClient.ts`、`AuthContext`、`SettingsContext`、`PermissionChecker`、`ProtectedRoute`、`AboutDialog`、`UserProfileMenu`、`ServerCard`、`App.tsx`、`runtime.ts`、`version.ts`、各 `services/*` 等）保留差异，**同步时需手动合并**。
-3. 后端（`src/`、`tests/`、`package.json` 依赖、Express/Hono、PostgreSQL、Smart Routing、Better-Auth 等）由 Rust 重写在 `src-tauri/`，**Node 后端代码不直接同步**，但需评估安全相关 fix 是否要在 Rust 端镜像实现。
-4. `package.json`、`pnpm-lock.yaml`、`docs/`、`Dockerfile`、`docker-compose*.yml`、`bin/cli.js`、`scripts/`、`mcp_settings.json` 等部署/文档文件**不同步**。
+   - desktop 主动改造的文件（见第 3 节）保留差异，**同步时需手动合并**。
+3. 后端由 Rust 重写在 `src-tauri/`，**Node 后端代码不直接同步**，但需评估安全相关 fix 是否要在 Rust 端镜像实现。
+4. `package.json`、`pnpm-lock.yaml`、`docs/`、`Dockerfile`、`docker-compose*.yml` 等部署/文档文件**不同步**。
 
-### 同步操作流程（标准 SOP）
+### 4.2 同步操作流程（标准 SOP）
 
 ```bash
 # 1. 更新 origin 子模块到 latest main
@@ -1116,24 +426,24 @@ git --no-pager diff <last-sync-sha>..HEAD -- frontend/ locales/ > /tmp/origin_fr
 # 4. dry-run 检查冲突
 cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin_frontend.patch
 
-# 5. 对未冲突文件直接 cp 覆盖；对冲突文件手动合并；后端逻辑改动评估后用 Rust 重写到 src-tauri/
-# 6. 升级 package.json / frontend/package.json / src-tauri/Cargo.toml / src-tauri/tauri.conf.json 的版本号到最新 origin tag
+# 5. 对未冲突文件直接 cp 覆盖；对冲突文件手动合并（保留桌面端差异）
+# 6. 升级版本号
 # 7. cd frontend && npm run build 验证
 # 8. 更新本章节「最近同步基线」与「同步条目」
 ```
 
-### 最近同步基线
+### 4.3 最近同步基线
 
 | 项 | 值 |
 |------|-----|
-| **当前已同步到 origin commit** | `a34dbac` (origin/main, 2026-06-17) |
-| **对应 origin tag** | `v0.12.15` (commit `2de5057`) |
-| **桌面端版本号** | `0.12.15` |
+| **当前已同步到 origin commit** | `a34dbac` (origin/main) |
+| **对应 origin tag** | `v0.12.15` |
+| **桌面端版本号** | `1.0.16` |
 | **同步执行日期** | 2026-06-17 |
 
-> 下次同步时，使用 `a34dbac` 作为新的基线 SHA 起点（命令：`git --no-pager log --oneline a34dbac..HEAD`）。
+> 下次同步时，使用 `a34dbac` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline a34dbac..HEAD`）。
 
-### 同步条目历史
+### 4.4 同步条目历史
 
 #### 2026-06-17：同步 `3ea0bbe` → `a34dbac`（77 个 commit）
 
@@ -1142,8 +452,8 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 | 来源 commit | 说明 | desktop 应用方式 |
 |------|------|------|
 | `bbc8f00` | 更新 skipAuth 描述 | `locales/{en,fr,tr,zh}.json` 直接覆盖 |
-| `c44a32b` | 代码分割与懒加载 | `frontend/src/App.tsx` 手动合并（保留 AppErrorBoundary + 添加 lazy/Suspense）；`frontend/vite.config.ts` 手动合并（保留 desktop 路径配置 + 添加 manualChunks） |
-| `bcf993e` | UI 重新设计（32 个组件文件） | 大部分文件直接覆盖；`ServerCard.tsx`、`AboutDialog.tsx`、`UserProfileMenu.tsx` 使用 upstream 版本 |
+| `c44a32b` | 代码分割与懒加载 | `frontend/src/App.tsx` 手动合并 |
+| `bcf993e` | UI 重新设计（32 个组件文件） | 大部分文件直接覆盖 |
 | `3ea2019` | 按钮样式更新 | 直接覆盖 |
 | `c2b16da` | 宽屏布局优化 | 直接覆盖 |
 | `f04eb69` | 服务器可见性列 | 直接覆盖 |
@@ -1195,105 +505,125 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 
 | 来源 commit | 类型 | 处理决策 |
 |------|------|------|
-| `077eed9` | Add headless mode | **Rust 端 TODO**：评估桌面端是否需要 headless 模式 |
-| `7300b74` | skipAuth guest access | **Rust 端 TODO**：在 auth 中间件中实现 guest 用户逻辑 |
-| `927e98d` | reject scoped bearer keys (CWE-863) | **Rust 端 TODO**：在 bearer key 验证中添加作用域检查 |
-| `60a4da4` | require admin for MCP settings export (CWE-862) | **Rust 端 TODO**：在设置导出端点添加管理员权限检查 |
-| `2de5057` | TRUST_PROXY 环境变量 | **Rust 端 TODO**：在 Rust 服务器中实现代理信任解析 |
-| `45b1f05` | scoped bearer auth on smart routes | **Rust 端 TODO**：在智能路由中支持作用域 bearer auth |
-| `8fe47e2` | load server config from DB after OAuth | **Rust 端 TODO**：OAuth token 交换后从 DB 加载配置 |
-| `c44a32b` (后端部分) | Vite config manualChunks | 已在 desktop vite.config.ts 中应用 |
-| `87f241a` | exclude tool description from hash | **Rust 端 TODO**：在 embedding 计算中排除工具描述 |
-| `6377812` | skip reconnect for disabled servers | **Rust 端 TODO**：跳过禁用服务器的重连 |
-| `3fb39f0` | harden JWT binding (GHSA-wf8q-wvv8-p8jf) | **Rust 端 TODO**：加固 JWT 身份绑定 |
-| `06b18cb` | server env interpolation in headers | **Rust 端 TODO**：支持请求头中的环境变量插值 |
-| `da23f69` | return MCP initialize metadata | **Rust 端 TODO**：返回上游 MCP 初始化元数据 |
-| `5ca154a` | prevent embedding regeneration | **Rust 端 TODO**：防止每次重启重新生成 embedding |
-| `c8779df` | SSO/OIDC user matching | **Rust 端 TODO**：改进 SSO 用户匹配逻辑 |
-| `b1e7a52` | smart routing arbitrary args | **Rust 端 TODO**：允许智能路由中的任意参数 |
-| `030d12e` | DEFAULT_REQUEST_TIMEOUT | **Rust 端 TODO**：添加默认请求超时 |
-| `f42c828` | Redis error handling | **Rust 端 TODO**：改进 Redis 错误处理 |
-| `330e0f7` | env-first better auth config | **Rust 端 TODO**：支持环境变量优先的 auth 配置 |
-| `20adf81` | hosted mode | **Rust 端 TODO**：实现托管模式功能 |
-| `61a59b4` | runtime config resolution | **Rust 端 TODO**：使用专用函数解析运行时配置 |
-| `e894500` | IPv4-mapped IPv6 normalization | **Rust 端 TODO**：规范化 IPv4 映射的 IPv6 地址 |
-| `0c30aad` | Better Auth trusted origins | **Rust 端 TODO**：修复 OIDC 登录的 trusted origins |
-| `bbec0c6` | bridge Better Auth session | **Rust 端 TODO**：在 OAuth 授权中桥接 Better Auth 会话 |
-| 依赖更新 commits | chore(deps) | **不同步**：桌面端使用独立依赖体系 |
+| `077eed9` | Add headless mode | **Rust 端 TODO** |
+| `7300b74` | skipAuth guest access | ✅ 已实现 |
+| `927e98d` | reject scoped bearer keys (CWE-863) | **Rust 端 TODO** |
+| `60a4da4` | require admin for MCP settings export (CWE-862) | **Rust 端 TODO** |
+| `2de5057` | TRUST_PROXY 环境变量 | **Rust 端 TODO** |
+| `45b1f05` | scoped bearer auth on smart routes | **Rust 端 TODO** |
+| `8fe47e2` | load server config from DB after OAuth | **Rust 端 TODO** |
+| `87f241a` | exclude tool description from hash | **Rust 端 TODO** |
+| `6377812` | skip reconnect for disabled servers | **Rust 端 TODO** |
+| `3fb39f0` | harden JWT binding (GHSA-wf8q-wvv8-p8jf) | **Rust 端 TODO** |
+| `06b18cb` | server env interpolation in headers | **Rust 端 TODO** |
+| `da23f69` | return MCP initialize metadata | **Rust 端 TODO** |
+| `5ca154a` | prevent embedding regeneration | **Rust 端 TODO** |
+| `c8779df` | SSO/OIDC user matching | **Rust 端 TODO** |
+| `b1e7a52` | smart routing arbitrary args | **Rust 端 TODO** |
+| `030d12e` | DEFAULT_REQUEST_TIMEOUT | **Rust 端 TODO** |
+| `f42c828` | Redis error handling | **Rust 端 TODO** |
+| `330e0f7` | env-first better auth config | **Rust 端 TODO** |
+| `20adf81` | hosted mode | **Rust 端 TODO** |
+| `61a59b4` | runtime config resolution | **Rust 端 TODO** |
+| `e894500` | IPv4-mapped IPv6 normalization | **Rust 端 TODO** |
+| `0c30aad` | Better Auth trusted origins | **Rust 端 TODO** |
+| `bbec0c6` | bridge Better Auth session | **Rust 端 TODO** |
+| 依赖更新 commits | chore(deps) | **不同步** |
 
-**后端同步 TODO（需在 Rust 端补齐的安全增强）**
+---
 
-> 以下条目按优先级排序，建议在 P0/P1 阶段补强时一并处理。
+## 5. 开发环境配置
 
-- [x] **JWT 身份绑定加固**（来源：`3fb39f0`，GHSA-wf8q-wvv8-p8jf）
-  - 用户级 SSE 路由严格验证 JWT 身份
-- [x] **Bearer Key 作用域检查**（来源：`927e98d`，CWE-863）
-  - Dashboard API 拒绝作用域 bearer key
-- [x] **MCP 设置导出权限**（来源：`60a4da4`，CWE-862）
-  - 要求管理员权限并脱敏敏感信息
-- [x] **Headless 模式**（来源：`077eed9`）
-  - 支持禁用内置 Web UI
-- [x] **Guest 用户访问**（来源：`7300b74`）
-  - 未认证用户获得 guest 管理员访问权限
-- [x] **代理信任解析**（来源：`2de5057`）
-  - 支持 TRUST_PROXY 环境变量
-- [x] **智能路由 bearer auth**（来源：`45b1f05`）
-  - 支持作用域 bearer auth
-- [x] **OAuth 配置加载**（来源：`8fe47e2`）
-  - OAuth token 交换后从 DB 加载配置
-- [x] **Embedding 优化**（来源：`87f241a`、`5ca154a`）
-  - 排除工具描述、防止重复生成
-- [x] **SSO 用户匹配**（来源：`c8779df`、`ed622fc`）
-  - 改进 OIDC 用户匹配逻辑
-- [x] **托管模式**（来源：`20adf81`）
-  - 实现 hosted mode 功能
-- [x] **IPv6 规范化**（来源：`e894500`）
-  - 规范化 IPv4 映射的 IPv6 地址
+### 5.1 关键注意事项
 
-#### 2026-04-28：同步 `af5b013` → `3ea0bbe`（21 个 commit）
+```bash
+# ⚠️ 必须使用 sparse 协议运行 cargo（绕过 GitHub git 访问限制）
+cd src-tauri
+CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check
 
-**已同步到 desktop（前端 / locales）**
+# .cargo/config.toml 已配置（无需手动设置环境变量时也生效）
+```
 
-| 来源 commit | 说明 | desktop 应用方式 |
-|------|------|------|
-| `b05c87f` | Dark mode 增强（38 个组件文件） | 大部分文件 desktop 副本已与 origin 一致；`index.css` 删除 3 处冗余 dark 颜色覆写（`.dark .text-blue-700` / `.bg-blue-50` / `.bg-blue-200`）。`ServerCard.tsx`、`UserProfileMenu.tsx` 因 desktop 已重构（`server-badge` 工具类、`!auth.skipAuth` 条件渲染、移除 sponsor / wechat / discord 入口）保留 desktop 版本，origin 的 className 改动已隐式包含。 |
-| `6d44d82` | `resetTimeoutOnProgress` 默认改为 true | `frontend/src/components/ServerForm.tsx` 应用 2 个 hunk；`frontend/src/utils/serverFormPayload.ts` 直接覆盖；`locales/{en,fr,tr,zh}.json` 直接覆盖。 |
-| `005b563` | Registry version 路由改用 query 参数避免编码斜杠 | `frontend/src/hooks/useRegistryData.ts` 直接覆盖。**注意**：Rust 端 registry 代理需同步支持新的 query 参数路径风格（详见下方 TODO）。 |
-| `f08dcc1` | tag `v0.12.14` 发布 | 升级桌面端版本号到 `0.12.14`（`package.json` × 3 + `Cargo.toml`）。 |
+### 5.2 sqlx 使用规则（重要）
 
-**未同步（后端 / 不适用）**
+```rust
+// ✅ 正确：使用 sqlx::query() 非宏 API
+use sqlx::Row;
+let rows = sqlx::query("SELECT id, name FROM servers")
+    .fetch_all(db::pool())
+    .await?;
+let id: String = rows[0].try_get("id")?;
 
-| 来源 commit | 类型 | 处理决策 |
-|------|------|------|
-| `3ea0bbe` | fix: harden auth & ownership checks（authController/serverController/oauth/middleware） | **Rust 端 TODO**：评估 `src-tauri/` 中是否存在等价路径并补齐所有权与权限校验。 |
-| `216cca7` | fix: enforce group ownership on mutating endpoints（groupService） | **Rust 端 TODO**：在 group 写操作命令中校验 owner。 |
-| `952610a` | fix: validate redirect_uri in OAuth authorize POST flow | **Rust 端 TODO**：若桌面端实现了 OAuth Server，需镜像该校验。 |
-| `f745af4` | feat: enhance OAuth redirect URI handling（新增 `oauthRedirectUri.ts`） | **Rust 端 TODO**：评估桌面端 OAuth 客户端注册逻辑，必要时移植 redirect URI 选择算法。 |
-| `02a5d9a` | feat: HTTP 4xx 可恢复错误重连 | **Rust 端 TODO**：在 `mcpService` Rust 等价实现里补充 4xx 重连。 |
-| `6d44d82` (后端部分) | `mcpService` 默认启用 `resetTimeoutOnProgress` | **Rust 端 TODO**：在 Rust MCP 客户端构造请求选项时同步默认值。 |
-| `9280242` | Use process cwd for stdio MCP transports | **Rust 端 TODO**：检查 stdio 子进程启动是否传入正确的 cwd。 |
-| `3741e1b` | 避免 Smart Routing 安装 onnxruntime（`tokenTruncation.ts`） | 桌面端 Smart Routing 尚未实现（见 P3-L），后续实现时直接采用新方案。 |
-| `61280ca` (后端部分) | uuid 11→14 的 GroupDao/groupService 改动 | Rust 端使用独立 `uuid` crate，无需同步。 |
-| `f08dcc1` (依赖)、`135ceca`、`2d03bd0`、`f5541a6`、`6b8e505`、`a4a1d1d`、`cb60292`、`88ba5a2`、`f1b4551`、`61280ca` (依赖) | npm/pnpm 安全/版本升级（uuid、postcss、@node-oauth/oauth2-server、next、axios、protobufjs、follow-redirects、hono、i18next-fs-backend） | **不同步**：桌面端 `frontend/package.json` 不依赖这些包；Rust 端用独立依赖体系。 |
-| `71057f2` | Postgres 镜像 pg17 升级（docker-compose） | **不同步**：桌面端无 Postgres。 |
+// ❌ 禁止：sqlx::query!() 宏（需要 DATABASE_URL 编译时检查，桌面应用无法提供）
 
-### 后端同步 TODO（需在 Rust 端补齐的 origin 安全增强）
+// ✅ 例外：sqlx::migrate!() 是嵌入文件宏，不需要 DATABASE_URL，可以使用
+sqlx::migrate!("./migrations").run(&pool).await?;
+```
 
-> 以下条目按优先级排序，建议在 P0/P1 阶段补强时一并处理。
+### 5.3 开发命令
 
-- [ ] **OAuth/Auth 加固**（来源：`3ea0bbe`、`216cca7`、`952610a`）
-  - 所有 mutating endpoint 校验请求用户与资源 owner；
-  - OAuth authorize POST 流程严格校验 `redirect_uri`；
-  - bearer key / oauth client 接口的越权检查。
-- [ ] **OAuth redirect URI 工具**（来源：`f745af4`）
-  - 移植 `src/utils/oauthRedirectUri.ts` 到 `src-tauri/src/.../oauth_redirect_uri.rs`。
-- [ ] **MCP 请求选项默认值**（来源：`6d44d82`）
-  - Rust MCP client 默认 `reset_timeout_on_progress = true`。
-- [ ] **MCP 4xx 重连**（来源：`02a5d9a`）
-  - 在连接管理层为 4xx 可恢复错误增加重连。
-- [ ] **stdio cwd**（来源：`9280242`）
-  - 子进程启动使用 `std::env::current_dir()` 而非自定义路径。
-- [ ] **Registry 路由支持 query 版本号**（来源：`005b563`）
-  - 与前端 `useRegistryData.ts` 的 query 参数风格保持一致。
+```bash
+# 前端开发
+cd frontend && npm run dev
 
+# 前端构建
+cd frontend && npm run build
 
+# Rust 编译检查
+cd src-tauri && CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check
+
+# Tauri 开发模式（启动 frontend dev server + Tauri 窗口）
+npm run dev
+
+# Tauri 生产构建
+npm run build
+```
+
+---
+
+## 6. 已知问题 & 解决方案
+
+### 问题 1 — Cargo 无法访问 crates.io
+- **根因**：网络环境阻断 `https://github.com/rust-lang/crates.io-index`
+- **解决**：`src-tauri/.cargo/config.toml` 配置 sparse 协议
+
+### 问题 2 — sqlx::query!() 宏需要 DATABASE_URL
+- **解决**：全部使用 `sqlx::query()` 非宏 API
+
+### 问题 3 — SSE 连接失败
+- **根因**：SSE 事件解析不正确，未跟踪 event 类型
+- **解决**：改进 SSE 传输，正确跟踪 `event:` 类型，支持多种 endpoint 格式
+
+### 问题 4 — 运行时版本隔离
+- **根因**：MCP 服务器使用系统环境的 Node.js/Python
+- **解决**：实现 `runtime_env` 服务，管理下载的版本，`stdio_transport` 使用 `resolve_command()` 解析命令
+
+---
+
+## 7. 当前状态与待办
+
+### 已完成
+- [x] 基础架构（Tauri + SQLite + MCP 传输层）
+- [x] 所有 Tauri 命令（auth, servers, groups, tools, users, config, logs）
+- [x] 前端适配器（tauriClient.ts + fetchInterceptor.ts）
+- [x] 系统托盘
+- [x] 免登录模式（guest 模式）
+- [x] 运行时版本管理（Node.js/Python）
+- [x] 内置 HTTP 服务器（expose_http 模式）
+- [x] Bearer Keys 管理
+- [x] Builtin Prompts/Resources
+- [x] Activity Log
+- [x] Market（本地 MCP 市场）
+- [x] Registry Proxy
+- [x] Cloud Proxy（MCPRouter）
+- [x] SSE 传输改进
+
+### 待办
+- [ ] Smart Routing（智能路由）
+- [ ] OAuth Server
+- [ ] Better Auth 集成
+- [ ] Tool Result Compression
+- [ ] OpenAPI 生成
+- [ ] MCPB/DXT 文件安装
+- [ ] Templates（配置模板）
+- [ ] CI/CD 打包配置

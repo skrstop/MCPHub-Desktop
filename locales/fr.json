@@ -690,7 +690,7 @@
     "npmRegistryPlaceholder": "ex. https://registry.npmjs.org/",
     "baseUrl": "URL de base",
     "baseUrlDescription": "URL de base pour les requêtes MCP et les callbacks OAuth",
-    "baseUrlPlaceholder": "ex. http://localhost:3000",
+    "baseUrlPlaceholder": "ex. http://localhost:23333",
     "installConfig": "Installation",
     "systemConfigUpdated": "Configuration système mise à jour avec succès",
     "betterAuthTitle": "Better Auth",

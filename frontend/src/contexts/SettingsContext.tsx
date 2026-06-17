@@ -21,6 +21,8 @@ interface RoutingConfig {
   bearerAuthHeaderName: string;
   jsonBodyLimit: string;
   skipAuth: boolean;
+  httpPort: number;
+  exposeHttp: boolean;
 }
 
 interface InstallConfig {
@@ -115,6 +117,8 @@ interface SystemSettings {
       betterAuth?: Partial<BetterAuthConfig>;
     };
     enableSessionRebuild?: boolean;
+    httpPort?: number;
+    exposeHttp?: boolean;
   };
   bearerKeys?: BearerKey[];
 }
@@ -144,6 +148,7 @@ interface SettingsContextValue {
   triggerRefresh: () => void;
   fetchSettings: () => Promise<void>;
   updateRoutingConfig: (key: keyof RoutingConfig, value: any) => Promise<boolean | undefined>;
+  updateSystemConfig: (updates: Record<string, any>) => Promise<boolean | undefined>;
   updateInstallConfig: (key: keyof InstallConfig, value: any) => Promise<boolean | undefined>;
   updateSmartRoutingConfig: (
     key: keyof SmartRoutingConfig,
@@ -322,6 +327,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     bearerAuthHeaderName: 'Authorization',
     jsonBodyLimit: '1mb',
     skipAuth: false,
+    httpPort: 23333,
+    exposeHttp: true,
   });
 
   const [tempRoutingConfig, setTempRoutingConfig] = useState<TempRoutingConfig>({
@@ -397,16 +404,18 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     try {
       const data: ApiResponse<SystemSettings> = await apiGet('/settings');
 
-      if (data.success && data.data?.systemConfig?.routing) {
+      if (data.success && data.data?.systemConfig) {
+        const routing = data.data.systemConfig.routing || {};
         setRoutingConfig({
-          enableGlobalRoute: data.data.systemConfig.routing.enableGlobalRoute ?? true,
-          enableGroupNameRoute: data.data.systemConfig.routing.enableGroupNameRoute ?? true,
-          enableBearerAuth: data.data.systemConfig.routing.enableBearerAuth ?? true,
-          bearerAuthKey: data.data.systemConfig.routing.bearerAuthKey || '',
-          bearerAuthHeaderName:
-            data.data.systemConfig.routing.bearerAuthHeaderName || 'Authorization',
-          jsonBodyLimit: data.data.systemConfig.routing.jsonBodyLimit || '1mb',
-          skipAuth: data.data.systemConfig.routing.skipAuth ?? false,
+          enableGlobalRoute: routing.enableGlobalRoute ?? true,
+          enableGroupNameRoute: routing.enableGroupNameRoute ?? true,
+          enableBearerAuth: routing.enableBearerAuth ?? true,
+          bearerAuthKey: routing.bearerAuthKey || '',
+          bearerAuthHeaderName: routing.bearerAuthHeaderName || 'Authorization',
+          jsonBodyLimit: routing.jsonBodyLimit || '1mb',
+          skipAuth: routing.skipAuth ?? false,
+          httpPort: data.data.systemConfig.httpPort ?? 23333,
+          exposeHttp: data.data.systemConfig.exposeHttp ?? true,
         });
       }
       if (data.success && data.data?.systemConfig?.install) {
@@ -589,6 +598,39 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       console.error('Failed to update install config', { key, value, error });
       setError(error instanceof Error ? error.message : 'Failed to update install config');
       showToast(t('errors.failedToUpdateInstallConfig'));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Update top-level system config (exposeHttp, httpPort, etc.)
+  const updateSystemConfig = async (updates: Record<string, any>) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await apiPut('/system-config', updates);
+
+      if (data.success) {
+        // Update local state for known fields
+        if ('exposeHttp' in updates) {
+          setRoutingConfig((prev) => ({ ...prev, exposeHttp: updates.exposeHttp }));
+        }
+        if ('httpPort' in updates) {
+          setRoutingConfig((prev) => ({ ...prev, httpPort: updates.httpPort }));
+        }
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      } else {
+        setError(data.error || 'Failed to update system config');
+        showToast(data.error || t('errors.failedToUpdateSystemConfig'));
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to update system config', { updates, error });
+      setError(error instanceof Error ? error.message : 'Failed to update system config');
+      showToast(t('errors.failedToUpdateSystemConfig'));
       return false;
     } finally {
       setLoading(false);
@@ -1123,6 +1165,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     triggerRefresh,
     fetchSettings,
     updateRoutingConfig,
+    updateSystemConfig,
     updateInstallConfig,
     updateSmartRoutingConfig,
     updateSmartRoutingConfigBatch,

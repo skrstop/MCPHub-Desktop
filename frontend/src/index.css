@@ -264,23 +264,29 @@
 }
 
 /* Servers page card row layout */
+/* Desktop: removed visibility column (9 columns instead of 10) */
 .hub-server-card-row {
   display: grid;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
+  width: 100%;
   grid-template-columns:
-    minmax(136px, 196px)
-    fit-content(92px)
-    fit-content(72px)
-    minmax(94px, 108px)
-    repeat(4, 88px)
-    44px
-    28px;
+    1fr
+    90px
+    70px
+    80px
+    80px
+    80px
+    80px
+    50px
+    32px;
 }
 
 .hub-server-card-row > * {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hub-server-card-visibility {
@@ -382,13 +388,15 @@
 
 @media (max-width: 1440px) {
   .hub-server-card-row {
-    gap: 9px;
+    gap: 8px;
     grid-template-columns:
-      minmax(128px, 180px)
-      fit-content(88px)
-      fit-content(66px)
-      minmax(90px, 102px)
-      repeat(4, 80px)
+      1fr
+      80px
+      60px
+      70px
+      70px
+      70px
+      70px
       44px
       28px;
   }

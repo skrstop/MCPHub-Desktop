@@ -98,6 +98,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
           <div className="pr-8">
             <h3 className="hub-h1">{t('about.title')}</h3>
             <p className="hub-sub">{t('about.versionInfo', { version })}</p>
+            <p className="text-xs mt-1" style={{ color: 'var(--hub-ink-3)' }}>MCPHub Desktop</p>
           </div>
 
           <div className="mt-5 space-y-4">

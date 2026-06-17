@@ -1,5 +1,6 @@
 use crate::{db, models::group::{Group, GroupPayload}};
 use anyhow::{anyhow, Result};
+use serde_json::Value as JsonValue;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -13,7 +14,7 @@ pub async fn list_all() -> Result<Vec<Group>> {
     rows.into_iter()
         .map(|r| {
             let servers_str: String = r.try_get("servers")?;
-            let servers: Vec<String> = serde_json::from_str(&servers_str).unwrap_or_default();
+            let servers: Vec<JsonValue> = serde_json::from_str(&servers_str).unwrap_or_default();
             Ok(Group {
                 id: r.try_get("id")?,
                 name: r.try_get("name")?,

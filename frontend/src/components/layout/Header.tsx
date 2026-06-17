@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useParams } from 'react-router-dom';
-import { BookOpen, Menu } from 'lucide-react';
+import { Menu } from 'lucide-react';
 import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
@@ -102,22 +102,13 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
 
       <div className="ml-auto flex items-center gap-1 shrink-0">
         <a
-          href="https://github.com/samanhappy/mcphub"
+          href="https://github.com/skrstop/mcphub-desktop"
           target="_blank"
           rel="noopener noreferrer"
           className="hub-icon-btn"
           aria-label="GitHub Repository"
         >
           <GitHubIcon className="h-4 w-4" />
-        </a>
-        <a
-          href="https://docs.mcphub.app"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hub-icon-btn"
-          aria-label="Documentation"
-        >
-          <BookOpen className="h-4 w-4" />
         </a>
         <ThemeSwitch />
         <LanguageSwitch />

@@ -133,23 +133,11 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     >
       {/* Brand */}
       <div className={'flex items-center gap-2.5 ' + (collapsed ? 'px-2 py-3 justify-center' : 'px-4 py-3')}>
-        <div
-          className="relative grid h-7 w-7 place-items-center rounded-md text-white hub-mono text-[12px] font-semibold"
-          style={{
-            background:
-              'linear-gradient(135deg, var(--hub-accent), oklch(0.62 0.18 285))',
-            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.14)',
-          }}
-        >
-          <span>M</span>
-          <span
-            className="absolute -right-0.5 -bottom-0.5 w-[6px] h-[6px] rounded-full"
-            style={{
-              background: 'var(--hub-ok)',
-              boxShadow: '0 0 0 2px oklch(0.66 0.15 145 / 0.18)',
-            }}
-          />
-        </div>
+        <img
+          src="/assets/logo.png"
+          alt="MCPHub Desktop"
+          className="h-7 w-7 rounded-md"
+        />
         {!collapsed && (
           <div className="flex items-baseline gap-1.5 min-w-0">
             <span className="font-semibold tracking-tight text-[var(--hub-ink)] truncate">

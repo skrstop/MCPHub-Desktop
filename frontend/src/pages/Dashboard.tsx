@@ -7,6 +7,7 @@ import { useGroupData } from '@/hooks/useGroupData';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useCostData } from '@/hooks/useCostData';
 import { formatTokens } from '@/utils/contextCost';
+import { isTauri } from '@/utils/tauriClient';
 import { Server } from '@/types';
 import { EndpointCopy } from '@/components/ui/EndpointCopy';
 import { ServerStatusDot } from '@/components/ui/StatusDot';
@@ -64,7 +65,7 @@ const DashboardPage: React.FC = () => {
     refreshOnMount: true,
   });
   const { groups } = useGroupData();
-  const { installConfig } = useSettingsData();
+  const { installConfig, routingConfig } = useSettingsData();
   const { serverCosts } = useCostData();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);
@@ -104,7 +105,15 @@ const DashboardPage: React.FC = () => {
   );
 
   const recentServers = useMemo(() => allServers.slice(0, 6), [allServers]);
-  const baseUrl = installConfig?.baseUrl?.replace(/\/+$/, '') || '';
+  // Desktop: construct baseUrl from httpPort setting, fallback to installConfig.baseUrl
+  const baseUrl = useMemo(() => {
+    // In desktop mode, use httpPort from routing config
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (isTauri && routingConfig?.httpPort) {
+      return `http://localhost:${routingConfig.httpPort}`;
+    }
+    return installConfig?.baseUrl?.replace(/\/+$/, '') || '';
+  }, [installConfig?.baseUrl, routingConfig?.httpPort]);
   const recentServerColumns =
     'minmax(220px,1.9fr) minmax(110px,0.95fr) minmax(120px,0.95fr) 80px 80px 90px 72px';
 
@@ -262,19 +271,22 @@ const DashboardPage: React.FC = () => {
                 'Use these URLs in Claude Desktop, Cursor, or any MCP client'}
             </p>
           </div>
-          <a
-            className="hub-btn ghost"
-            href="https://docs.mcphub.app"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: 'var(--hub-ink-3)' }}
-          >
-            {t('common.docs') || 'Docs'} →
-          </a>
+          {!isTauri() && (
+            <a
+              className="hub-btn ghost"
+              href="https://docs.mcphub.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: 'var(--hub-ink-3)' }}
+            >
+              {t('common.docs') || 'Docs'} →
+            </a>
+          )}
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
           <EndpointCopy label="ALL" url={`${baseUrl}/mcp`} />
-          <EndpointCopy label="SMART" url={`${baseUrl}/mcp/$smart`} />
+          {/* SMART routing not implemented in desktop client */}
+          {!isTauri() && <EndpointCopy label="SMART" url={`${baseUrl}/mcp/$smart`} />}
           {groups.slice(0, 2).map((g) => (
             <EndpointCopy key={g.id} label="GROUP" url={`${baseUrl}/mcp/${g.name}`} />
           ))}

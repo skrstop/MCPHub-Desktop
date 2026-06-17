@@ -445,7 +445,7 @@ const ServerCard = ({
     <>
       <div
         className="hub-card overflow-visible"
-        style={{ marginBottom: 10 }}
+        style={{ marginBottom: 10, width: '100%' }}
       >
         {/* Main row */}
         <div
@@ -581,39 +581,6 @@ const ServerCard = ({
               </span>
             ) : (
               <span style={{ color: 'var(--hub-ink-3)', fontSize: 12 }}>—</span>
-            )}
-          </div>
-
-          <div className="hub-server-card-visibility min-w-0" onClick={(e) => e.stopPropagation()}>
-            {canManage && onVisibilityChange ? (
-              <LoadingControl
-                isLoading={isUpdatingVisibility}
-                className="w-full"
-                overlayStyle={{ borderRadius: 6 }}
-              >
-                <select
-                  value={visibility.value}
-                  onChange={handleVisibilityChange}
-                  disabled={isUpdatingVisibility}
-                  className="hub-server-card-select w-full rounded-md border px-2 py-1 text-[11.5px] bg-[var(--hub-surface)] text-[var(--hub-ink)]"
-                  style={{ borderColor: 'var(--hub-line-2)' }}
-                  aria-label={t('server.visibility', 'Visibility')}
-                  title={visibility.longLabel}
-                >
-                  {visibilityOptions.map((option) => (
-                    <option key={option.value} value={option.value} disabled={option.disabled}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </LoadingControl>
-            ) : (
-              <span
-                className={`hub-server-card-visibility-badge inline-flex items-center rounded-md border px-2 py-0.5 text-[11.5px] ${visibility.className}`}
-                title={visibility.longLabel}
-              >
-                {visibility.shortLabel}
-              </span>
             )}
           </div>
 

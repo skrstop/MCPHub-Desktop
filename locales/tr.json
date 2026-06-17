@@ -689,7 +689,7 @@
     "npmRegistryPlaceholder": "örn. https://registry.npmjs.org/",
     "baseUrl": "Temel URL",
     "baseUrlDescription": "MCP istekleri ve OAuth geri çağrıları için temel URL",
-    "baseUrlPlaceholder": "örn. http://localhost:3000",
+    "baseUrlPlaceholder": "örn. http://localhost:23333",
     "installConfig": "Kurulum",
     "systemConfigUpdated": "Sistem yapılandırması başarıyla güncellendi",
     "betterAuthTitle": "Better Auth",

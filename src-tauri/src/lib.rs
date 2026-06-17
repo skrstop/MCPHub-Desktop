@@ -70,6 +70,11 @@ pub fn run() {
             // Start MCP servers and HTTP server in background after DB is ready
             let app_handle2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // Ensure default admin user exists
+                if let Err(e) = services::user_service::ensure_default_admin().await {
+                    log::error!("Failed to create default admin user: {}", e);
+                }
+
                 // Load persisted active runtime versions from DB and apply them
                 if let Ok(cfg) = services::config_service::get().await {
                     if let Some(node_ver) = cfg
@@ -174,6 +179,7 @@ pub fn run() {
             commands::config::get_system_config,
             commands::config::update_system_config,
             commands::config::get_settings,
+            commands::config::get_public_config,
             commands::config::import_settings,
             commands::config::export_settings,
             // Log commands

@@ -25,6 +25,10 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   const p = endpoint.replace(/^\//, '').split('?')[0];
   const segs = p.split('/');
 
+  // Public config (skipAuth check, no auth required)
+  if (p === 'public-config' && m === 'GET')
+    return { command: 'get_public_config', args: {} };
+
   // Auth
   if (p === 'auth/login' && m === 'POST')
     return { command: 'login', args: { request: body } };
@@ -159,7 +163,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
 
   if (p === 'groups' && m === 'GET') return { command: 'list_groups', args: {} };
   if (p === 'groups' && m === 'POST') {
-    // Rust GroupPayload.servers: Vec<String> — always flatten IGroupServerConfig[] to string[]
+    // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
     const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
     return {
       command: 'add_group',
@@ -167,7 +171,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
         payload: {
           name: b?.name ?? '',
           description: b?.description,
-          servers: toServerNames(b?.servers ?? []),
+          servers: b?.servers ?? [],
         },
       },
     };
@@ -178,7 +182,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: '__batch_groups__', args: { groups: b?.groups ?? [] } };
   }
   if (segs[0] === 'groups' && segs.length === 2 && m === 'PUT') {
-    // Rust GroupPayload.servers: Vec<String> — flatten IGroupServerConfig[] to string[]
+    // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
     const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
     return {
       command: 'update_group',
@@ -187,7 +191,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
         payload: {
           name: b?.name ?? '',
           description: b?.description,
-          servers: toServerNames(b?.servers ?? []),
+          servers: b?.servers ?? [],
         },
       },
     };
@@ -433,6 +437,16 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: '__stub__', args: { __response: { success: true, data: null } } };
   }
 
+  // Cost endpoints — not implemented in desktop client
+  if (segs[0] === 'cost') {
+    return { command: '__stub__', args: { __response: { success: true, data: [] } } };
+  }
+
+  // Changelog endpoints — not implemented in desktop client
+  if (segs[0] === 'changelog') {
+    return { command: '__stub__', args: { __response: { success: true, data: { hasUpdate: false, entries: [] } } } };
+  }
+
   throw new Error(`[tauriClient] Unmapped route: ${m} /${p}`);
 }
 
@@ -470,6 +484,10 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   }
 
   // ── Config commands ───────────────────────────────────────────────────────
+  // get_public_config returns { skipAuth, permissions } — wrap in success envelope
+  if (command === 'get_public_config') {
+    return { success: true, data: result };
+  }
   // get_settings returns { systemConfig, bearerKeys } already – just wrap in success envelope
   if (command === 'get_settings') {
     return { success: true, data: result };
@@ -684,12 +702,13 @@ export async function invokeMapped<T>(command: string, args: Record<string, unkn
       const sn = String(args.serverName ?? '');
       nextNames = namesOf(currentServers).filter(n => n !== sn);
     } else {
+      // For __group_update_servers__, preserve the full config format
       nextNames = namesOf((args.servers as unknown[]) ?? []);
     }
     const payload = {
       name: group.name,
       description: group.description,
-      servers: nextNames,
+      servers: command === '__group_update_servers__' ? (args.servers as unknown[] ?? []) : nextNames,
     };
     try {
       const updated = await invoke<Record<string, unknown>>('update_group', {

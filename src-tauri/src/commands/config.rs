@@ -5,6 +5,29 @@ use crate::{
 use tauri::State;
 use crate::commands::auth::SessionState;
 
+/// Get public configuration (skipAuth setting) without authentication
+/// This is used by the frontend to determine if login should be skipped
+#[tauri::command]
+pub async fn get_public_config() -> Result<serde_json::Value, String> {
+    let config = config_service::get().await.map_err(|e| e.to_string())?;
+
+    let skip_auth = config
+        .get("routing")
+        .and_then(|r| r.get("skipAuth"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true); // Default to true for desktop app
+
+    let permissions = config
+        .get("permissions")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Ok(serde_json::json!({
+        "skipAuth": skip_auth,
+        "permissions": permissions
+    }))
+}
+
 /// Helper to verify that the current session belongs to an admin user.
 async fn require_admin(session: &SessionState) -> Result<(), String> {
     let token_str = {

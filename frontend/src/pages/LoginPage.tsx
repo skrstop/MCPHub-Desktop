@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, AlertCircle } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { getToken } from '../services/authService';
 import { getPublicConfig } from '../services/configService';
@@ -30,7 +30,7 @@ const sanitizeReturnUrl = (value: string | null): string | null => {
 
 const LoginPage: React.FC = () => {
   const { t } = useTranslation();
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -193,22 +193,13 @@ const LoginPage: React.FC = () => {
       {/* Top-right controls */}
       <div className="absolute top-3 right-4 z-20 flex items-center gap-1">
         <a
-          href="https://github.com/samanhappy/mcphub"
+          href="https://github.com/skrstop/mcphub-desktop"
           target="_blank"
           rel="noopener noreferrer"
           className="hub-icon-btn"
           aria-label="GitHub Repository"
         >
           <GitHubIcon className="h-4 w-4" />
-        </a>
-        <a
-          href="https://docs.mcphub.app"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hub-icon-btn"
-          aria-label="Documentation"
-        >
-          <BookOpen className="h-4 w-4" />
         </a>
         <ThemeSwitch />
         <LanguageSwitch />
@@ -239,32 +230,15 @@ const LoginPage: React.FC = () => {
         <div className="w-full space-y-8">
           {/* Brand */}
           <div className="flex flex-col items-center gap-3">
-            <div
-              className="relative grid place-items-center"
+            <img
+              src="/assets/logo.png"
+              alt="MCPHub Desktop"
               style={{
-                width: 44,
-                height: 44,
-                borderRadius: 10,
-                background: 'var(--hub-ink)',
-                color: 'white',
+                width: 64,
+                height: 64,
+                borderRadius: 12,
               }}
-            >
-              <span className="hub-mono font-semibold" style={{ fontSize: 18 }}>
-                M
-              </span>
-              <span
-                className="absolute"
-                style={{
-                  right: -2,
-                  bottom: -2,
-                  width: 8,
-                  height: 8,
-                  borderRadius: 50,
-                  background: 'var(--hub-ok)',
-                  boxShadow: '0 0 0 3px var(--hub-bg)',
-                }}
-              />
-            </div>
+            />
             <div className="text-center">
               <h1
                 style={{
@@ -308,7 +282,8 @@ const LoginPage: React.FC = () => {
                   className="hub-input"
                   placeholder={t('auth.username')}
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  readOnly
+                  style={{ opacity: 0.7, cursor: 'not-allowed' }}
                 />
               </div>
               <div>
@@ -358,6 +333,13 @@ const LoginPage: React.FC = () => {
                 {loading ? t('auth.loggingIn') : t('auth.login')}
               </button>
             </form>
+
+            <p
+              className="text-center mt-3"
+              style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}
+            >
+              {t('auth.defaultPasswordHint', '默认密码: admin')}
+            </p>
 
             {(socialProviders.google || socialProviders.github || socialProviders.oidc) && (
               <div className="mt-5 space-y-3">

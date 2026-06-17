@@ -46,7 +46,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           loading: false,
           skipAuth: true,
           user: {
-            username: 'guest',
+            username: '免登陆模式',
             isAdmin: true,
             permissions,
           },

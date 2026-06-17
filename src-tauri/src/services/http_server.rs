@@ -193,6 +193,22 @@ async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<BearerKey>, Res
     }
 }
 
+/// Extract server names from a list of JsonValue (can be strings or objects with "name" field)
+fn extract_server_names(servers: &[serde_json::Value]) -> Vec<String> {
+    servers
+        .iter()
+        .filter_map(|s| {
+            if let Some(name) = s.as_str() {
+                Some(name.to_string())
+            } else if let Some(name) = s.get("name").and_then(|n| n.as_str()) {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Compute the set of server names a bearer key is allowed to access.
 /// Returns `None` when there is no restriction (access_type "all" or no key present).
 async fn get_allowed_servers(key: Option<&BearerKey>) -> Option<HashSet<String>> {
@@ -205,7 +221,7 @@ async fn get_allowed_servers(key: Option<&BearerKey>) -> Option<HashSet<String>>
             if let Ok(groups) = group_service::list_all().await {
                 for g in groups {
                     if key.allowed_groups.contains(&g.name) {
-                        servers.extend(g.servers);
+                        servers.extend(extract_server_names(&g.servers));
                     }
                 }
             }
@@ -216,7 +232,7 @@ async fn get_allowed_servers(key: Option<&BearerKey>) -> Option<HashSet<String>>
             if let Ok(groups) = group_service::list_all().await {
                 for g in groups {
                     if key.allowed_groups.contains(&g.name) {
-                        servers.extend(g.servers);
+                        servers.extend(extract_server_names(&g.servers));
                     }
                 }
             }
@@ -315,7 +331,8 @@ async fn list_group_tools(
     };
     // Apply bearer key access control: filter to only servers the key can access
     let allowed_opt = get_allowed_servers(bearer_key.as_ref()).await;
-    let accessible: Vec<&String> = group.servers.iter()
+    let server_names = extract_server_names(&group.servers);
+    let accessible: Vec<&String> = server_names.iter()
         .filter(|s| allowed_opt.as_ref().map_or(true, |a| a.contains(*s)))
         .collect();
     if accessible.is_empty() && allowed_opt.is_some() {
@@ -353,8 +370,9 @@ async fn call_group_tool(
     let tool_name = &req.tool;
     // Apply bearer key access control: only search servers the key can access
     let allowed_opt = get_allowed_servers(bearer_key.as_ref()).await;
+    let server_names = extract_server_names(&group.servers);
     let mut target_server: Option<String> = None;
-    for server_name in &group.servers {
+    for server_name in &server_names {
         if allowed_opt.as_ref().map_or(true, |a| a.contains(server_name)) {
             if let Ok(tools) = pool::list_tools_for(server_name).await {
                 if tools.iter().any(|t| &t.name == tool_name) {
@@ -407,6 +425,49 @@ fn jsonrpc_error(id: Option<Value>, code: i32, message: impl Into<String>) -> Re
         .unwrap()
 }
 
+/// Server config with optional tool/prompt/resource filters
+struct ServerFilter {
+    name: String,
+    tools: Option<Vec<String>>,  // None = all tools, Some = specific tools
+    prompts: Option<Vec<String>>,
+    resources: Option<Vec<String>>,
+}
+
+/// Extract server filters from group servers config
+fn extract_server_filters(servers: &[serde_json::Value]) -> Vec<ServerFilter> {
+    servers
+        .iter()
+        .filter_map(|s| {
+            let (name, tools, prompts, resources) = if let Some(name) = s.as_str() {
+                (name.to_string(), None, None, None)
+            } else if let Some(obj) = s.as_object() {
+                let name = obj.get("name")?.as_str()?.to_string();
+                let tools = extract_filter_list(obj.get("tools"));
+                let prompts = extract_filter_list(obj.get("prompts"));
+                let resources = extract_filter_list(obj.get("resources"));
+                (name, tools, prompts, resources)
+            } else {
+                return None;
+            };
+            Some(ServerFilter { name, tools, prompts, resources })
+        })
+        .collect()
+}
+
+/// Extract filter list from a JSON value (can be "all" or array of strings)
+fn extract_filter_list(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    match value {
+        Some(serde_json::Value::String(s)) if s == "all" => None,  // None means all
+        Some(serde_json::Value::Array(arr)) => {
+            let names: Vec<String> = arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            if names.is_empty() { None } else { Some(names) }
+        }
+        _ => None,  // Default to all
+    }
+}
+
 /// Resolve a scope path to the list of connected server names.
 /// - "" or "$smart"              → all connected servers
 /// - "$smart/{group}"            → servers in that group
@@ -425,7 +486,7 @@ async fn mcp_scope_servers(scope: &str) -> Vec<String> {
     // Try as group (name or id)
     if let Ok(groups) = group_service::list_all().await {
         if let Some(g) = groups.iter().find(|g| g.name == name || g.id == name) {
-            return g.servers.clone();
+            return extract_server_names(&g.servers);
         }
     }
     // Try as server name
@@ -435,6 +496,46 @@ async fn mcp_scope_servers(scope: &str) -> Vec<String> {
         .any(|s| s.connected && s.name == name)
     {
         return vec![name.to_string()];
+    }
+    vec![]
+}
+
+/// Get server filters for a scope (used for tool filtering in groups)
+async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
+    let scope = scope.trim_start_matches('/').trim();
+    if scope.is_empty() || scope == "$smart" {
+        // No filters for global scope
+        return pool::get_all_statuses()
+            .await
+            .into_iter()
+            .filter(|s| s.connected)
+            .map(|s| ServerFilter {
+                name: s.name.clone(),
+                tools: None,
+                prompts: None,
+                resources: None,
+            })
+            .collect();
+    }
+    let name = scope.strip_prefix("$smart/").unwrap_or(scope);
+    // Try as group (name or id)
+    if let Ok(groups) = group_service::list_all().await {
+        if let Some(g) = groups.iter().find(|g| g.name == name || g.id == name) {
+            return extract_server_filters(&g.servers);
+        }
+    }
+    // Try as server name (no filters)
+    if pool::get_all_statuses()
+        .await
+        .iter()
+        .any(|s| s.connected && s.name == name)
+    {
+        return vec![ServerFilter {
+            name: name.to_string(),
+            tools: None,
+            prompts: None,
+            resources: None,
+        }];
     }
     vec![]
 }
@@ -516,22 +617,28 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
         }
         "ping" => jsonrpc_response(id, json!({})),
         "tools/list" => {
-            let mut server_names = mcp_scope_servers(&scope).await;
+            let mut server_filters = mcp_scope_server_filters(&scope).await;
             // Apply bearer key access control
             if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
-                server_names.retain(|s| allowed.contains(s));
+                server_filters.retain(|s| allowed.contains(&s.name));
             }
             // Prefix tool names with server name when multiple servers are in scope
-            let use_prefix = server_names.len() > 1;
+            let use_prefix = server_filters.len() > 1;
             let mut tools: Vec<Value> = Vec::new();
-            for sn in &server_names {
-                if let Ok(ts) = pool::list_tools_for(sn).await {
-                    let filtered = server_tool_config_service::apply_tool_filters(sn, ts)
+            for sf in &server_filters {
+                if let Ok(ts) = pool::list_tools_for(&sf.name).await {
+                    let filtered = server_tool_config_service::apply_tool_filters(&sf.name, ts)
                         .await
                         .unwrap_or_else(|_| vec![]);
                     for t in &filtered {
+                        // Apply group-level tool filter
+                        if let Some(ref allowed_tools) = sf.tools {
+                            if !allowed_tools.contains(&t.name) {
+                                continue;
+                            }
+                        }
                         let exposed_name = if use_prefix {
-                            format!("{}{}{}", sn, name_sep, t.name)
+                            format!("{}{}{}", sf.name, name_sep, t.name)
                         } else {
                             t.name.clone()
                         };
@@ -548,24 +655,30 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
         "tools/call" => {
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let mut server_names = mcp_scope_servers(&scope).await;
+            let mut server_filters = mcp_scope_server_filters(&scope).await;
             // Apply bearer key access control
             if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
-                server_names.retain(|s| allowed.contains(s));
+                server_filters.retain(|s| allowed.contains(&s.name));
             }
-            let use_prefix = server_names.len() > 1;
+            let use_prefix = server_filters.len() > 1;
 
             // Resolve server + original tool name (strip nameSeparator prefix if needed)
             let mut target: Option<(String, String)> = None;
             if use_prefix {
                 // Try to find a server whose prefix matches the tool_name
-                for sn in &server_names {
-                    let prefix = format!("{}{}", sn, name_sep);
+                for sf in &server_filters {
+                    let prefix = format!("{}{}", sf.name, name_sep);
                     if tool_name.starts_with(&prefix) {
                         let orig_name = &tool_name[prefix.len()..];
-                        if let Ok(ts) = pool::list_tools_for(sn).await {
+                        // Check if tool is allowed in group config
+                        if let Some(ref allowed_tools) = sf.tools {
+                            if !allowed_tools.contains(&orig_name.to_string()) {
+                                continue;
+                            }
+                        }
+                        if let Ok(ts) = pool::list_tools_for(&sf.name).await {
                             if ts.iter().any(|t| t.name == orig_name) {
-                                target = Some((sn.clone(), orig_name.to_string()));
+                                target = Some((sf.name.clone(), orig_name.to_string()));
                                 break;
                             }
                         }
@@ -574,10 +687,16 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
             }
             // Fallback: search by original name (single-server scope or unprefixed call)
             if target.is_none() {
-                for sn in &server_names {
-                    if let Ok(ts) = pool::list_tools_for(sn).await {
+                for sf in &server_filters {
+                    // Check if tool is allowed in group config
+                    if let Some(ref allowed_tools) = sf.tools {
+                        if !allowed_tools.contains(&tool_name.to_string()) {
+                            continue;
+                        }
+                    }
+                    if let Ok(ts) = pool::list_tools_for(&sf.name).await {
                         if ts.iter().any(|t| t.name == tool_name) {
-                            target = Some((sn.clone(), tool_name.to_string()));
+                            target = Some((sf.name.clone(), tool_name.to_string()));
                             break;
                         }
                     }

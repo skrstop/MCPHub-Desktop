@@ -4,10 +4,12 @@ import { useNavigate } from 'react-router-dom';
 import ChangePasswordForm from '@/components/ChangePasswordForm';
 import { Switch } from '@/components/ui/ToggleGroup';
 import { MultiSelect } from '@/components/ui/MultiSelect';
+import RuntimeVersionManager from '@/components/RuntimeVersionManager';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useToast } from '@/contexts/ToastContext';
 import { PermissionChecker } from '@/components/PermissionChecker';
 import { PERMISSIONS } from '@/constants/permissions';
+import { isTauri } from '@/utils/tauriClient';
 import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText } from 'lucide-react';
 import { EndpointCopy } from '@/components/ui/EndpointCopy';
 import type { BearerKey, User } from '@/types';
@@ -411,7 +413,7 @@ const SettingsPage: React.FC = () => {
   }>({
     pythonIndexUrl: '',
     npmRegistry: '',
-    baseUrl: 'http://localhost:3000',
+    baseUrl: 'http://localhost:23333',
   });
 
   const [tempSmartRoutingConfig, setTempSmartRoutingConfig] = useState<{
@@ -518,6 +520,7 @@ const SettingsPage: React.FC = () => {
     loading,
     bearerKeys,
     updateRoutingConfig,
+    updateSystemConfig,
     updateInstallConfig,
     updateSmartRoutingConfig,
     updateSmartRoutingConfigBatch,
@@ -714,10 +717,17 @@ const SettingsPage: React.FC = () => {
       | 'bearerAuthKey'
       | 'bearerAuthHeaderName'
       | 'jsonBodyLimit'
-      | 'skipAuth',
-    value: boolean | string,
+      | 'skipAuth'
+      | 'exposeHttp'
+      | 'httpPort',
+    value: boolean | string | number,
   ) => {
-    await updateRoutingConfig(key, value);
+    // exposeHttp and httpPort are top-level config, not inside routing
+    if (key === 'exposeHttp' || key === 'httpPort') {
+      await updateSystemConfig({ [key]: value });
+    } else {
+      await updateRoutingConfig(key, value);
+    }
   };
 
   const handleTempRoutingConfigChange = (
@@ -1825,8 +1835,8 @@ const SettingsPage: React.FC = () => {
           )}
         </div>
 
-      {/* Smart Routing Configuration Settings */}
-      <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
+      {/* Smart Routing Configuration Settings - Hidden in desktop client */}
+      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
         <div className="hub-card mb-6 overflow-hidden">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] px-6 py-3"
@@ -2425,10 +2435,10 @@ const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </PermissionChecker>
+      </PermissionChecker>}
 
-      {/* Tool Result Compression Settings */}
-      <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
+      {/* Tool Result Compression Settings - Hidden in desktop client */}
+      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
         <div className="hub-card mb-6 overflow-hidden">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] px-6 py-3"
@@ -2594,10 +2604,10 @@ const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </PermissionChecker>
+      </PermissionChecker>}
 
-      {/* OAuth Server Configuration Settings */}
-      <PermissionChecker permissions={PERMISSIONS.SETTINGS_OAUTH_SERVER}>
+      {/* OAuth Server Configuration Settings - Hidden in desktop client */}
+      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_OAUTH_SERVER}>
         <div className="hub-card mb-6 overflow-hidden">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
@@ -2851,10 +2861,10 @@ const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </PermissionChecker>
+      </PermissionChecker>}
 
-      {/* MCPRouter Configuration Settings */}
-      <PermissionChecker permissions={PERMISSIONS.SETTINGS_INSTALL_CONFIG}>
+      {/* MCPRouter Configuration Settings - Hidden in desktop client */}
+      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_INSTALL_CONFIG}>
         <div className="hub-card mb-6 overflow-hidden">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
@@ -2925,10 +2935,10 @@ const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </PermissionChecker>
+      </PermissionChecker>}
 
-      {/* Better Auth Settings */}
-      <PermissionChecker permissions={PERMISSIONS.SETTINGS_SYSTEM_CONFIG}>
+      {/* Better Auth Settings - Hidden in desktop client */}
+      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_SYSTEM_CONFIG}>
         <div className="hub-card mb-6 overflow-hidden">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
@@ -3218,7 +3228,7 @@ const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </PermissionChecker>
+      </PermissionChecker>}
 
       {/* System Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_SYSTEM_CONFIG}>
@@ -3366,6 +3376,40 @@ const SettingsPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div>
+                  <h3 className="font-medium text-gray-700">{t('settings.exposeHttp', '启用 HTTP 服务')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.exposeHttpDescription', '启用后，MCP 服务将通过 HTTP 暴露给外部客户端')}</p>
+                </div>
+                <Switch
+                  disabled={loading}
+                  checked={routingConfig.exposeHttp}
+                  onCheckedChange={(checked) => handleRoutingConfigChange('exposeHttp', checked)}
+                />
+              </div>
+
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="mb-2">
+                  <h3 className="font-medium text-gray-700">{t('settings.httpPort', 'HTTP 服务端口')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.httpPortDescription', 'MCP HTTP 服务监听端口，修改后需重启应用生效')}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    value={routingConfig.httpPort}
+                    onChange={(e) => handleRoutingConfigChange('httpPort', parseInt(e.target.value) || 23333)}
+                    placeholder="23333"
+                    min="1024"
+                    max="65535"
+                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                    disabled={loading}
+                  />
+                </div>
+                <p className="text-xs text-amber-600 mt-2">
+                  ⚠️ {t('settings.httpPortWarning', '修改端口后需要重启应用才能生效')}
+                </p>
+              </div>
             </div>
           )}
         </div>
@@ -3387,30 +3431,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.installConfig && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
-                <div className="mb-2">
-                  <h3 className="font-medium text-gray-700">{t('settings.baseUrl')}</h3>
-                  <p className="text-sm text-gray-500">{t('settings.baseUrlDescription')}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="text"
-                    value={installConfig.baseUrl}
-                    onChange={(e) => handleInstallConfigChange('baseUrl', e.target.value)}
-                    placeholder={t('settings.baseUrlPlaceholder')}
-                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
-                    disabled={loading}
-                  />
-                  <button
-                    onClick={() => saveInstallConfig('baseUrl')}
-                    disabled={loading}
-                    className="hub-btn primary"
-                  >
-                    {t('common.save')}
-                  </button>
-                </div>
-              </div>
-
+              {/* Base URL hidden in desktop client - port is configured in route config */}
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.pythonIndexUrl')}</h3>
@@ -3457,6 +3478,24 @@ const SettingsPage: React.FC = () => {
                     {t('common.save')}
                   </button>
                 </div>
+              </div>
+
+              {/* Node.js Runtime Version */}
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="mb-2">
+                  <h3 className="font-medium text-gray-700">{t('settings.nodeVersion', 'Node.js Version')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.nodeVersionDescription', 'Select or install a specific Node.js version for running MCP servers')}</p>
+                </div>
+                <RuntimeVersionManager runtime="node" />
+              </div>
+
+              {/* Python Runtime Version */}
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="mb-2">
+                  <h3 className="font-medium text-gray-700">{t('settings.pythonVersion', 'Python Version')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.pythonVersionDescription', 'Select or install a specific Python version for running MCP servers')}</p>
+                </div>
+                <RuntimeVersionManager runtime="python" />
               </div>
             </div>
           )}

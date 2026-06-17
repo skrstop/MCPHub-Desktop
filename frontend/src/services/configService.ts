@@ -112,27 +112,18 @@ export const getPublicConfig = async (): Promise<{
   betterAuth?: BetterAuthConfig;
 }> => {
   try {
-    const basePath = getBasePath();
-    const response = await fetchWithInterceptors(`${basePath}/public-config`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (response.ok) {
-      const data: PublicConfigResponse = await response.json();
+    const data = await apiGet<PublicConfigResponse>('/public-config');
+    if (data.success) {
       return {
         skipAuth: data.data?.skipAuth === true,
         permissions: data.data?.permissions || {},
         betterAuth: data.data?.betterAuth,
       };
     }
-
-    return { skipAuth: false };
+    return { skipAuth: true }; // Default to skipAuth for desktop
   } catch (error) {
     console.debug('Failed to get public config:', error);
-    return { skipAuth: false };
+    return { skipAuth: true }; // Default to skipAuth for desktop
   }
 };
 
