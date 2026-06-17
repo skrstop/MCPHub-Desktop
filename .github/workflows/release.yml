@@ -18,25 +18,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon (arm64) — native
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            runtime-arch: arm64
-
-          # macOS Intel (x64) — native
-          - platform: macos-13
-            target: x86_64-apple-darwin
-            runtime-arch: x64
-
-          # Linux x64 — native
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            runtime-arch: x64
-
-          # Linux arm64 — GitHub 托管 ARM runner
-          - platform: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            runtime-arch: arm64
+#          # macOS Apple Silicon (arm64) — native
+#          - platform: macos-latest
+#            target: aarch64-apple-darwin
+#            runtime-arch: arm64
+#
+#          # macOS Intel (x64) — native
+#          - platform: macos-13
+#            target: x86_64-apple-darwin
+#            runtime-arch: x64
+#
+#          # Linux x64 — native
+#          - platform: ubuntu-22.04
+#            target: x86_64-unknown-linux-gnu
+#            runtime-arch: x64
+#
+#          # Linux arm64 — GitHub 托管 ARM runner
+#          - platform: ubuntu-22.04-arm
+#            target: aarch64-unknown-linux-gnu
+#            runtime-arch: arm64
 
           # Windows x64 — native
           - platform: windows-latest
