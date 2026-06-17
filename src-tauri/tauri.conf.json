@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "appimage", "rpm", "nsis", "msi", "dmg"],
     "resources": [
       "runtimes/**/*"
     ],

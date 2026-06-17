@@ -28,15 +28,15 @@ jobs:
 #            target: x86_64-apple-darwin
 #            runtime-arch: x64
 #
-#          # Linux x64 — native
-#          - platform: ubuntu-22.04
-#            target: x86_64-unknown-linux-gnu
-#            runtime-arch: x64
-#
-#          # Linux arm64 — GitHub 托管 ARM runner
-#          - platform: ubuntu-22.04-arm
-#            target: aarch64-unknown-linux-gnu
-#            runtime-arch: arm64
+          # Linux x64 — native
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            runtime-arch: x64
+
+          # Linux arm64 — GitHub 托管 ARM runner
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            runtime-arch: arm64
 
           # Windows x64 — native
           - platform: windows-latest
@@ -94,7 +94,10 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            file \
+            libfuse2 \
+            xdg-utils
 
       # ─── 安装根目录依赖（tauri-cli）────────────────────────────────────────
       - name: Install root deps
@@ -120,6 +123,7 @@ jobs:
       # ─── 读取签名私钥 ─────────────────────────────────────────────────────
       - name: Read signing key
         id: signing-key
+        shell: bash
         run: |
           if [ -f "src-tauri/updater/mcphub.key" ]; then
             echo "key=$(cat src-tauri/updater/mcphub.key)" >> $GITHUB_OUTPUT
