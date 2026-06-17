@@ -45,6 +45,7 @@ pub async fn login(
     let role_str = match user.role {
         crate::models::user::UserRole::Admin => "admin",
         crate::models::user::UserRole::User => "user",
+        crate::models::user::UserRole::Guest => "guest",
     };
 
     let token = auth_util::issue_token(&user.id, &user.username, role_str)
