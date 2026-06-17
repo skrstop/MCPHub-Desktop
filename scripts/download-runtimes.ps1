@@ -87,7 +87,8 @@ $UvDest = Join-Path $Dest "uv"
 $UvExe  = Join-Path $UvDest "uv.exe"
 
 if (Test-Path $UvExe) {
-    $UvCurrent = & $UvExe version 2>$null | ForEach-Object { ($_ -split " ")[1] }
+    # 使用 uv self version 获取版本号（uv version 在没有 pyproject.toml 时会报错）
+    $UvCurrent = & $UvExe self version 2>$null | ForEach-Object { ($_ -split " ")[1] }
     if ($UvCurrent -eq $UvVersion) {
         Write-Host "--> uv v$UvVersion already present, skipping"
     } else {

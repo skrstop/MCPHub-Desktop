@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, CheckCircle2, RefreshCw, X } from 'lucide-react';
+import { ArrowUpRight, CheckCircle2, Download, RefreshCw, X } from 'lucide-react';
 import { ChangelogUpdateInfo } from '@/types';
 import {
   dismissUpdateVersion,
   fetchChangelogUpdateInfo,
   isUpdateDismissed,
 } from '@/services/changelogService';
+import { checkForAppUpdate, installAppUpdate, type UpdateInfo } from '@/utils/version';
+import { isTauri } from '@/utils/tauriClient';
 
 interface AboutDialogProps {
   isOpen: boolean;
@@ -31,6 +33,8 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
   );
   const [isChecking, setIsChecking] = useState(false);
   const [localDismissed, setLocalDismissed] = useState(false);
+  const [tauriUpdate, setTauriUpdate] = useState<UpdateInfo | null>(null);
+  const [isInstalling, setIsInstalling] = useState(false);
 
   useEffect(() => {
     setUpdateInfo(initialUpdateInfo ?? null);
@@ -43,17 +47,46 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
   const checkForUpdates = async (force = false) => {
     setIsChecking(true);
     try {
-      const info = await fetchChangelogUpdateInfo({
-        currentVersion: version,
-        locale: i18n.language,
-        force,
-      });
-      setUpdateInfo(info);
-      onUpdateInfoChange?.(info);
+      // 在 Tauri 环境下使用原生 updater 插件
+      if (isTauri()) {
+        const update = await checkForAppUpdate();
+        setTauriUpdate(update);
+        // 同时获取 changelog 信息用于显示
+        const info = await fetchChangelogUpdateInfo({
+          currentVersion: version,
+          locale: i18n.language,
+          force,
+        });
+        setUpdateInfo(info);
+        onUpdateInfoChange?.(info);
+      } else {
+        // Web 环境下使用 changelog API
+        const info = await fetchChangelogUpdateInfo({
+          currentVersion: version,
+          locale: i18n.language,
+          force,
+        });
+        setUpdateInfo(info);
+        onUpdateInfoChange?.(info);
+      }
     } catch (error) {
       console.error('Failed to check for updates:', error);
     } finally {
       setIsChecking(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!tauriUpdate) return;
+    setIsInstalling(true);
+    try {
+      await installAppUpdate((event) => {
+        console.log('Download event:', event);
+      });
+    } catch (error) {
+      console.error('Failed to install update:', error);
+    } finally {
+      setIsInstalling(false);
     }
   };
 
@@ -206,19 +239,29 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 onClick={() => checkForUpdates(true)}
-                disabled={isChecking}
-                className={`hub-btn ${isChecking ? 'opacity-60 cursor-not-allowed' : ''}`}
+                disabled={isChecking || isInstalling}
+                className={`hub-btn ${(isChecking || isInstalling) ? 'opacity-60 cursor-not-allowed' : ''}`}
               >
                 <RefreshCw className={`h-4 w-4 ${isChecking ? 'animate-spin' : ''}`} />
                 {isChecking ? t('about.checking') : t('about.checkForUpdates')}
               </button>
+              {tauriUpdate && (
+                <button
+                  onClick={handleInstallUpdate}
+                  disabled={isInstalling}
+                  className={`hub-btn primary ${isInstalling ? 'opacity-60 cursor-not-allowed' : ''}`}
+                >
+                  <Download className={`h-4 w-4 ${isInstalling ? 'animate-spin' : ''}`} />
+                  {isInstalling ? t('about.installing') : t('about.installUpdate')}
+                </button>
+              )}
               <a
-                href={updateInfo?.changelogUrl || 'https://www.mcphub.app/changelog'}
+                href={`https://github.com/skrstop/MCPHub-Desktop/releases`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="hub-btn primary"
+                className="hub-btn"
               >
-                {hasNewVersion ? t('about.viewReleaseNotes') : t('about.viewChangelog')}
+                {t('about.viewReleaseNotes')}
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </a>
               {latestEntry?.url && (

@@ -74,6 +74,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # ─── Windows arm64 交叉编译工具链 ─────────────────────────────────────
+      - name: Install Windows ARM64 MSVC toolchain
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+          echo "Added aarch64-pc-windows-msvc target"
+
       # ─── Rust 构建缓存 ─────────────────────────────────────────────────────
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -115,12 +122,25 @@ jobs:
         shell: pwsh
         run: .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
 
+      # ─── 读取签名私钥 ─────────────────────────────────────────────────────
+      - name: Read signing key
+        id: signing-key
+        run: |
+          if [ -f "src-tauri/updater/mcphub.key" ]; then
+            echo "key=$(cat src-tauri/updater/mcphub.key)" >> $GITHUB_OUTPUT
+            echo "✅ Signing key found"
+          else
+            echo "⚠️  Signing key not found, using secret if available"
+            echo "key=${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" >> $GITHUB_OUTPUT
+          fi
+
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
         run: npm run tauri build -- --target ${{ matrix.target }}
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 开源项目：使用仓库中的私钥文件，或 GitHub Secrets
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.signing-key.outputs.key }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
 
       # ─── 收集产物 ──────────────────────────────────────────────────────────
       # macOS: .dmg + .app.tar.gz（updater）+ .app.tar.gz.sig（updater 签名）

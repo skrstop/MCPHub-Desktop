@@ -323,9 +323,163 @@ services/ (业务逻辑 = 原 services/)
 
 新增的翻译键（同上，英文版本）
 
-### 3.4 Rust 后端差异
+### 3.4 自动更新配置
 
-#### 3.4.1 免登录模式
+#### 3.4.1 更新机制概述
+
+桌面端使用 Tauri 原生 updater 插件实现自动更新，**不依赖** mcphub-origin 的 changelog API。
+
+**更新流程**：
+1. GitHub Actions 构建所有平台的安装包
+2. 使用私钥签名更新包（生成 `.sig` 文件）
+3. 生成 `latest.json`（包含版本信息、下载链接和签名）
+4. 创建 draft Release 并上传所有文件
+5. 用户端定期检查 `latest.json` 端点，验证签名后提示更新
+
+**相关文件**：
+- `src-tauri/tauri.conf.json` — updater 插件配置（endpoints + pubkey）
+- `frontend/src/utils/version.ts` — Tauri updater 集成（`check()`, `downloadAndInstall()`）
+- `frontend/src/services/changelogService.ts` — Web 端 changelog 服务（Tauri 中禁用）
+- `.github/workflows/release.yml` — CI/CD 构建和发布流程
+
+#### 3.4.2 签名密钥配置
+
+**生成签名密钥**：
+```bash
+bash scripts/generate-signing-key.sh
+```
+
+**配置步骤**：
+1. 运行脚本生成密钥对（`~/.tauri/mcphub.key` 和 `~/.tauri/mcphub.key.pub`）
+2. 将公钥内容复制到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 字段
+3. 添加 GitHub Secrets：
+   - `TAURI_SIGNING_PRIVATE_KEY` — 私钥文件内容
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — 密钥密码（如果有）
+
+**验证配置**：
+```bash
+bash scripts/verify-signing.sh
+```
+
+#### 3.4.3 GitHub Actions 配置
+
+**文件**：`.github/workflows/release.yml`
+
+**触发条件**：
+- 推送 `v*` 格式的 tag（如 `v1.0.17`）
+- 手动触发（workflow_dispatch）
+
+**构建矩阵**：
+| 平台 | Runner | Target | 架构 |
+|------|--------|--------|------|
+| macOS ARM64 | macos-latest | aarch64-apple-darwin | arm64 |
+| macOS x64 | macos-13 | x86_64-apple-darwin | x64 |
+| Linux x64 | ubuntu-22.04 | x86_64-unknown-linux-gnu | x64 |
+| Linux ARM64 | ubuntu-22.04-arm | aarch64-unknown-linux-gnu | arm64 |
+| Windows x64 | windows-latest | x86_64-pc-windows-msvc | x64 |
+| Windows ARM64 | windows-latest | aarch64-pc-windows-msvc | arm64 |
+
+**关键步骤**：
+1. 安装 Node.js 20 + Rust stable + 目标 triple
+2. 安装系统依赖（Linux: webkit2gtk, appindicator3, rsvg2, patchelf, ssl）
+3. 下载 bundled runtimes（Node.js + uv + Python）
+4. 构建 Tauri 应用（使用私钥签名）
+5. 收集平台产物（.dmg, .app.tar.gz, .deb, .AppImage, .exe, .nsis.zip）
+6. 生成 `latest.json`（Python 脚本解析 .sig 文件）
+7. 创建 draft Release 并上传所有文件
+
+**产物说明**：
+| 平台 | 安装包 | 更新包 | 签名文件 |
+|------|--------|--------|----------|
+| macOS | .dmg | .app.tar.gz | .app.tar.gz.sig |
+| Linux | .deb, .AppImage | .AppImage.tar.gz | .AppImage.tar.gz.sig |
+| Windows | .exe, .msi | .nsis.zip | .nsis.zip.sig |
+
+#### 3.4.4 latest.json 格式
+
+```json
+{
+  "version": "1.0.16",
+  "notes": "MCPHub Desktop 1.0.16\n\nSee release page for full changelog.",
+  "pub_date": "2026-06-17T12:00:00Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6...",
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.16/MCPHub.Desktop_1.0.16_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "...",
+      "url": "..."
+    },
+    "linux-x86_64": {
+      "signature": "...",
+      "url": "..."
+    },
+    "windows-x86_64": {
+      "signature": "...",
+      "url": "..."
+    }
+  }
+}
+```
+
+**平台标识**：
+- `darwin-aarch64` — macOS ARM64 (Apple Silicon)
+- `darwin-x86_64` — macOS x64 (Intel)
+- `linux-aarch64` — Linux ARM64
+- `linux-x86_64` — Linux x64
+- `windows-aarch64` — Windows ARM64
+- `windows-x86_64` — Windows x64
+
+#### 3.4.5 Changelog API 禁用说明
+
+**文件**：`frontend/src/utils/tauriClient.ts`
+
+```typescript
+// Changelog endpoints — not implemented in desktop client
+if (segs[0] === 'changelog') {
+  return { command: '__stub__', args: { __response: { success: true, data: { hasUpdate: false, entries: [] } } } };
+}
+```
+
+**原因**：
+- Tauri 桌面应用使用原生 updater 插件进行自动更新
+- Changelog API 是为 Web 版本设计的，在桌面版本中不需要
+- `frontend/src/utils/version.ts` 正确实现了 Tauri updater 集成
+
+**前端调用**：
+```typescript
+// 检查更新（使用 Tauri updater 插件）
+import { checkForAppUpdate, installAppUpdate } from '@/utils/version';
+
+const updateInfo = await checkForAppUpdate();
+if (updateInfo) {
+  console.log('New version:', updateInfo.version);
+  await installAppUpdate((event) => {
+    console.log('Download progress:', event);
+  });
+}
+```
+
+#### 3.4.6 故障排除
+
+**问题：updater 无法验证签名**
+- 原因：公钥配置错误或私钥不匹配
+- 解决：确认 `tauri.conf.json` 中的 `pubkey` 与生成的公钥一致，确认 GitHub Secrets 中的私钥与公钥配对
+
+**问题：CI 构建失败**
+- 原因：GitHub Secrets 配置错误
+- 解决：检查 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 是否正确设置
+
+**问题：用户无法收到更新**
+- 原因：`latest.json` 文件不存在或格式错误
+- 解决：检查 GitHub Release 是否包含 `latest.json` 文件，确认格式正确
+
+**详细文档**：参见 `SIGNING_SETUP.md`
+
+### 3.5 Rust 后端差异
+
+#### 3.5.1 免登录模式
 **文件**：`src-tauri/src/commands/config.rs`
 
 - 新增 `get_public_config` 命令：返回 `skipAuth` 和 `permissions` 配置
@@ -339,7 +493,7 @@ services/ (业务逻辑 = 原 services/)
 
 - 数据库迁移：默认设置 `routing.skipAuth = true`
 
-#### 3.4.2 Guest 用户支持
+#### 3.5.2 Guest 用户支持
 **文件**：`src-tauri/src/models/user.rs`
 
 - `UserRole` 枚举新增 `Guest` 变体
@@ -353,7 +507,7 @@ services/ (业务逻辑 = 原 services/)
 
 - 新增 `issue_guest_token()` 函数：签发 guest JWT token
 
-#### 3.4.3 SSE 传输改进
+#### 3.5.3 SSE 传输改进
 **文件**：`src-tauri/src/mcp/sse_transport.rs`
 
 改进内容：
@@ -366,7 +520,7 @@ services/ (业务逻辑 = 原 services/)
 - 改进后台 SSE 响应读取（使用缓冲区处理不完整行）
 - 添加详细日志输出
 
-#### 3.4.4 运行时环境管理
+#### 3.5.4 运行时环境管理
 **文件**：`src-tauri/src/services/runtime_env.rs`
 
 - 管理下载的 Node.js 和 Python 版本
@@ -388,7 +542,7 @@ services/ (业务逻辑 = 原 services/)
   - `set_active_node_version` / `set_active_python_version`
   - `get_active_node_version` / `get_active_python_version`
 
-#### 3.4.5 内置 HTTP 服务器
+#### 3.5.5 内置 HTTP 服务器
 **文件**：`src-tauri/src/services/http_server.rs`
 
 - 使用 Axum 框架实现内置 HTTP 服务器

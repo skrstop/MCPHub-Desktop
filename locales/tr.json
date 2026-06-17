@@ -32,7 +32,9 @@
     "updateChecksDisabled": "Bu dağıtımda güncelleme kontrolü devre dışı.",
     "dismissUpdate": "Yoksay",
     "dismissed": "Yoksayıldı",
-    "earlierReleases": "+ {{count}} önceki sürüm"
+    "earlierReleases": "+ {{count}} önceki sürüm",
+    "installUpdate": "Güncellemeyi Yükle",
+    "installing": "Güncelleme yükleniyor..."
   },
   "profile": {
     "viewProfile": "Profili görüntüle",

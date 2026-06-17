@@ -32,7 +32,9 @@
     "updateChecksDisabled": "当前部署已禁用更新检查。",
     "dismissUpdate": "忽略",
     "dismissed": "已忽略",
-    "earlierReleases": "另有 {{count}} 个更早版本"
+    "earlierReleases": "另有 {{count}} 个更早版本",
+    "installUpdate": "安装更新",
+    "installing": "正在安装更新..."
   },
   "profile": {
     "viewProfile": "查看个人中心",

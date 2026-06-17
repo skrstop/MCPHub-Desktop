@@ -32,7 +32,9 @@
     "updateChecksDisabled": "Update checks are disabled for this deployment.",
     "dismissUpdate": "Dismiss",
     "dismissed": "Dismissed",
-    "earlierReleases": "+ {{count}} earlier releases"
+    "earlierReleases": "+ {{count}} earlier releases",
+    "installUpdate": "Install Update",
+    "installing": "Installing update..."
   },
   "profile": {
     "viewProfile": "View profile",

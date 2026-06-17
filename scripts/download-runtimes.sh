@@ -114,7 +114,8 @@ fi
 UV_DEST="$DEST/uv"
 
 if [[ -f "$UV_DEST/uv" ]]; then
-  UV_CURRENT=$("$UV_DEST/uv" version 2>/dev/null | awk '{print $2}' || echo "unknown")
+  # 使用 uv self version 获取版本号（uv version 在没有 pyproject.toml 时会报错）
+  UV_CURRENT=$("$UV_DEST/uv" self version 2>/dev/null | awk '{print $2}' || echo "unknown")
   if [[ "$UV_CURRENT" == "${UV_VERSION}" ]]; then
     echo "--> uv v${UV_VERSION} already present, skipping download"
   else

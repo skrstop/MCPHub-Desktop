@@ -1,78 +1,226 @@
-# Tauri Updater — 发布清单 `latest.json` 使用说明
+# Tauri Updater — 自动更新配置指南
 
-[Tauri Updater 插件](https://v2.tauri.app/plugin/updater/) 通过拉取一份 `latest.json` 清单来判断是否有新版本。本目录的 [latest.json](latest.json) 是模板，发版时按下面流程替换字段后上传到 GitHub Release。
+[Tauri Updater 插件](https://v2.tauri.app/plugin/updater/) 通过拉取一份 `latest.json` 清单来判断是否有新版本。本目录包含签名密钥和配置文件，用于实现应用的自动更新功能。
 
-## 1. 生成签名密钥（仅首次）
+## 📁 目录结构
 
-```bash
-npx @tauri-apps/cli signer generate -w ~/.tauri/mcphub.key
+```
+src-tauri/updater/
+├── README.md              # 本文档
+├── mcphub.key             # 签名私钥（已提交到仓库）
+├── mcphub.key.pub         # 签名公钥（已提交到仓库）
+└── latest.json            # 更新清单模板
 ```
 
-- 把 **公钥** 填到 [src-tauri/tauri.conf.json](../tauri.conf.json) 的 `plugins.updater.pubkey`
-- **私钥** 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 仅保存在 CI Secrets 中，用于签名构建产物
+## 🔑 签名密钥配置
 
-## 2. 构建并签名
+### 密钥说明
+
+- **私钥** (`mcphub.key`)：用于签名更新包，已提交到仓库（开源项目）
+- **公钥** (`mcphub.key.pub`)：用于验证更新包，已配置到 `tauri.conf.json`
+- **证书密码**：`mcphub`
+
+### 配置状态
+
+- ✅ 公钥已配置到 `src-tauri/tauri.conf.json`
+- ✅ 私钥已存在于 `src-tauri/updater/mcphub.key`
+- ✅ GitHub Actions 已配置使用仓库中的私钥
+
+## 🚀 快速开始
+
+### 1. 本地构建
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/mcphub.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<your-password>"
-npm run tauri build
+# 安装依赖
+npm install
+cd frontend && npm install && cd ..
+
+# 构建应用（会自动签名）
+npm run build
+
+# 检查签名文件
+ls -la src-tauri/target/release/bundle/*.sig
 ```
+
+### 2. 创建 Release
+
+```bash
+# 创建并推送 tag
+git tag v1.0.17
+git push origin v1.0.17
+```
+
+### 3. 测试自动更新
+
+1. 安装当前版本的应用
+2. 打开"关于"对话框
+3. 点击"检查更新"
+4. 如果有新版本，点击"安装更新"
+5. 应用会自动下载、安装并重启
+
+## 🔧 GitHub Actions 配置
+
+### 签名流程
+
+1. **读取签名私钥**
+   - 首先检查仓库中的 `src-tauri/updater/mcphub.key` 文件
+   - 如果不存在，回退到 GitHub Secrets 中的 `TAURI_SIGNING_PRIVATE_KEY`
+
+2. **构建应用**
+   - 使用私钥签名更新包
+   - 生成 `.sig` 签名文件
+
+3. **生成 latest.json**
+   - 解析 `.sig` 文件生成更新元数据
+   - 包含版本信息、下载链接和签名
+
+4. **创建 Release**
+   - 创建 draft release
+   - 上传所有平台的安装包和签名文件
+
+### 环境变量
+
+| 变量名 | 值 | 说明 |
+|--------|-----|------|
+| `TAURI_SIGNING_PRIVATE_KEY` | 从仓库文件读取或 GitHub Secrets | 签名私钥 |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | `mcphub` 或 GitHub Secrets | 私钥密码 |
+
+## 📋 构建产物
 
 构建完成后会在 `src-tauri/target/release/bundle/<platform>/` 下生成：
 
-| 平台 | 升级包 | 签名文件 |
-|---|---|---|
-| macOS | `MCPHub Desktop_<ver>_x64.app.tar.gz` / `_aarch64.app.tar.gz` | 同名 `.sig` |
-| Linux | `mcphub-desktop_<ver>_amd64.AppImage.tar.gz` | 同名 `.sig` |
-| Windows | `MCPHub Desktop_<ver>_x64-setup.nsis.zip` | 同名 `.sig` |
+| 平台 | 安装包 | 更新包 | 签名文件 |
+|------|--------|--------|----------|
+| macOS | `.dmg` | `.app.tar.gz` | `.app.tar.gz.sig` |
+| Linux | `.deb`, `.AppImage` | `.AppImage.tar.gz` | `.AppImage.tar.gz.sig` |
+| Windows | `.exe`, `.msi` | `.nsis.zip` | `.nsis.zip.sig` |
 
-## 3. 填写 `latest.json`
+## 📝 `latest.json` 格式
 
 把每个 `.sig` 文件的 **整段 base64 内容** 填到对应平台的 `signature` 字段。`url` 指向 GitHub Release 资产的下载链接。
 
-示例（macOS aarch64 单平台）：
-
 ```json
 {
-  "version": "0.12.13",
-  "notes": "Release notes here",
-  "pub_date": "2026-04-23T00:00:00Z",
+  "version": "1.0.16",
+  "notes": "MCPHub Desktop 1.0.16\n\nSee release page for full changelog.",
+  "pub_date": "2026-06-17T12:00:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRcm...",
-      "url": "https://github.com/samanhappy/mcphub-desktop/releases/download/v0.12.13/MCPHub.Desktop_0.12.13_aarch64.app.tar.gz"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.16/MCPHub.Desktop_1.0.16_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "...",
+      "url": "..."
+    },
+    "linux-x86_64": {
+      "signature": "...",
+      "url": "..."
+    },
+    "windows-x86_64": {
+      "signature": "...",
+      "url": "..."
     }
   }
 }
 ```
 
-## 4. 上传到 GitHub Release
+### 平台标识
 
-把以下文件作为 Release 资产上传到 `v0.12.13` Release：
+- `darwin-aarch64` — macOS ARM64 (Apple Silicon)
+- `darwin-x86_64` — macOS x64 (Intel)
+- `linux-aarch64` — Linux ARM64
+- `linux-x86_64` — Linux x64
+- `windows-aarch64` — Windows ARM64
+- `windows-x86_64` — Windows x64
 
-- `latest.json`
-- 所有平台的升级包（`.tar.gz` / `.nsis.zip`）
+## 🔄 自动更新流程
 
-客户端配置（[tauri.conf.json](../tauri.conf.json)）的 endpoint 已指向：
-`https://github.com/samanhappy/mcphub-desktop/releases/latest/download/latest.json`
+### 检查更新
 
-GitHub 会自动把 `latest` 别名解析到最新 Release，因此后续每次发版只需上传新的 `latest.json` 与升级包即可，无需修改客户端。
+1. 用户打开"关于"对话框
+2. 点击"检查更新"按钮
+3. 应用使用 Tauri updater 插件检查 `latest.json` 端点
+4. 如果有新版本，显示"安装更新"按钮
 
-## 5. （推荐）使用 GitHub Action 自动化
+### 安装更新
 
-`tauri-apps/tauri-action` 支持自动构建、签名、生成 `latest.json` 并上传到 Release。最小示例：
+1. 用户点击"安装更新"按钮
+2. 应用下载新版本（使用 `.sig` 文件验证完整性）
+3. 下载完成后自动安装并重启应用
 
-```yaml
-- uses: tauri-apps/tauri-action@v0
-  env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-  with:
-    tagName: v__VERSION__
-    releaseName: 'MCPHub Desktop v__VERSION__'
-    includeUpdaterJson: true
-```
+### 查看更新日志
 
-`includeUpdaterJson: true` 会自动生成并上传 `latest.json`，无需手动维护。
+- 点击"查看更新日志"按钮跳转到 GitHub releases 页面
+- 用户可以查看所有版本的更新日志
+
+## 🛠️ 故障排除
+
+### 问题：updater 无法验证签名
+
+**症状**：检查更新时显示错误，或无法安装更新
+
+**原因**：公钥配置错误或私钥不匹配
+
+**解决**：
+1. 确认 `tauri.conf.json` 中的 `pubkey` 与 `mcphub.key.pub` 一致
+2. 确认使用正确的私钥进行签名
+3. 重新生成密钥对并更新配置
+
+### 问题：CI 构建失败
+
+**症状**：GitHub Actions 构建失败
+
+**原因**：签名配置错误
+
+**解决**：
+1. 检查 `src-tauri/updater/mcphub.key` 文件是否存在
+2. 确认私钥内容完整
+3. 检查 GitHub Actions 日志获取详细错误信息
+
+### 问题：用户无法收到更新
+
+**症状**：应用显示"已是最新版本"，但实际上有新版本
+
+**原因**：`latest.json` 文件不存在或格式错误
+
+**解决**：
+1. 检查 GitHub Release 是否包含 `latest.json` 文件
+2. 确认 `latest.json` 格式正确（包含 `version`、`platforms` 等字段）
+3. 检查 `latest.json` 中的下载链接是否正确
+
+### 问题：下载更新失败
+
+**症状**：点击"安装更新"后显示错误
+
+**原因**：网络问题或文件损坏
+
+**解决**：
+1. 检查网络连接
+2. 尝试重新检查更新
+3. 如果问题持续，手动下载安装包更新
+
+## 🔐 安全注意事项
+
+1. **私钥公开**：由于是开源项目，私钥已提交到代码仓库，这是预期行为
+2. **签名目的**：签名主要用于验证**完整性**，而不是**安全性**
+3. **官方版本**：只有通过 GitHub Actions 构建的版本才会被推送到更新端点
+4. **本地构建**：本地构建的版本不会自动更新，除非手动配置更新端点
+5. **密钥轮换**：如需轮换密钥，需要重新生成并更新 `src-tauri/updater/` 目录中的文件
+
+## 📚 相关文档
+
+- [Tauri Updater 官方文档](https://tauri.app/plugin/updater/)
+- [Tauri 签名文档](https://tauri.app/distribute/signing/)
+- [GitHub Actions 配置](../../.github/workflows/release.yml)
+
+## 🎯 下一步
+
+1. 测试本地构建
+2. 创建第一个 release
+3. 测试自动更新功能
+4. 收集用户反馈
+
+---
+
+💡 **提示**：运行 `bash scripts/verify-signing.sh` 验证配置状态。

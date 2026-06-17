@@ -32,7 +32,9 @@
     "updateChecksDisabled": "La vérification des mises à jour est désactivée pour ce déploiement.",
     "dismissUpdate": "Ignorer",
     "dismissed": "Ignoré",
-    "earlierReleases": "+ {{count}} versions précédentes"
+    "earlierReleases": "+ {{count}} versions précédentes",
+    "installUpdate": "Installer la mise à jour",
+    "installing": "Installation de la mise à jour..."
   },
   "profile": {
     "viewProfile": "Voir le profil",
