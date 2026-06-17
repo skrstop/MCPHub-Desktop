@@ -89,9 +89,9 @@ const AddServerForm = ({ onAdd }: AddServerFormProps) => {
     <div>
       <button
         onClick={toggleModal}
-        className="w-full bg-blue-100 text-blue-800 rounded hover:bg-blue-200 py-2 px-4 flex items-center justify-center btn-primary"
+        className="hub-btn primary"
       >
-        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2" viewBox="0 0 20 20" fill="currentColor">
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
           <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
         </svg>
         {t('server.add')}
@@ -110,7 +110,7 @@ const AddServerForm = ({ onAdd }: AddServerFormProps) => {
 
       {confirmationVisible && (
         <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
+          <div className="hub-card p-6 w-full max-w-md">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">
               {t('server.confirmVariables')}
             </h3>
@@ -147,13 +147,13 @@ const AddServerForm = ({ onAdd }: AddServerFormProps) => {
                   setConfirmationVisible(false)
                   setPendingPayload(null)
                 }}
-                className="px-4 py-2 text-gray-600 border border-gray-300 rounded hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 btn-secondary"
+                className="hub-btn"
               >
                 {t('common.cancel')}
               </button>
               <button
                 onClick={handleConfirmSubmit}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 btn-primary"
+                className="hub-btn primary"
               >
                 {t('server.confirmAndAdd')}
               </button>

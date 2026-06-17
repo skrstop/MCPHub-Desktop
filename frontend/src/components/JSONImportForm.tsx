@@ -1,27 +1,11 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { apiPost } from '@/utils/fetchInterceptor';
+import { ImportJsonFormat, normalizeImportedServers } from '../utils/jsonImport';
 
 interface JSONImportFormProps {
   onSuccess: () => void;
   onCancel: () => void;
-}
-
-interface McpServerConfig {
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  type?: string;
-  url?: string;
-  headers?: Record<string, string>;
-  openapi?: {
-    version: string;
-    url: string;
-  };
-}
-
-interface ImportJsonFormat {
-  mcpServers: Record<string, McpServerConfig>;
 }
 
 const JSONImportForm: React.FC<JSONImportFormProps> = ({ onSuccess, onCancel }) => {
@@ -85,33 +69,7 @@ All servers will be imported in a single efficient batch operation.`;
     const parsed = parseAndValidateJson(jsonInput);
     if (!parsed) return;
 
-    const servers = Object.entries(parsed.mcpServers).map(([name, config]) => {
-      // Normalize config to MCPHub format
-      const normalizedConfig: any = {};
-
-      if (config.type === 'sse' || config.type === 'streamable-http') {
-        normalizedConfig.type = config.type;
-        normalizedConfig.url = config.url;
-        if (config.headers) {
-          normalizedConfig.headers = config.headers;
-        }
-      } else if (config.type === 'openapi') {
-        normalizedConfig.type = 'openapi';
-        normalizedConfig.openapi = config.openapi;
-      } else {
-        // Default to stdio
-        normalizedConfig.type = 'stdio';
-        normalizedConfig.command = config.command;
-        normalizedConfig.args = config.args || [];
-        if (config.env) {
-          normalizedConfig.env = config.env;
-        }
-      }
-
-      return { name, config: normalizedConfig };
-    });
-
-    setPreviewServers(servers);
+    setPreviewServers(normalizeImportedServers(parsed));
   };
 
   const handleImport = async () => {
@@ -174,44 +132,14 @@ All servers will be imported in a single efficient batch operation.`;
         {!previewServers ? (
           <div>
             <div className="mb-4">
-              <div className="flex items-center justify-between mb-2">
-                <label className="block text-sm font-medium text-gray-700">
-                  {t('jsonImport.inputLabel')}
-                </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    try {
-                      const parsed = JSON.parse(jsonInput.trim());
-                      setJsonInput(JSON.stringify(parsed, null, 2));
-                      setError(null);
-                    } catch {
-                      setError(t('jsonImport.parseError'));
-                    }
-                  }}
-                  disabled={!jsonInput.trim()}
-                  className="px-2 py-1 text-xs text-blue-600 border border-blue-300 rounded hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  {t('jsonImport.format') || 'Format JSON'}
-                </button>
-              </div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                {t('jsonImport.inputLabel')}
+              </label>
               <textarea
                 value={jsonInput}
                 onChange={(e) => setJsonInput(e.target.value)}
-                onPaste={(e) => {
-                  const pasted = e.clipboardData.getData('text');
-                  try {
-                    const parsed = JSON.parse(pasted.trim());
-                    e.preventDefault();
-                    setJsonInput(JSON.stringify(parsed, null, 2));
-                    setError(null);
-                  } catch {
-                    // not valid JSON, allow normal paste
-                  }
-                }}
-                className="w-full h-96 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm bg-gray-50 dark:bg-gray-900 dark:text-gray-100 dark:border-gray-600 resize-y"
+                className="w-full h-96 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
                 placeholder={examplePlaceholder}
-                spellCheck={false}
               />
               <p className="text-xs text-gray-500 mt-2">{t('jsonImport.inputHelp')}</p>
             </div>
@@ -219,14 +147,14 @@ All servers will be imported in a single efficient batch operation.`;
             <div className="flex justify-end space-x-4">
               <button
                 onClick={onCancel}
-                className="px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 btn-secondary"
+                className="hub-btn"
               >
                 {t('common.cancel')}
               </button>
               <button
                 onClick={handlePreview}
                 disabled={!jsonInput.trim()}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 btn-primary"
+                className="hub-btn primary"
               >
                 {t('jsonImport.preview')}
               </button>
@@ -289,14 +217,14 @@ All servers will be imported in a single efficient batch operation.`;
               <button
                 onClick={() => setPreviewServers(null)}
                 disabled={isImporting}
-                className="px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 disabled:opacity-50 btn-secondary"
+                className="hub-btn"
               >
                 {t('common.back')}
               </button>
               <button
                 onClick={handleImport}
                 disabled={isImporting}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center btn-primary"
+                className="hub-btn primary"
               >
                 {isImporting ? (
                   <>

@@ -17,6 +17,7 @@ const EditUserForm = ({ user, onEdit, onCancel }: EditUserFormProps) => {
 
   const [formData, setFormData] = useState({
     isAdmin: user.isAdmin,
+    email: user.email || '',
     newPassword: '',
     confirmPassword: '',
   });
@@ -41,6 +42,7 @@ const EditUserForm = ({ user, onEdit, onCancel }: EditUserFormProps) => {
     try {
       const updateData: UserUpdateData = {
         isAdmin: formData.isAdmin,
+        email: formData.email,
       };
 
       if (formData.newPassword) {
@@ -101,6 +103,22 @@ const EditUserForm = ({ user, onEdit, onCancel }: EditUserFormProps) => {
               </label>
             </div>
 
+            <div>
+              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
+                {t('users.email')}
+              </label>
+              <input
+                type="email"
+                id="email"
+                name="email"
+                value={formData.email}
+                onChange={handleInputChange}
+                placeholder={t('users.emailPlaceholder')}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent form-input transition-all duration-200"
+                disabled={isSubmitting}
+              />
+            </div>
+
             <div className="border-t border-gray-100 dark:border-gray-700 pt-4 mt-2">
               <p className="text-xs text-gray-500 uppercase font-semibold tracking-wider mb-3">
                 {t('users.changePassword')}
@@ -152,18 +170,18 @@ const EditUserForm = ({ user, onEdit, onCancel }: EditUserFormProps) => {
             </div>
           </div>
 
-          <div className="flex justify-end space-x-3 mt-8">
+          <div className="flex justify-end space-x-2 mt-6">
             <button
               type="button"
               onClick={onCancel}
-              className="px-5 py-2.5 text-gray-700 bg-white dark:bg-gray-800 border border-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-all duration-200 font-medium btn-secondary shadow-sm"
+              className="hub-btn"
               disabled={isSubmitting}
             >
               {t('common.cancel')}
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 font-medium btn-primary shadow-md disabled:opacity-70 disabled:cursor-not-allowed flex items-center"
+              className="hub-btn primary"
               disabled={isSubmitting}
             >
               {isSubmitting && (

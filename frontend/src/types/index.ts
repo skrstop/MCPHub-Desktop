@@ -55,6 +55,37 @@ export interface MarketServer {
   is_official?: boolean;
 }
 
+export type ChangelogCategory = 'feature' | 'fix' | 'breaking' | 'security';
+
+export interface ChangelogEntry {
+  product: 'mcphub';
+  version: string;
+  tagName: string;
+  publishedAt: string;
+  url: string;
+  changelogUrl: string;
+  title: string;
+  summary: string;
+  highlights: string[];
+  fixes: string[];
+  breakingChanges: string[];
+  upgradeNotes: string[];
+  categories: ChangelogCategory[];
+  locale: 'en' | 'zh';
+  bodyMarkdown: string;
+  isStructured: boolean;
+}
+
+export interface ChangelogUpdateInfo {
+  latestVersion: string | null;
+  hasUpdate: boolean;
+  entries: ChangelogEntry[];
+  totalUpdateCount: number;
+  changelogUrl: string;
+  allChangelogUrl: string;
+  source: 'mcphub-web' | 'npm-fallback' | 'disabled';
+}
+
 // Cloud Server types (for MCPRouter API)
 export interface CloudServer {
   created_at: string;
@@ -87,7 +118,11 @@ export interface ToolInputSchema {
 export interface Tool {
   name: string;
   description: string;
+  defaultDescription?: string;
+  hasDescriptionOverride?: boolean;
   inputSchema: ToolInputSchema;
+  annotations?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
   enabled?: boolean;
 }
 
@@ -111,6 +146,8 @@ export interface Resource {
   name?: string;
   description?: string;
   mimeType?: string;
+  annotations?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
   enabled?: boolean;
 }
 
@@ -166,6 +203,8 @@ export interface ServerConfig {
   headers?: Record<string, string>;
   passthroughHeaders?: string[];
   enabled?: boolean;
+  // Per-server visibility for non-admin users. See issue #817. 'group' reserved.
+  visibility?: 'private' | 'group' | 'public';
   enableKeepAlive?: boolean; // Enable keep-alive for this server (requires global enable as well)
   keepAliveInterval?: number; // Keep-alive ping interval in milliseconds (default: 60000ms)
   tools?: Record<string, { enabled: boolean; description?: string }>; // Tool-specific configurations with enable/disable state and custom descriptions
@@ -246,6 +285,7 @@ export interface OpenAPISecurityConfig {
     clientSecret?: string;
     scopes?: string[]; // Required scopes
     token?: string; // Pre-obtained access token
+    expiresAt?: number; // Access token expiration timestamp in milliseconds
   };
   // OpenID Connect
   openIdConnect?: {
@@ -259,6 +299,8 @@ export interface OpenAPISecurityConfig {
 // Server types
 export interface Server {
   name: string;
+  owner?: string;
+  visibility?: 'private' | 'group' | 'public';
   status: ServerStatus;
   error?: string;
   tools?: Tool[];
@@ -306,6 +348,8 @@ export interface ServerFormData {
   env: EnvVar[];
   headers: EnvVar[];
   passthroughHeaders?: string;
+  // Visibility for non-admin users. See issue #817. 'group' is reserved.
+  visibility?: 'private' | 'group' | 'public';
   options?: {
     timeout?: number;
     resetTimeoutOnProgress?: boolean;
@@ -370,12 +414,15 @@ export interface ApiResponse<T = any> {
 
 // Bearer authentication key configuration (frontend view model)
 export type BearerKeyAccessType = 'all' | 'groups' | 'servers' | 'custom';
+export type BearerKeyKind = 'system' | 'user';
 
 export interface BearerKey {
   id: string;
   name: string;
   token: string;
   enabled: boolean;
+  kind?: BearerKeyKind;
+  owner?: string;
   accessType: BearerKeyAccessType;
   allowedGroups?: string[];
   allowedServers?: string[];
@@ -392,17 +439,20 @@ export interface IUser {
 export interface User {
   username: string;
   isAdmin: boolean;
+  email?: string;
 }
 
 export interface UserFormData {
   username: string;
   password: string;
   isAdmin: boolean;
+  email?: string;
 }
 
 export interface UserUpdateData {
   isAdmin?: boolean;
   newPassword?: string;
+  email?: string;
 }
 
 export interface UserStats {
@@ -416,7 +466,6 @@ export interface AuthState {
   user: IUser | null;
   loading: boolean;
   error: string | null;
-  skipAuth?: boolean;
 }
 
 export interface LoginCredentials {
@@ -599,8 +648,10 @@ export interface Activity {
   input?: string;
   output?: string;
   group?: string;
+  username?: string;
   keyId?: string;
   keyName?: string;
+  sourceIp?: string;
   errorMessage?: string;
 }
 
@@ -616,6 +667,7 @@ export interface ActivityFilter {
   tool?: string;
   status?: ActivityStatus;
   group?: string;
+  username?: string;
   keyId?: string;
   keyName?: string;
   startDate?: string;
@@ -626,6 +678,7 @@ export interface ActivityFilterOptions {
   servers: string[];
   tools: string[];
   groups: string[];
+  usernames: string[];
   keyNames: string[];
 }
 
@@ -717,4 +770,34 @@ export interface TemplateImportDetail {
   name: string;
   action: 'created' | 'skipped' | 'failed';
   message?: string;
+}
+
+// Context Footprint cost DTOs
+export interface ItemCost {
+  kind: 'tool' | 'prompt' | 'resource';
+  name: string;
+  cost: number;
+  enabled: boolean;
+}
+
+export interface ServerCost {
+  name: string;
+  connected: boolean;
+  exposed: number;
+  gross: number;
+  items: ItemCost[];
+}
+
+export interface SmartRoutingCost {
+  base: number;
+  progressiveDisclosure: number;
+}
+
+export interface GroupCost {
+  id: string;
+  name: string;
+  connectedCount: number;
+  totalCount: number;
+  direct: { exposed: number; gross: number };
+  smartRouting: SmartRoutingCost | null;
 }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Route, Routes, Navigate, useParams } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { ToastProvider } from './contexts/ToastContext';
@@ -7,7 +7,6 @@ import { ServerProvider } from './contexts/ServerContext';
 import { SettingsProvider } from './contexts/SettingsContext';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
-import LoginPage from './pages/LoginPage';
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -37,24 +36,32 @@ class AppErrorBoundary extends React.Component<
     return this.props.children;
   }
 }
-import DashboardPage from './pages/Dashboard';
-import ServersPage from './pages/ServersPage';
-import GroupsPage from './pages/GroupsPage';
-import UsersPage from './pages/UsersPage';
-import SettingsPage from './pages/SettingsPage';
-import MarketPage from './pages/MarketPage';
-import LogsPage from './pages/LogsPage';
-import ActivityPage from './pages/ActivityPage';
-import PromptsPage from './pages/PromptsPage';
-import ResourcesPage from './pages/ResourcesPage';
 import EmbeddingSyncAlertListener from './components/EmbeddingSyncAlertListener';
 import { getBasePath } from './utils/runtime';
+
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const DashboardPage = lazy(() => import('./pages/Dashboard'));
+const ServersPage = lazy(() => import('./pages/ServersPage'));
+const GroupsPage = lazy(() => import('./pages/GroupsPage'));
+const UsersPage = lazy(() => import('./pages/UsersPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const MarketPage = lazy(() => import('./pages/MarketPage'));
+const LogsPage = lazy(() => import('./pages/LogsPage'));
+const ActivityPage = lazy(() => import('./pages/ActivityPage'));
+const PromptsPage = lazy(() => import('./pages/PromptsPage'));
+const ResourcesPage = lazy(() => import('./pages/ResourcesPage'));
 
 // Helper component to redirect cloud server routes to market
 const CloudRedirect: React.FC = () => {
   const { serverName } = useParams<{ serverName: string }>();
   return <Navigate to={`/market/${serverName}?tab=cloud`} replace />;
 };
+
+const RouteFallback: React.FC = () => (
+  <div className="flex min-h-screen items-center justify-center text-sm text-gray-500">
+    Loading...
+  </div>
+);
 
 function App() {
   const basename = getBasePath();
@@ -69,7 +76,14 @@ function App() {
                 <EmbeddingSyncAlertListener />
                 <Routes>
                   {/* 公共路由 */}
-                  <Route path="/login" element={<LoginPage />} />
+                  <Route
+                    path="/login"
+                    element={
+                      <Suspense fallback={<RouteFallback />}>
+                        <LoginPage />
+                      </Suspense>
+                    }
+                  />
 
                   {/* 受保护的路由，使用 MainLayout 作为布局容器 */}
                   <Route element={<ProtectedRoute />}>

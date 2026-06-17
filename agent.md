@@ -1126,14 +1126,129 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 
 | 项 | 值 |
 |------|-----|
-| **当前已同步到 origin commit** | `3ea0bbe` (origin/main, 2026-04-28) |
-| **对应 origin tag** | `v0.12.14` (commit `f08dcc1`) |
-| **桌面端版本号** | `0.12.14` |
-| **同步执行日期** | 2026-04-28 |
+| **当前已同步到 origin commit** | `a34dbac` (origin/main, 2026-06-17) |
+| **对应 origin tag** | `v0.12.15` (commit `2de5057`) |
+| **桌面端版本号** | `0.12.15` |
+| **同步执行日期** | 2026-06-17 |
 
-> 下次同步时，使用 `3ea0bbe` 作为新的基线 SHA 起点（命令：`git --no-pager log --oneline 3ea0bbe..HEAD`）。
+> 下次同步时，使用 `a34dbac` 作为新的基线 SHA 起点（命令：`git --no-pager log --oneline a34dbac..HEAD`）。
 
 ### 同步条目历史
+
+#### 2026-06-17：同步 `3ea0bbe` → `a34dbac`（77 个 commit）
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+|------|------|------|
+| `bbc8f00` | 更新 skipAuth 描述 | `locales/{en,fr,tr,zh}.json` 直接覆盖 |
+| `c44a32b` | 代码分割与懒加载 | `frontend/src/App.tsx` 手动合并（保留 AppErrorBoundary + 添加 lazy/Suspense）；`frontend/vite.config.ts` 手动合并（保留 desktop 路径配置 + 添加 manualChunks） |
+| `bcf993e` | UI 重新设计（32 个组件文件） | 大部分文件直接覆盖；`ServerCard.tsx`、`AboutDialog.tsx`、`UserProfileMenu.tsx` 使用 upstream 版本 |
+| `3ea2019` | 按钮样式更新 | 直接覆盖 |
+| `c2b16da` | 宽屏布局优化 | 直接覆盖 |
+| `f04eb69` | 服务器可见性列 | 直接覆盖 |
+| `8977514` | 轮询优化 | 直接覆盖 |
+| `3142206` | OIDC 支持 | 直接覆盖 |
+| `62d706d` | 活动日志 IP 追踪 | 直接覆盖 |
+| `ee1aa9d` | 基础 URL 解析增强 | 直接覆盖 |
+| `c951f63` | Discord 链接更新 | 直接覆盖 |
+| `bfbf6b6` | 可见性权限修复 | 直接覆盖 |
+| `ff05c9b` | OAuth2 客户端凭证 | 直接覆盖 |
+| `f2baf0a` | stdio 请求选项保留 | 直接覆盖 |
+| `ed622fc` | ssoUserId 匹配 | 直接覆盖 |
+| `79730a8` | 服务器可见性编辑 | 直接覆盖 |
+| `a37bad5` | 用户级 bearer keys | 直接覆盖 |
+| `b344aba` | 隐藏系统日志导航 | 直接覆盖 |
+| `f783ef2` | 访问范围过滤 | 直接覆盖 |
+| `92625b2` | 用户名列过滤 | 直接覆盖 |
+| `b721275` | OIDC 账户链接 | 直接覆盖 |
+| `58e11ab` | Bearer Keys 样式修复 | 直接覆盖 |
+| `bb2652e` | MCP Apps 支持 | 直接覆盖 |
+| `3ce8bc2` | Context Footprint | 直接覆盖 |
+| `c0050d8` | 工具结果压缩 | 直接覆盖 |
+| `deff236` | Changelog 功能 | 直接覆盖（新增 `changelogService.ts`） |
+| `33b6613` | 禁用过滤标签 | 直接覆盖 |
+| `2982a08` | 自定义 Switch 组件 | 直接覆盖 |
+| `fd43a8b` | ServerCard 样式修复 | 直接覆盖 |
+| `e84ff7e` | 工具描述管理增强 | 直接覆盖 |
+| `a34dbac` | UUID 正则检查 | 直接覆盖 |
+| `6a0256a` | 用户级密钥查看公共服务器 | 直接覆盖 |
+
+**新增文件**
+
+| 文件 | 来源 commit | 说明 |
+|------|------|------|
+| `frontend/src/services/changelogService.ts` | `deff236` | Changelog 服务 |
+| `frontend/src/utils/bearerKeyScopeFilter.ts` | `a37bad5` | Bearer key 范围过滤 |
+| `frontend/src/utils/contextCost.ts` | `3ce8bc2` | Context 成本计算 |
+| `frontend/src/utils/jsonImport.ts` | `f2baf0a` | JSON 导入工具 |
+| `frontend/src/utils/navigationPermissions.ts` | `b344aba` | 导航权限 |
+| `frontend/src/utils/serverFilters.ts` | `33b6613` | 服务器过滤 |
+| `frontend/src/utils/serverListState.ts` | `33b6613` | 服务器列表状态 |
+| `frontend/src/utils/serverPermissions.ts` | `bfbf6b6` | 服务器权限 |
+| `frontend/src/utils/serverVisibility.ts` | `f04eb69` | 服务器可见性 |
+| `frontend/src/utils/toolDescription.ts` | `e84ff7e` | 工具描述 |
+| `frontend/src/components/ui/EndpointCopy.tsx` | `bcf993e` | 端点复制组件 |
+| `frontend/src/components/ui/StatusDot.tsx` | `bcf993e` | 状态点组件 |
+
+**未同步（后端 / 不适用）**
+
+| 来源 commit | 类型 | 处理决策 |
+|------|------|------|
+| `077eed9` | Add headless mode | **Rust 端 TODO**：评估桌面端是否需要 headless 模式 |
+| `7300b74` | skipAuth guest access | **Rust 端 TODO**：在 auth 中间件中实现 guest 用户逻辑 |
+| `927e98d` | reject scoped bearer keys (CWE-863) | **Rust 端 TODO**：在 bearer key 验证中添加作用域检查 |
+| `60a4da4` | require admin for MCP settings export (CWE-862) | **Rust 端 TODO**：在设置导出端点添加管理员权限检查 |
+| `2de5057` | TRUST_PROXY 环境变量 | **Rust 端 TODO**：在 Rust 服务器中实现代理信任解析 |
+| `45b1f05` | scoped bearer auth on smart routes | **Rust 端 TODO**：在智能路由中支持作用域 bearer auth |
+| `8fe47e2` | load server config from DB after OAuth | **Rust 端 TODO**：OAuth token 交换后从 DB 加载配置 |
+| `c44a32b` (后端部分) | Vite config manualChunks | 已在 desktop vite.config.ts 中应用 |
+| `87f241a` | exclude tool description from hash | **Rust 端 TODO**：在 embedding 计算中排除工具描述 |
+| `6377812` | skip reconnect for disabled servers | **Rust 端 TODO**：跳过禁用服务器的重连 |
+| `3fb39f0` | harden JWT binding (GHSA-wf8q-wvv8-p8jf) | **Rust 端 TODO**：加固 JWT 身份绑定 |
+| `06b18cb` | server env interpolation in headers | **Rust 端 TODO**：支持请求头中的环境变量插值 |
+| `da23f69` | return MCP initialize metadata | **Rust 端 TODO**：返回上游 MCP 初始化元数据 |
+| `5ca154a` | prevent embedding regeneration | **Rust 端 TODO**：防止每次重启重新生成 embedding |
+| `c8779df` | SSO/OIDC user matching | **Rust 端 TODO**：改进 SSO 用户匹配逻辑 |
+| `b1e7a52` | smart routing arbitrary args | **Rust 端 TODO**：允许智能路由中的任意参数 |
+| `030d12e` | DEFAULT_REQUEST_TIMEOUT | **Rust 端 TODO**：添加默认请求超时 |
+| `f42c828` | Redis error handling | **Rust 端 TODO**：改进 Redis 错误处理 |
+| `330e0f7` | env-first better auth config | **Rust 端 TODO**：支持环境变量优先的 auth 配置 |
+| `20adf81` | hosted mode | **Rust 端 TODO**：实现托管模式功能 |
+| `61a59b4` | runtime config resolution | **Rust 端 TODO**：使用专用函数解析运行时配置 |
+| `e894500` | IPv4-mapped IPv6 normalization | **Rust 端 TODO**：规范化 IPv4 映射的 IPv6 地址 |
+| `0c30aad` | Better Auth trusted origins | **Rust 端 TODO**：修复 OIDC 登录的 trusted origins |
+| `bbec0c6` | bridge Better Auth session | **Rust 端 TODO**：在 OAuth 授权中桥接 Better Auth 会话 |
+| 依赖更新 commits | chore(deps) | **不同步**：桌面端使用独立依赖体系 |
+
+**后端同步 TODO（需在 Rust 端补齐的安全增强）**
+
+> 以下条目按优先级排序，建议在 P0/P1 阶段补强时一并处理。
+
+- [ ] **JWT 身份绑定加固**（来源：`3fb39f0`，GHSA-wf8q-wvv8-p8jf）
+  - 用户级 SSE 路由严格验证 JWT 身份
+- [ ] **Bearer Key 作用域检查**（来源：`927e98d`，CWE-863）
+  - Dashboard API 拒绝作用域 bearer key
+- [ ] **MCP 设置导出权限**（来源：`60a4da4`，CWE-862）
+  - 要求管理员权限并脱敏敏感信息
+- [ ] **Headless 模式**（来源：`077eed9`）
+  - 支持禁用内置 Web UI
+- [ ] **Guest 用户访问**（来源：`7300b74`）
+  - 未认证用户获得 guest 管理员访问权限
+- [ ] **代理信任解析**（来源：`2de5057`）
+  - 支持 TRUST_PROXY 环境变量
+- [ ] **智能路由 bearer auth**（来源：`45b1f05`）
+  - 支持作用域 bearer auth
+- [ ] **OAuth 配置加载**（来源：`8fe47e2`）
+  - OAuth token 交换后从 DB 加载配置
+- [ ] **Embedding 优化**（来源：`87f241a`、`5ca154a`）
+  - 排除工具描述、防止重复生成
+- [ ] **SSO 用户匹配**（来源：`c8779df`、`ed622fc`）
+  - 改进 OIDC 用户匹配逻辑
+- [ ] **托管模式**（来源：`20adf81`）
+  - 实现 hosted mode 功能
+- [ ] **IPv6 规范化**（来源：`e894500`）
+  - 规范化 IPv4 映射的 IPv6 地址
 
 #### 2026-04-28：同步 `af5b013` → `3ea0bbe`（21 个 commit）
 

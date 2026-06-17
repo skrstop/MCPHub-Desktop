@@ -47,6 +47,15 @@ interface SmartRoutingConfig {
   embeddingMaxTokens?: number;
 }
 
+type ToolResultCompressionStrategy = 'auto' | 'json' | 'log' | 'search' | 'diff' | 'text';
+
+interface ToolResultCompressionConfig {
+  enabled: boolean;
+  minTokens: number;
+  maxOutputTokens: number;
+  strategy: ToolResultCompressionStrategy;
+}
+
 interface MCPRouterConfig {
   apiKey: string;
   referer: string;
@@ -69,17 +78,43 @@ interface OAuthServerConfig {
   };
 }
 
+interface BetterAuthProviderToggle {
+  enabled: boolean;
+}
+
+interface BetterAuthOidcConfig {
+  enabled: boolean;
+  providerId: string;
+  discoveryUrl: string;
+  scopes: string[];
+  pkce: boolean;
+  prompt: string;
+}
+
+interface BetterAuthConfig {
+  enabled: boolean;
+  basePath: string;
+  trustedOrigins: string[];
+  providers: {
+    google: BetterAuthProviderToggle;
+    github: BetterAuthProviderToggle;
+    oidc: BetterAuthOidcConfig;
+  };
+}
+
 interface SystemSettings {
   systemConfig?: {
     routing?: RoutingConfig;
     install?: InstallConfig;
     smartRouting?: SmartRoutingConfig;
+    toolResultCompression?: ToolResultCompressionConfig;
     mcpRouter?: MCPRouterConfig;
     nameSeparator?: string;
     oauthServer?: OAuthServerConfig;
+    auth?: {
+      betterAuth?: Partial<BetterAuthConfig>;
+    };
     enableSessionRebuild?: boolean;
-    exposeHttp?: boolean;
-    httpPort?: number;
   };
   bearerKeys?: BearerKey[];
 }
@@ -96,12 +131,12 @@ interface SettingsContextValue {
   setTempRoutingConfig: React.Dispatch<React.SetStateAction<TempRoutingConfig>>;
   installConfig: InstallConfig;
   smartRoutingConfig: SmartRoutingConfig;
+  toolResultCompressionConfig: ToolResultCompressionConfig;
   mcpRouterConfig: MCPRouterConfig;
   oauthServerConfig: OAuthServerConfig;
+  betterAuthConfig: BetterAuthConfig;
   nameSeparator: string;
   enableSessionRebuild: boolean;
-  exposeHttp: boolean;
-  httpPort: number;
   bearerKeys: BearerKey[];
   loading: boolean;
   error: string | null;
@@ -117,6 +152,13 @@ interface SettingsContextValue {
   updateSmartRoutingConfigBatch: (
     updates: Partial<SmartRoutingConfig>,
   ) => Promise<boolean | undefined>;
+  updateToolResultCompressionConfig: (
+    key: keyof ToolResultCompressionConfig,
+    value: any,
+  ) => Promise<boolean | undefined>;
+  updateToolResultCompressionConfigBatch: (
+    updates: Partial<ToolResultCompressionConfig>,
+  ) => Promise<boolean | undefined>;
   updateRoutingConfigBatch: (updates: Partial<RoutingConfig>) => Promise<boolean | undefined>;
   updateMCPRouterConfig: (key: keyof MCPRouterConfig, value: any) => Promise<boolean | undefined>;
   updateMCPRouterConfigBatch: (updates: Partial<MCPRouterConfig>) => Promise<boolean | undefined>;
@@ -127,14 +169,17 @@ interface SettingsContextValue {
   updateOAuthServerConfigBatch: (
     updates: Partial<OAuthServerConfig>,
   ) => Promise<boolean | undefined>;
+  updateBetterAuthConfigBatch: (
+    updates: Partial<BetterAuthConfig>,
+  ) => Promise<boolean | undefined>;
   updateNameSeparator: (value: string) => Promise<boolean | undefined>;
   updateSessionRebuild: (value: boolean) => Promise<boolean | undefined>;
-  updateExposeHttp: (value: boolean) => Promise<boolean | undefined>;
-  updateHttpPort: (value: number) => Promise<boolean | undefined>;
   exportMCPSettings: (serverName?: string) => Promise<any>;
   // Bearer key management
   refreshBearerKeys: () => Promise<void>;
-  createBearerKey: (payload: Omit<BearerKey, 'id'>) => Promise<BearerKey | null>;
+  createBearerKey: (
+    payload: Pick<BearerKey, 'name'> & Partial<Omit<BearerKey, 'id' | 'name' | 'token'>>,
+  ) => Promise<BearerKey | null>;
   updateBearerKey: (
     id: string,
     updates: Partial<Omit<BearerKey, 'id'>>,
@@ -157,6 +202,99 @@ const getDefaultOAuthServerConfig = (): OAuthServerConfig => ({
   },
 });
 
+const DEFAULT_OIDC_SCOPES = ['openid', 'profile', 'email'];
+
+const getDefaultBetterAuthConfig = (): BetterAuthConfig => ({
+  enabled: true,
+  basePath: '/api/auth/better',
+  trustedOrigins: [],
+  providers: {
+    google: {
+      enabled: true,
+    },
+    github: {
+      enabled: true,
+    },
+    oidc: {
+      enabled: false,
+      providerId: 'oidc',
+      discoveryUrl: '',
+      scopes: [...DEFAULT_OIDC_SCOPES],
+      pkce: true,
+      prompt: '',
+    },
+  },
+});
+
+const normalizeStringArray = (value: unknown, fallback: string[] = []): string[] => {
+  const normalized = Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0)
+    : [];
+
+  return normalized.length > 0 ? normalized : [...fallback];
+};
+
+const normalizeBetterAuthConfig = (
+  config?: Partial<BetterAuthConfig>,
+): BetterAuthConfig => {
+  const defaults = getDefaultBetterAuthConfig();
+
+  return {
+    enabled: config?.enabled ?? defaults.enabled,
+    basePath: config?.basePath?.trim() || defaults.basePath,
+    trustedOrigins: normalizeStringArray(config?.trustedOrigins, defaults.trustedOrigins),
+    providers: {
+      google: {
+        enabled: config?.providers?.google?.enabled ?? defaults.providers.google.enabled,
+      },
+      github: {
+        enabled: config?.providers?.github?.enabled ?? defaults.providers.github.enabled,
+      },
+      oidc: {
+        enabled: config?.providers?.oidc?.enabled ?? defaults.providers.oidc.enabled,
+        providerId: config?.providers?.oidc?.providerId?.trim() || defaults.providers.oidc.providerId,
+        discoveryUrl: config?.providers?.oidc?.discoveryUrl?.trim() || '',
+        scopes: normalizeStringArray(config?.providers?.oidc?.scopes, DEFAULT_OIDC_SCOPES),
+        pkce: config?.providers?.oidc?.pkce ?? defaults.providers.oidc.pkce,
+        prompt: config?.providers?.oidc?.prompt?.trim() || '',
+      },
+    },
+  };
+};
+
+const mergeBetterAuthConfig = (
+  current: BetterAuthConfig,
+  updates: Partial<BetterAuthConfig>,
+): BetterAuthConfig => {
+  const nextConfig: Partial<BetterAuthConfig> = {
+    ...current,
+    ...updates,
+    trustedOrigins: updates.trustedOrigins ?? current.trustedOrigins,
+    providers: {
+      ...current.providers,
+      ...updates.providers,
+      google: {
+        ...current.providers.google,
+        ...updates.providers?.google,
+      },
+      github: {
+        ...current.providers.github,
+        ...updates.providers?.github,
+      },
+      oidc: {
+        ...current.providers.oidc,
+        ...updates.providers?.oidc,
+        scopes: updates.providers?.oidc?.scopes ?? current.providers.oidc.scopes,
+      },
+    },
+  };
+
+  return normalizeBetterAuthConfig(nextConfig);
+};
+
 const SettingsContext = createContext<SettingsContextValue | undefined>(undefined);
 
 export const useSettings = () => {
@@ -174,7 +312,7 @@ interface SettingsProviderProps {
 export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
-  const { auth, reloadAuth } = useAuth();
+  const { auth } = useAuth();
 
   const [routingConfig, setRoutingConfig] = useState<RoutingConfig>({
     enableGlobalRoute: true,
@@ -183,8 +321,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     bearerAuthKey: '',
     bearerAuthHeaderName: 'Authorization',
     jsonBodyLimit: '1mb',
-    // 桌面版默认开启免登录，避免本地用户每次都要输入账号密码
-    skipAuth: true,
+    skipAuth: false,
   });
 
   const [tempRoutingConfig, setTempRoutingConfig] = useState<TempRoutingConfig>({
@@ -196,7 +333,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
   const [installConfig, setInstallConfig] = useState<InstallConfig>({
     pythonIndexUrl: '',
     npmRegistry: '',
-    baseUrl: 'http://localhost:23333',
+    baseUrl: 'http://localhost:3000',
   });
 
   const [smartRoutingConfig, setSmartRoutingConfig] = useState<SmartRoutingConfig>({
@@ -212,9 +349,18 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     azureOpenaiApiKey: '',
     azureOpenaiApiVersion: '',
     azureOpenaiEmbeddingDeployment: '',
+    azureOpenaiEmbeddingModel: '',
     progressiveDisclosure: false,
     embeddingMaxTokens: undefined,
   });
+
+  const [toolResultCompressionConfig, setToolResultCompressionConfig] =
+    useState<ToolResultCompressionConfig>({
+      enabled: false,
+      minTokens: 2000,
+      maxOutputTokens: 1200,
+      strategy: 'auto',
+    });
 
   const [mcpRouterConfig, setMCPRouterConfig] = useState<MCPRouterConfig>({
     apiKey: '',
@@ -226,11 +372,12 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
   const [oauthServerConfig, setOAuthServerConfig] = useState<OAuthServerConfig>(
     getDefaultOAuthServerConfig(),
   );
+  const [betterAuthConfig, setBetterAuthConfig] = useState<BetterAuthConfig>(
+    getDefaultBetterAuthConfig(),
+  );
 
   const [nameSeparator, setNameSeparator] = useState<string>('-');
   const [enableSessionRebuild, setEnableSessionRebuild] = useState<boolean>(false);
-  const [exposeHttp, setExposeHttp] = useState<boolean>(true);
-  const [httpPort, setHttpPort] = useState<number>(23333);
   const [bearerKeys, setBearerKeys] = useState<BearerKey[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -259,15 +406,14 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           bearerAuthHeaderName:
             data.data.systemConfig.routing.bearerAuthHeaderName || 'Authorization',
           jsonBodyLimit: data.data.systemConfig.routing.jsonBodyLimit || '1mb',
-          // 桌面版默认开启免登录
-          skipAuth: data.data.systemConfig.routing.skipAuth ?? true,
+          skipAuth: data.data.systemConfig.routing.skipAuth ?? false,
         });
       }
       if (data.success && data.data?.systemConfig?.install) {
         setInstallConfig({
           pythonIndexUrl: data.data.systemConfig.install.pythonIndexUrl || '',
           npmRegistry: data.data.systemConfig.install.npmRegistry || '',
-          baseUrl: data.data.systemConfig.install.baseUrl || 'http://localhost:23333',
+          baseUrl: data.data.systemConfig.install.baseUrl || 'http://localhost:3000',
         });
       }
       if (data.success && data.data?.systemConfig?.smartRouting) {
@@ -298,6 +444,18 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
             data.data.systemConfig.smartRouting.azureOpenaiEmbeddingModel || '',
           progressiveDisclosure: data.data.systemConfig.smartRouting.progressiveDisclosure ?? false,
           embeddingMaxTokens: data.data.systemConfig.smartRouting.embeddingMaxTokens,
+        });
+      }
+      if (data.success && data.data?.systemConfig?.toolResultCompression) {
+        const toolResultCompression = data.data.systemConfig.toolResultCompression;
+        const strategy = toolResultCompression.strategy;
+        setToolResultCompressionConfig({
+          enabled: toolResultCompression.enabled ?? false,
+          minTokens: toolResultCompression.minTokens || 2000,
+          maxOutputTokens: toolResultCompression.maxOutputTokens || 1200,
+          strategy: ['auto', 'json', 'log', 'search', 'diff', 'text'].includes(strategy)
+            ? strategy
+            : 'auto',
         });
       }
       if (data.success && data.data?.systemConfig?.mcpRouter) {
@@ -345,18 +503,16 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
         } else {
           setOAuthServerConfig(getDefaultOAuthServerConfig());
         }
+
+        setBetterAuthConfig(
+          normalizeBetterAuthConfig(data.data?.systemConfig?.auth?.betterAuth),
+        );
       }
       if (data.success && data.data?.systemConfig?.nameSeparator !== undefined) {
         setNameSeparator(data.data.systemConfig.nameSeparator);
       }
       if (data.success && data.data?.systemConfig?.enableSessionRebuild !== undefined) {
         setEnableSessionRebuild(data.data.systemConfig.enableSessionRebuild);
-      }
-      if (data.success && data.data?.systemConfig?.exposeHttp !== undefined) {
-        setExposeHttp(data.data.systemConfig.exposeHttp);
-      }
-      if (data.success && data.data?.systemConfig?.httpPort !== undefined) {
-        setHttpPort(data.data.systemConfig.httpPort);
       }
 
       if (data.success && Array.isArray(data.data?.bearerKeys)) {
@@ -389,10 +545,6 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           [key]: value,
         });
         showToast(t('settings.systemConfigUpdated'));
-        // When skipAuth changes, re-evaluate auth state
-        if (key === 'skipAuth') {
-          await reloadAuth();
-        }
         return true;
       } else {
         setError(data.error || 'Failed to update routing config');
@@ -503,6 +655,88 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       console.error('Failed to batch update smart routing config', { updates, error });
       setError(error instanceof Error ? error.message : 'Failed to update smart routing config');
       showToast(t('errors.failedToUpdateSmartRoutingConfig'));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Update tool result compression configuration
+  const updateToolResultCompressionConfig = async (
+    key: keyof ToolResultCompressionConfig,
+    value: any,
+  ) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await apiPut('/system-config', {
+        toolResultCompression: {
+          [key]: value,
+        },
+      });
+
+      if (data.success) {
+        setToolResultCompressionConfig({
+          ...toolResultCompressionConfig,
+          [key]: value,
+        });
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      } else {
+        setError(data.error || 'Failed to update tool result compression config');
+        showToast(data.error || t('errors.failedToUpdateSettings'));
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to update tool result compression config', { key, value, error });
+      setError(
+        error instanceof Error
+          ? error.message
+          : 'Failed to update tool result compression config',
+      );
+      showToast(t('errors.failedToUpdateSettings'));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Batch update tool result compression configuration
+  const updateToolResultCompressionConfigBatch = async (
+    updates: Partial<ToolResultCompressionConfig>,
+  ) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await apiPut('/system-config', {
+        toolResultCompression: updates,
+      });
+
+      if (data.success) {
+        setToolResultCompressionConfig({
+          ...toolResultCompressionConfig,
+          ...updates,
+        });
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      } else {
+        setError(data.error || 'Failed to update tool result compression config');
+        showToast(data.error || t('errors.failedToUpdateSettings'));
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to batch update tool result compression config', {
+        updates,
+        error,
+      });
+      setError(
+        error instanceof Error
+          ? error.message
+          : 'Failed to update tool result compression config',
+      );
+      showToast(t('errors.failedToUpdateSettings'));
       return false;
     } finally {
       setLoading(false);
@@ -673,6 +907,37 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     }
   };
 
+  // Batch update Better Auth configuration
+  const updateBetterAuthConfigBatch = async (updates: Partial<BetterAuthConfig>) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await apiPut('/system-config', {
+        auth: {
+          betterAuth: updates,
+        },
+      });
+
+      if (data.success) {
+        setBetterAuthConfig((current) => mergeBetterAuthConfig(current, updates));
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      } else {
+        setError(data.error || 'Failed to update Better Auth config');
+        showToast(data.error || t('errors.failedToUpdateBetterAuthConfig'));
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to batch update Better Auth config', { updates, error });
+      setError(error instanceof Error ? error.message : 'Failed to update Better Auth config');
+      showToast(t('errors.failedToUpdateBetterAuthConfig'));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Update name separator
   const updateNameSeparator = async (value: string) => {
     setLoading(true);
@@ -731,55 +996,6 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     }
   };
 
-  // Update HTTP server settings (exposeHttp and httpPort are top-level config keys)
-  const updateExposeHttp = async (value: boolean) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await apiPut('/system-config', { exposeHttp: value });
-      if (data.success) {
-        setExposeHttp(value);
-        showToast(t('settings.systemConfigUpdated'));
-        return true;
-      } else {
-        setError(data.error || 'Failed to update HTTP server setting');
-        showToast(data.error || t('errors.failedToUpdateRoutingConfig'));
-        return false;
-      }
-    } catch (error) {
-      console.error('Failed to update exposeHttp', { value, error });
-      setError(error instanceof Error ? error.message : 'Failed to update HTTP server setting');
-      showToast(t('errors.failedToUpdateRoutingConfig'));
-      return false;
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateHttpPort = async (value: number) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await apiPut('/system-config', { httpPort: value });
-      if (data.success) {
-        setHttpPort(value);
-        showToast(t('settings.systemConfigUpdated'));
-        return true;
-      } else {
-        setError(data.error || 'Failed to update HTTP port');
-        showToast(data.error || t('errors.failedToUpdateRoutingConfig'));
-        return false;
-      }
-    } catch (error) {
-      console.error('Failed to update httpPort', { value, error });
-      setError(error instanceof Error ? error.message : 'Failed to update HTTP port');
-      showToast(t('errors.failedToUpdateRoutingConfig'));
-      return false;
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const exportMCPSettings = async (serverName?: string) => {
     setLoading(true);
     setError(null);
@@ -808,7 +1024,9 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     }
   };
 
-  const createBearerKey = async (payload: Omit<BearerKey, 'id'>): Promise<BearerKey | null> => {
+  const createBearerKey = async (
+    payload: Pick<BearerKey, 'name'> & Partial<Omit<BearerKey, 'id' | 'name' | 'token'>>,
+  ): Promise<BearerKey | null> => {
     try {
       const data: ApiResponse<BearerKey> = await apiPost('/auth/keys', payload as any);
       if (data.success && data.data) {
@@ -892,12 +1110,12 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     setTempRoutingConfig,
     installConfig,
     smartRoutingConfig,
+    toolResultCompressionConfig,
     mcpRouterConfig,
     oauthServerConfig,
+    betterAuthConfig,
     nameSeparator,
     enableSessionRebuild,
-    exposeHttp,
-    httpPort,
     bearerKeys,
     loading,
     error,
@@ -908,15 +1126,16 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     updateInstallConfig,
     updateSmartRoutingConfig,
     updateSmartRoutingConfigBatch,
+    updateToolResultCompressionConfig,
+    updateToolResultCompressionConfigBatch,
     updateRoutingConfigBatch,
     updateMCPRouterConfig,
     updateMCPRouterConfigBatch,
     updateOAuthServerConfig,
     updateOAuthServerConfigBatch,
+    updateBetterAuthConfigBatch,
     updateNameSeparator,
     updateSessionRebuild,
-    updateExposeHttp,
-    updateHttpPort,
     exportMCPSettings,
     refreshBearerKeys,
     createBearerKey,

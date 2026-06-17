@@ -9,7 +9,11 @@ import WeChatDialog from './WeChatDialog';
 import WeChatIcon from '@/components/icons/WeChatIcon';
 import DiscordIcon from '@/components/icons/DiscordIcon';
 import SponsorIcon from '@/components/icons/SponsorIcon';
-import { checkLatestVersion, compareVersions } from '@/utils/version';
+import { ChangelogUpdateInfo } from '@/types';
+import {
+  fetchChangelogUpdateInfo,
+  shouldShowUpdateBadge,
+} from '@/services/changelogService';
 
 interface UserProfileMenuProps {
   collapsed: boolean;
@@ -25,23 +29,26 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
   const [showAboutDialog, setShowAboutDialog] = useState(false);
   const [sponsorDialogOpen, setSponsorDialogOpen] = useState(false);
   const [wechatDialogOpen, setWechatDialogOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<ChangelogUpdateInfo | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Check for new version on login and component mount
+  // Check for new version on login and component mount.
   useEffect(() => {
     const checkForNewVersion = async () => {
       try {
-        const latestVersion = await checkLatestVersion();
-        if (latestVersion) {
-          setShowNewVersionInfo(compareVersions(version, latestVersion) > 0);
-        }
+        const info = await fetchChangelogUpdateInfo({
+          currentVersion: version,
+          locale: i18n.language,
+        });
+        setUpdateInfo(info);
+        setShowNewVersionInfo(shouldShowUpdateBadge(info));
       } catch (error) {
         console.error('Error checking for new version:', error);
       }
     };
 
     checkForNewVersion();
-  }, [version]);
+  }, [version, i18n.language]);
 
   // Close the menu when clicking outside
   useEffect(() => {
@@ -109,6 +116,34 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
       {isOpen && (
         <div className="absolute top-0 transform -translate-y-full left-0 w-full min-w-max bg-white border border-gray-200 dark:border-gray-700 dark:bg-gray-800 z-50">
           <button
+            onClick={handleSponsorClick}
+            className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+          >
+            <SponsorIcon className="h-4 w-4 mr-2" />
+            {t('sponsor.label')}
+          </button>
+
+          {i18n.language === 'zh' ? (
+            <button
+              onClick={handleWeChatClick}
+              className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+            >
+              <WeChatIcon className="h-4 w-4 mr-2" />
+              {t('wechat.label')}
+            </button>
+          ) : (
+            <a
+              href="https://discord.gg/c8GKyzyFF"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+            >
+              <DiscordIcon className="h-4 w-4 mr-2" />
+              {t('discord.label')}
+            </a>
+          )}
+
+          <button
             onClick={handleSettingsClick}
             className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
           >
@@ -126,19 +161,15 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
             )}
           </button>
 
-          {!auth.skipAuth && (
-            <>
-              <div className="border-t border-gray-200 dark:border-gray-600"></div>
+          <div className="border-t border-gray-200 dark:border-gray-600"></div>
 
-              <button
-                onClick={handleLogoutClick}
-                className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
-              >
-                <LogOut className="h-4 w-4 mr-2" />
-                {t('app.logout')}
-              </button>
-            </>
-          )}
+          <button
+            onClick={handleLogoutClick}
+            className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+          >
+            <LogOut className="h-4 w-4 mr-2" />
+            {t('app.logout')}
+          </button>
         </div>
       )}
 
@@ -147,6 +178,14 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
         isOpen={showAboutDialog}
         onClose={() => setShowAboutDialog(false)}
         version={version}
+        initialUpdateInfo={updateInfo}
+        onUpdateInfoChange={(info) => {
+          setUpdateInfo(info);
+          setShowNewVersionInfo(shouldShowUpdateBadge(info));
+        }}
+        onDismissUpdate={() => {
+          setShowNewVersionInfo(false);
+        }}
       />
 
       {/* Sponsor dialog */}

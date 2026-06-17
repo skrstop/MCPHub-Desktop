@@ -18,6 +18,7 @@ const AddUserForm = ({ onAdd, onCancel }: AddUserFormProps) => {
     username: '',
     password: '',
     isAdmin: false,
+    email: '',
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -94,6 +95,22 @@ const AddUserForm = ({ onAdd, onCancel }: AddUserFormProps) => {
             </div>
 
             <div>
+              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
+                {t('users.email')}
+              </label>
+              <input
+                type="email"
+                id="email"
+                name="email"
+                value={formData.email || ''}
+                onChange={handleInputChange}
+                placeholder={t('users.emailPlaceholder')}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent form-input transition-all duration-200"
+                disabled={isSubmitting}
+              />
+            </div>
+
+            <div>
               <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
                 {t('users.password')} <span className="text-red-500">*</span>
               </label>
@@ -130,18 +147,18 @@ const AddUserForm = ({ onAdd, onCancel }: AddUserFormProps) => {
             </div>
           </div>
 
-          <div className="flex justify-end space-x-3 mt-8">
+          <div className="flex justify-end space-x-2 mt-6">
             <button
               type="button"
               onClick={onCancel}
-              className="px-5 py-2.5 text-gray-700 bg-white dark:bg-gray-800 border border-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-all duration-200 font-medium btn-secondary shadow-sm"
+              className="hub-btn"
               disabled={isSubmitting}
             >
               {t('common.cancel')}
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 font-medium btn-primary shadow-md disabled:opacity-70 disabled:cursor-not-allowed flex items-center"
+              className="hub-btn primary"
               disabled={isSubmitting}
             >
               {isSubmitting && (

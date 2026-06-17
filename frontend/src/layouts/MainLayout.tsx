@@ -1,12 +1,20 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { Outlet } from 'react-router-dom';
 import Header from '@/components/layout/Header';
 import Sidebar from '@/components/layout/Sidebar';
 import Content from '@/components/layout/Content';
 import { EmbeddingSyncProvider } from '@/contexts/EmbeddingSyncContext';
 
+const PageFallback: React.FC = () => (
+  <div
+    className="flex h-full min-h-[240px] items-center justify-center text-sm"
+    style={{ color: 'var(--hub-ink-3)' }}
+  >
+    Loading...
+  </div>
+);
+
 const MainLayout: React.FC = () => {
-  // 控制侧边栏展开/折叠状态
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
 
   const toggleSidebar = () => {
@@ -15,17 +23,14 @@ const MainLayout: React.FC = () => {
 
   return (
     <EmbeddingSyncProvider>
-      <div className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900">
-        {/* 顶部导航 */}
-        <Header onToggleSidebar={toggleSidebar} />
-
-        <div className="flex flex-1 overflow-hidden">
-          {/* 侧边导航 */}
-          <Sidebar collapsed={sidebarCollapsed} />
-
-          {/* 主内容区域 */}
+      <div className="flex h-screen" style={{ background: 'var(--hub-bg)', color: 'var(--hub-ink)' }}>
+        <Sidebar collapsed={sidebarCollapsed} />
+        <div className="flex flex-1 flex-col min-w-0 min-h-0">
+          <Header onToggleSidebar={toggleSidebar} />
           <Content>
-            <Outlet />
+            <Suspense fallback={<PageFallback />}>
+              <Outlet />
+            </Suspense>
           </Content>
         </div>
       </div>

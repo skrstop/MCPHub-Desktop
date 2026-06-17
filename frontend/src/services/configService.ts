@@ -1,5 +1,4 @@
-import { apiGet, apiRequest, fetchWithInterceptors } from '../utils/fetchInterceptor';
-import { isTauri } from '../utils/tauriClient';
+import { apiGet, fetchWithInterceptors } from '../utils/fetchInterceptor';
 import { getBasePath } from '../utils/runtime';
 
 export interface SystemConfig {
@@ -15,6 +14,7 @@ export interface SystemConfig {
   install?: {
     pythonIndexUrl?: string;
     npmRegistry?: string;
+    baseUrl?: string;
   };
   smartRouting?: {
     enabled?: boolean;
@@ -31,17 +31,32 @@ export interface SystemConfig {
     azureOpenaiEmbeddingDeployment?: string;
     embeddingMaxTokens?: number;
   };
+  toolResultCompression?: {
+    enabled?: boolean;
+    minTokens?: number;
+    maxOutputTokens?: number;
+    strategy?: 'auto' | 'json' | 'log' | 'search' | 'diff' | 'text';
+  };
   nameSeparator?: string;
   auth?: {
     betterAuth?: {
       enabled?: boolean;
       basePath?: string;
+      trustedOrigins?: string[];
       providers?: {
         google?: {
           enabled?: boolean;
         };
         github?: {
           enabled?: boolean;
+        };
+        oidc?: {
+          enabled?: boolean;
+          providerId?: string;
+          discoveryUrl?: string;
+          scopes?: string[];
+          pkce?: boolean;
+          prompt?: string;
         };
       };
     };
@@ -51,12 +66,21 @@ export interface SystemConfig {
 interface BetterAuthConfig {
   enabled?: boolean;
   basePath?: string;
+  trustedOrigins?: string[];
   providers?: {
     google?: {
       enabled?: boolean;
     };
     github?: {
       enabled?: boolean;
+    };
+    oidc?: {
+      enabled?: boolean;
+      providerId?: string;
+      discoveryUrl?: string;
+      scopes?: string[];
+      pkce?: boolean;
+      prompt?: string;
     };
   };
 }
@@ -88,20 +112,6 @@ export const getPublicConfig = async (): Promise<{
   betterAuth?: BetterAuthConfig;
 }> => {
   try {
-    // In Tauri desktop, fetch('/public-config') doesn't reach the Axum server.
-    // Use the invoke-based settings API instead.
-    if (isTauri()) {
-      const data = await apiRequest<any>('/settings');
-      if (data?.success) {
-        // 桌面版默认开启免登录：仅当配置中显式将 skipAuth 设置为 false 时才启用鉴权
-        const skipAuthValue = data.data?.systemConfig?.routing?.skipAuth;
-        const skipAuth = skipAuthValue === undefined ? true : skipAuthValue === true;
-        return { skipAuth, permissions: [] };
-      }
-      // 接口失败时，桌面版同样默认免登录，避免无法进入系统
-      return { skipAuth: true };
-    }
-
     const basePath = getBasePath();
     const response = await fetchWithInterceptors(`${basePath}/public-config`, {
       method: 'GET',

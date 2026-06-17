@@ -22,16 +22,20 @@ import { Switch } from './ToggleGroup';
 import DynamicForm from './DynamicForm';
 import ToolResult from './ToolResult';
 import ResetDescriptionButton from './ResetDescriptionButton';
+import { formatTokens } from '@/utils/contextCost';
+import { getToolDescriptionInfo } from '@/utils/toolDescription';
 
 interface ToolCardProps {
   server: string;
   tool: Tool;
+  readOnly?: boolean;
   onToggle?: (toolName: string, enabled: boolean) => void;
   onDescriptionUpdate?: (
     toolName: string,
     description: string,
     options?: { restored?: boolean },
   ) => void;
+  cost?: number;
 }
 
 // Helper to check for "empty" values
@@ -43,7 +47,7 @@ function isEmptyValue(value: any): boolean {
   return false;
 }
 
-const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps) => {
+const ToolCard = ({ tool, server, readOnly = false, onToggle, onDescriptionUpdate, cost }: ToolCardProps) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { nameSeparator } = useSettingsData();
@@ -81,6 +85,14 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
     setCustomDescription(tool.description || '');
   }, [tool.description]);
 
+  const toolDisplayName = tool.name.replace(server + nameSeparator, '');
+  const descriptionInfo = getToolDescriptionInfo(tool, t('tool.noDescription'));
+  const defaultDescriptionTooltip = descriptionInfo.hasDescriptionOverride
+    ? t('tool.defaultDescriptionTooltip', {
+        description: descriptionInfo.defaultDescription,
+      })
+    : undefined;
+
   // Generate a unique key for localStorage based on tool name and server
   const getStorageKey = useCallback(() => {
     return `mcphub_tool_form_${server ? `${server}_` : ''}${tool.name}`;
@@ -92,16 +104,18 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
   }, [getStorageKey]);
 
   const handleToggle = (enabled: boolean) => {
-    if (onToggle) {
+    if (!readOnly && onToggle) {
       onToggle(tool.name, enabled);
     }
   };
 
   const handleDescriptionEdit = () => {
+    if (readOnly) return;
     setIsEditingDescription(true);
   };
 
   const handleDescriptionSave = async () => {
+    if (readOnly) return;
     try {
       const result = await updateToolDescription(server, tool.name, customDescription);
       if (result.success) {
@@ -126,6 +140,7 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
   };
 
   const handleDescriptionReset = async () => {
+    if (readOnly) return;
     setIsResettingDescription(true);
 
     try {
@@ -230,122 +245,160 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow rounded-lg mb-4">
+    <div
+      className="hub-card overflow-hidden"
+      style={{ marginBottom: 8 }}
+    >
       <div
-        className="flex justify-between items-center cursor-pointer p-2"
+        className="flex justify-between items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-[var(--hub-surface-hover)] transition-colors"
         onClick={(e) => {
           e.stopPropagation();
           setIsExpanded(!isExpanded);
         }}
       >
-        <div className="flex-1">
-          <h3 className="text-lg font-medium text-gray-900 inline-flex items-center">
-            {tool.name.replace(server + nameSeparator, '')}
-            <button
-              className="ml-2 p-1 text-gray-500 hover:text-blue-600 cursor-pointer transition-colors"
-              onClick={handleCopyToolName}
-              title={t('common.copy')}
-            >
-              {copiedToolName ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
-            </button>
-            <span className="ml-2 text-sm font-normal text-gray-600 inline-flex items-center">
-              {isEditingDescription ? (
-                <>
-                  <input
-                    ref={descriptionInputRef}
-                    type="text"
-                    className="px-2 py-1 border border-blue-300 rounded bg-white dark:bg-gray-800 text-sm focus:outline-none form-input"
-                    value={customDescription}
-                    onChange={handleDescriptionChange}
-                    onKeyDown={handleDescriptionKeyDown}
-                    onClick={(e) => e.stopPropagation()}
+        <div className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
+          <span className="hub-mono font-medium" style={{ fontSize: 13, color: 'var(--hub-ink)' }}>
+            {toolDisplayName}
+          </span>
+          <button
+            className="hub-icon-btn sm"
+            onClick={handleCopyToolName}
+            title={t('common.copy')}
+          >
+            {copiedToolName
+              ? <Check size={12} style={{ color: 'var(--hub-ok)' }} />
+              : <Copy size={12} />}
+          </button>
+          <span className="flex items-center gap-1" style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>
+            {isEditingDescription ? (
+              <>
+                <input
+                  ref={descriptionInputRef}
+                  type="text"
+                  className="hub-input"
+                  style={{ height: 26, fontSize: 12, width: textWidth > 0 ? `${textWidth + 20}px` : 160, minWidth: 80 }}
+                  value={customDescription}
+                  onChange={handleDescriptionChange}
+                  onKeyDown={handleDescriptionKeyDown}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <button
+                  className="hub-icon-btn sm"
+                  onClick={(e) => { e.stopPropagation(); handleDescriptionSave(); }}
+                  disabled={isResettingDescription}
+                >
+                  <Check size={12} style={{ color: 'var(--hub-ok)' }} />
+                </button>
+                <ResetDescriptionButton
+                  title={t('tool.restoreDefault')}
+                  onClick={(e) => { e.stopPropagation(); handleDescriptionReset(); }}
+                  disabled={isResettingDescription}
+                  loading={isResettingDescription}
+                />
+              </>
+            ) : (
+              <>
+                <span ref={descriptionTextRef} title={defaultDescriptionTooltip}>
+                  {descriptionInfo.currentDescription}
+                </span>
+                {descriptionInfo.hasDescriptionOverride && (
+                  <span
+                    className="inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium"
                     style={{
-                      minWidth: '100px',
-                      width: textWidth > 0 ? `${textWidth + 20}px` : 'auto',
+                      color: 'var(--hub-accent)',
+                      borderColor: 'var(--hub-line)',
+                      background: 'var(--hub-bg-2)',
                     }}
-                  />
-                  <button
-                    className="ml-2 p-1 text-green-600 hover:text-green-800 cursor-pointer transition-colors"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDescriptionSave();
-                    }}
-                    disabled={isResettingDescription}
+                    title={defaultDescriptionTooltip}
                   >
-                    <Check size={16} />
-                  </button>
-                  <ResetDescriptionButton
-                    title={t('tool.restoreDefault')}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDescriptionReset();
-                    }}
-                    disabled={isResettingDescription}
-                    loading={isResettingDescription}
-                  />
-                </>
-              ) : (
-                <>
-                  <span ref={descriptionTextRef}>
-                    {customDescription || t('tool.noDescription')}
+                    {t('tool.descriptionModifiedBadge')}
                   </span>
-                  <button
-                    className="ml-2 p-1 text-gray-500 hover:text-blue-600 cursor-pointer transition-colors"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDescriptionEdit();
-                    }}
-                  >
-                    <Edit size={14} />
-                  </button>
-                  <ResetDescriptionButton
-                    title={t('tool.restoreDefault')}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDescriptionReset();
-                    }}
-                    disabled={isResettingDescription}
-                    loading={isResettingDescription}
-                  />
-                </>
-              )}
-            </span>
-          </h3>
+                )}
+                {!readOnly && (
+                  <>
+                    <button
+                      className="hub-icon-btn sm"
+                      onClick={(e) => { e.stopPropagation(); handleDescriptionEdit(); }}
+                    >
+                      <Edit size={12} />
+                    </button>
+                    <ResetDescriptionButton
+                      title={t('tool.restoreDefault')}
+                      onClick={(e) => { e.stopPropagation(); handleDescriptionReset(); }}
+                      disabled={isResettingDescription}
+                      loading={isResettingDescription}
+                    />
+                  </>
+                )}
+              </>
+            )}
+          </span>
         </div>
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-2" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {cost != null && (
+            <span
+              className="hub-mono flex-shrink-0"
+              style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}
+              title={t('cost.estimate')}
+            >
+              Σ {formatTokens(cost)}
+            </span>
+          )}
+          <div className="flex h-[26px] items-center" onClick={(e) => e.stopPropagation()}>
             <Switch
               checked={tool.enabled ?? true}
               onCheckedChange={handleToggle}
-              disabled={isRunning}
+              disabled={isRunning || readOnly}
+              size="card"
+              aria-label={`${t((tool.enabled ?? true) ? 'server.disable' : 'server.enable')} ${toolDisplayName}`}
             />
           </div>
           <button
             onClick={(e) => {
               e.stopPropagation();
-              setIsExpanded(true); // Ensure card is expanded when showing run form
+              setIsExpanded(true);
               setShowRunForm(true);
             }}
-            className="flex items-center space-x-1 px-3 py-1 text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
-            // tool.enabled 为 undefined 时视为启用（Rust 端 Tool 模型未返回 enabled 字段）
-            disabled={isRunning || tool.enabled === false}
+            className="hub-btn sm"
+            style={{ color: 'var(--hub-accent)' }}
+            disabled={isRunning || !tool.enabled}
           >
-            {isRunning ? <Loader size={14} className="animate-spin" /> : <Play size={14} />}
+            {isRunning ? <Loader size={12} className="animate-spin" /> : <Play size={12} />}
             <span>{isRunning ? t('tool.running') : t('tool.run')}</span>
           </button>
-          <button className="text-gray-400 hover:text-gray-600">
-            {isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+          <button className="hub-icon-btn sm">
+            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
         </div>
       </div>
 
       {isExpanded && (
-        <div className="mt-4 space-y-4">
+        <div style={{ borderTop: '1px solid var(--hub-line-2)', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {descriptionInfo.hasDescriptionOverride && descriptionInfo.defaultDescription && (
+            <div
+              style={{
+                background: 'var(--hub-bg-2)',
+                borderRadius: 7,
+                padding: '8px 12px',
+                border: '1px dashed var(--hub-line)',
+                fontSize: 11.5,
+                color: 'var(--hub-ink-3)',
+              }}
+            >
+              <span className="hub-sect" style={{ marginRight: 6 }}>
+                {t('tool.defaultDescriptionLabel')}
+              </span>
+              <span className="whitespace-pre-wrap break-words">
+                {descriptionInfo.defaultDescription}
+              </span>
+            </div>
+          )}
+
           {/* Schema Display */}
           {!showRunForm && (
-            <div className="bg-gray-50 dark:bg-gray-800 rounded p-3 border border-gray-300">
-              <h4 className="text-sm font-medium text-gray-900 mb-2">{t('tool.inputSchema')}</h4>
-              <pre className="text-xs text-gray-600 overflow-auto">
+            <div style={{ background: 'var(--hub-bg-2)', borderRadius: 7, padding: '8px 12px', border: '1px solid var(--hub-line)' }}>
+              <div className="hub-sect" style={{ marginBottom: 6 }}>{t('tool.inputSchema')}</div>
+              <pre className="hub-mono overflow-auto" style={{ fontSize: 11.5, color: 'var(--hub-ink-2)', margin: 0 }}>
                 {JSON.stringify(tool.inputSchema, null, 2)}
               </pre>
             </div>
@@ -353,7 +406,7 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
 
           {/* Run Form */}
           {showRunForm && (
-            <div className="border border-gray-300 rounded-lg p-4">
+            <div style={{ border: '1px solid var(--hub-line)', borderRadius: 8, padding: 14 }}>
               <DynamicForm
                 schema={tool.inputSchema || { type: 'object' }}
                 onSubmit={handleRunTool}
@@ -361,12 +414,11 @@ const ToolCard = ({ tool, server, onToggle, onDescriptionUpdate }: ToolCardProps
                 loading={isRunning}
                 storageKey={getStorageKey()}
                 title={t('tool.runToolWithName', {
-                  name: tool.name.replace(server + nameSeparator, ''),
+                  name: toolDisplayName,
                 })}
               />
-              {/* Tool Result */}
               {result && (
-                <div className="mt-4">
+                <div style={{ marginTop: 12 }}>
                   <ToolResult result={result} onClose={handleCloseResult} />
                 </div>
               )}
