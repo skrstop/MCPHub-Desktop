@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum UserRole {
     Admin,
     User,
+    Guest,
 }
 
 impl Default for UserRole {

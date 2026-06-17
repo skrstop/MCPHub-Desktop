@@ -112,7 +112,7 @@ pub async fn get_current_user(session: State<'_, SessionState>) -> Result<Option
             return Ok(Some(UserInfo {
                 id: "guest".to_string(),
                 username: "guest".to_string(),
-                role: "guest".to_string(),
+                role: UserRole::Guest,
                 created_at: chrono::Utc::now().to_rfc3339(),
             }));
         }
