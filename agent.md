@@ -1225,29 +1225,29 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 
 > 以下条目按优先级排序，建议在 P0/P1 阶段补强时一并处理。
 
-- [ ] **JWT 身份绑定加固**（来源：`3fb39f0`，GHSA-wf8q-wvv8-p8jf）
+- [x] **JWT 身份绑定加固**（来源：`3fb39f0`，GHSA-wf8q-wvv8-p8jf）
   - 用户级 SSE 路由严格验证 JWT 身份
-- [ ] **Bearer Key 作用域检查**（来源：`927e98d`，CWE-863）
+- [x] **Bearer Key 作用域检查**（来源：`927e98d`，CWE-863）
   - Dashboard API 拒绝作用域 bearer key
-- [ ] **MCP 设置导出权限**（来源：`60a4da4`，CWE-862）
+- [x] **MCP 设置导出权限**（来源：`60a4da4`，CWE-862）
   - 要求管理员权限并脱敏敏感信息
-- [ ] **Headless 模式**（来源：`077eed9`）
+- [x] **Headless 模式**（来源：`077eed9`）
   - 支持禁用内置 Web UI
-- [ ] **Guest 用户访问**（来源：`7300b74`）
+- [x] **Guest 用户访问**（来源：`7300b74`）
   - 未认证用户获得 guest 管理员访问权限
-- [ ] **代理信任解析**（来源：`2de5057`）
+- [x] **代理信任解析**（来源：`2de5057`）
   - 支持 TRUST_PROXY 环境变量
-- [ ] **智能路由 bearer auth**（来源：`45b1f05`）
+- [x] **智能路由 bearer auth**（来源：`45b1f05`）
   - 支持作用域 bearer auth
-- [ ] **OAuth 配置加载**（来源：`8fe47e2`）
+- [x] **OAuth 配置加载**（来源：`8fe47e2`）
   - OAuth token 交换后从 DB 加载配置
-- [ ] **Embedding 优化**（来源：`87f241a`、`5ca154a`）
+- [x] **Embedding 优化**（来源：`87f241a`、`5ca154a`）
   - 排除工具描述、防止重复生成
-- [ ] **SSO 用户匹配**（来源：`c8779df`、`ed622fc`）
+- [x] **SSO 用户匹配**（来源：`c8779df`、`ed622fc`）
   - 改进 OIDC 用户匹配逻辑
-- [ ] **托管模式**（来源：`20adf81`）
+- [x] **托管模式**（来源：`20adf81`）
   - 实现 hosted mode 功能
-- [ ] **IPv6 规范化**（来源：`e894500`）
+- [x] **IPv6 规范化**（来源：`e894500`）
   - 规范化 IPv4 映射的 IPv6 地址
 
 #### 2026-04-28：同步 `af5b013` → `3ea0bbe`（21 个 commit）
