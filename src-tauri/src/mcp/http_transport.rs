@@ -49,6 +49,9 @@ impl HttpTransport {
             "id": id,
             "method": method,
             "params": params,
+            "options": {
+                "resetTimeoutOnProgress": true
+            },
         });
 
         let mut req = self.client.post(&self.url).json(&body);
@@ -57,8 +60,35 @@ impl HttpTransport {
         }
 
         let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("HTTP error: {}", resp.status()));
+        let status = resp.status();
+
+        // Retry on recoverable 4xx errors (408, 429)
+        if status.is_client_error() && (status.as_u16() == 408 || status.as_u16() == 429) {
+            log::warn!(
+                "[{}] Received recoverable HTTP {}, retrying...",
+                self.server_name,
+                status
+            );
+            // Wait a bit before retrying
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+            let mut req = self.client.post(&self.url).json(&body);
+            for (k, v) in &self.headers {
+                req = req.header(k, v);
+            }
+            let resp = req.send().await?;
+            if !resp.status().is_success() {
+                return Err(anyhow!("HTTP error after retry: {}", resp.status()));
+            }
+            let json: Value = resp.json().await?;
+            if let Some(err) = json.get("error") {
+                return Err(anyhow!("MCP error: {}", err));
+            }
+            return Ok(json["result"].clone());
+        }
+
+        if !status.is_success() {
+            return Err(anyhow!("HTTP error: {}", status));
         }
 
         let json: Value = resp.json().await?;

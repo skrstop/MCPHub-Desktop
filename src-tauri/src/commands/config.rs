@@ -1,4 +1,22 @@
-use crate::services::{bearer_key_service, config_service, http_server, settings_import};
+use crate::{
+    auth as auth_util,
+    services::{bearer_key_service, config_service, http_server, settings_import},
+};
+use tauri::State;
+use crate::commands::auth::SessionState;
+
+/// Helper to verify that the current session belongs to an admin user.
+async fn require_admin(session: &SessionState) -> Result<(), String> {
+    let token_str = {
+        let guard = session.0.lock().await;
+        guard.as_ref().ok_or("Not authenticated")?.token.clone()
+    };
+    let claims = auth_util::verify_token(&token_str).map_err(|e| e.to_string())?;
+    if claims.role != "admin" {
+        return Err("Admin access required".to_string());
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn get_system_config() -> Result<serde_json::Value, String> {
@@ -34,8 +52,11 @@ pub async fn import_settings(json: String) -> Result<settings_import::ImportSumm
 }
 
 /// Export current server/group/system config as a JSON string (mcp_settings.json compatible)
+/// Requires admin access. Sensitive values (API keys, tokens) are redacted.
 #[tauri::command]
-pub async fn export_settings() -> Result<String, String> {
+pub async fn export_settings(session: State<'_, SessionState>) -> Result<String, String> {
+    require_admin(&session).await?;
+
     use crate::services::{group_service, server_service};
     use std::collections::HashMap;
 
@@ -44,6 +65,25 @@ pub async fn export_settings() -> Result<String, String> {
 
     let mut mcp_servers: HashMap<String, serde_json::Value> = HashMap::new();
     for s in &servers {
+        // Redact sensitive environment variables
+        let redacted_env = s.env.as_ref().map(|env| {
+            env.iter()
+                .map(|(k, v)| {
+                    let lower_k = k.to_lowercase();
+                    if lower_k.contains("key")
+                        || lower_k.contains("token")
+                        || lower_k.contains("secret")
+                        || lower_k.contains("password")
+                        || lower_k.contains("auth")
+                    {
+                        (k.clone(), "***REDACTED***".to_string())
+                    } else {
+                        (k.clone(), v.clone())
+                    }
+                })
+                .collect::<std::collections::HashMap<String, String>>()
+        });
+
         mcp_servers.insert(
             s.name.clone(),
             serde_json::json!({
@@ -51,7 +91,7 @@ pub async fn export_settings() -> Result<String, String> {
                 "description": s.description,
                 "command": s.command,
                 "args": s.args,
-                "env": s.env,
+                "env": redacted_env,
                 "url": s.url,
                 "disabled": !s.enabled,
             }),

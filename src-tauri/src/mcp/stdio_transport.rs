@@ -131,6 +131,11 @@ impl McpTransport for StdioTransport {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // Use current working directory for the child process
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.current_dir(cwd);
+        }
+
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to get stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to get stdout"))?;

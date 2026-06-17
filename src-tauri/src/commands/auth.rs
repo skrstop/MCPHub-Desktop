@@ -4,13 +4,26 @@ use crate::{
         auth::{AuthToken, LoginRequest},
         user::{UserInfo, UserPayload, UserRole},
     },
-    services::user_service,
+    services::{config_service, user_service},
 };
 use tauri::State;
 use tokio::sync::Mutex;
 
 /// In-memory session: stores current user token
 pub struct SessionState(pub Mutex<Option<AuthToken>>);
+
+/// Check if skipAuth is enabled in config
+async fn is_skip_auth_enabled() -> bool {
+    config_service::get()
+        .await
+        .ok()
+        .and_then(|c| {
+            c.get("routing")
+                .and_then(|r| r.get("skipAuth"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
 
 #[tauri::command]
 pub async fn login(
@@ -91,6 +104,18 @@ pub async fn get_current_user(session: State<'_, SessionState>) -> Result<Option
         guard.as_ref().map(|t| t.token.clone())
     };
     let Some(token_str) = token_str else {
+        // If no token and skipAuth is enabled, return a guest user
+        if is_skip_auth_enabled().await {
+            let guest_token = auth_util::issue_guest_token().map_err(|e| e.to_string())?;
+            let mut guard = session.0.lock().await;
+            *guard = Some(guest_token);
+            return Ok(Some(UserInfo {
+                id: "guest".to_string(),
+                username: "guest".to_string(),
+                role: "guest".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }));
+        }
         return Ok(None);
     };
     let claims = auth_util::verify_token(&token_str).map_err(|e| e.to_string())?;

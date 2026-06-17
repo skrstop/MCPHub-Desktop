@@ -14,6 +14,19 @@ pub async fn get() -> Result<Value> {
     Ok(val)
 }
 
+/// Check if headless mode is enabled (disables built-in Web UI)
+pub async fn is_headless() -> bool {
+    get()
+        .await
+        .ok()
+        .and_then(|c| {
+            c.get("routing")
+                .and_then(|r| r.get("headless"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
 /// Deep-merge `patch` into `current`: object keys are merged recursively,
 /// non-object values are replaced.
 fn merge_json(current: &mut Value, patch: &Value) {

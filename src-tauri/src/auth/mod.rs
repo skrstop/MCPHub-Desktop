@@ -46,6 +46,11 @@ pub fn issue_token(user_id: &str, username: &str, role: &str) -> Result<AuthToke
     })
 }
 
+/// Issue a guest token with limited admin privileges
+pub fn issue_guest_token() -> Result<AuthToken> {
+    issue_token("guest", "guest", "guest")
+}
+
 /// Validate a JWT token and return the claims
 pub fn verify_token(token: &str) -> Result<Claims> {
     let token_data = decode::<Claims>(

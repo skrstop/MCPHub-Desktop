@@ -705,9 +705,13 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
 
     let app = build_router(body_limit_bytes);
 
+    // Check TRUST_PROXY environment variable
+    let trust_proxy = std::env::var("TRUST_PROXY").unwrap_or_default().to_lowercase();
+    let trust_proxy = trust_proxy == "true" || trust_proxy == "1" || trust_proxy == "yes";
+
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
     let listener = TcpListener::bind(addr).await?;
-    log::info!("MCPHub HTTP server listening on http://0.0.0.0:{} (body limit: {} bytes)", port, body_limit_bytes);
+    log::info!("MCPHub HTTP server listening on http://0.0.0.0:{} (body limit: {} bytes, trust_proxy: {})", port, body_limit_bytes, trust_proxy);
 
     let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
 

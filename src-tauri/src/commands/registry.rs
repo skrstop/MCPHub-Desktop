@@ -31,12 +31,24 @@ pub async fn list_registry_servers(
     proxy_send(req).await
 }
 
-/// Proxy GET /registry/servers/:name/versions to the official MCP registry.
+/// Proxy GET /registry/servers/versions?serverName= to the official MCP registry.
+/// Uses query parameter style as per frontend useRegistryData.ts.
 #[tauri::command]
-pub async fn get_registry_server_versions(name: String) -> Result<serde_json::Value, String> {
+pub async fn get_registry_server_versions(server_name: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let req = client
-        .get(format!("{}/servers/{}/versions", REGISTRY_BASE, name))
+        .get(format!("{}/servers/{}/versions", REGISTRY_BASE, server_name))
+        .header("Accept", "application/json, application/problem+json");
+    proxy_send(req).await
+}
+
+/// Proxy GET /registry/servers/version?serverName=&version= to the official MCP registry.
+/// Uses query parameter style as per frontend useRegistryData.ts.
+#[tauri::command]
+pub async fn get_registry_server_version(server_name: String, version: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let req = client
+        .get(format!("{}/servers/{}/versions/{}", REGISTRY_BASE, server_name, version))
         .header("Accept", "application/json, application/problem+json");
     proxy_send(req).await
 }
