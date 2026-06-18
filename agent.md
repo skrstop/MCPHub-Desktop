@@ -531,6 +531,11 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 - 原因：`latest.json` 文件不存在或格式错误
 - 解决：检查 GitHub Release 是否包含 `latest.json` 文件，确认格式正确
 
+**问题：Windows CI 构建 Decode signing key 步骤报 UnicodeEncodeError**
+
+- 原因：Windows runner 上 Python 默认使用 cp1252 编码，无法输出 `✅`（U+2705）等 Unicode 字符，导致 `print()` 抛出 `UnicodeEncodeError: 'charmap' codec can't encode character '\u2705'`
+- 解决：在 `build` job 级别添加 `env: PYTHONIOENCODING: utf-8`，确保所有步骤中 Python 使用 UTF-8 编码输出
+
 **问题：构建矩阵只构建了一个平台**
 
 - 原因：release.yml 中其他平台被注释掉了
