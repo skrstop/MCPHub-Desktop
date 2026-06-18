@@ -92,6 +92,15 @@ jobs:
           echo "Ref:           ${{ github.ref }}"
           echo "SHA:           ${{ github.sha }}"
           echo "========================================="
+          echo ""
+          echo "=== Current directory ==="
+          pwd
+          echo ""
+          echo "=== Directory listing ==="
+          ls -la
+          echo ""
+          echo "=== Disk space ==="
+          df -h . 2>/dev/null || echo "(df not available)"
 
       # ─── 安装 Node.js ──────────────────────────────────────────────────────
       - name: Setup Node.js
@@ -104,8 +113,21 @@ jobs:
       - name: Print Node.js info
         shell: bash
         run: |
+          echo "========================================="
+          echo "  Node.js Environment"
+          echo "========================================="
+          echo "Node.js path:  $(which node)"
           echo "Node.js version: $(node --version)"
+          echo "npm path:      $(which npm)"
           echo "npm version:     $(npm --version)"
+          echo "npx path:      $(which npx)"
+          echo ""
+          echo "=== npm config ==="
+          npm config list
+          echo ""
+          echo "=== NODE_ENV ==="
+          echo "NODE_ENV=${NODE_ENV:-<not set>}"
+          echo "========================================="
 
       # ─── 安装 Rust + 目标 triple ───────────────────────────────────────────
       - name: Setup Rust
@@ -116,18 +138,42 @@ jobs:
       - name: Print Rust info
         shell: bash
         run: |
-          echo "Rust version:"
+          echo "========================================="
+          echo "  Rust Environment"
+          echo "========================================="
+          echo "Active toolchain:"
           rustup show active-toolchain
+          echo ""
           echo "Installed targets:"
           rustup target list --installed
+          echo ""
+          echo "Rust version: $(rustc --version)"
+          echo "Rust host:    $(rustc -vV | grep host | awk '{print $2}')"
           echo "Cargo version: $(cargo --version)"
+          echo ""
+          echo "=== rustup show ==="
+          rustup show
+          echo ""
+          echo "=== CARGO_HOME ==="
+          echo "CARGO_HOME=${CARGO_HOME:-<not set>}"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-<not set>}"
+          echo "========================================="
 
       # ─── Windows arm64 交叉编译工具链 ─────────────────────────────────────
       - name: Install Windows ARM64 MSVC toolchain
         if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
         run: |
+          echo "========================================="
+          echo "  Installing Windows ARM64 MSVC toolchain"
+          echo "========================================="
+          echo "Adding target: aarch64-pc-windows-msvc"
           rustup target add aarch64-pc-windows-msvc
-          echo "Added aarch64-pc-windows-msvc target"
+          echo ""
+          echo "Installed targets after add:"
+          rustup target list --installed
+          echo "✅ aarch64-pc-windows-msvc target added"
+          echo "========================================="
 
       # ─── Rust 构建缓存 ─────────────────────────────────────────────────────
       - name: Cache Rust
@@ -139,9 +185,15 @@ jobs:
       # ─── Linux 系统依赖 ────────────────────────────────────────────────────
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          echo "Installing Linux system dependencies..."
+          echo "========================================="
+          echo "  Installing Linux System Dependencies"
+          echo "========================================="
+          echo "[1/3] apt-get update..."
           sudo apt-get update
+          echo ""
+          echo "[2/3] apt-get install..."
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
@@ -153,33 +205,100 @@ jobs:
             file \
             libfuse2 \
             xdg-utils
+          echo ""
+          echo "[3/3] Verify installed packages..."
+          echo "pkg-config version: $(pkg-config --version)"
+          echo "openssl version: $(openssl version 2>/dev/null || echo 'not found')"
+          echo ""
+          echo "=== Installed webkit2gtk ==="
+          dpkg -l | grep webkit2gtk || echo "not found"
+          echo ""
           echo "✅ Linux dependencies installed"
+          echo "========================================="
 
       # ─── 安装根目录依赖（tauri-cli）────────────────────────────────────────
       - name: Install root deps
+        shell: bash
         run: |
-          echo "Installing root npm dependencies..."
+          echo "========================================="
+          echo "  Installing Root npm Dependencies"
+          echo "========================================="
+          echo "Current directory: $(pwd)"
+          echo ""
+          echo "[1/4] package.json contents:"
+          cat package.json
+          echo ""
+          echo "[2/4] npm install..."
           npm install
+          echo ""
+          echo "[3/4] node_modules size:"
+          du -sh node_modules 2>/dev/null || echo "node_modules not found"
+          echo ""
+          echo "[4/4] Verify tauri-cli installed:"
+          npx tauri --version 2>/dev/null || echo "tauri-cli not found"
+          echo ""
+          echo "=== @tauri-apps/cli version ==="
+          cat node_modules/@tauri-apps/cli/package.json 2>/dev/null | grep '"version"' || echo "not found"
+          echo ""
           echo "✅ Root deps installed"
+          echo "========================================="
 
       # ─── 安装前端依赖 ──────────────────────────────────────────────────────
       - name: Install frontend deps
+        shell: bash
         run: |
-          echo "Installing frontend npm dependencies..."
+          echo "========================================="
+          echo "  Installing Frontend npm Dependencies"
+          echo "========================================="
+          echo "Current directory: $(pwd)"
+          echo ""
+          echo "[1/4] frontend/package.json contents:"
+          cat frontend/package.json
+          echo ""
+          echo "[2/4] cd frontend && npm install..."
           cd frontend && npm install
+          echo ""
+          echo "[3/4] frontend/node_modules size:"
+          du -sh node_modules 2>/dev/null || echo "node_modules not found"
+          echo ""
+          echo "[4/4] Verify frontend build tools:"
+          echo "vite: $(npx vite --version 2>/dev/null || echo 'not found')"
+          echo ""
           echo "✅ Frontend deps installed"
+          echo "========================================="
 
       # ─── 下载 bundled runtimes（Unix）─────────────────────────────────────
       - name: Download bundled runtimes (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
-          echo "Downloading bundled runtimes for Unix (TARGET_ARCH=${{ matrix.runtime-arch }})..."
+          echo "========================================="
+          echo "  Downloading Bundled Runtimes (Unix)"
+          echo "========================================="
+          echo "TARGET_ARCH=${{ matrix.runtime-arch }}"
+          echo "Script: scripts/download-runtimes.sh"
+          echo ""
+          echo "[1/3] Script content:"
+          cat scripts/download-runtimes.sh
+          echo ""
+          echo "[2/3] Running download script..."
           bash scripts/download-runtimes.sh
           echo ""
-          echo "=== Runtime files ==="
+          echo "[3/3] Verify downloaded files:"
+          echo "=== src-tauri/runtimes/ ==="
           ls -la src-tauri/runtimes/ 2>/dev/null || echo "No runtimes directory"
+          echo ""
+          echo "=== src-tauri/runtimes/node/bin/ ==="
           ls -la src-tauri/runtimes/node/bin/ 2>/dev/null || echo "No node binary"
+          echo ""
+          echo "=== src-tauri/runtimes/uv/ ==="
           ls -la src-tauri/runtimes/uv/ 2>/dev/null || echo "No uv binary"
+          echo ""
+          echo "=== Full runtimes tree ==="
+          find src-tauri/runtimes/ -type f 2>/dev/null | sort || echo "No runtimes"
+          echo ""
+          echo "✅ Runtimes downloaded"
+          echo "========================================="
         env:
           TARGET_ARCH: ${{ matrix.runtime-arch }}
 
@@ -188,125 +307,217 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Write-Host "Downloading bundled runtimes for Windows (TargetArch=${{ matrix.runtime-arch }})..."
+          Write-Host "========================================="
+          Write-Host "  Downloading Bundled Runtimes (Windows)"
+          Write-Host "========================================="
+          Write-Host "TargetArch=${{ matrix.runtime-arch }}"
+          Write-Host "Script: scripts/download-runtimes.ps1"
+          Write-Host ""
+          Write-Host "[1/3] Script content:"
+          Get-Content scripts/download-runtimes.ps1
+          Write-Host ""
+          Write-Host "[2/3] Running download script..."
           .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
           Write-Host ""
-          Write-Host "=== Runtime files ==="
-          Get-ChildItem -Path src-tauri\runtimes -Recurse -Depth 2 | Format-Table Name, Length
+          Write-Host "[3/3] Verify downloaded files:"
+          Write-Host "=== src-tauri\runtimes ==="
+          Get-ChildItem -Path src-tauri\runtimes -Recurse -Depth 2 | Format-Table Name, Length, FullName
+          Write-Host ""
+          Write-Host "✅ Runtimes downloaded"
+          Write-Host "========================================="
 
-      # ─── 解码签名私钥 ─────────────────────────────────────────────────────
-      # mcphub.key 文件以 base64 编码存储，Tauri signer 需要原始格式（以 "untrusted comment:" 开头）
-      # 关键：解码后必须 strip 尾部空白/换行，否则 Tauri signer 解析失败导致 .sig 不生成
-      # ⚠️ Windows 兼容：使用 Python 直接写 GITHUB_ENV（newline='\n' 强制 Unix 换行）
-      # 不使用 bash heredoc，因为 Windows 上 echo/printf 可能添加 \r 导致密钥截断
+      # ─── 解码签名密钥 ─────────────────────────────────────────────────────
       - name: Decode signing key
         shell: bash
         run: |
           echo "========================================="
-          echo "  Decoding signing key"
+          echo "  [1/7] Locate key file"
           echo "========================================="
           KEY_FILE="src-tauri/updater/mcphub.key"
+          echo "KEY_FILE=$KEY_FILE"
+          echo "Current directory: $(pwd)"
+          echo ""
           if [ ! -f "$KEY_FILE" ]; then
             echo "❌ ERROR: Key file not found: $KEY_FILE"
+            echo "Listing src-tauri/updater/:"
+            ls -la src-tauri/updater/ 2>/dev/null || echo "Directory not found"
             exit 1
           fi
-          KEY_SIZE=$(wc -c < "$KEY_FILE")
-          echo "Key file size: $KEY_SIZE bytes"
-          python3 << 'PYEOF'
-          import base64, os, sys
-          key_file = 'src-tauri/updater/mcphub.key'
-          key_content = open(key_file, 'r', encoding='utf-8').read().strip()
-          print(f"Key file content length: {len(key_content)} chars")
-          print(f"Key starts with: {key_content[:30]}...")
-          # 如果密钥已经是原始格式（以 "untrusted comment:" 开头），直接使用
-          # 否则从 base64 解码
-          if key_content.startswith('untrusted comment:'):
-              key_raw = key_content
-              print("Key is already in raw format (starts with 'untrusted comment:')")
-          else:
-              print("Key is base64 encoded, decoding...")
-              key_raw = base64.b64decode(key_content).decode('utf-8')
-              print(f"Decoded key length: {len(key_raw)} chars")
-          # ⚠️ 关键修复：strip 尾部空白/换行，确保密钥格式干净
-          # 之前缺少此步骤导致 TAURI_SIGNING_PRIVATE_KEY 末尾有多余空行，
-          # Tauri signer 无法解析，.sig 文件不会生成，latest.json platforms 为空
-          key_raw = key_raw.strip()
-          # ⚠️ 移除所有 \r 字符，避免 Windows 换行符问题
-          key_raw = key_raw.replace('\r', '')
-          print(f"After strip: key length = {len(key_raw)} chars")
-          print(f"First line: {key_raw.split(chr(10))[0]}")
-          print(f"Number of lines: {len(key_raw.split(chr(10)))}")
-          # ⚠️ 使用二进制模式写入 GITHUB_ENV，强制 Unix 换行符（\n）
-          # Windows 上 Python open() 文本模式会将 \n 写为 \r\n，破坏 heredoc 语法
-          # Tauri signer 报错 "Invalid symbol 32, offset 9" 就是因为 heredoc 截断只读到第一行
-          env_file = os.environ['GITHUB_ENV']
-          with open(env_file, 'ab') as f:
-              f.write(b'TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF\n')
-              f.write(key_raw.encode('utf-8') + b'\n')
-              f.write(b'TAURI_KEY_EOF\n')
-          print("✅ TAURI_SIGNING_PRIVATE_KEY set via GITHUB_ENV (binary mode)")
-          PYEOF
+          ls -la "$KEY_FILE"
+          echo "✅ File found"
 
-      # ─── 验证签名密钥已正确设置 ──────────────────────────────────────────
-      - name: Verify signing key
-        shell: bash
-        run: |
-          echo "========================================="
-          echo "  Verifying signing key"
-          echo "========================================="
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "❌ ERROR: TAURI_SIGNING_PRIVATE_KEY is not set!"
-            exit 1
-          fi
-          KEY_LEN=${#TAURI_SIGNING_PRIVATE_KEY}
-          FIRST_LINE=$(echo "$TAURI_SIGNING_PRIVATE_KEY" | head -1)
-          LINE_COUNT=$(echo "$TAURI_SIGNING_PRIVATE_KEY" | wc -l)
-          echo "✅ TAURI_SIGNING_PRIVATE_KEY is set"
-          echo "   Key length: $KEY_LEN chars"
-          echo "   Number of lines: $LINE_COUNT"
-          echo "   First line: $FIRST_LINE"
-          # 验证密钥格式：必须以 "untrusted comment:" 开头
-          if [[ "$FIRST_LINE" != untrusted\ comment:* ]]; then
-            echo "❌ ERROR: Signing key does not start with 'untrusted comment:'"
-            echo "   This means the key format is invalid and Tauri signer will fail."
-            echo "   First 50 chars: ${FIRST_LINE:0:50}"
-            exit 1
-          fi
-          echo "✅ Signing key format looks valid (starts with 'untrusted comment:')"
           echo ""
-          echo "Checking pubkey in tauri.conf.json..."
-          PUBKEY=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])")
-          echo "   Pubkey: ${PUBKEY:0:50}..."
-          echo "✅ Pubkey found in tauri.conf.json"
+          echo "========================================="
+          echo "  [2/7] Read raw file bytes (hex dump)"
+          echo "========================================="
+          xxd "$KEY_FILE"
           echo ""
-          echo "Checking createUpdaterArtifacts in tauri.conf.json..."
-          UPDATER_ARTIFACTS=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['bundle']['createUpdaterArtifacts'])")
-          echo "   createUpdaterArtifacts: $UPDATER_ARTIFACTS"
-          if [ "$UPDATER_ARTIFACTS" != "True" ]; then
-            echo "❌ ERROR: createUpdaterArtifacts is not True! Updater artifacts will NOT be generated."
-            echo "   Set bundle.createUpdaterArtifacts to true in src-tauri/tauri.conf.json"
+          echo "File size (bytes): $(wc -c < "$KEY_FILE")"
+          echo "File size (chars): $(wc -m < "$KEY_FILE")"
+          echo "File line count:   $(wc -l < "$KEY_FILE")"
+          echo ""
+          echo "File content (raw):"
+          cat "$KEY_FILE"
+          echo ""
+
+          echo ""
+          echo "========================================="
+          echo "  [3/7] base64 decode"
+          echo "========================================="
+          echo "Detecting base64 variant..."
+          if base64 -D </dev/null >/dev/null 2>&1; then
+            echo "Using: base64 -D (macOS variant)"
+            DECODED=$(base64 -D < "$KEY_FILE")
+          elif base64 -d </dev/null >/dev/null 2>&1; then
+            echo "Using: base64 -d (Linux variant)"
+            DECODED=$(base64 -d < "$KEY_FILE")
+          else
+            echo "❌ ERROR: base64 command not available"
             exit 1
           fi
-          echo "✅ createUpdaterArtifacts is True — updater artifacts will be generated"
+          echo ""
+          echo "DECODED length: ${#DECODED} chars"
+          echo ""
+          echo "--- decoded content START ---"
+          echo "$DECODED"
+          echo "--- decoded content END ---"
+          echo ""
+          echo "--- decoded hex dump START ---"
+          echo "$DECODED" | xxd
+          echo "--- decoded hex dump END ---"
+
+          echo ""
+          echo "========================================="
+          echo "  [4/7] Strip \\r and trailing whitespace"
+          echo "========================================="
+          # tr -d '\r' 去掉 Windows 换行符
+          # awk 去掉尾部空行
+          CLEAN=$(printf '%s' "$DECODED" | tr -d '\r' | awk 'NF{p=1} p{print}' | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--){if(lines[i]!=""){last=i;break}} for(i=1;i<=last;i++) print lines[i]}')
+          echo "CLEAN length: ${#CLEAN} chars"
+          echo ""
+          echo "--- clean content START ---"
+          printf '%s\n' "$CLEAN"
+          echo "--- clean content END ---"
+          echo ""
+          echo "--- clean hex dump START ---"
+          printf '%s\n' "$CLEAN" | xxd
+          echo "--- clean hex dump END ---"
+          echo ""
+          LINE_COUNT=$(printf '%s\n' "$CLEAN" | wc -l | tr -d ' ')
+          echo "Line count: $LINE_COUNT"
+          echo "First line: $(printf '%s\n' "$CLEAN" | head -1)"
+          echo "Last line:  $(printf '%s\n' "$CLEAN" | tail -1)"
+          echo ""
+
+          # 验证格式
+          FIRST_LINE=$(printf '%s\n' "$CLEAN" | head -1)
+          if [[ "$FIRST_LINE" == untrusted\ comment:* ]]; then
+            echo "✅ First line starts with 'untrusted comment:' — format OK"
+          else
+            echo "❌ ERROR: First line does NOT start with 'untrusted comment:'"
+            echo "   Actual first line: $FIRST_LINE"
+            echo "   This key format is invalid!"
+            exit 1
+          fi
+
+          echo ""
+          echo "========================================="
+          echo "  [5/7] Write to GITHUB_ENV"
+          echo "========================================="
+          echo "GITHUB_ENV=$GITHUB_ENV"
+          echo ""
+          echo "Writing heredoc format:"
+          echo "  Header: TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
+          echo "  Body:   <CLEAN content>"
+          echo "  Footer: TAURI_KEY_EOF"
+          echo ""
+          {
+            printf 'TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF\n'
+            printf '%s\n' "$CLEAN"
+            printf 'TAURI_KEY_EOF\n'
+          } >> "$GITHUB_ENV"
+          echo "✅ Written to GITHUB_ENV"
+
+          echo ""
+          echo "========================================="
+          echo "  [6/7] Dump GITHUB_ENV file"
+          echo "========================================="
+          echo "--- GITHUB_ENV hex dump START ---"
+          xxd "$GITHUB_ENV"
+          echo "--- GITHUB_ENV hex dump END ---"
+          echo ""
+          echo "--- GITHUB_ENV text START ---"
+          cat "$GITHUB_ENV"
+          echo "--- GITHUB_ENV text END ---"
+
+          echo ""
+          echo "========================================="
+          echo "  [7/7] Verify env var (read back)"
+          echo "========================================="
+          VERIFY=$(sed -n '/^TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF$/,/^TAURI_KEY_EOF$/{/^TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF$/d;/^TAURI_KEY_EOF$/d;p;}' "$GITHUB_ENV")
+          echo "Read-back value length: ${#VERIFY} chars"
+          echo ""
+          echo "--- read-back content START ---"
+          echo "$VERIFY"
+          echo "--- read-back content END ---"
+          echo ""
+          echo "--- read-back hex dump START ---"
+          echo "$VERIFY" | xxd
+          echo "--- read-back hex dump END ---"
+          echo ""
+          VERIFY_FIRST=$(echo "$VERIFY" | head -1)
+          echo "Read-back first line: $VERIFY_FIRST"
+          echo "Starts with 'untrusted comment:' -> $( [[ "$VERIFY_FIRST" == untrusted\ comment:* ]] && echo YES || echo NO )"
+          echo ""
+          echo "✅ DONE — signing key decoded and set"
 
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
+        shell: bash
         run: |
           echo "========================================="
-          echo "  Building Tauri app"
+          echo "  Building Tauri App"
           echo "========================================="
           echo "Target:  ${{ matrix.target }}"
           echo "Bundles: ${{ matrix.bundles }}"
+          echo ""
+          echo "=== Environment variables ==="
+          echo "TAURI_SIGNING_PRIVATE_KEY set: $([ -n \"$TAURI_SIGNING_PRIVATE_KEY\" ] && echo YES || echo NO)"
+          echo "TAURI_SIGNING_PRIVATE_KEY length: ${#TAURI_SIGNING_PRIVATE_KEY} chars"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}'"
+          echo ""
+          echo "TAURI_SIGNING_PRIVATE_KEY first line: $(echo \"$TAURI_SIGNING_PRIVATE_KEY\" | head -1)"
+          echo "TAURI_SIGNING_PRIVATE_KEY line count: $(echo \"$TAURI_SIGNING_PRIVATE_KEY\" | wc -l | tr -d ' ')"
+          echo ""
+          echo "=== tauri.conf.json ==="
+          cat src-tauri/tauri.conf.json
+          echo ""
+          echo "=== Cargo.toml ==="
+          cat src-tauri/Cargo.toml
+          echo ""
+          echo "=== tauri-cli version ==="
+          npx tauri --version 2>/dev/null || echo "tauri-cli not found"
           echo ""
           echo "⚠️  Note: macOS bundles MUST include 'app' target to generate updater artifacts."
           echo "   'dmg' alone does NOT generate .app.tar.gz / .app.tar.gz.sig"
           echo "   Windows 'nsis' target generates .nsis.zip / .nsis.zip.sig"
           echo ""
+          echo "[START] npm run tauri build..."
+          echo "========================================="
           npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          EXIT_CODE=$?
+          echo "========================================="
+          echo "[END] npm run tauri build"
+          echo "Exit code: $EXIT_CODE"
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Tauri build FAILED with exit code $EXIT_CODE"
+          else
+            echo "✅ Tauri build succeeded"
+          fi
+          exit $EXIT_CODE
         env:
           # TAURI_SIGNING_PRIVATE_KEY 已通过 GITHUB_ENV 设置（由上一步解码）
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          # Cargo 网络重试（应对 crates.io 连接不稳定）
           CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_NET_RETRY: 10
           CARGO_HTTP_TIMEOUT: 120
@@ -317,11 +528,13 @@ jobs:
         shell: bash
         run: |
           echo "========================================="
-          echo "  Build artifacts for ${{ matrix.platform-tag }}"
+          echo "  Build Artifacts: ${{ matrix.platform-tag }}"
           echo "========================================="
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          echo "BUNDLE_DIR=$BUNDLE_DIR"
+          echo ""
           if [ -d "$BUNDLE_DIR" ]; then
-            echo "Bundle directory: $BUNDLE_DIR"
+            echo "✅ Bundle directory exists"
             echo ""
             echo "=== All files in bundle directory ==="
             find "$BUNDLE_DIR" -type f | sort
@@ -329,14 +542,22 @@ jobs:
             echo "=== File sizes ==="
             find "$BUNDLE_DIR" -type f -exec ls -lh {} \; | sort
           else
-            echo "⚠️  Bundle directory not found: $BUNDLE_DIR"
+            echo "❌ Bundle directory NOT found: $BUNDLE_DIR"
             echo ""
             echo "Checking if target/release directory exists..."
             if [ -d "src-tauri/target/${{ matrix.target }}/release" ]; then
               echo "Release directory exists, listing top-level:"
-              ls -la "src-tauri/target/${{ matrix.target }}/release/" | head -20
+              ls -la "src-tauri/target/${{ matrix.target }}/release/" | head -30
             else
               echo "Release directory not found either"
+              echo ""
+              echo "Checking if target directory exists..."
+              if [ -d "src-tauri/target" ]; then
+                echo "target directory exists:"
+                ls -la src-tauri/target/
+              else
+                echo "target directory not found"
+              fi
             fi
           fi
           echo ""
@@ -345,9 +566,10 @@ jobs:
           if [ -d "$BUNDLE_DIR" ]; then
             while IFS= read -r f; do
               SIG_SIZE=$(ls -lh "$f" | awk '{print $5}')
-              SIG_CONTENT=$(head -c 100 "$f")
               echo "  ✅ $f ($SIG_SIZE)"
-              echo "     Content preview: ${SIG_CONTENT:0:80}..."
+              echo "     Content (hex):"
+              xxd "$f" | head -5
+              echo ""
               SIG_COUNT=$((SIG_COUNT + 1))
             done < <(find "$BUNDLE_DIR" -name "*.sig" -type f 2>/dev/null)
           fi
@@ -365,84 +587,117 @@ jobs:
           echo ""
           echo "=== Platform-specific files ==="
           echo "macOS (.dmg, .app.tar.gz):"
-          find "$BUNDLE_DIR" \( -name "*.dmg" -o -name "*.app.tar.gz" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" \( -name "*.dmg" -o -name "*.app.tar.gz" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done || echo "  (none)"
           echo "Linux (.deb, .rpm):"
-          find "$BUNDLE_DIR" \( -name "*.deb" -o -name "*.rpm" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" \( -name "*.deb" -o -name "*.rpm" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done || echo "  (none)"
           echo "Windows (.exe, .msi, .nsis.zip):"
-          find "$BUNDLE_DIR" \( -name "*.exe" -o -name "*.msi" -o -name "*.nsis.zip" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" \( -name "*.exe" -o -name "*.msi" -o -name "*.nsis.zip" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done || echo "  (none)"
+          echo ""
+          echo "========================================="
 
       # ─── 收集产物并重命名 ──────────────────────────────────────────────────
       # 命名规则: mcphub-desktop-{platform-tag}.{ext}
       # macOS: .dmg + .app.tar.gz（updater）+ .app.tar.gz.sig（updater 签名）
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           echo "========================================="
-          echo "  Collecting macOS artifacts"
+          echo "  Collecting macOS Artifacts"
           echo "========================================="
           mkdir -p dist-artifacts
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           TAG="${{ matrix.platform-tag }}"
+          echo "BUNDLE_DIR=$BUNDLE_DIR"
+          echo "TAG=$TAG"
+          echo ""
+
           # .dmg installer
+          echo "[1/3] Looking for .dmg..."
           DMG=$(find "$BUNDLE_DIR" -name "*.dmg" | head -1)
           if [ -n "$DMG" ]; then
             cp "$DMG" "dist-artifacts/mcphub-desktop-${TAG}.dmg"
             echo "✅ Collected: mcphub-desktop-${TAG}.dmg ($(ls -lh "$DMG" | awk '{print $5}'))"
+            echo "   Source: $DMG"
           else
             echo "⚠️  No .dmg file found"
           fi
+          echo ""
+
           # .app.tar.gz (updater payload)
+          echo "[2/3] Looking for .app.tar.gz (updater payload)..."
           ATG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz" ! -name "*.app.tar.gz.sig" | head -1)
           if [ -n "$ATG" ]; then
             cp "$ATG" "dist-artifacts/mcphub-desktop-${TAG}.app.tar.gz"
             echo "✅ Collected: mcphub-desktop-${TAG}.app.tar.gz ($(ls -lh "$ATG" | awk '{print $5}'))"
+            echo "   Source: $ATG"
           else
             echo "⚠️  No .app.tar.gz file found (updater payload)"
             echo "   ⚠️  This means bundles config may not include 'app' target!"
             echo "   Fix: set bundles to 'app,dmg' instead of just 'dmg'"
           fi
+          echo ""
+
           # .app.tar.gz.sig (updater signature)
+          echo "[3/3] Looking for .app.tar.gz.sig (updater signature)..."
           ASIG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz.sig" | head -1)
           if [ -n "$ASIG" ]; then
             cp "$ASIG" "dist-artifacts/mcphub-desktop-${TAG}.app.tar.gz.sig"
             echo "✅ Collected: mcphub-desktop-${TAG}.app.tar.gz.sig ($(ls -lh "$ASIG" | awk '{print $5}'))"
-            echo "   Signature content: $(head -c 80 "$ASIG")..."
+            echo "   Source: $ASIG"
+            echo "   Signature hex:"
+            xxd "$ASIG" | head -3
           else
             echo "⚠️  No .app.tar.gz.sig file found (updater signature)"
           fi
           echo ""
           echo "=== dist-artifacts contents ==="
           ls -lh dist-artifacts/
+          echo ""
+          echo "========================================="
 
       # Linux: .deb + .rpm（AppImage 在 CI 中不可靠，已禁用；Linux 无自动更新）
       - name: Collect artifacts (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           echo "========================================="
-          echo "  Collecting Linux artifacts"
+          echo "  Collecting Linux Artifacts"
           echo "========================================="
           mkdir -p dist-artifacts
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           TAG="${{ matrix.platform-tag }}"
+          echo "BUNDLE_DIR=$BUNDLE_DIR"
+          echo "TAG=$TAG"
+          echo ""
+
           # .deb package
+          echo "[1/2] Looking for .deb..."
           DEB=$(find "$BUNDLE_DIR" -name "*.deb" | head -1)
           if [ -n "$DEB" ]; then
             cp "$DEB" "dist-artifacts/mcphub-desktop-${TAG}.deb"
             echo "✅ Collected: mcphub-desktop-${TAG}.deb ($(ls -lh "$DEB" | awk '{print $5}'))"
+            echo "   Source: $DEB"
           else
             echo "⚠️  No .deb file found"
           fi
+          echo ""
+
           # .rpm package
+          echo "[2/2] Looking for .rpm..."
           RPM=$(find "$BUNDLE_DIR" -name "*.rpm" | head -1)
           if [ -n "$RPM" ]; then
             cp "$RPM" "dist-artifacts/mcphub-desktop-${TAG}.rpm"
             echo "✅ Collected: mcphub-desktop-${TAG}.rpm ($(ls -lh "$RPM" | awk '{print $5}'))"
+            echo "   Source: $RPM"
           else
             echo "⚠️  No .rpm file found"
           fi
           echo ""
           echo "=== dist-artifacts contents ==="
           ls -lh dist-artifacts/
+          echo ""
+          echo "========================================="
 
       # Windows: NSIS 安装包 (.exe) + .nsis.zip + .nsis.zip.sig（updater 专用）
       - name: Collect artifacts (Windows)
@@ -450,48 +705,68 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "========================================="
-          Write-Host "  Collecting Windows artifacts"
+          Write-Host "  Collecting Windows Artifacts"
           Write-Host "========================================="
           New-Item -ItemType Directory -Force -Path dist-artifacts | Out-Null
           $Tag = "${{ matrix.platform-tag }}"
           $BundleDir = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          Write-Host "BundleDir=$BundleDir"
+          Write-Host "Tag=$Tag"
+          Write-Host ""
+
           # .exe (NSIS installer)
+          Write-Host "[1/4] Looking for .exe (NSIS installer)..."
           $Exe = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.exe" | Select-Object -First 1
-          if ($Exe) { 
+          if ($Exe) {
             Copy-Item $Exe.FullName "dist-artifacts/mcphub-desktop-$Tag.exe"
             Write-Host "✅ Collected: mcphub-desktop-$Tag.exe ($('{0:N1} MB' -f ($Exe.Length / 1MB)))"
+            Write-Host "   Source: $($Exe.FullName)"
           } else {
             Write-Host "⚠️  No .exe file found"
           }
+          Write-Host ""
+
           # .msi
+          Write-Host "[2/4] Looking for .msi..."
           $Msi = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.msi" | Select-Object -First 1
-          if ($Msi) { 
+          if ($Msi) {
             Copy-Item $Msi.FullName "dist-artifacts/mcphub-desktop-$Tag.msi"
             Write-Host "✅ Collected: mcphub-desktop-$Tag.msi ($('{0:N1} MB' -f ($Msi.Length / 1MB)))"
+            Write-Host "   Source: $($Msi.FullName)"
           } else {
             Write-Host "⚠️  No .msi file found"
           }
+          Write-Host ""
+
           # .nsis.zip (updater payload)
+          Write-Host "[3/4] Looking for .nsis.zip (updater payload)..."
           $Nsis = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip" | Where-Object { $_.Name -notmatch '\.sig$' } | Select-Object -First 1
-          if ($Nsis) { 
+          if ($Nsis) {
             Copy-Item $Nsis.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip"
             Write-Host "✅ Collected: mcphub-desktop-$Tag.nsis.zip ($('{0:N1} MB' -f ($Nsis.Length / 1MB)))"
+            Write-Host "   Source: $($Nsis.FullName)"
           } else {
             Write-Host "⚠️  No .nsis.zip file found (updater payload)"
           }
+          Write-Host ""
+
           # .nsis.zip.sig (updater signature)
+          Write-Host "[4/4] Looking for .nsis.zip.sig (updater signature)..."
           $Nsig = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip.sig" | Select-Object -First 1
-          if ($Nsig) { 
+          if ($Nsig) {
             Copy-Item $Nsig.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip.sig"
             Write-Host "✅ Collected: mcphub-desktop-$Tag.nsis.zip.sig ($('{0:N0} bytes' -f $Nsig.Length))"
-            $sigContent = Get-Content $Nsig.FullName -Raw
-            Write-Host "   Signature preview: $($sigContent.Substring(0, [Math]::Min(80, $sigContent.Length)))..."
+            Write-Host "   Source: $($Nsig.FullName)"
+            $bytes = [System.IO.File]::ReadAllBytes($Nsig.FullName)
+            $hex = ($bytes | ForEach-Object { $_.ToString("x2") }) -join ' '
+            Write-Host "   Signature hex: $($hex.Substring(0, [Math]::Min(160, $hex.Length)))..."
           } else {
             Write-Host "⚠️  No .nsis.zip.sig file found (updater signature)"
           }
           Write-Host ""
           Write-Host "=== dist-artifacts contents ==="
           Get-ChildItem dist-artifacts/ | Format-Table Name, @{L='Size(MB)';E={'{0:N1}' -f ($_.Length / 1MB)}}
+          Write-Host "========================================="
 
       # ─── 上传产物到 Actions Artifacts ─────────────────────────────────────
       - name: Upload artifacts
@@ -514,19 +789,23 @@ jobs:
           echo "Bundles: ${{ matrix.bundles }}"
           echo ""
           if [ -d "dist-artifacts" ]; then
-            echo "Artifacts produced:"
-            ls -lh dist-artifacts/ 2>/dev/null || echo "  (empty)"
+            echo "=== Artifacts produced ==="
+            ls -lh dist-artifacts/
           else
             echo "⚠️  No dist-artifacts directory found"
           fi
           echo ""
           SIG_COUNT=$(find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.sig" -type f 2>/dev/null | wc -l | tr -d ' ')
-          echo "Signature files (.sig) found: $SIG_COUNT"
+          echo "=== Signature files (.sig) found: $SIG_COUNT ==="
           if [ "$SIG_COUNT" -eq 0 ]; then
             echo "⚠️  WARNING: No .sig files found. Auto-update will NOT work for this platform."
             echo "   For macOS: bundles must include 'app' (not just 'dmg')"
             echo "   For Windows: bundles must include 'nsis'"
+          else
+            echo "✅ .sig files present — updater will work"
           fi
+          echo ""
+          echo "========================================="
 
   # ─── 创建 GitHub Release + 生成 latest.json ──────────────────────────────
   release:
@@ -541,12 +820,22 @@ jobs:
       # 从 tauri.conf.json 读取版本号
       - name: Read version from tauri.conf.json
         id: version
+        shell: bash
         run: |
+          echo "========================================="
+          echo "  Reading version from tauri.conf.json"
+          echo "========================================="
+          echo "tauri.conf.json content:"
+          cat src-tauri/tauri.conf.json
+          echo ""
           VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           TAG="v${VERSION}"
+          echo "VERSION=$VERSION"
+          echo "TAG=$TAG"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "✅ Version: ${VERSION}, Tag: ${TAG}"
+          echo "========================================="
 
       # 下载全部平台产物
       - name: Download all artifacts
@@ -557,9 +846,10 @@ jobs:
           merge-multiple: false
 
       - name: List all downloaded artifacts
+        shell: bash
         run: |
           echo "========================================="
-          echo "  All downloaded artifacts"
+          echo "  All Downloaded Artifacts"
           echo "========================================="
           echo ""
           echo "=== Directory structure ==="
@@ -575,9 +865,10 @@ jobs:
           SIG_COUNT=0
           for f in $(find all-artifacts -name "*.sig" -type f 2>/dev/null); do
             SIG_SIZE=$(ls -lh "$f" | awk '{print $5}')
-            SIG_CONTENT=$(head -c 100 "$f")
             echo "  ✅ $f ($SIG_SIZE)"
-            echo "     Content preview: ${SIG_CONTENT:0:80}..."
+            echo "     Hex dump:"
+            xxd "$f" | head -5
+            echo ""
             SIG_COUNT=$((SIG_COUNT + 1))
           done
           if [ "$SIG_COUNT" -eq 0 ]; then
@@ -586,9 +877,11 @@ jobs:
           else
             echo "  ✅ Total: $SIG_COUNT .sig file(s)"
           fi
+          echo "========================================="
 
       # 从各平台 .sig 文件自动生成 latest.json
       - name: Generate latest.json
+        shell: bash
         env:
           REPO: ${{ github.repository }}
         run: |
@@ -602,6 +895,10 @@ jobs:
           repo     = os.environ['REPO']                 # e.g. skrstop/MCPHub-Desktop
           pub_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+          print(f'REPO={repo}')
+          print(f'pub_date={pub_date}')
+          print()
+
           # 从 tauri.conf.json 读取版本号
           with open('src-tauri/tauri.conf.json', 'r', encoding='utf-8') as f:
               tauri_conf = json.load(f)
@@ -612,12 +909,10 @@ jobs:
           print(f'✅ Version from tauri.conf.json: {version}')
           print(f'✅ Tag: {tag}')
           print(f'✅ Base URL: {base_url}')
+          print()
 
           def classify(filename: str):
-              """根据文件名推断 Tauri updater 平台 key
-              文件名格式: mcphub-desktop-{platform-tag}.{ext}
-              platform-tag: macos-arm64, macos-x64, linux-x64, linux-arm64, windows-x64, windows-arm64
-              """
+              """根据文件名推断 Tauri updater 平台 key"""
               n = filename.lower()
               if '.app.tar.gz' in n:
                   return 'darwin-aarch64' if 'arm64' in n else 'darwin-x86_64'
@@ -629,9 +924,10 @@ jobs:
 
           platforms = {}
           sig_files = sorted(glob.glob('all-artifacts/**/*.sig', recursive=True))
-          print(f'\n🔍 Found {len(sig_files)} .sig file(s):')
+          print(f'🔍 Found {len(sig_files)} .sig file(s):')
           for sig_path in sig_files:
               print(f'  {sig_path}')
+          print()
 
           # Also check for corresponding payload files
           for sig_path in sig_files:
@@ -641,6 +937,7 @@ jobs:
                   print(f'  Payload: {payload_path} ({payload_size} bytes)')
               else:
                   print(f'  ⚠️  Payload not found: {payload_path}')
+          print()
 
           for sig_path in sig_files:
               # 去掉末尾 .sig 得到资源文件名
@@ -662,9 +959,10 @@ jobs:
               print(f'  [ok] {platform} -> {url_name}')
               print(f'       signature length: {len(sig_content)} chars')
               print(f'       signature preview: {sig_content[:60]}...')
+          print()
 
           if not platforms:
-              print('\n❌ CRITICAL: 未找到任何有效的 .sig 文件，latest.json 的 platforms 为空！')
+              print('❌ CRITICAL: 未找到任何有效的 .sig 文件，latest.json 的 platforms 为空！')
               print('   可能原因：')
               print('   1. TAURI_SIGNING_PRIVATE_KEY 未正确设置（检查 Decode signing key 步骤）')
               print('   2. Tauri 构建未生成 updater 产物（检查 List build artifacts 步骤）')
@@ -672,9 +970,10 @@ jobs:
               print('   4. macOS bundles 未包含 app 目标（需要 bundles: app,dmg 而非仅 dmg）')
               print('   5. 构建矩阵中某些平台被注释掉（检查 release.yml）')
           else:
-              print(f'\n✅ Found {len(platforms)} platform(s) with valid signatures:')
+              print(f'✅ Found {len(platforms)} platform(s) with valid signatures:')
               for p in platforms:
                   print(f'   - {p}: {platforms[p]["url"]}')
+          print()
 
           # 读取版本更新说明
           notes_file = f'doc/upgrade/{version}.md'
@@ -704,9 +1003,10 @@ jobs:
 
       # 验证生成结果
       - name: Show latest.json
+        shell: bash
         run: |
           echo "========================================="
-          echo "  latest.json content"
+          echo "  latest.json Content"
           echo "========================================="
           cat release-meta/latest.json
           echo ""
@@ -721,7 +1021,19 @@ jobs:
             echo "   Check the 'Generate latest.json' step above for details."
           else
             echo "✅ latest.json has $PLATFORM_COUNT platform(s)"
+            echo ""
+            echo "=== Platform details ==="
+            python3 -c "
+          import json
+          d = json.load(open('release-meta/latest.json'))
+          for p, info in d.get('platforms', {}).items():
+              print(f'  {p}:')
+              print(f'    url: {info[\"url\"]}')
+              print(f'    signature: {info[\"signature\"][:60]}...')
+          "
           fi
+          echo ""
+          echo "========================================="
 
       # 创建 draft Release，上传全部产物 + latest.json
       - name: Create GitHub Release
