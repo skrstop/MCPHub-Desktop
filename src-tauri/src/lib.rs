@@ -1,3 +1,6 @@
+// objc 0.2 宏在新版 Rust 下会产生 unexpected_cfgs 警告，全局抑制
+#![allow(unexpected_cfgs)]
+
 pub mod auth;
 pub mod commands;
 pub mod db;
