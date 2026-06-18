@@ -34,7 +34,8 @@
     "dismissed": "Ignoré",
     "earlierReleases": "+ {{count}} versions précédentes",
     "installUpdate": "Installer la mise à jour",
-    "installing": "Installation de la mise à jour..."
+    "installing": "Installation de la mise à jour...",
+    "downloadManual": "Télécharger la mise à jour"
   },
   "profile": {
     "viewProfile": "Voir le profil",

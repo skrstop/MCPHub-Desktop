@@ -34,7 +34,8 @@
     "dismissed": "Yoksayıldı",
     "earlierReleases": "+ {{count}} önceki sürüm",
     "installUpdate": "Güncellemeyi Yükle",
-    "installing": "Güncelleme yükleniyor..."
+    "installing": "Güncelleme yükleniyor...",
+    "downloadManual": "Güncellemeyi İndir"
   },
   "profile": {
     "viewProfile": "Profili görüntüle",

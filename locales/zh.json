@@ -34,7 +34,8 @@
     "dismissed": "已忽略",
     "earlierReleases": "另有 {{count}} 个更早版本",
     "installUpdate": "安装更新",
-    "installing": "正在安装更新..."
+    "installing": "正在安装更新...",
+    "downloadManual": "下载更新"
   },
   "profile": {
     "viewProfile": "查看个人中心",

@@ -9,7 +9,7 @@
 
 ---
 
-## 1. 项目概览[](https://)
+## 1. 项目概览[](https://)[](https://)
 
 ### 1.1 原项目（mcphub-origin — Node.js/Express + React/Vite）
 
@@ -482,37 +482,32 @@ bash scripts/verify-signing.sh
 - `windows-aarch64` — Windows ARM64
 - `windows-x86_64` — Windows x64
 
-#### 3.4.5 Changelog API 禁用说明
+#### 3.4.5 更新检查与 Linux 回退机制
+
+**文件**：`frontend/src/utils/version.ts`（⚠️ 本地修改）
+
+桌面端更新检查逻辑：
+
+1. **macOS / Windows**：使用 Tauri updater 插件（`check()`），支持自动下载安装
+2. **Linux（deb/rpm）**：Tauri updater 不支持自动更新，回退到检查 GitHub `latest.json` 版本号，提示用户手动下载
+
+**`UpdateInfo` 接口新增字段**：
+
+- `canAutoUpdate: boolean` — 当前平台是否支持自动更新（macOS/Windows=true, Linux=false）
+- `downloadUrl: string` — 手动下载链接（Linux 使用 GitHub Releases 页面）
+
+**文件**：`frontend/src/components/ui/AboutDialog.tsx`（⚠️ 本地修改）
+
+- 当 `canAutoUpdate=true` 时显示"安装更新"按钮（macOS/Windows）
+- 当 `canAutoUpdate=false` 时显示"下载更新"链接（Linux），跳转到 GitHub Releases
 
 **文件**：`frontend/src/utils/tauriClient.ts`
 
-```typescript
-// Changelog endpoints — not implemented in desktop client
-if (segs[0] === 'changelog') {
-  return { command: '__stub__', args: { __response: { success: true, data: { hasUpdate: false, entries: [] } } } };
-}
-```
+Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `version.ts` 处理。
 
-**原因**：
+**i18n 新增翻译键**：
 
-- Tauri 桌面应用使用原生 updater 插件进行自动更新
-- Changelog API 是为 Web 版本设计的，在桌面版本中不需要
-- `frontend/src/utils/version.ts` 正确实现了 Tauri updater 集成
-
-**前端调用**：
-
-```typescript
-// 检查更新（使用 Tauri updater 插件）
-import { checkForAppUpdate, installAppUpdate } from '@/utils/version';
-
-const updateInfo = await checkForAppUpdate();
-if (updateInfo) {
-  console.log('New version:', updateInfo.version);
-  await installAppUpdate((event) => {
-    console.log('Download progress:', event);
-  });
-}
-```
+- `about.downloadManual` — "Download Update" / "下载更新" / "Télécharger la mise à jour" / "Güncellemeyi İndir"
 
 #### 3.4.6 故障排除
 

@@ -34,7 +34,8 @@
     "dismissed": "Dismissed",
     "earlierReleases": "+ {{count}} earlier releases",
     "installUpdate": "Install Update",
-    "installing": "Installing update..."
+    "installing": "Installing update...",
+    "downloadManual": "Download Update"
   },
   "profile": {
     "viewProfile": "View profile",

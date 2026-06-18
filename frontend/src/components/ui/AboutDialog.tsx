@@ -57,8 +57,23 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
           locale: i18n.language,
           force,
         });
-        setUpdateInfo(info);
-        onUpdateInfoChange?.(info);
+        // If changelog API returned empty (desktop intercepts it) but we have
+        // update info from Tauri updater (including fallback), construct a minimal
+        // ChangelogUpdateInfo so the UI can show "new version available"
+        if (update && (!info || !info.hasUpdate)) {
+          setUpdateInfo({
+            hasUpdate: true,
+            latestVersion: update.version,
+            entries: update.notes
+              ? [{ version: update.version, title: update.version, summary: update.notes, highlights: [], changelogUrl: `https://github.com/skrstop/MCPHub-Desktop/releases/tag/v${update.version}`, url: `https://github.com/skrstop/MCPHub-Desktop/releases/tag/v${update.version}` }]
+              : [],
+            totalUpdateCount: 1,
+            source: 'tauri-fallback',
+          });
+        } else {
+          setUpdateInfo(info);
+          onUpdateInfoChange?.(info);
+        }
       } else {
         // Web 环境下使用 changelog API
         const info = await fetchChangelogUpdateInfo({
@@ -245,7 +260,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                 <RefreshCw className={`h-4 w-4 ${isChecking ? 'animate-spin' : ''}`} />
                 {isChecking ? t('about.checking') : t('about.checkForUpdates')}
               </button>
-              {tauriUpdate && (
+              {tauriUpdate && tauriUpdate.canAutoUpdate !== false && (
                 <button
                   onClick={handleInstallUpdate}
                   disabled={isInstalling}
@@ -254,6 +269,17 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                   <Download className={`h-4 w-4 ${isInstalling ? 'animate-spin' : ''}`} />
                   {isInstalling ? t('about.installing') : t('about.installUpdate')}
                 </button>
+              )}
+              {tauriUpdate && tauriUpdate.canAutoUpdate === false && (
+                <a
+                  href={tauriUpdate.downloadUrl || 'https://github.com/skrstop/MCPHub-Desktop/releases/latest'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hub-btn primary"
+                >
+                  <Download className="h-4 w-4" />
+                  {t('about.downloadManual')}
+                </a>
               )}
               <a
                 href={`https://github.com/skrstop/MCPHub-Desktop/releases`}
