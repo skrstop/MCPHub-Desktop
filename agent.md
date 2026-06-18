@@ -1,4 +1,4 @@
-# [](https://)MCPHub Desktop (Tauri) — Agent 开发文档
+# [](https://)[](https://)MCPHub Desktop (Tauri) — Agent 开发文档
 
 > 本文档是 Tauri 桌面客户端迁移的**完整参考**，供 AI Agent 和开发者续接工作使用。
 > 包含：原项目架构、桌面端架构、已完成内容、待办事项及所有关键技术细节。
@@ -22,7 +22,7 @@
 | 认证     | JWT + bcrypt + Better-Auth（OAuth/OIDC）                |
 | 数据存储 | JSON 文件 (`mcp_settings.json`) 或 PostgreSQL           |
 | MCP 连接 | `src/services/mcpService.ts` 管理所有 MCP 服务端连接    |
-| 路由     | `/mcp/{group|server}`、`/mcp/$smart`、REST API `/api/*` |
+| 路由     | `/mcp/{group                                            |
 | i18n     | react-i18next，翻译文件在`locales/`                     |
 
 ### 1.2 桌面端项目（mcphub-desktop — Rust/Tauri 2 + 复用原 React 前端）
@@ -365,6 +365,9 @@ services/ (业务逻辑 = 原 services/)
 
 #### 3.4.2 签名密钥配置
 
+> ⚠️ **核心原则（MUST FOLLOW）**：本项目是**开源项目**，签名密钥**直接明文存储在仓库中**（`src-tauri/updater/mcphub.key`），
+> **不使用 GitHub Secrets**。所有密钥相关配置均通过仓库文件完成，无需配置任何 GitHub Secret。
+
 **生成签名密钥**：
 
 ```bash
@@ -374,10 +377,14 @@ bash scripts/generate-signing-key.sh
 **配置步骤**：
 
 1. 运行脚本生成密钥对（`~/.tauri/mcphub.key` 和 `~/.tauri/mcphub.key.pub`）
-2. 将公钥内容复制到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 字段
-3. 添加 GitHub Secrets：
-   - `TAURI_SIGNING_PRIVATE_KEY` — 私钥文件内容
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — 密钥密码（如果有）
+2. 将私钥以 base64 编码存入 `src-tauri/updater/mcphub.key`（脚本自动完成）
+3. 将公钥以 base64 编码存入 `src-tauri/updater/mcphub.key.pub`（脚本自动完成）
+4. 将公钥内容复制到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey` 字段
+5. 将私钥和公钥文件提交到仓库（**不需要配置 GitHub Secrets**）
+
+> ⚠️ **密钥存储格式**：`src-tauri/updater/mcphub.key` 文件以 **base64 编码**存储私钥内容（以 `dW50cnVzdGVk...` 开头），
+> 而 Tauri signer 期望 `TAURI_SIGNING_PRIVATE_KEY` 环境变量是**原始格式**（以 `untrusted comment:` 开头的两行文本）。
+> release.yml 中已使用 Python 脚本在 CI 中自动解码 base64 后设置环境变量，无需手动处理。
 
 **验证配置**：
 
@@ -499,12 +506,17 @@ if (updateInfo) {
 **问题：updater 无法验证签名**
 
 - 原因：公钥配置错误或私钥不匹配
-- 解决：确认 `tauri.conf.json` 中的 `pubkey` 与生成的公钥一致，确认 GitHub Secrets 中的私钥与公钥配对
+- 解决：确认 `tauri.conf.json` 中的 `pubkey` 与 `src-tauri/updater/mcphub.key.pub` 中的公钥一致，确认仓库中的私钥与公钥配对
+
+**问题：CI 构建 .sig 签名文件不生成**
+
+- 原因：`src-tauri/updater/mcphub.key` 文件以 **base64 编码**存储私钥，但 `TAURI_SIGNING_PRIVATE_KEY` 环境变量需要原始格式（以 `untrusted comment:` 开头的两行文本）。之前 release.yml 直接 `cat` 读取文件内容传给环境变量，导致 Tauri signer 无法解析密钥，跳过签名步骤，.sig 文件不会生成。
+- 解决：release.yml 中使用 Python 脚本将 base64 编码的密钥解码后再设置到 `TAURI_SIGNING_PRIVATE_KEY` 环境变量（通过 `GITHUB_ENV` 多行写入）
 
 **问题：CI 构建失败**
 
-- 原因：GitHub Secrets 配置错误
-- 解决：检查 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 是否正确设置
+- 原因：签名密钥文件缺失或格式错误
+- 解决：确认 `src-tauri/updater/mcphub.key` 文件存在于仓库中且为有效的 base64 编码私钥。本项目**不使用 GitHub Secrets**，签名密钥直接存储在仓库中。
 
 **问题：用户无法收到更新**
 
