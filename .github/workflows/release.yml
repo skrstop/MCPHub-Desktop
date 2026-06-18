@@ -367,10 +367,10 @@ jobs:
           echo "Detecting base64 variant..."
           if base64 -D </dev/null >/dev/null 2>&1; then
             echo "Using: base64 -D (macOS variant)"
-            DECODED=$(base64 -D < "$KEY_FILE")
+            DECODED=$(tr -d '\r' < "$KEY_FILE" | base64 -D)
           elif base64 -d </dev/null >/dev/null 2>&1; then
             echo "Using: base64 -d (Linux variant)"
-            DECODED=$(base64 -d < "$KEY_FILE")
+            DECODED=$(tr -d '\r' < "$KEY_FILE" | base64 -d)
           else
             echo "❌ ERROR: base64 command not available"
             exit 1
