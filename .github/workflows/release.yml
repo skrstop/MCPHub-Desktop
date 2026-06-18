@@ -649,7 +649,8 @@ jobs:
           echo ""
           echo "========================================="
 
-      # Windows: NSIS 安装包 (.exe) + .nsis.zip + .nsis.zip.sig（updater 专用）
+      # Windows: NSIS 安装包 (.exe) + .exe.sig（updater 签名）+ .msi + .msi.sig
+      # Tauri 2.x 的 Windows updater 直接签名 .exe 文件，不再生成 .nsis.zip
       - name: Collect artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -664,9 +665,9 @@ jobs:
           Write-Host "Tag=$Tag"
           Write-Host ""
 
-          # .exe (NSIS installer)
+          # .exe (NSIS installer) — 同时也是 updater payload
           Write-Host "[1/4] Looking for .exe (NSIS installer)..."
-          $Exe = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.exe" | Select-Object -First 1
+          $Exe = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.exe" | Where-Object { $_.Name -notmatch '\.sig$' } | Select-Object -First 1
           if ($Exe) {
             Copy-Item $Exe.FullName "dist-artifacts/mcphub-desktop-$Tag.exe"
             Write-Host "✅ Collected: mcphub-desktop-$Tag.exe ($('{0:N1} MB' -f ($Exe.Length / 1MB)))"
@@ -676,9 +677,24 @@ jobs:
           }
           Write-Host ""
 
+          # .exe.sig (updater signature) — Tauri 2.x 直接签名 .exe
+          Write-Host "[2/4] Looking for .exe.sig (updater signature)..."
+          $ExeSig = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.exe.sig" | Select-Object -First 1
+          if ($ExeSig) {
+            Copy-Item $ExeSig.FullName "dist-artifacts/mcphub-desktop-$Tag.exe.sig"
+            Write-Host "✅ Collected: mcphub-desktop-$Tag.exe.sig ($('{0:N0} bytes' -f $ExeSig.Length))"
+            Write-Host "   Source: $($ExeSig.FullName)"
+            $bytes = [System.IO.File]::ReadAllBytes($ExeSig.FullName)
+            $hex = ($bytes | ForEach-Object { $_.ToString("x2") }) -join ' '
+            Write-Host "   Signature hex: $($hex.Substring(0, [Math]::Min(160, $hex.Length)))..."
+          } else {
+            Write-Host "⚠️  No .exe.sig file found (updater signature)"
+          }
+          Write-Host ""
+
           # .msi
-          Write-Host "[2/4] Looking for .msi..."
-          $Msi = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.msi" | Select-Object -First 1
+          Write-Host "[3/4] Looking for .msi..."
+          $Msi = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.msi" | Where-Object { $_.Name -notmatch '\.sig$' } | Select-Object -First 1
           if ($Msi) {
             Copy-Item $Msi.FullName "dist-artifacts/mcphub-desktop-$Tag.msi"
             Write-Host "✅ Collected: mcphub-desktop-$Tag.msi ($('{0:N1} MB' -f ($Msi.Length / 1MB)))"
@@ -688,30 +704,15 @@ jobs:
           }
           Write-Host ""
 
-          # .nsis.zip (updater payload)
-          Write-Host "[3/4] Looking for .nsis.zip (updater payload)..."
-          $Nsis = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip" | Where-Object { $_.Name -notmatch '\.sig$' } | Select-Object -First 1
-          if ($Nsis) {
-            Copy-Item $Nsis.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip"
-            Write-Host "✅ Collected: mcphub-desktop-$Tag.nsis.zip ($('{0:N1} MB' -f ($Nsis.Length / 1MB)))"
-            Write-Host "   Source: $($Nsis.FullName)"
+          # .msi.sig
+          Write-Host "[4/4] Looking for .msi.sig..."
+          $MsiSig = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.msi.sig" | Select-Object -First 1
+          if ($MsiSig) {
+            Copy-Item $MsiSig.FullName "dist-artifacts/mcphub-desktop-$Tag.msi.sig"
+            Write-Host "✅ Collected: mcphub-desktop-$Tag.msi.sig ($('{0:N0} bytes' -f $MsiSig.Length))"
+            Write-Host "   Source: $($MsiSig.FullName)"
           } else {
-            Write-Host "⚠️  No .nsis.zip file found (updater payload)"
-          }
-          Write-Host ""
-
-          # .nsis.zip.sig (updater signature)
-          Write-Host "[4/4] Looking for .nsis.zip.sig (updater signature)..."
-          $Nsig = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip.sig" | Select-Object -First 1
-          if ($Nsig) {
-            Copy-Item $Nsig.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip.sig"
-            Write-Host "✅ Collected: mcphub-desktop-$Tag.nsis.zip.sig ($('{0:N0} bytes' -f $Nsig.Length))"
-            Write-Host "   Source: $($Nsig.FullName)"
-            $bytes = [System.IO.File]::ReadAllBytes($Nsig.FullName)
-            $hex = ($bytes | ForEach-Object { $_.ToString("x2") }) -join ' '
-            Write-Host "   Signature hex: $($hex.Substring(0, [Math]::Min(160, $hex.Length)))..."
-          } else {
-            Write-Host "⚠️  No .nsis.zip.sig file found (updater signature)"
+            Write-Host "⚠️  No .msi.sig file found"
           }
           Write-Host ""
           Write-Host "=== dist-artifacts contents ==="
@@ -862,13 +863,16 @@ jobs:
           print()
 
           def classify(filename: str):
-              """根据文件名推断 Tauri updater 平台 key"""
+              """根据文件名推断 Tauri updater 平台 key
+              Tauri 2.x Windows 直接签名 .exe，不再生成 .nsis.zip
+              """
               n = filename.lower()
               if '.app.tar.gz' in n:
                   return 'darwin-aarch64' if 'arm64' in n else 'darwin-x86_64'
               if 'appimage.tar.gz' in n:
                   return 'linux-aarch64' if 'arm64' in n else 'linux-x86_64'
-              if 'nsis.zip' in n:
+              # Tauri 2.x: .nsis.zip（旧格式）或 .exe（新格式）
+              if 'nsis.zip' in n or n.endswith('.exe'):
                   return 'windows-aarch64' if 'arm64' in n else 'windows-x86_64'
               return None
 

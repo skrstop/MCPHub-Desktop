@@ -6,7 +6,7 @@ authors = ["MCPHub Contributors"]
 license = "ISC"
 repository = "https://github.com/samanhappy/mcphub"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.96.0"
 
 [lib]
 name = "mcphub_lib"
