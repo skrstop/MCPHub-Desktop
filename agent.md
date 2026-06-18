@@ -590,14 +590,32 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 
 | 项 | 值 |
 |------|-----|
-| **当前已同步到 origin commit** | `a34dbac` (origin/main) |
-| **对应 origin tag** | `v0.12.15` |
-| **桌面端版本号** | `1.0.16` |
-| **同步执行日期** | 2026-06-17 |
+| **当前已同步到 origin commit** | `6067aa9` (origin/main) |
+| **对应 origin tag** | `v0.12.15+6` |
+| **桌面端版本号** | `1.0.17` |
+| **同步执行日期** | 2026-06-18 |
 
-> 下次同步时，使用 `a34dbac` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline a34dbac..HEAD`）。
+> 下次同步时，使用 `6067aa9` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 6067aa9..HEAD`）。
 
 ### 4.4 同步条目历史
+
+#### 2026-06-18：同步 `a34dbac` → `6067aa9`（6 个 commit）
+
+**已同步到 desktop（前端 / locales / Rust 后端）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+|------|------|------|
+| `f163674` | feat: add cache refresh/reinstall for npx/uvx MCP servers | 前端：ServerCard/ServerContext/ServersPage/SettingsPage 添加 reinstall 和 clearCache 功能；locales 四语言翻译；Rust：添加 `reinstall_server` 和 `clear_cache` 命令 |
+| `b6d9fd4` | fix: scope single-server reload to only that server | Rust 后端已确认无需修改（`reload_server` 已只作用于单个服务器） |
+| `16eed01` | fix: terminate stdio process tree on server delete and disable | Rust 后端：`stdio_transport.rs` 添加 `kill_process_tree()` 函数，使用 `process_group(0)` 创建进程组，disconnect 时杀死整个进程树；`Cargo.toml` 添加 `libc` 依赖 |
+| `626ae36` | fix: handle null/primitive tool result payloads without crashing | Rust 后端已确认无需修改（Rust 端使用 `as_bool()`/`as_array()` 安全处理） |
+
+**未同步（后端 / 不适用）**
+
+| 来源 commit | 类型 | 处理决策 |
+|------|------|------|
+| `6067aa9` | chore(deps): bump hono | **不同步**（依赖更新） |
+| `5772aeb` | chore(deps-dev): bump vite | **不同步**（依赖更新） |
 
 #### 2026-06-17：同步 `3ea0bbe` → `a34dbac`（77 个 commit）
 

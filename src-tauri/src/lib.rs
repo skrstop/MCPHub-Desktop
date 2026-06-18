@@ -162,6 +162,8 @@ pub fn run() {
             commands::servers::delete_server,
             commands::servers::toggle_server,
             commands::servers::reload_server,
+            commands::servers::reinstall_server,
+            commands::servers::clear_cache,
             // Group commands
             commands::groups::list_groups,
             commands::groups::add_group,

@@ -93,6 +93,8 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: 'toggle_server', args: { name: decodeURIComponent(segs[1]) } };
   if (segs[0] === 'servers' && segs[2] === 'reload' && m === 'POST')
     return { command: 'reload_server', args: { name: decodeURIComponent(segs[1]) } };
+  if (segs[0] === 'servers' && segs[2] === 'reinstall' && m === 'POST')
+    return { command: 'reinstall_server', args: { name: decodeURIComponent(segs[1]) } };
 
   // Per-server tool/prompt/resource toggle & description overrides.
   if (
@@ -441,6 +443,10 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (segs[0] === 'cost') {
     return { command: '__stub__', args: { __response: { success: true, data: [] } } };
   }
+
+  // Cache endpoints
+  if (segs[0] === 'cache' && segs[1] === 'clear' && m === 'POST')
+    return { command: 'clear_cache', args: {} };
 
   // Changelog endpoints — not implemented in desktop client
   if (segs[0] === 'changelog') {

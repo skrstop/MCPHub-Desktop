@@ -105,6 +105,9 @@ tokio-stream = "0.1"
 flate2 = "1"
 tar = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 zip = "2"
 

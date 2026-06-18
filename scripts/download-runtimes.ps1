@@ -34,11 +34,18 @@ if ($HostArchRaw -eq 12) {
     $HostUvArch = "x86_64-pc-windows-msvc"
 }
 
+# 宿主默认目标架构（无 TargetArch 参数时使用）
+if ($HostArchRaw -eq 12) {
+    $HostTargetArch = "arm64"
+} else {
+    $HostTargetArch = "x64"
+}
+
 # 目标架构（用于 Node.js 和 Python）
 if ($TargetArch -ne "") {
     $NodeArch = $TargetArch
 } else {
-    $NodeArch = if ($HostArchRaw -eq 12) { "arm64" } else { "x64" }
+    $NodeArch = $HostTargetArch
 }
 
 # uv 始终使用宿主架构，这样才能在 CI runner 上执行
@@ -133,25 +140,61 @@ if (-not (Test-Path $UvExe)) {
 # ---------------------------------------------------------------------------
 $PythonInstallDir = Join-Path $UvDest "python"
 
+# uv 解压后目录名格式: cpython-3.12.x+...
+# python-build-standalone tar 解压后目录名: python/
 $PythonExists = Test-Path $PythonInstallDir
 if ($PythonExists) {
-    $PythonDirs = Get-ChildItem $PythonInstallDir -Directory | Where-Object { $_.Name -like "cpython-$PythonVersion*" }
+    $PythonDirs = Get-ChildItem $PythonInstallDir -Directory | Where-Object {
+        $_.Name -like "cpython-$PythonVersion*" -or $_.Name -eq "python"
+    }
     $PythonExists = $PythonDirs.Count -gt 0
 }
 
 if (-not $PythonExists) {
-    Write-Host "--> Downloading Python $PythonVersion via uv..."
-    $env:UV_PYTHON_INSTALL_DIR = $PythonInstallDir
-    # 交叉编译时需要指定目标平台，确保下载目标架构的 Python
-    if ($TargetArch -ne "" -and $TargetArch -ne (if ($HostArchRaw -eq 12) { "arm64" } else { "x64" })) {
+    Write-Host "--> Downloading Python $PythonVersion..."
+    New-Item -ItemType Directory -Force -Path $PythonInstallDir | Out-Null
+    # uv python install 不支持 --platform，交叉编译时需要直接下载目标架构的 Python
+    if ($TargetArch -ne "" -and $TargetArch -ne $HostTargetArch) {
         if ($TargetArch -eq "arm64") {
-            $PyPlatform = "aarch64-pc-windows-msvc"
+            $PyTriple = "aarch64-pc-windows-msvc"
         } else {
-            $PyPlatform = "x86_64-pc-windows-msvc"
+            $PyTriple = "x86_64-pc-windows-msvc"
         }
-        Write-Host "--> Cross-compiling: downloading Python for $PyPlatform"
-        & $UvExe python install $PythonVersion --platform $PyPlatform
+        Write-Host "--> Cross-compiling: downloading Python $PythonVersion for $PyTriple directly..."
+        # 通过 GitHub API 获取 python-build-standalone 最新 release 中匹配的 asset
+        $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5"
+        $AssetName = $null
+        $DownloadUrl = $null
+        foreach ($Rel in $Releases) {
+            foreach ($A in $Rel.assets) {
+                if ($A.name -match "cpython-$PythonVersion\.\d+\+.*-$PyTriple-install_only\.tar\.gz" -and
+                    $A.name -notmatch "stripped") {
+                    $AssetName = $A.name
+                    $DownloadUrl = $A.browser_download_url
+                    break
+                }
+            }
+            if ($AssetName) { break }
+        }
+        if (-not $DownloadUrl) {
+            Write-Error "ERROR: Could not find Python $PythonVersion for $PyTriple in python-build-standalone releases"
+            exit 1
+        }
+        Write-Host "--> Found: $AssetName"
+        $TmpDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid()
+        New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+        $TmpTar = Join-Path $TmpDir "python.tar.gz"
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpTar
+        tar -xzf $TmpTar -C $TmpDir
+        Remove-Item $TmpTar -Force
+        # tar 解压后目录名为 python/，将其内容移到 PythonInstallDir
+        $ExtractedPy = Join-Path $TmpDir "python"
+        if (Test-Path $ExtractedPy) {
+            Get-ChildItem $ExtractedPy | Move-Item -Destination $PythonInstallDir -Force
+        }
+        Remove-Item -Recurse -Force $TmpDir
     } else {
+        $env:UV_PYTHON_INSTALL_DIR = $PythonInstallDir
         & $UvExe python install $PythonVersion
     }
     Write-Host "--> Python $PythonVersion downloaded to: $PythonInstallDir"

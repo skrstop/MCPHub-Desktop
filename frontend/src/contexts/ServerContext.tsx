@@ -65,6 +65,7 @@ interface ServerContextType {
   handleServerRemove: (serverName: string) => Promise<boolean>;
   handleServerToggle: (server: Server, enabled: boolean) => Promise<boolean>;
   handleServerReload: (server: Server) => Promise<boolean>;
+  handleServerReinstall: (server: Server) => Promise<boolean>;
 }
 
 // Create Context
@@ -474,6 +475,30 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     [t, triggerRefresh],
   );
 
+  const handleServerReinstall = useCallback(
+    async (server: Server) => {
+      try {
+        const encodedServerName = encodeURIComponent(server.name);
+        const result = await apiPost(`/servers/${encodedServerName}/reinstall`, {});
+
+        if (!result || !result.success) {
+          console.error('Failed to reinstall server', { serverName: server.name, result });
+          setError(result?.message || t('server.reinstallError', { serverName: server.name }));
+          return false;
+        }
+
+        // Refresh server list after successful reinstall
+        triggerRefresh();
+        return true;
+      } catch (err) {
+        console.error('Error reinstalling server', { serverName: server.name, err });
+        setError(err instanceof Error ? err.message : String(err));
+        return false;
+      }
+    },
+    [t, triggerRefresh],
+  );
+
   // Handle page change
   const handlePageChange = useCallback((page: number) => {
     setCurrentPage(page);
@@ -510,6 +535,7 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     handleServerRemove,
     handleServerToggle,
     handleServerReload,
+    handleServerReinstall,
   };
 
   return <ServerContext.Provider value={value}>{children}</ServerContext.Provider>;

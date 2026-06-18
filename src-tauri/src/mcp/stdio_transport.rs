@@ -19,6 +19,28 @@ use tokio::{
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Kill the entire process tree of a stdio transport's child process.
+/// When the server is launched through a wrapper like `npx` / `npm exec`,
+/// the wrapper does not forward signals to its descendants, so the real
+/// server process is left running as an orphan. Walk the whole tree and
+/// force-kill it.
+fn kill_process_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        // Send SIGTERM to the process group first
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, use taskkill /F /T /PID to kill the process tree
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .spawn();
+    }
+}
+
 fn next_id() -> u64 {
     REQUEST_ID.fetch_add(1, Ordering::SeqCst)
 }
@@ -131,6 +153,14 @@ impl McpTransport for StdioTransport {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // On Unix, create a new process group so we can kill the entire tree
+        // (including npx/uvx wrapper children) on disconnect.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
         // Use current working directory for the child process
         if let Ok(cwd) = std::env::current_dir() {
             cmd.current_dir(cwd);
@@ -183,6 +213,14 @@ impl McpTransport for StdioTransport {
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
         if let Some(mut child) = self.child.take() {
+            // Kill the entire process group to ensure child processes spawned
+            // by wrappers like npx/uvx are also terminated. Without this,
+            // the real server process can become an orphan that leaks resources.
+            let pid = child.id();
+            if let Some(pid) = pid {
+                kill_process_tree(pid);
+            }
+            // Also kill the direct child process
             child.kill().await.ok();
         }
         Ok(())

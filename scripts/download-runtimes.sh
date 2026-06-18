@@ -25,39 +25,47 @@ mkdir -p "$DEST"
 OS=$(uname -s)
 ARCH=$(uname -m)
 
-# 允许通过 TARGET_ARCH 覆盖（CI 交叉编译时使用）
+# 宿主架构（用于 uv 下载，确保能在当前机器上运行）
+if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+  HOST_UV_ARCH_DARWIN="aarch64-apple-darwin"
+  HOST_UV_ARCH_LINUX="aarch64-unknown-linux-gnu"
+  HOST_TARGET_ARCH="arm64"
+else
+  HOST_UV_ARCH_DARWIN="x86_64-apple-darwin"
+  HOST_UV_ARCH_LINUX="x86_64-unknown-linux-gnu"
+  HOST_TARGET_ARCH="x64"
+fi
+
+# 允许通过 TARGET_ARCH 覆盖目标架构（CI 交叉编译时使用）
 if [[ -n "${TARGET_ARCH:-}" ]]; then
   ARCH_OVERRIDE="${TARGET_ARCH}"
 else
-  # 将 uname -m 的输出统一为 arm64 / x64
-  if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
-    ARCH_OVERRIDE="arm64"
-  else
-    ARCH_OVERRIDE="x64"
-  fi
+  ARCH_OVERRIDE="$HOST_TARGET_ARCH"
 fi
 
 case "$OS" in
   Darwin)
     PLATFORM="darwin"
+    # Node.js 使用目标架构（打包到最终应用）
     if [[ "$ARCH_OVERRIDE" == "arm64" ]]; then
       NODE_ARCH="arm64"
-      UV_ARCH="aarch64-apple-darwin"
     else
       NODE_ARCH="x64"
-      UV_ARCH="x86_64-apple-darwin"
     fi
+    # uv 始终使用宿主架构，这样才能在 CI runner 上执行
+    UV_ARCH="$HOST_UV_ARCH_DARWIN"
     NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz"
     ;;
   Linux)
     PLATFORM="linux"
+    # Node.js 使用目标架构（打包到最终应用）
     if [[ "$ARCH_OVERRIDE" == "arm64" ]]; then
       NODE_ARCH="arm64"
-      UV_ARCH="aarch64-unknown-linux-gnu"
     else
       NODE_ARCH="x64"
-      UV_ARCH="x86_64-unknown-linux-gnu"
     fi
+    # uv 始终使用宿主架构，这样才能在 CI runner 上执行
+    UV_ARCH="$HOST_UV_ARCH_LINUX"
     NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
     ;;
   *)
@@ -65,6 +73,8 @@ case "$OS" in
     exit 1
     ;;
 esac
+
+echo "--> Host uv arch: $UV_ARCH, Target node arch: $NODE_ARCH"
 
 UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_ARCH}.tar.gz"
 
@@ -84,7 +94,7 @@ if [[ -f "$NODE_DEST/bin/node" ]]; then
 fi
 
 if [[ ! -f "$NODE_DEST/bin/node" ]]; then
-  echo "--> Downloading Node.js v${NODE_VERSION} (${ARCH})..."
+  echo "--> Downloading Node.js v${NODE_VERSION} (${NODE_ARCH})..."
   TMP_NODE=$(mktemp -d)
   TMP_ARCHIVE=$(mktemp "$TMP_NODE/node-XXXXXX.tar.gz")
   curl -fL --http1.1 --progress-bar --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 -o "$TMP_ARCHIVE" "$NODE_URL"
@@ -222,13 +232,51 @@ fi
 # ---------------------------------------------------------------------------
 PYTHON_INSTALL_DIR="$UV_DEST/python"
 
-if [[ -d "$PYTHON_INSTALL_DIR" ]] && ls "$PYTHON_INSTALL_DIR"/cpython-${PYTHON_VERSION}* 1>/dev/null 2>&1; then
+# uv 解压后目录名格式: cpython-3.12.x+...
+# python-build-standalone tar 解压后目录名: python/
+if [[ -d "$PYTHON_INSTALL_DIR" ]] && { ls "$PYTHON_INSTALL_DIR"/cpython-${PYTHON_VERSION}* 1>/dev/null 2>&1 || [[ -d "$PYTHON_INSTALL_DIR/python" ]]; }; then
   echo "--> Python ${PYTHON_VERSION} already present, skipping download"
 else
-  echo "--> Downloading Python ${PYTHON_VERSION} via uv..."
+  echo "--> Downloading Python ${PYTHON_VERSION}..."
   mkdir -p "$PYTHON_INSTALL_DIR"
-  UV_PYTHON_INSTALL_DIR="$PYTHON_INSTALL_DIR" \
-    "$UV_DEST/uv" python install "${PYTHON_VERSION}"
+  # uv python install 不支持 --platform，交叉编译时需要直接下载目标架构的 Python
+  if [[ "$ARCH_OVERRIDE" != "$HOST_TARGET_ARCH" ]]; then
+    if [[ "$ARCH_OVERRIDE" == "arm64" ]]; then
+      PY_TRIPLE="aarch64-unknown-linux-gnu"
+    else
+      PY_TRIPLE="x86_64-unknown-linux-gnu"
+    fi
+    echo "--> Cross-compiling: downloading Python ${PYTHON_VERSION} for $PY_TRIPLE directly..."
+    # 通过 GitHub API 获取 python-build-standalone 最新 release 中匹配的 asset
+    DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5" \
+      | python3 -c "
+import json, sys, re
+releases = json.load(sys.stdin)
+pattern = re.compile(r'cpython-${PYTHON_VERSION}\.\d+\+.*-${PY_TRIPLE}-install_only\.tar\.gz')
+for rel in releases:
+    for asset in rel.get('assets', []):
+        if pattern.match(asset['name']) and 'stripped' not in asset['name']:
+            print(asset['browser_download_url'])
+            sys.exit(0)
+print('', end='')
+")
+    if [[ -z "$DOWNLOAD_URL" ]]; then
+      echo "ERROR: Could not find Python ${PYTHON_VERSION} for $PY_TRIPLE in python-build-standalone releases"
+      exit 1
+    fi
+    echo "--> Found: $(basename "$DOWNLOAD_URL")"
+    TMP_PY=$(mktemp -d)
+    curl -fL --retry 3 --retry-delay 5 -o "$TMP_PY/python.tar.gz" "$DOWNLOAD_URL"
+    tar -xzf "$TMP_PY/python.tar.gz" -C "$TMP_PY"
+    # tar 解压后目录名为 python/，将其内容移到 PYTHON_INSTALL_DIR
+    if [[ -d "$TMP_PY/python" ]]; then
+      cp -a "$TMP_PY/python/." "$PYTHON_INSTALL_DIR/"
+    fi
+    rm -rf "$TMP_PY"
+  else
+    UV_PYTHON_INSTALL_DIR="$PYTHON_INSTALL_DIR" \
+      "$UV_DEST/uv" python install "${PYTHON_VERSION}"
+  fi
   echo "--> Python ${PYTHON_VERSION} downloaded to: $PYTHON_INSTALL_DIR"
 fi
 

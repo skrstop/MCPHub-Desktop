@@ -503,3 +503,17 @@ pub fn app_data_dir(name: &str) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
+
+/// Returns the npm/npx cache directory used by the managed Node.js runtime.
+/// This is the `_npx` directory inside the runtimes dir.
+pub fn npm_cache_dir() -> Option<PathBuf> {
+    let rt = runtimes_dir()?;
+    Some(rt.join("_npx"))
+}
+
+/// Returns the uv/uvx cache directory used by the managed uv runtime.
+/// This is the `uv-cache` directory inside the runtimes dir.
+pub fn uvx_cache_dir() -> Option<PathBuf> {
+    let rt = runtimes_dir()?;
+    Some(rt.join("uv-cache"))
+}
