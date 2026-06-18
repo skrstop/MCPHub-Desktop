@@ -135,7 +135,7 @@ pub async fn reinstall_server(name: String) -> Result<serde_json::Value, String>
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Server '{}' not found", name))?;
 
-    let command = cfg.command.to_lowercase();
+    let command = cfg.command.as_ref().map(|c| c.to_lowercase()).unwrap_or_default();
     let mut cleared: Vec<String> = Vec::new();
 
     // Clear npx cache if the server uses npx

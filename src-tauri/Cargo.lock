@@ -2761,6 +2761,7 @@ dependencies = [
  "futures-util",
  "jsonwebtoken",
  "keyring",
+ "libc",
  "log",
  "objc",
  "rand 0.8.5",

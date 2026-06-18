@@ -205,9 +205,13 @@ if (-not $PythonExists) {
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+$NodeVer = & $NodeExe --version 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $NodeVer) { $NodeVer = "(version check failed)" }
+$UvVer = & $UvExe version 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $UvVer) { $UvVer = "(version check failed)" }
 Write-Host ""
 Write-Host "==> Runtimes ready in src-tauri/runtimes/"
-Write-Host "    Node.js : $(& $NodeExe --version)"
-Write-Host "    uv      : $(& $UvExe version)"
+Write-Host "    Node.js : $NodeVer"
+Write-Host "    uv      : $UvVer"
 Write-Host ""
 Write-Host "Run 'cargo tauri build' or 'cargo tauri dev' to use bundled runtimes."

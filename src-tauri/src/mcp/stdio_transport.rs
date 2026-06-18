@@ -157,7 +157,6 @@ impl McpTransport for StdioTransport {
         // (including npx/uvx wrapper children) on disconnect.
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
 

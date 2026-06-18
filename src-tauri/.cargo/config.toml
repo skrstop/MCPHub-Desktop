@@ -4,5 +4,3 @@ protocol = "sparse"
 [net]
 retry = 5
 git-fetch-with-cli = false
-low-speed-limit = 500
-low-speed-timeout = 60
