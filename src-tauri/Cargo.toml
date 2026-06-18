@@ -124,4 +124,7 @@ panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"
-strip = true
+# ⚠️ 使用 "debuginfo" 而非 true（即 "symbols"）
+# strip = true 会移除 __TAURI_BUNDLE_TYPE 符号，导致 Tauri CLI 无法注入 bundle 类型信息
+# 这会导致 updater 无法识别 bundle 类型，自动更新功能失效
+strip = "debuginfo"
