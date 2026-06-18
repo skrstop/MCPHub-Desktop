@@ -18,49 +18,53 @@ jobs:
       fail-fast: false
       matrix:
         include:
-#          # macOS Apple Silicon (arm64) — native on macos-14
-#          - platform: macos-14
-#            target: aarch64-apple-darwin
-#            runtime-arch: arm64
-#            bundles: dmg
-#            platform-tag: macos-arm64
-#
-#          # macOS Intel (x64) — cross-compile on ARM64 runner
-#          - platform: macos-14
-#            target: x86_64-apple-darwin
-#            runtime-arch: x64
-#            bundles: dmg
-#            platform-tag: macos-x64
-#
-#          # Linux x64 — native
-#          # Note: AppImage bundling (linuxdeploy) is unreliable in CI, only build deb/rpm
-#          # This means Linux x64 will NOT have auto-update support
-#          - platform: ubuntu-22.04
-#            target: x86_64-unknown-linux-gnu
-#            runtime-arch: x64
-#            bundles: deb,rpm
-#            platform-tag: linux-x64
-#
-#          # Linux arm64 — GitHub hosted ARM runner
-#          - platform: ubuntu-22.04-arm
-#            target: aarch64-unknown-linux-gnu
-#            runtime-arch: arm64
-#            bundles: deb,rpm
-#            platform-tag: linux-arm64
+          # macOS Apple Silicon (arm64) — native on macos-14
+          # ⚠️ bundles 必须包含 app 才能生成 updater 产物（.app.tar.gz + .app.tar.gz.sig）
+          # 仅 dmg 不会生成 updater 产物！
+          - platform: macos-14
+            target: aarch64-apple-darwin
+            runtime-arch: arm64
+            bundles: app,dmg
+            platform-tag: macos-arm64
+
+          # macOS Intel (x64) — cross-compile on ARM64 runner
+          # ⚠️ bundles 必须包含 app 才能生成 updater 产物
+          - platform: macos-14
+            target: x86_64-apple-darwin
+            runtime-arch: x64
+            bundles: app,dmg
+            platform-tag: macos-x64
+
+          # Linux x64 — native
+          # Note: AppImage bundling (linuxdeploy) is unreliable in CI, only build deb/rpm
+          # Linux 不支持自动更新（无 AppImage），所以不需要 updater 产物
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            runtime-arch: x64
+            bundles: deb,rpm
+            platform-tag: linux-x64
+
+          # Linux arm64 — GitHub hosted ARM runner
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            runtime-arch: arm64
+            bundles: deb,rpm
+            platform-tag: linux-arm64
 
           # Windows x64 — native
+          # nsis 目标会生成 .nsis.zip + .nsis.zip.sig（updater 产物）
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             runtime-arch: x64
             bundles: nsis,msi
             platform-tag: windows-x64
 
-#          # Windows arm64 — cross-compile on x64 runner
-#          - platform: windows-latest
-#            target: aarch64-pc-windows-msvc
-#            runtime-arch: arm64
-#            bundles: nsis,msi
-#            platform-tag: windows-arm64
+          # Windows arm64 — cross-compile on x64 runner
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            runtime-arch: arm64
+            bundles: nsis,msi
+            platform-tag: windows-arm64
 
     runs-on: ${{ matrix.platform }}
 
@@ -265,6 +269,16 @@ jobs:
           PUBKEY=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])")
           echo "   Pubkey: ${PUBKEY:0:50}..."
           echo "✅ Pubkey found in tauri.conf.json"
+          echo ""
+          echo "Checking createUpdaterArtifacts in tauri.conf.json..."
+          UPDATER_ARTIFACTS=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['bundle']['createUpdaterArtifacts'])")
+          echo "   createUpdaterArtifacts: $UPDATER_ARTIFACTS"
+          if [ "$UPDATER_ARTIFACTS" != "True" ]; then
+            echo "❌ ERROR: createUpdaterArtifacts is not True! Updater artifacts will NOT be generated."
+            echo "   Set bundle.createUpdaterArtifacts to true in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+          echo "✅ createUpdaterArtifacts is True — updater artifacts will be generated"
 
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
@@ -274,7 +288,10 @@ jobs:
           echo "========================================="
           echo "Target:  ${{ matrix.target }}"
           echo "Bundles: ${{ matrix.bundles }}"
-          echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL: ${{ env.CARGO_REGISTRIES_CRATES_IO_PROTOCOL }}"
+          echo ""
+          echo "⚠️  Note: macOS bundles MUST include 'app' target to generate updater artifacts."
+          echo "   'dmg' alone does NOT generate .app.tar.gz / .app.tar.gz.sig"
+          echo "   Windows 'nsis' target generates .nsis.zip / .nsis.zip.sig"
           echo ""
           npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
@@ -327,24 +344,23 @@ jobs:
           fi
           if [ "$SIG_COUNT" -eq 0 ]; then
             echo "  ⚠️  No .sig files found! Updater artifacts were NOT generated."
-            echo "  This usually means TAURI_SIGNING_PRIVATE_KEY was not set correctly."
-            echo "  Check the 'Verify signing key' step above for details."
+            echo "  This usually means TAURI_SIGNING_PRIVATE_KEY was not set correctly,"
+            echo "  OR the bundles config does not include an updater-enabled target."
+            echo ""
+            echo "  ⚠️  macOS: bundles must include 'app' (not just 'dmg')"
+            echo "  ⚠️  Windows: bundles must include 'nsis'"
+            echo "  ⚠️  Linux: no updater support (deb/rpm only)"
           else
             echo "  ✅ Found $SIG_COUNT .sig file(s)"
           fi
           echo ""
-          echo "=== .dmg / .app.tar.gz files (macOS) ==="
-          find "$BUNDLE_DIR" -name "*.dmg" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
-          find "$BUNDLE_DIR" -name "*.app.tar.gz" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
-          echo ""
-          echo "=== .deb / .rpm files (Linux) ==="
-          find "$BUNDLE_DIR" -name "*.deb" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
-          find "$BUNDLE_DIR" -name "*.rpm" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
-          echo ""
-          echo "=== .exe / .msi / .nsis.zip files (Windows) ==="
-          find "$BUNDLE_DIR" -name "*.exe" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
-          find "$BUNDLE_DIR" -name "*.msi" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
-          find "$BUNDLE_DIR" -name "*.nsis.zip" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          echo "=== Platform-specific files ==="
+          echo "macOS (.dmg, .app.tar.gz):"
+          find "$BUNDLE_DIR" \( -name "*.dmg" -o -name "*.app.tar.gz" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          echo "Linux (.deb, .rpm):"
+          find "$BUNDLE_DIR" \( -name "*.deb" -o -name "*.rpm" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          echo "Windows (.exe, .msi, .nsis.zip):"
+          find "$BUNDLE_DIR" \( -name "*.exe" -o -name "*.msi" -o -name "*.nsis.zip" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
 
       # ─── 收集产物并重命名 ──────────────────────────────────────────────────
       # 命名规则: mcphub-desktop-{platform-tag}.{ext}
@@ -373,6 +389,8 @@ jobs:
             echo "✅ Collected: mcphub-desktop-${TAG}.app.tar.gz ($(ls -lh "$ATG" | awk '{print $5}'))"
           else
             echo "⚠️  No .app.tar.gz file found (updater payload)"
+            echo "   ⚠️  This means bundles config may not include 'app' target!"
+            echo "   Fix: set bundles to 'app,dmg' instead of just 'dmg'"
           fi
           # .app.tar.gz.sig (updater signature)
           ASIG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz.sig" | head -1)
@@ -484,6 +502,7 @@ jobs:
           echo "Target: ${{ matrix.target }}"
           echo "Platform: ${{ matrix.platform }}"
           echo "Runner OS: ${{ runner.os }}"
+          echo "Bundles: ${{ matrix.bundles }}"
           echo ""
           if [ -d "dist-artifacts" ]; then
             echo "Artifacts produced:"
@@ -496,6 +515,8 @@ jobs:
           echo "Signature files (.sig) found: $SIG_COUNT"
           if [ "$SIG_COUNT" -eq 0 ]; then
             echo "⚠️  WARNING: No .sig files found. Auto-update will NOT work for this platform."
+            echo "   For macOS: bundles must include 'app' (not just 'dmg')"
+            echo "   For Windows: bundles must include 'nsis'"
           fi
 
   # ─── 创建 GitHub Release + 生成 latest.json ──────────────────────────────
@@ -639,7 +660,8 @@ jobs:
               print('   1. TAURI_SIGNING_PRIVATE_KEY 未正确设置（检查 Decode signing key 步骤）')
               print('   2. Tauri 构建未生成 updater 产物（检查 List build artifacts 步骤）')
               print('   3. .sig 文件为空（检查签名密钥是否与公钥匹配）')
-              print('   4. 构建矩阵中某些平台被注释掉（检查 release.yml）')
+              print('   4. macOS bundles 未包含 app 目标（需要 bundles: app,dmg 而非仅 dmg）')
+              print('   5. 构建矩阵中某些平台被注释掉（检查 release.yml）')
           else:
               print(f'\n✅ Found {len(platforms)} platform(s) with valid signatures:')
               for p in platforms:

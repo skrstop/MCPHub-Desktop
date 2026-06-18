@@ -9,7 +9,7 @@
 
 ---
 
-## 1. 项目概览
+## 1. 项目概览[](https://)
 
 ### 1.1 原项目（mcphub-origin — Node.js/Express + React/Vite）
 
@@ -426,14 +426,21 @@ bash scripts/verify-signing.sh
 9. 生成 `latest.json`（Python 脚本解析 .sig 文件，验证非空）
 10. 创建 draft Release 并上传所有文件
 
+> ⚠️ **bundles 配置（MUST GET RIGHT）**：
+>
+> - **macOS**: bundles 必须为 `app,dmg`（不能只写 `dmg`）。`dmg` 只生成安装包，**不会**生成 updater 产物（`.app.tar.gz` + `.app.tar.gz.sig`）。必须加 `app` 目标。
+> - **Windows**: bundles 必须包含 `nsis`，才会生成 `.nsis.zip` + `.nsis.zip.sig`。
+> - **Linux**: `deb,rpm` 即可，Linux 不支持自动更新（无 AppImage）。
+> - 如果 bundles 配置错误，Tauri 会输出警告：`The bundler was configured to create updater artifacts but no updater-enabled targets were built`，且 `.sig` 文件不会生成。
+
 **产物说明**：
 
 
-| 平台    | 安装包          | 更新包           | 签名文件             | 备注                        |
-| ------- | --------------- | ---------------- | -------------------- | --------------------------- |
-| macOS   | .dmg            | .app.tar.gz      | .app.tar.gz.sig      | 支持自动更新                |
-| Linux   | .deb, .rpm      | 无               | 无                   | 不支持自动更新（无 AppImage）|
-| Windows | .exe, .msi      | .nsis.zip        | .nsis.zip.sig        | 支持自动更新                |
+| 平台    | bundles 配置 | 安装包     | 更新包      | 签名文件        | 备注                          |
+| ------- | ------------ | ---------- | ----------- | --------------- | ----------------------------- |
+| macOS   | `app,dmg`    | .dmg       | .app.tar.gz | .app.tar.gz.sig | 支持自动更新                  |
+| Linux   | `deb,rpm`    | .deb, .rpm | 无          | 无              | 不支持自动更新（无 AppImage） |
+| Windows | `nsis,msi`   | .exe, .msi | .nsis.zip   | .nsis.zip.sig   | 支持自动更新                  |
 
 #### 3.4.4 latest.json 格式
 
