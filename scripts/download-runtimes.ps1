@@ -7,6 +7,7 @@ param(
     [string]$UvVersion = "0.6.12",
     [string]$PythonVersion = "3.12",
     # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
+    # 注意: TargetArch 控制 Node.js 和 Python 的目标架构，但 uv 始终使用宿主架构以便能执行
     [string]$TargetArch = ""
 )
 
@@ -22,25 +23,27 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 # ---------------------------------------------------------------------------
 # Detect architecture
 # TargetArch 参数可覆盖自动检测（CI 交叉编译时使用）
+# 注意: uv 必须使用宿主架构（HostArch）以便能执行；Node.js/Python 使用目标架构
 # ---------------------------------------------------------------------------
+# 检测宿主架构（用于 uv 下载，确保能在当前机器上运行）
+$HostArchRaw = (Get-CimInstance Win32_Processor).Architecture
+# 9 = x64, 12 = ARM64
+if ($HostArchRaw -eq 12) {
+    $HostUvArch = "aarch64-pc-windows-msvc"
+} else {
+    $HostUvArch = "x86_64-pc-windows-msvc"
+}
+
+# 目标架构（用于 Node.js 和 Python）
 if ($TargetArch -ne "") {
     $NodeArch = $TargetArch
-    if ($TargetArch -eq "arm64") {
-        $UvArch = "aarch64-pc-windows-msvc"
-    } else {
-        $UvArch = "x86_64-pc-windows-msvc"
-    }
 } else {
-    $Arch = (Get-CimInstance Win32_Processor).Architecture
-    # 9 = x64, 12 = ARM64
-    if ($Arch -eq 12) {
-        $NodeArch = "arm64"
-        $UvArch = "aarch64-pc-windows-msvc"
-    } else {
-        $NodeArch = "x64"
-        $UvArch = "x86_64-pc-windows-msvc"
-    }
+    $NodeArch = if ($HostArchRaw -eq 12) { "arm64" } else { "x64" }
 }
+
+# uv 始终使用宿主架构，这样才能在 CI runner 上执行
+$UvArch = $HostUvArch
+Write-Host "--> Host arch: $HostUvArch, Target arch: $NodeArch"
 
 # ---------------------------------------------------------------------------
 # Download Node.js
@@ -139,7 +142,18 @@ if ($PythonExists) {
 if (-not $PythonExists) {
     Write-Host "--> Downloading Python $PythonVersion via uv..."
     $env:UV_PYTHON_INSTALL_DIR = $PythonInstallDir
-    & $UvExe python install $PythonVersion
+    # 交叉编译时需要指定目标平台，确保下载目标架构的 Python
+    if ($TargetArch -ne "" -and $TargetArch -ne (if ($HostArchRaw -eq 12) { "arm64" } else { "x64" })) {
+        if ($TargetArch -eq "arm64") {
+            $PyPlatform = "aarch64-pc-windows-msvc"
+        } else {
+            $PyPlatform = "x86_64-pc-windows-msvc"
+        }
+        Write-Host "--> Cross-compiling: downloading Python for $PyPlatform"
+        & $UvExe python install $PythonVersion --platform $PyPlatform
+    } else {
+        & $UvExe python install $PythonVersion
+    }
     Write-Host "--> Python $PythonVersion downloaded to: $PythonInstallDir"
 } else {
     Write-Host "--> Python $PythonVersion already present, skipping"

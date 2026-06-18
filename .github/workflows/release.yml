@@ -92,6 +92,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
+            libgtk-3-dev \
             patchelf \
             libssl-dev \
             pkg-config \
@@ -140,6 +141,11 @@ jobs:
           # 开源项目：使用仓库中的私钥文件，或 GitHub Secrets
           TAURI_SIGNING_PRIVATE_KEY: ${{ steps.signing-key.outputs.key }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          # Cargo 网络重试（应对 crates.io 连接不稳定）
+          CARGO_NET_RETRY: 10
+          CARGO_HTTP_TIMEOUT: 120
+          # Linux AppImage 打包：避免 FUSE 依赖（CI 容器不支持 FUSE）
+          APPIMAGE_EXTRACT_AND_RUN: 1
 
       # ─── 收集产物 ──────────────────────────────────────────────────────────
       # macOS: .dmg + .app.tar.gz（updater）+ .app.tar.gz.sig（updater 签名）
