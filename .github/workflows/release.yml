@@ -18,43 +18,44 @@ jobs:
       fail-fast: false
       matrix:
         include:
-#          # macOS Apple Silicon (arm64) — native
-#          - platform: macos-latest
+#          # macOS Apple Silicon (arm64) — native on macos-14
+#          - platform: macos-14
 #            target: aarch64-apple-darwin
 #            runtime-arch: arm64
 #            bundles: dmg
 #            platform-tag: macos-arm64
-
-          # macOS Intel (x64) — cross-compile on ARM64 runner (macos-13 deprecated)
-          - platform: macos-14
-            target: x86_64-apple-darwin
-            runtime-arch: x64
-            bundles: dmg
-            platform-tag: macos-x64
-
+#
+#          # macOS Intel (x64) — cross-compile on ARM64 runner
+#          - platform: macos-14
+#            target: x86_64-apple-darwin
+#            runtime-arch: x64
+#            bundles: dmg
+#            platform-tag: macos-x64
+#
 #          # Linux x64 — native
 #          # Note: AppImage bundling (linuxdeploy) is unreliable in CI, only build deb/rpm
+#          # This means Linux x64 will NOT have auto-update support
 #          - platform: ubuntu-22.04
 #            target: x86_64-unknown-linux-gnu
 #            runtime-arch: x64
 #            bundles: deb,rpm
 #            platform-tag: linux-x64
 #
-#          # Linux arm64 — GitHub 托管 ARM runner
+#          # Linux arm64 — GitHub hosted ARM runner
 #          - platform: ubuntu-22.04-arm
 #            target: aarch64-unknown-linux-gnu
 #            runtime-arch: arm64
 #            bundles: deb,rpm
 #            platform-tag: linux-arm64
-#
-#          # Windows x64 — native
-#          - platform: windows-latest
-#            target: x86_64-pc-windows-msvc
-#            runtime-arch: x64
-#            bundles: nsis,msi
-#            platform-tag: windows-x64
-#
-#          # Windows arm64 — 在 x64 runner 上交叉编译
+
+          # Windows x64 — native
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            runtime-arch: x64
+            bundles: nsis,msi
+            platform-tag: windows-x64
+
+#          # Windows arm64 — cross-compile on x64 runner
 #          - platform: windows-latest
 #            target: aarch64-pc-windows-msvc
 #            runtime-arch: arm64
@@ -66,21 +67,54 @@ jobs:
     steps:
       # ─── 检出代码 ──────────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Print build info
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "  Build Configuration"
+          echo "========================================="
+          echo "Platform:      ${{ matrix.platform }}"
+          echo "Target:        ${{ matrix.target }}"
+          echo "Runtime arch:  ${{ matrix.runtime-arch }}"
+          echo "Bundles:       ${{ matrix.bundles }}"
+          echo "Platform tag:  ${{ matrix.platform-tag }}"
+          echo "Runner OS:      ${{ runner.os }}"
+          echo "Runner arch:   ${{ runner.arch }}"
+          echo "Event:         ${{ github.event_name }}"
+          echo "Ref:           ${{ github.ref }}"
+          echo "SHA:           ${{ github.sha }}"
+          echo "========================================="
 
       # ─── 安装 Node.js ──────────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Print Node.js info
+        shell: bash
+        run: |
+          echo "Node.js version: $(node --version)"
+          echo "npm version:     $(npm --version)"
 
       # ─── 安装 Rust + 目标 triple ───────────────────────────────────────────
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Print Rust info
+        shell: bash
+        run: |
+          echo "Rust version:"
+          rustup show active-toolchain
+          echo "Installed targets:"
+          rustup target list --installed
+          echo "Cargo version: $(cargo --version)"
 
       # ─── Windows arm64 交叉编译工具链 ─────────────────────────────────────
       - name: Install Windows ARM64 MSVC toolchain
@@ -91,7 +125,7 @@ jobs:
 
       # ─── Rust 构建缓存 ─────────────────────────────────────────────────────
       - name: Cache Rust
-        uses: Swatinem/rust-cache@v2.9.1
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           key: ${{ matrix.target }}
@@ -100,6 +134,7 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          echo "Installing Linux system dependencies..."
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -112,19 +147,33 @@ jobs:
             file \
             libfuse2 \
             xdg-utils
+          echo "✅ Linux dependencies installed"
 
       # ─── 安装根目录依赖（tauri-cli）────────────────────────────────────────
       - name: Install root deps
-        run: npm install
+        run: |
+          echo "Installing root npm dependencies..."
+          npm install
+          echo "✅ Root deps installed"
 
       # ─── 安装前端依赖 ──────────────────────────────────────────────────────
       - name: Install frontend deps
-        run: cd frontend && npm install
+        run: |
+          echo "Installing frontend npm dependencies..."
+          cd frontend && npm install
+          echo "✅ Frontend deps installed"
 
       # ─── 下载 bundled runtimes（Unix）─────────────────────────────────────
       - name: Download bundled runtimes (Unix)
         if: runner.os != 'Windows'
-        run: bash scripts/download-runtimes.sh
+        run: |
+          echo "Downloading bundled runtimes for Unix (TARGET_ARCH=${{ matrix.runtime-arch }})..."
+          bash scripts/download-runtimes.sh
+          echo ""
+          echo "=== Runtime files ==="
+          ls -la src-tauri/runtimes/ 2>/dev/null || echo "No runtimes directory"
+          ls -la src-tauri/runtimes/node/bin/ 2>/dev/null || echo "No node binary"
+          ls -la src-tauri/runtimes/uv/ 2>/dev/null || echo "No uv binary"
         env:
           TARGET_ARCH: ${{ matrix.runtime-arch }}
 
@@ -132,39 +181,170 @@ jobs:
       - name: Download bundled runtimes (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
+        run: |
+          Write-Host "Downloading bundled runtimes for Windows (TargetArch=${{ matrix.runtime-arch }})..."
+          .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
+          Write-Host ""
+          Write-Host "=== Runtime files ==="
+          Get-ChildItem -Path src-tauri\runtimes -Recurse -Depth 2 | Format-Table Name, Length
 
       # ─── 解码签名私钥 ─────────────────────────────────────────────────────
       # mcphub.key 文件以 base64 编码存储，Tauri signer 需要原始格式（以 "untrusted comment:" 开头）
+      # 关键：解码后必须 strip 尾部空白/换行，否则 Tauri signer 解析失败导致 .sig 不生成
       - name: Decode signing key
         shell: bash
         run: |
+          echo "========================================="
+          echo "  Decoding signing key"
+          echo "========================================="
+          KEY_FILE="src-tauri/updater/mcphub.key"
+          if [ ! -f "$KEY_FILE" ]; then
+            echo "❌ ERROR: Key file not found: $KEY_FILE"
+            exit 1
+          fi
+          KEY_SIZE=$(wc -c < "$KEY_FILE")
+          echo "Key file size: $KEY_SIZE bytes"
           python3 << 'PYEOF'
-          import base64, os
-          key_content = open('src-tauri/updater/mcphub.key').read().strip()
+          import base64, os, sys
+          key_file = 'src-tauri/updater/mcphub.key'
+          key_content = open(key_file).read().strip()
+          print(f"Key file content length: {len(key_content)} chars")
+          print(f"Key starts with: {key_content[:30]}...")
           # 如果密钥已经是原始格式（以 "untrusted comment:" 开头），直接使用
           # 否则从 base64 解码
           if key_content.startswith('untrusted comment:'):
               key_raw = key_content
+              print("Key is already in raw format (starts with 'untrusted comment:')")
           else:
+              print("Key is base64 encoded, decoding...")
               key_raw = base64.b64decode(key_content).decode()
+              print(f"Decoded key length: {len(key_raw)} chars")
+          # ⚠️ 关键修复：strip 尾部空白/换行，确保密钥格式干净
+          # 之前缺少此步骤导致 TAURI_SIGNING_PRIVATE_KEY 末尾有多余空行，
+          # Tauri signer 无法解析，.sig 文件不会生成，latest.json platforms 为空
+          key_raw = key_raw.strip()
+          print(f"After strip: key length = {len(key_raw)} chars")
+          print(f"First line: {key_raw.split(chr(10))[0]}")
+          print(f"Number of lines: {len(key_raw.split(chr(10)))}")
           env_file = os.environ['GITHUB_ENV']
           with open(env_file, 'a') as f:
               f.write('TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF\n')
               f.write(key_raw + '\n')
               f.write('TAURI_KEY_EOF\n')
+          print("✅ TAURI_SIGNING_PRIVATE_KEY set via GITHUB_ENV")
           PYEOF
-          echo "✅ Signing key decoded and set as TAURI_SIGNING_PRIVATE_KEY env var"
+
+      # ─── 验证签名密钥已正确设置 ──────────────────────────────────────────
+      - name: Verify signing key
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "  Verifying signing key"
+          echo "========================================="
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "❌ ERROR: TAURI_SIGNING_PRIVATE_KEY is not set!"
+            exit 1
+          fi
+          KEY_LEN=${#TAURI_SIGNING_PRIVATE_KEY}
+          FIRST_LINE=$(echo "$TAURI_SIGNING_PRIVATE_KEY" | head -1)
+          LINE_COUNT=$(echo "$TAURI_SIGNING_PRIVATE_KEY" | wc -l)
+          echo "✅ TAURI_SIGNING_PRIVATE_KEY is set"
+          echo "   Key length: $KEY_LEN chars"
+          echo "   Number of lines: $LINE_COUNT"
+          echo "   First line: $FIRST_LINE"
+          # 验证密钥格式：必须以 "untrusted comment:" 开头
+          if [[ "$FIRST_LINE" != untrusted\ comment:* ]]; then
+            echo "❌ ERROR: Signing key does not start with 'untrusted comment:'"
+            echo "   This means the key format is invalid and Tauri signer will fail."
+            echo "   First 50 chars: ${FIRST_LINE:0:50}"
+            exit 1
+          fi
+          echo "✅ Signing key format looks valid (starts with 'untrusted comment:')"
+          echo ""
+          echo "Checking pubkey in tauri.conf.json..."
+          PUBKEY=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])")
+          echo "   Pubkey: ${PUBKEY:0:50}..."
+          echo "✅ Pubkey found in tauri.conf.json"
 
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
-        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: |
+          echo "========================================="
+          echo "  Building Tauri app"
+          echo "========================================="
+          echo "Target:  ${{ matrix.target }}"
+          echo "Bundles: ${{ matrix.bundles }}"
+          echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL: ${{ env.CARGO_REGISTRIES_CRATES_IO_PROTOCOL }}"
+          echo ""
+          npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
           # TAURI_SIGNING_PRIVATE_KEY 已通过 GITHUB_ENV 设置（由上一步解码）
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           # Cargo 网络重试（应对 crates.io 连接不稳定）
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_NET_RETRY: 10
           CARGO_HTTP_TIMEOUT: 120
+
+      # ─── 调试：列出构建产物 ─────────────────────────────────────────────────
+      - name: List build artifacts
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "  Build artifacts for ${{ matrix.platform-tag }}"
+          echo "========================================="
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          if [ -d "$BUNDLE_DIR" ]; then
+            echo "Bundle directory: $BUNDLE_DIR"
+            echo ""
+            echo "=== All files in bundle directory ==="
+            find "$BUNDLE_DIR" -type f | sort
+            echo ""
+            echo "=== File sizes ==="
+            find "$BUNDLE_DIR" -type f -exec ls -lh {} \; | sort
+          else
+            echo "⚠️  Bundle directory not found: $BUNDLE_DIR"
+            echo ""
+            echo "Checking if target/release directory exists..."
+            if [ -d "src-tauri/target/${{ matrix.target }}/release" ]; then
+              echo "Release directory exists, listing top-level:"
+              ls -la "src-tauri/target/${{ matrix.target }}/release/" | head -20
+            else
+              echo "Release directory not found either"
+            fi
+          fi
+          echo ""
+          echo "=== .sig files (updater signatures) ==="
+          SIG_COUNT=0
+          if [ -d "$BUNDLE_DIR" ]; then
+            while IFS= read -r f; do
+              SIG_SIZE=$(ls -lh "$f" | awk '{print $5}')
+              SIG_CONTENT=$(head -c 100 "$f")
+              echo "  ✅ $f ($SIG_SIZE)"
+              echo "     Content preview: ${SIG_CONTENT:0:80}..."
+              SIG_COUNT=$((SIG_COUNT + 1))
+            done < <(find "$BUNDLE_DIR" -name "*.sig" -type f 2>/dev/null)
+          fi
+          if [ "$SIG_COUNT" -eq 0 ]; then
+            echo "  ⚠️  No .sig files found! Updater artifacts were NOT generated."
+            echo "  This usually means TAURI_SIGNING_PRIVATE_KEY was not set correctly."
+            echo "  Check the 'Verify signing key' step above for details."
+          else
+            echo "  ✅ Found $SIG_COUNT .sig file(s)"
+          fi
+          echo ""
+          echo "=== .dmg / .app.tar.gz files (macOS) ==="
+          find "$BUNDLE_DIR" -name "*.dmg" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" -name "*.app.tar.gz" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          echo ""
+          echo "=== .deb / .rpm files (Linux) ==="
+          find "$BUNDLE_DIR" -name "*.deb" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" -name "*.rpm" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          echo ""
+          echo "=== .exe / .msi / .nsis.zip files (Windows) ==="
+          find "$BUNDLE_DIR" -name "*.exe" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" -name "*.msi" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
+          find "$BUNDLE_DIR" -name "*.nsis.zip" -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done
 
       # ─── 收集产物并重命名 ──────────────────────────────────────────────────
       # 命名规则: mcphub-desktop-{platform-tag}.{ext}
@@ -172,6 +352,9 @@ jobs:
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
         run: |
+          echo "========================================="
+          echo "  Collecting macOS artifacts"
+          echo "========================================="
           mkdir -p dist-artifacts
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           TAG="${{ matrix.platform-tag }}"
@@ -179,22 +362,38 @@ jobs:
           DMG=$(find "$BUNDLE_DIR" -name "*.dmg" | head -1)
           if [ -n "$DMG" ]; then
             cp "$DMG" "dist-artifacts/mcphub-desktop-${TAG}.dmg"
+            echo "✅ Collected: mcphub-desktop-${TAG}.dmg ($(ls -lh "$DMG" | awk '{print $5}'))"
+          else
+            echo "⚠️  No .dmg file found"
           fi
           # .app.tar.gz (updater payload)
           ATG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz" ! -name "*.app.tar.gz.sig" | head -1)
           if [ -n "$ATG" ]; then
             cp "$ATG" "dist-artifacts/mcphub-desktop-${TAG}.app.tar.gz"
+            echo "✅ Collected: mcphub-desktop-${TAG}.app.tar.gz ($(ls -lh "$ATG" | awk '{print $5}'))"
+          else
+            echo "⚠️  No .app.tar.gz file found (updater payload)"
           fi
           # .app.tar.gz.sig (updater signature)
           ASIG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz.sig" | head -1)
           if [ -n "$ASIG" ]; then
             cp "$ASIG" "dist-artifacts/mcphub-desktop-${TAG}.app.tar.gz.sig"
+            echo "✅ Collected: mcphub-desktop-${TAG}.app.tar.gz.sig ($(ls -lh "$ASIG" | awk '{print $5}'))"
+            echo "   Signature content: $(head -c 80 "$ASIG")..."
+          else
+            echo "⚠️  No .app.tar.gz.sig file found (updater signature)"
           fi
+          echo ""
+          echo "=== dist-artifacts contents ==="
+          ls -lh dist-artifacts/
 
-      # Linux: .deb + .rpm（AppImage 在 CI 中不可靠，已禁用）
+      # Linux: .deb + .rpm（AppImage 在 CI 中不可靠，已禁用；Linux 无自动更新）
       - name: Collect artifacts (Linux)
         if: runner.os == 'Linux'
         run: |
+          echo "========================================="
+          echo "  Collecting Linux artifacts"
+          echo "========================================="
           mkdir -p dist-artifacts
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           TAG="${{ matrix.platform-tag }}"
@@ -202,41 +401,102 @@ jobs:
           DEB=$(find "$BUNDLE_DIR" -name "*.deb" | head -1)
           if [ -n "$DEB" ]; then
             cp "$DEB" "dist-artifacts/mcphub-desktop-${TAG}.deb"
+            echo "✅ Collected: mcphub-desktop-${TAG}.deb ($(ls -lh "$DEB" | awk '{print $5}'))"
+          else
+            echo "⚠️  No .deb file found"
           fi
           # .rpm package
           RPM=$(find "$BUNDLE_DIR" -name "*.rpm" | head -1)
           if [ -n "$RPM" ]; then
             cp "$RPM" "dist-artifacts/mcphub-desktop-${TAG}.rpm"
+            echo "✅ Collected: mcphub-desktop-${TAG}.rpm ($(ls -lh "$RPM" | awk '{print $5}'))"
+          else
+            echo "⚠️  No .rpm file found"
           fi
+          echo ""
+          echo "=== dist-artifacts contents ==="
+          ls -lh dist-artifacts/
 
       # Windows: NSIS 安装包 (.exe) + .nsis.zip + .nsis.zip.sig（updater 专用）
       - name: Collect artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          Write-Host "========================================="
+          Write-Host "  Collecting Windows artifacts"
+          Write-Host "========================================="
           New-Item -ItemType Directory -Force -Path dist-artifacts | Out-Null
           $Tag = "${{ matrix.platform-tag }}"
           $BundleDir = "src-tauri/target/${{ matrix.target }}/release/bundle"
           # .exe (NSIS installer)
           $Exe = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.exe" | Select-Object -First 1
-          if ($Exe) { Copy-Item $Exe.FullName "dist-artifacts/mcphub-desktop-$Tag.exe" }
+          if ($Exe) { 
+            Copy-Item $Exe.FullName "dist-artifacts/mcphub-desktop-$Tag.exe"
+            Write-Host "✅ Collected: mcphub-desktop-$Tag.exe ($('{0:N1} MB' -f ($Exe.Length / 1MB)))"
+          } else {
+            Write-Host "⚠️  No .exe file found"
+          }
           # .msi
           $Msi = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.msi" | Select-Object -First 1
-          if ($Msi) { Copy-Item $Msi.FullName "dist-artifacts/mcphub-desktop-$Tag.msi" }
+          if ($Msi) { 
+            Copy-Item $Msi.FullName "dist-artifacts/mcphub-desktop-$Tag.msi"
+            Write-Host "✅ Collected: mcphub-desktop-$Tag.msi ($('{0:N1} MB' -f ($Msi.Length / 1MB)))"
+          } else {
+            Write-Host "⚠️  No .msi file found"
+          }
           # .nsis.zip (updater payload)
           $Nsis = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip" | Where-Object { $_.Name -notmatch '\.sig$' } | Select-Object -First 1
-          if ($Nsis) { Copy-Item $Nsis.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip" }
+          if ($Nsis) { 
+            Copy-Item $Nsis.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip"
+            Write-Host "✅ Collected: mcphub-desktop-$Tag.nsis.zip ($('{0:N1} MB' -f ($Nsis.Length / 1MB)))"
+          } else {
+            Write-Host "⚠️  No .nsis.zip file found (updater payload)"
+          }
           # .nsis.zip.sig (updater signature)
           $Nsig = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip.sig" | Select-Object -First 1
-          if ($Nsig) { Copy-Item $Nsig.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip.sig" }
+          if ($Nsig) { 
+            Copy-Item $Nsig.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip.sig"
+            Write-Host "✅ Collected: mcphub-desktop-$Tag.nsis.zip.sig ($('{0:N0} bytes' -f $Nsig.Length))"
+            $sigContent = Get-Content $Nsig.FullName -Raw
+            Write-Host "   Signature preview: $($sigContent.Substring(0, [Math]::Min(80, $sigContent.Length)))..."
+          } else {
+            Write-Host "⚠️  No .nsis.zip.sig file found (updater signature)"
+          }
+          Write-Host ""
+          Write-Host "=== dist-artifacts contents ==="
+          Get-ChildItem dist-artifacts/ | Format-Table Name, @{L='Size(MB)';E={'{0:N1}' -f ($_.Length / 1MB)}}
 
       # ─── 上传产物到 Actions Artifacts ─────────────────────────────────────
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: mcphub-desktop-${{ matrix.target }}
           path: dist-artifacts/
           if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "  Build Summary: ${{ matrix.platform-tag }}"
+          echo "========================================="
+          echo "Target: ${{ matrix.target }}"
+          echo "Platform: ${{ matrix.platform }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo ""
+          if [ -d "dist-artifacts" ]; then
+            echo "Artifacts produced:"
+            ls -lh dist-artifacts/ 2>/dev/null || echo "  (empty)"
+          else
+            echo "⚠️  No dist-artifacts directory found"
+          fi
+          echo ""
+          SIG_COUNT=$(find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.sig" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "Signature files (.sig) found: $SIG_COUNT"
+          if [ "$SIG_COUNT" -eq 0 ]; then
+            echo "⚠️  WARNING: No .sig files found. Auto-update will NOT work for this platform."
+          fi
 
   # ─── 创建 GitHub Release + 生成 latest.json ──────────────────────────────
   release:
@@ -246,7 +506,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       # 从 tauri.conf.json 读取版本号
       - name: Read version from tauri.conf.json
@@ -260,20 +520,51 @@ jobs:
 
       # 下载全部平台产物
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: all-artifacts
           pattern: mcphub-desktop-*
           merge-multiple: false
 
-      - name: List artifacts
-        run: find all-artifacts -type f | sort
+      - name: List all downloaded artifacts
+        run: |
+          echo "========================================="
+          echo "  All downloaded artifacts"
+          echo "========================================="
+          echo ""
+          echo "=== Directory structure ==="
+          find all-artifacts -type d | sort
+          echo ""
+          echo "=== All files ==="
+          find all-artifacts -type f | sort
+          echo ""
+          echo "=== File sizes ==="
+          find all-artifacts -type f -exec ls -lh {} \; | sort
+          echo ""
+          echo "=== .sig files (updater signatures) ==="
+          SIG_COUNT=0
+          for f in $(find all-artifacts -name "*.sig" -type f 2>/dev/null); do
+            SIG_SIZE=$(ls -lh "$f" | awk '{print $5}')
+            SIG_CONTENT=$(head -c 100 "$f")
+            echo "  ✅ $f ($SIG_SIZE)"
+            echo "     Content preview: ${SIG_CONTENT:0:80}..."
+            SIG_COUNT=$((SIG_COUNT + 1))
+          done
+          if [ "$SIG_COUNT" -eq 0 ]; then
+            echo "  ❌ No .sig files found! This means updater signatures are missing."
+            echo "     Auto-update will NOT work for any platform."
+          else
+            echo "  ✅ Total: $SIG_COUNT .sig file(s)"
+          fi
 
       # 从各平台 .sig 文件自动生成 latest.json
       - name: Generate latest.json
         env:
           REPO: ${{ github.repository }}
         run: |
+          echo "========================================="
+          echo "  Generating latest.json"
+          echo "========================================="
           python3 - <<'PYEOF'
           import os, json, glob
           from datetime import datetime, timezone
@@ -290,11 +581,12 @@ jobs:
 
           print(f'✅ Version from tauri.conf.json: {version}')
           print(f'✅ Tag: {tag}')
+          print(f'✅ Base URL: {base_url}')
 
           def classify(filename: str):
               """根据文件名推断 Tauri updater 平台 key
               文件名格式: mcphub-desktop-{platform-tag}.{ext}
-              platform-tag: macos-arm64, macos-x64, linux-x64, windows-x64, windows-arm64
+              platform-tag: macos-arm64, macos-x64, linux-x64, linux-arm64, windows-x64, windows-arm64
               """
               n = filename.lower()
               if '.app.tar.gz' in n:
@@ -306,7 +598,21 @@ jobs:
               return None
 
           platforms = {}
-          for sig_path in sorted(glob.glob('all-artifacts/**/*.sig', recursive=True)):
+          sig_files = sorted(glob.glob('all-artifacts/**/*.sig', recursive=True))
+          print(f'\n🔍 Found {len(sig_files)} .sig file(s):')
+          for sig_path in sig_files:
+              print(f'  {sig_path}')
+
+          # Also check for corresponding payload files
+          for sig_path in sig_files:
+              payload_path = sig_path[:-4]  # Remove .sig extension
+              if os.path.exists(payload_path):
+                  payload_size = os.path.getsize(payload_path)
+                  print(f'  Payload: {payload_path} ({payload_size} bytes)')
+              else:
+                  print(f'  ⚠️  Payload not found: {payload_path}')
+
+          for sig_path in sig_files:
               # 去掉末尾 .sig 得到资源文件名
               asset_name = os.path.basename(sig_path[:-4])
               platform   = classify(asset_name)
@@ -314,6 +620,9 @@ jobs:
                   print(f'  [skip] {asset_name} — 无法识别平台')
                   continue
               sig_content = open(sig_path).read().strip()
+              if not sig_content:
+                  print(f'  [warn] {asset_name}.sig is empty, skipping')
+                  continue
               # GitHub releases 会把文件名中的空格替换为 '.' 生成下载 URL
               url_name = asset_name.replace(' ', '.')
               platforms[platform] = {
@@ -321,10 +630,20 @@ jobs:
                   'url': f"{base_url}/{url_name}",
               }
               print(f'  [ok] {platform} -> {url_name}')
+              print(f'       signature length: {len(sig_content)} chars')
+              print(f'       signature preview: {sig_content[:60]}...')
 
           if not platforms:
-              print('WARNING: 未找到任何 .sig 文件，latest.json 的 platforms 为空。')
-              print('         请确认 src-tauri/updater/mcphub.key 文件存在且格式正确。')
+              print('\n❌ CRITICAL: 未找到任何有效的 .sig 文件，latest.json 的 platforms 为空！')
+              print('   可能原因：')
+              print('   1. TAURI_SIGNING_PRIVATE_KEY 未正确设置（检查 Decode signing key 步骤）')
+              print('   2. Tauri 构建未生成 updater 产物（检查 List build artifacts 步骤）')
+              print('   3. .sig 文件为空（检查签名密钥是否与公钥匹配）')
+              print('   4. 构建矩阵中某些平台被注释掉（检查 release.yml）')
+          else:
+              print(f'\n✅ Found {len(platforms)} platform(s) with valid signatures:')
+              for p in platforms:
+                  print(f'   - {p}: {platforms[p]["url"]}')
 
           # 读取版本更新说明
           notes_file = f'doc/upgrade/{version}.md'
@@ -333,7 +652,7 @@ jobs:
                   notes = f.read().strip()
               print(f'✅ Loaded release notes from {notes_file}')
           else:
-              notes = '暂无更新说明'
+              notes = f'MCPHub Desktop {version}'
               print(f'⚠️  No release notes found at {notes_file}, using default')
 
           data = {
@@ -348,17 +667,34 @@ jobs:
           with open(out_path, 'w', encoding='utf-8') as f:
               json.dump(data, f, indent=2, ensure_ascii=False)
 
-          print(f'\nGenerated latest.json with {len(platforms)} platform(s):')
+          print(f'\n📄 Generated latest.json ({len(json.dumps(data, ensure_ascii=False))} bytes):')
           print(json.dumps(data, indent=2, ensure_ascii=False))
           PYEOF
 
       # 验证生成结果
       - name: Show latest.json
-        run: cat release-meta/latest.json
+        run: |
+          echo "========================================="
+          echo "  latest.json content"
+          echo "========================================="
+          cat release-meta/latest.json
+          echo ""
+          echo "========================================="
+          echo "  Validation"
+          echo "========================================="
+          # Check platforms count
+          PLATFORM_COUNT=$(python3 -c "import json; d=json.load(open('release-meta/latest.json')); print(len(d.get('platforms', {})))")
+          echo "Platforms count: $PLATFORM_COUNT"
+          if [ "$PLATFORM_COUNT" -eq 0 ]; then
+            echo "❌ CRITICAL: No platforms in latest.json! Auto-update will NOT work."
+            echo "   Check the 'Generate latest.json' step above for details."
+          else
+            echo "✅ latest.json has $PLATFORM_COUNT platform(s)"
+          fi
 
       # 创建 draft Release，上传全部产物 + latest.json
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: MCPHub Desktop ${{ steps.version.outputs.tag }}

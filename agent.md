@@ -406,8 +406,8 @@ bash scripts/verify-signing.sh
 
 | 平台          | Runner           | Target                    | 架构  |
 | ------------- | ---------------- | ------------------------- | ----- |
-| macOS ARM64   | macos-latest     | aarch64-apple-darwin      | arm64 |
-| macOS x64     | macos-13         | x86_64-apple-darwin       | x64   |
+| macOS ARM64   | macos-14         | aarch64-apple-darwin      | arm64 |
+| macOS x64     | macos-14         | x86_64-apple-darwin       | x64   |
 | Linux x64     | ubuntu-22.04     | x86_64-unknown-linux-gnu  | x64   |
 | Linux ARM64   | ubuntu-22.04-arm | aarch64-unknown-linux-gnu | arm64 |
 | Windows x64   | windows-latest   | x86_64-pc-windows-msvc    | x64   |
@@ -415,46 +415,52 @@ bash scripts/verify-signing.sh
 
 **关键步骤**：
 
-1. 安装 Node.js 20 + Rust stable + 目标 triple
+1. 安装 Node.js 22 + Rust stable + 目标 triple
 2. 安装系统依赖（Linux: webkit2gtk, appindicator3, rsvg2, patchelf, ssl）
 3. 下载 bundled runtimes（Node.js + uv + Python）
-4. 构建 Tauri 应用（使用私钥签名）
-5. 收集平台产物（.dmg, .app.tar.gz, .deb, .AppImage, .exe, .nsis.zip）
-6. 生成 `latest.json`（Python 脚本解析 .sig 文件）
-7. 创建 draft Release 并上传所有文件
+4. 解码签名私钥（base64 → 原始格式，**必须 strip 尾部空白**）
+5. 验证签名密钥格式（必须以 `untrusted comment:` 开头）
+6. 构建 Tauri 应用（使用私钥签名，`createUpdaterArtifacts: true`）
+7. 调试：列出构建产物，检查 `.sig` 文件是否生成
+8. 收集平台产物并重命名为统一格式 `mcphub-desktop-{platform-tag}.{ext}`
+9. 生成 `latest.json`（Python 脚本解析 .sig 文件，验证非空）
+10. 创建 draft Release 并上传所有文件
 
 **产物说明**：
 
 
-| 平台    | 安装包          | 更新包           | 签名文件             |
-| ------- | --------------- | ---------------- | -------------------- |
-| macOS   | .dmg            | .app.tar.gz      | .app.tar.gz.sig      |
-| Linux   | .deb, .AppImage | .AppImage.tar.gz | .AppImage.tar.gz.sig |
-| Windows | .exe, .msi      | .nsis.zip        | .nsis.zip.sig        |
+| 平台    | 安装包          | 更新包           | 签名文件             | 备注                        |
+| ------- | --------------- | ---------------- | -------------------- | --------------------------- |
+| macOS   | .dmg            | .app.tar.gz      | .app.tar.gz.sig      | 支持自动更新                |
+| Linux   | .deb, .rpm      | 无               | 无                   | 不支持自动更新（无 AppImage）|
+| Windows | .exe, .msi      | .nsis.zip        | .nsis.zip.sig        | 支持自动更新                |
 
 #### 3.4.4 latest.json 格式
 
+> ⚠️ `latest.json` 由 CI 在 release job 中自动生成，**不需要手动维护**。
+> 仓库中的 `src-tauri/updater/latest.json` 仅作占位参考，实际更新检查使用 GitHub Release 上的版本。
+
 ```json
 {
-  "version": "1.0.16",
-  "notes": "MCPHub Desktop 1.0.16\n\nSee release page for full changelog.",
-  "pub_date": "2026-06-17T12:00:00Z",
+  "version": "1.0.17",
+  "notes": "MCPHub Desktop 1.0.17\n\nSee release page for full changelog.",
+  "pub_date": "2026-06-18T12:00:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6...",
-      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.16/MCPHub.Desktop_1.0.16_aarch64.app.tar.gz"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.17/mcphub-desktop-macos-arm64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "...",
-      "url": "..."
-    },
-    "linux-x86_64": {
-      "signature": "...",
-      "url": "..."
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.17/mcphub-desktop-macos-x64.app.tar.gz"
     },
     "windows-x86_64": {
       "signature": "...",
-      "url": "..."
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.17/mcphub-desktop-windows-x64.nsis.zip"
+    },
+    "windows-aarch64": {
+      "signature": "...",
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.17/mcphub-desktop-windows-arm64.nsis.zip"
     }
   }
 }
@@ -508,10 +514,10 @@ if (updateInfo) {
 - 原因：公钥配置错误或私钥不匹配
 - 解决：确认 `tauri.conf.json` 中的 `pubkey` 与 `src-tauri/updater/mcphub.key.pub` 中的公钥一致，确认仓库中的私钥与公钥配对
 
-**问题：CI 构建 .sig 签名文件不生成**
+**问题：CI 构建 .sig 签名文件不生成（latest.json platforms 为空）**
 
-- 原因：`src-tauri/updater/mcphub.key` 文件以 **base64 编码**存储私钥，但 `TAURI_SIGNING_PRIVATE_KEY` 环境变量需要原始格式（以 `untrusted comment:` 开头的两行文本）。之前 release.yml 直接 `cat` 读取文件内容传给环境变量，导致 Tauri signer 无法解析密钥，跳过签名步骤，.sig 文件不会生成。
-- 解决：release.yml 中使用 Python 脚本将 base64 编码的密钥解码后再设置到 `TAURI_SIGNING_PRIVATE_KEY` 环境变量（通过 `GITHUB_ENV` 多行写入）
+- 原因：`src-tauri/updater/mcphub.key` 文件以 **base64 编码**存储私钥，但 `TAURI_SIGNING_PRIVATE_KEY` 环境变量需要原始格式（以 `untrusted comment:` 开头的两行文本）。解码后密钥末尾可能有多余的空白/换行符，导致 Tauri signer 无法解析密钥，跳过签名步骤，.sig 文件不会生成。
+- 解决：release.yml 中使用 Python 脚本将 base64 编码的密钥解码后 **必须 `.strip()` 去除尾部空白**，再设置到 `TAURI_SIGNING_PRIVATE_KEY` 环境变量（通过 `GITHUB_ENV` 多行写入）。同时添加了验证步骤确认密钥格式正确。
 
 **问题：CI 构建失败**
 
@@ -523,7 +529,12 @@ if (updateInfo) {
 - 原因：`latest.json` 文件不存在或格式错误
 - 解决：检查 GitHub Release 是否包含 `latest.json` 文件，确认格式正确
 
-**详细文档**：参见 `SIGNING_SETUP.md`
+**问题：构建矩阵只构建了一个平台**
+
+- 原因：release.yml 中其他平台被注释掉了
+- 解决：确保所有 6 个平台（macOS ARM64/x64、Linux x64/ARM64、Windows x64/ARM64）都未被注释
+
+**详细文档**：参见 `doc/SIGNING_SETUP.md`
 
 ### 3.5 Rust 后端差异
 
