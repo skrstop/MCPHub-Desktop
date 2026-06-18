@@ -239,8 +239,9 @@ if [[ -d "$PYTHON_INSTALL_DIR" ]] && { ls "$PYTHON_INSTALL_DIR"/cpython-${PYTHON
 else
   echo "--> Downloading Python ${PYTHON_VERSION}..."
   mkdir -p "$PYTHON_INSTALL_DIR"
-  # uv python install 不支持 --platform，交叉编译时需要直接下载目标架构的 Python
-  if [[ "$ARCH_OVERRIDE" != "$HOST_TARGET_ARCH" ]]; then
+  # uv python install 不支持 --platform，Linux 交叉编译时需要直接下载目标架构的 Python
+  # macOS 交叉编译（如在 ARM64 runner 上构建 x64）可以通过 uv python install 正常工作
+  if [[ "$ARCH_OVERRIDE" != "$HOST_TARGET_ARCH" && "$PLATFORM" == "linux" ]]; then
     if [[ "$ARCH_OVERRIDE" == "arm64" ]]; then
       PY_TRIPLE="aarch64-unknown-linux-gnu"
     else
@@ -248,21 +249,51 @@ else
     fi
     echo "--> Cross-compiling: downloading Python ${PYTHON_VERSION} for $PY_TRIPLE directly..."
     # 通过 GitHub API 获取 python-build-standalone 最新 release 中匹配的 asset
-    DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5" \
-      | python3 -c "
+    # 先尝试 GitHub API，失败时回退到直接构造 URL
+    API_RESPONSE=$(curl -s -w "\n%{http_code}" "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5" 2>/dev/null || true)
+    HTTP_STATUS=$(echo "$API_RESPONSE" | tail -1)
+    API_BODY=$(echo "$API_RESPONSE" | sed '$d')
+
+    DOWNLOAD_URL=""
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      DOWNLOAD_URL=$(echo "$API_BODY" | python3 -c "
 import json, sys, re
-releases = json.load(sys.stdin)
-pattern = re.compile(r'cpython-${PYTHON_VERSION}\.\d+\+.*-${PY_TRIPLE}-install_only\.tar\.gz')
-for rel in releases:
-    for asset in rel.get('assets', []):
-        if pattern.match(asset['name']) and 'stripped' not in asset['name']:
-            print(asset['browser_download_url'])
-            sys.exit(0)
-print('', end='')
-")
+try:
+    releases = json.load(sys.stdin)
+    if isinstance(releases, dict) and 'message' in releases:
+        # API rate limit or error response
+        print(f'API error: {releases[\"message\"]}', file=sys.stderr)
+        sys.exit(1)
+    pattern = re.compile(r'cpython-${PYTHON_VERSION}\.\d+\+.*-${PY_TRIPLE}-install_only\.tar\.gz')
+    for rel in releases:
+        if not isinstance(rel, dict):
+            continue
+        for asset in rel.get('assets', []):
+            if pattern.match(asset['name']) and 'stripped' not in asset['name']:
+                print(asset['browser_download_url'])
+                sys.exit(0)
+except Exception as e:
+    print(f'Error parsing API response: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null || true)
+    fi
+
+    # 回退：直接构造已知版本的下载 URL
     if [[ -z "$DOWNLOAD_URL" ]]; then
-      echo "ERROR: Could not find Python ${PYTHON_VERSION} for $PY_TRIPLE in python-build-standalone releases"
-      exit 1
+      echo "--> GitHub API unavailable or no matching asset found, trying direct URL construction..."
+      # 使用已知的 python-build-standalone release 版本
+      PYTHON_RELEASE_VERSION="${PYTHON_RELEASE_VERSION:-2024.10.16}"
+      DIRECT_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_RELEASE_VERSION}/cpython-${PYTHON_VERSION}.1+${PYTHON_RELEASE_VERSION}-${PY_TRIPLE}-install_only.tar.gz"
+      # 验证 URL 是否可访问
+      if curl -sfI --http1.1 --connect-timeout 10 "$DIRECT_URL" >/dev/null 2>&1; then
+        DOWNLOAD_URL="$DIRECT_URL"
+        echo "--> Found Python via direct URL: $(basename "$DOWNLOAD_URL")"
+      else
+        echo "ERROR: Could not find Python ${PYTHON_VERSION} for $PY_TRIPLE"
+        echo "       GitHub API status: ${HTTP_STATUS:-unknown}"
+        echo "       Direct URL also unavailable: $DIRECT_URL"
+        exit 1
+      fi
     fi
     echo "--> Found: $(basename "$DOWNLOAD_URL")"
     TMP_PY=$(mktemp -d)
