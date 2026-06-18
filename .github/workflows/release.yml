@@ -67,11 +67,11 @@ jobs:
     steps:
       # ─── 检出代码 ──────────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # ─── 安装 Node.js ──────────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'npm'
@@ -92,7 +92,7 @@ jobs:
 
       # ─── Rust 构建缓存 ─────────────────────────────────────────────────────
       - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: src-tauri
           key: ${{ matrix.target }}
@@ -225,7 +225,7 @@ jobs:
 
       # ─── 上传产物到 Actions Artifacts ─────────────────────────────────────
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mcphub-desktop-${{ matrix.target }}
           path: dist-artifacts/
@@ -239,7 +239,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # 从 tauri.conf.json 读取版本号
       - name: Read version from tauri.conf.json
@@ -253,7 +253,7 @@ jobs:
 
       # 下载全部平台产物
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-artifacts
           pattern: mcphub-desktop-*
@@ -285,14 +285,17 @@ jobs:
           print(f'✅ Tag: {tag}')
 
           def classify(filename: str):
-              """根据文件名推断 Tauri updater 平台 key"""
+              """根据文件名推断 Tauri updater 平台 key
+              文件名格式: mcphub-desktop-{platform-tag}.{ext}
+              platform-tag: macos-arm64, macos-x64, linux-x64, windows-x64, windows-arm64
+              """
               n = filename.lower()
               if '.app.tar.gz' in n:
-                  return 'darwin-aarch64' if 'aarch64' in n else 'darwin-x86_64'
+                  return 'darwin-aarch64' if 'arm64' in n else 'darwin-x86_64'
               if 'appimage.tar.gz' in n:
-                  return 'linux-aarch64' if ('arm64' in n or 'aarch64' in n) else 'linux-x86_64'
+                  return 'linux-aarch64' if 'arm64' in n else 'linux-x86_64'
               if 'nsis.zip' in n:
-                  return 'windows-aarch64' if ('arm64' in n or 'aarch64' in n) else 'windows-x86_64'
+                  return 'windows-aarch64' if 'arm64' in n else 'windows-x86_64'
               return None
 
           platforms = {}
@@ -316,9 +319,19 @@ jobs:
               print('WARNING: 未找到任何 .sig 文件，latest.json 的 platforms 为空。')
               print('         请确认已配置 TAURI_SIGNING_PRIVATE_KEY secret。')
 
+          # 读取版本更新说明
+          notes_file = f'doc/upgrade/{version}.md'
+          if os.path.exists(notes_file):
+              with open(notes_file, 'r', encoding='utf-8') as f:
+                  notes = f.read().strip()
+              print(f'✅ Loaded release notes from {notes_file}')
+          else:
+              notes = '暂无更新说明'
+              print(f'⚠️  No release notes found at {notes_file}, using default')
+
           data = {
               'version': version,
-              'notes': f'MCPHub Desktop {version}\n\nSee release page for full changelog.',
+              'notes': notes,
               'pub_date': pub_date,
               'platforms': platforms,
           }
@@ -338,7 +351,7 @@ jobs:
 
       # 创建 draft Release，上传全部产物 + latest.json
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: MCPHub Desktop ${{ steps.version.outputs.tag }}
