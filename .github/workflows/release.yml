@@ -73,7 +73,7 @@ jobs:
     steps:
       # ─── 检出代码 ──────────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Print build info
         shell: bash
@@ -95,9 +95,9 @@ jobs:
 
       # ─── 安装 Node.js ──────────────────────────────────────────────────────
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -131,7 +131,7 @@ jobs:
 
       # ─── Rust 构建缓存 ─────────────────────────────────────────────────────
       - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.1
         with:
           workspaces: src-tauri
           key: ${{ matrix.target }}
@@ -197,6 +197,9 @@ jobs:
       # ─── 解码签名私钥 ─────────────────────────────────────────────────────
       # mcphub.key 文件以 base64 编码存储，Tauri signer 需要原始格式（以 "untrusted comment:" 开头）
       # 关键：解码后必须 strip 尾部空白/换行，否则 Tauri signer 解析失败导致 .sig 不生成
+      # ⚠️ Windows 兼容：使用两步方案避免 GITHUB_ENV heredoc 换行符问题
+      #   1. Python 将密钥写入临时文件（newline='\n' 强制 Unix 换行）
+      #   2. Bash 从文件读取密钥并设置 GITHUB_ENV heredoc
       - name: Decode signing key
         shell: bash
         run: |
@@ -213,7 +216,7 @@ jobs:
           python3 << 'PYEOF'
           import base64, os, sys
           key_file = 'src-tauri/updater/mcphub.key'
-          key_content = open(key_file).read().strip()
+          key_content = open(key_file, 'r', encoding='utf-8').read().strip()
           print(f"Key file content length: {len(key_content)} chars")
           print(f"Key starts with: {key_content[:30]}...")
           # 如果密钥已经是原始格式（以 "untrusted comment:" 开头），直接使用
@@ -223,22 +226,39 @@ jobs:
               print("Key is already in raw format (starts with 'untrusted comment:')")
           else:
               print("Key is base64 encoded, decoding...")
-              key_raw = base64.b64decode(key_content).decode()
+              key_raw = base64.b64decode(key_content).decode('utf-8')
               print(f"Decoded key length: {len(key_raw)} chars")
           # ⚠️ 关键修复：strip 尾部空白/换行，确保密钥格式干净
           # 之前缺少此步骤导致 TAURI_SIGNING_PRIVATE_KEY 末尾有多余空行，
           # Tauri signer 无法解析，.sig 文件不会生成，latest.json platforms 为空
           key_raw = key_raw.strip()
+          # ⚠️ 移除所有 \r 字符，避免 Windows 换行符问题
+          key_raw = key_raw.replace('\r', '')
           print(f"After strip: key length = {len(key_raw)} chars")
           print(f"First line: {key_raw.split(chr(10))[0]}")
           print(f"Number of lines: {len(key_raw.split(chr(10)))}")
-          env_file = os.environ['GITHUB_ENV']
-          with open(env_file, 'a') as f:
-              f.write('TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF\n')
-              f.write(key_raw + '\n')
-              f.write('TAURI_KEY_EOF\n')
-          print("✅ TAURI_SIGNING_PRIVATE_KEY set via GITHUB_ENV")
+          # ⚠️ 写入临时文件而非直接写 GITHUB_ENV
+          # Windows 上 Python open() 文本模式会将 \n 写为 \r\n，破坏 heredoc 语法
+          # 使用 newline='\n' 强制 Unix 换行符
+          with open('signing_key.txt', 'w', encoding='utf-8', newline='\n') as f:
+              f.write(key_raw)
+          print("✅ Signing key written to signing_key.txt")
           PYEOF
+
+      - name: Set signing key environment variable
+        shell: bash
+        run: |
+          # 从文件读取密钥并设置为环境变量
+          # ⚠️ 使用 printf 而非 echo，避免 Windows 上 echo 解释转义字符或添加 \r
+          KEY_RAW=$(cat signing_key.txt)
+          echo "Key read from file, length: ${#KEY_RAW} chars"
+          echo "First line: $(echo "$KEY_RAW" | head -1)"
+          echo "Number of lines: $(echo "$KEY_RAW" | wc -l)"
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
+            printf '%s\n' "$KEY_RAW"
+            echo "TAURI_KEY_EOF"
+          } >> $GITHUB_ENV
 
       # ─── 验证签名密钥已正确设置 ──────────────────────────────────────────
       - name: Verify signing key
@@ -488,7 +508,7 @@ jobs:
 
       # ─── 上传产物到 Actions Artifacts ─────────────────────────────────────
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mcphub-desktop-${{ matrix.target }}
           path: dist-artifacts/
@@ -529,7 +549,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # 从 tauri.conf.json 读取版本号
       - name: Read version from tauri.conf.json
@@ -543,7 +563,7 @@ jobs:
 
       # 下载全部平台产物
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-artifacts
           pattern: mcphub-desktop-*
@@ -718,7 +738,7 @@ jobs:
 
       # 创建 draft Release，上传全部产物 + latest.json
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: MCPHub Desktop ${{ steps.version.outputs.tag }}
