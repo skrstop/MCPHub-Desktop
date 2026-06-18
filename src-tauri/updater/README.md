@@ -18,7 +18,7 @@ src-tauri/updater/
 
 - **私钥** (`mcphub.key`)：用于签名更新包，已提交到仓库（开源项目）
 - **公钥** (`mcphub.key.pub`)：用于验证更新包，已配置到 `tauri.conf.json`
-- **证书密码**：`mcphub`
+- **证书密码**：无（空密码，CI 直接使用）
 
 ### 配置状态
 
@@ -63,11 +63,10 @@ git push origin v1.0.17
 ### 签名流程
 
 1. **读取签名私钥**
-   - 首先检查仓库中的 `src-tauri/updater/mcphub.key` 文件
-   - 如果不存在，回退到 GitHub Secrets 中的 `TAURI_SIGNING_PRIVATE_KEY`
+   - 从仓库中的 `src-tauri/updater/mcphub.key` 文件读取（无需 GitHub Secrets）
 
 2. **构建应用**
-   - 使用私钥签名更新包
+   - 使用私钥签名更新包（无密码）
    - 生成 `.sig` 签名文件
 
 3. **生成 latest.json**
@@ -82,8 +81,8 @@ git push origin v1.0.17
 
 | 变量名 | 值 | 说明 |
 |--------|-----|------|
-| `TAURI_SIGNING_PRIVATE_KEY` | 从仓库文件读取或 GitHub Secrets | 签名私钥 |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | `mcphub` 或 GitHub Secrets | 私钥密码 |
+| `TAURI_SIGNING_PRIVATE_KEY` | 从仓库文件 `mcphub.key` 读取 | 签名私钥 |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | `""`（空字符串） | 私钥无密码 |
 
 ## 📋 构建产物
 
@@ -92,7 +91,7 @@ git push origin v1.0.17
 | 平台 | 安装包 | 更新包 | 签名文件 |
 |------|--------|--------|----------|
 | macOS | `.dmg` | `.app.tar.gz` | `.app.tar.gz.sig` |
-| Linux | `.deb`, `.AppImage` | `.AppImage.tar.gz` | `.AppImage.tar.gz.sig` |
+| Linux | `.deb`, `.rpm` | — | — |
 | Windows | `.exe`, `.msi` | `.nsis.zip` | `.nsis.zip.sig` |
 
 ## 📝 `latest.json` 格式
@@ -206,7 +205,14 @@ git push origin v1.0.17
 2. **签名目的**：签名主要用于验证**完整性**，而不是**安全性**
 3. **官方版本**：只有通过 GitHub Actions 构建的版本才会被推送到更新端点
 4. **本地构建**：本地构建的版本不会自动更新，除非手动配置更新端点
-5. **密钥轮换**：如需轮换密钥，需要重新生成并更新 `src-tauri/updater/` 目录中的文件
+5. **密钥轮换**：如需轮换密钥，需要重新生成并更新 `src-tauri/updater/` 目录中的文件以及 `tauri.conf.json` 中的 `pubkey`
+
+### 密钥历史
+
+| 时间 | Key ID | 说明 |
+|------|--------|------|
+| 2026-06 初始 | `65BF7C572D68354A` | 初始密钥（密码加密，已废弃） |
+| 2026-06-18 | `DC1E8C89B9CCAD9C` | 新密钥（无密码，供 CI 直接使用） |
 
 ## 📚 相关文档
 

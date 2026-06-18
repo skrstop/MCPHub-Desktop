@@ -18,19 +18,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-#          # macOS Apple Silicon (arm64) — native
-#          - platform: macos-latest
-#            target: aarch64-apple-darwin
-#            runtime-arch: arm64
-#            bundles: dmg
-#            platform-tag: macos-arm64
-#
-#          # macOS Intel (x64) — native
-#          - platform: macos-13
-#            target: x86_64-apple-darwin
-#            runtime-arch: x64
-#            bundles: dmg
-#            platform-tag: macos-x64
+          # macOS Apple Silicon (arm64) — native
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            runtime-arch: arm64
+            bundles: dmg
+            platform-tag: macos-arm64
+
+          # macOS Intel (x64) — native
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            runtime-arch: x64
+            bundles: dmg
+            platform-tag: macos-x64
 
           # Linux x64 — native
           # Note: AppImage bundling (linuxdeploy) is unreliable in CI, only build deb/rpm
@@ -40,27 +40,26 @@ jobs:
             bundles: deb,rpm
             platform-tag: linux-x64
 
-#          # Linux arm64 — GitHub 托管 ARM runner
-#          # Note: linuxdeploy (AppImage) doesn't support ARM64, so only build deb
-#          - platform: ubuntu-22.04-arm
-#            target: aarch64-unknown-linux-gnu
-#            runtime-arch: arm64
-#            bundles: deb
-#            platform-tag: linux-arm64
-#
-#          # Windows x64 — native
-#          - platform: windows-latest
-#            target: x86_64-pc-windows-msvc
-#            runtime-arch: x64
-#            bundles: nsis,msi
-#            platform-tag: windows-x64
-#
-#          # Windows arm64 — 在 x64 runner 上交叉编译
-#          - platform: windows-latest
-#            target: aarch64-pc-windows-msvc
-#            runtime-arch: arm64
-#            bundles: nsis,msi
-#            platform-tag: windows-arm64
+          # Linux arm64 — GitHub 托管 ARM runner
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            runtime-arch: arm64
+            bundles: deb,rpm
+            platform-tag: linux-arm64
+
+          # Windows x64 — native
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            runtime-arch: x64
+            bundles: nsis,msi
+            platform-tag: windows-x64
+
+          # Windows arm64 — 在 x64 runner 上交叉编译
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+            runtime-arch: arm64
+            bundles: nsis,msi
+            platform-tag: windows-arm64
 
     runs-on: ${{ matrix.platform }}
 
@@ -135,12 +134,21 @@ jobs:
         shell: pwsh
         run: .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
 
+      # ─── 读取签名私钥 ─────────────────────────────────────────────────────
+      - name: Read signing key
+        id: signing-key
+        shell: bash
+        run: |
+          echo "key=$(cat src-tauri/updater/mcphub.key)" >> $GITHUB_OUTPUT
+          echo "✅ Signing key loaded from repo"
+
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
-          # 开源项目：直接使用仓库中的签名私钥文件
-          TAURI_SIGNING_PRIVATE_KEY: file:src-tauri/updater/mcphub.key
+          # 开源项目：使用仓库中的签名私钥（无密码）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.signing-key.outputs.key }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           # Cargo 网络重试（应对 crates.io 连接不稳定）
           CARGO_NET_RETRY: 10
           CARGO_HTTP_TIMEOUT: 120
