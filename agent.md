@@ -663,14 +663,23 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `6067aa9` (origin/main) |
-| **对应 origin tag**            | `v0.12.15+6`            |
+| **当前已同步到 origin commit** | `96c16d9` (origin/main) |
+| **对应 origin tag**            | `v0.12.15+8`            |
 | **桌面端版本号**               | `1.0.17`                |
 | **同步执行日期**               | 2026-06-18              |
 
-> 下次同步时，使用 `6067aa9` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 6067aa9..HEAD`）。
+> 下次同步时，使用 `96c16d9` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 96c16d9..HEAD`）。
 
 ### 4.4 同步条目历史
+
+#### 2026-06-18：同步 `6067aa9` → `96c16d9`（2 个 commit）
+
+**已评估 — 无需同步到 desktop**
+
+| 来源 commit | 说明                                                                 | 处理决策                                                                                                                           |
+| ----------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `21decd9`   | fix: attach request user context for system-level all-access bearer auth | **不同步**：Node 端修复 dashboard API 的 bearer auth 用户上下文；Rust 端 HTTP 服务器已返回 BearerKey 对象，dashboard 走 JWT/Tauri IPC |
+| `96c16d9`   | feat: release-notes skill + relaxed bilingual release notes validation | **不同步**：仅涉及 `.claude/`、`.github/`、`scripts/`，与桌面端无关                                                                |
 
 #### 2026-06-18：同步 `a34dbac` → `6067aa9`（6 个 commit）
 
