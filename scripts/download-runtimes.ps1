@@ -13,6 +13,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Helper: run an external executable and capture its stdout without triggering
+# the PowerShell "StandardOutputEncoding" error that occurs in some CI environments.
+function Get-ExeOutput {
+    param([string]$ExePath, [string[]]$Args)
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $ExePath
+        foreach ($a in $Args) { $psi.ArgumentList.Add($a) }
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $proc.WaitForExit()
+        return $stdout.Trim()
+    } catch {
+        return ""
+    }
+}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Dest = Join-Path $ScriptDir "..\src-tauri\runtimes"
 $Dest = [System.IO.Path]::GetFullPath($Dest)
@@ -59,12 +80,17 @@ $NodeDest = Join-Path $Dest "node"
 $NodeExe  = Join-Path $NodeDest "node.exe"
 
 if (Test-Path $NodeExe) {
-    $NodeCurrent = & $NodeExe --version 2>$null
-    if ($NodeCurrent -eq "v$NodeVersion") {
-        Write-Host "--> Node.js v$NodeVersion already present, skipping"
+    # Skip version check when cross-compiling (ARM64 binary can't run on x64 host)
+    if ($TargetArch -ne "" -and $TargetArch -ne $HostTargetArch) {
+        Write-Host "--> Node.js already present (cross-compile, skipping version check)"
     } else {
-        Write-Host "--> Node.js found ($NodeCurrent), re-downloading v$NodeVersion..."
-        Remove-Item -Recurse -Force $NodeDest
+        $NodeCurrent = Get-ExeOutput $NodeExe @("--version")
+        if ($NodeCurrent -eq "v$NodeVersion") {
+            Write-Host "--> Node.js v$NodeVersion already present, skipping"
+        } else {
+            Write-Host "--> Node.js found ($NodeCurrent), re-downloading v$NodeVersion..."
+            Remove-Item -Recurse -Force $NodeDest
+        }
     }
 }
 
@@ -98,7 +124,8 @@ $UvExe  = Join-Path $UvDest "uv.exe"
 
 if (Test-Path $UvExe) {
     # 使用 uv self version 获取版本号（uv version 在没有 pyproject.toml 时会报错）
-    $UvCurrent = & $UvExe self version 2>$null | ForEach-Object { ($_ -split " ")[1] }
+    $UvCurrentRaw = Get-ExeOutput $UvExe @("self", "version")
+    $UvCurrent = ($UvCurrentRaw -split " ")[1]
     if ($UvCurrent -eq $UvVersion) {
         Write-Host "--> uv v$UvVersion already present, skipping"
     } else {
@@ -205,10 +232,15 @@ if (-not $PythonExists) {
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-$NodeVer = & $NodeExe --version 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $NodeVer) { $NodeVer = "(version check failed)" }
-$UvVer = & $UvExe version 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $UvVer) { $UvVer = "(version check failed)" }
+# Skip version check for cross-compiled binaries (ARM64 binary can't run on x64 host)
+if ($TargetArch -ne "" -and $TargetArch -ne $HostTargetArch) {
+    $NodeVer = "v$NodeVersion (cross-compiled, not verified)"
+} else {
+    $NodeVer = Get-ExeOutput $NodeExe @("--version")
+    if (-not $NodeVer) { $NodeVer = "(version check failed)" }
+}
+$UvVer = Get-ExeOutput $UvExe @("version")
+if (-not $UvVer) { $UvVer = "(version check failed)" }
 Write-Host ""
 Write-Host "==> Runtimes ready in src-tauri/runtimes/"
 Write-Host "    Node.js : $NodeVer"

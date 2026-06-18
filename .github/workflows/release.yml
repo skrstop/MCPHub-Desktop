@@ -22,31 +22,45 @@ jobs:
 #          - platform: macos-latest
 #            target: aarch64-apple-darwin
 #            runtime-arch: arm64
+#            bundles: dmg
+#            platform-tag: macos-arm64
 #
 #          # macOS Intel (x64) — native
 #          - platform: macos-13
 #            target: x86_64-apple-darwin
 #            runtime-arch: x64
-#
+#            bundles: dmg
+#            platform-tag: macos-x64
+
           # Linux x64 — native
+          # Note: AppImage bundling (linuxdeploy) is unreliable in CI, only build deb/rpm
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             runtime-arch: x64
+            bundles: deb,rpm
+            platform-tag: linux-x64
 
           # Linux arm64 — GitHub 托管 ARM runner
+          # Note: linuxdeploy (AppImage) doesn't support ARM64, so only build deb
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             runtime-arch: arm64
+            bundles: deb
+            platform-tag: linux-arm64
 
           # Windows x64 — native
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             runtime-arch: x64
+            bundles: nsis,msi
+            platform-tag: windows-x64
 
           # Windows arm64 — 在 x64 runner 上交叉编译
           - platform: windows-latest
             target: aarch64-pc-windows-msvc
             runtime-arch: arm64
+            bundles: nsis,msi
+            platform-tag: windows-arm64
 
     runs-on: ${{ matrix.platform }}
 
@@ -59,7 +73,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -136,7 +150,7 @@ jobs:
 
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
-        run: npm run tauri build -- --target ${{ matrix.target }}
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
           # 开源项目：使用仓库中的私钥文件，或 GitHub Secrets
           TAURI_SIGNING_PRIVATE_KEY: ${{ steps.signing-key.outputs.key }}
@@ -144,45 +158,70 @@ jobs:
           # Cargo 网络重试（应对 crates.io 连接不稳定）
           CARGO_NET_RETRY: 10
           CARGO_HTTP_TIMEOUT: 120
-          # Linux AppImage 打包：避免 FUSE 依赖（CI 容器不支持 FUSE）
-          APPIMAGE_EXTRACT_AND_RUN: 1
 
-      # ─── 收集产物 ──────────────────────────────────────────────────────────
+      # ─── 收集产物并重命名 ──────────────────────────────────────────────────
+      # 命名规则: mcphub-desktop-{platform-tag}.{ext}
       # macOS: .dmg + .app.tar.gz（updater）+ .app.tar.gz.sig（updater 签名）
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist-artifacts
-          find src-tauri/target/${{ matrix.target }}/release/bundle \
-            \( -name "*.dmg" \
-               -o -name "*.app.tar.gz" \
-               -o -name "*.app.tar.gz.sig" \) \
-            -exec cp {} dist-artifacts/ \;
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          TAG="${{ matrix.platform-tag }}"
+          # .dmg installer
+          DMG=$(find "$BUNDLE_DIR" -name "*.dmg" | head -1)
+          if [ -n "$DMG" ]; then
+            cp "$DMG" "dist-artifacts/mcphub-desktop-${TAG}.dmg"
+          fi
+          # .app.tar.gz (updater payload)
+          ATG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz" ! -name "*.app.tar.gz.sig" | head -1)
+          if [ -n "$ATG" ]; then
+            cp "$ATG" "dist-artifacts/mcphub-desktop-${TAG}.app.tar.gz"
+          fi
+          # .app.tar.gz.sig (updater signature)
+          ASIG=$(find "$BUNDLE_DIR" -name "*.app.tar.gz.sig" | head -1)
+          if [ -n "$ASIG" ]; then
+            cp "$ASIG" "dist-artifacts/mcphub-desktop-${TAG}.app.tar.gz.sig"
+          fi
 
-      # Linux: .deb + .AppImage（直接安装）
-      #        + .AppImage.tar.gz + .AppImage.tar.gz.sig（updater 专用）
+      # Linux: .deb + .rpm（AppImage 在 CI 中不可靠，已禁用）
       - name: Collect artifacts (Linux)
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist-artifacts
-          find src-tauri/target/${{ matrix.target }}/release/bundle \
-            \( -name "*.deb" \
-               -o -name "*.AppImage" \
-               -o -name "*.AppImage.tar.gz" \
-               -o -name "*.AppImage.tar.gz.sig" \
-               -o -name "*.rpm" \) \
-            -exec cp {} dist-artifacts/ \;
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          TAG="${{ matrix.platform-tag }}"
+          # .deb package
+          DEB=$(find "$BUNDLE_DIR" -name "*.deb" | head -1)
+          if [ -n "$DEB" ]; then
+            cp "$DEB" "dist-artifacts/mcphub-desktop-${TAG}.deb"
+          fi
+          # .rpm package
+          RPM=$(find "$BUNDLE_DIR" -name "*.rpm" | head -1)
+          if [ -n "$RPM" ]; then
+            cp "$RPM" "dist-artifacts/mcphub-desktop-${TAG}.rpm"
+          fi
 
-      # Windows: NSIS 安装包 + .nsis.zip + .nsis.zip.sig（updater 专用）
+      # Windows: NSIS 安装包 (.exe) + .nsis.zip + .nsis.zip.sig（updater 专用）
       - name: Collect artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-artifacts | Out-Null
-          Get-ChildItem -Recurse `
-            -Path "src-tauri/target/${{ matrix.target }}/release/bundle" `
-            -Include "*.exe","*.msi","*.nsis.zip","*.nsis.zip.sig" `
-            | Copy-Item -Destination dist-artifacts/
+          $Tag = "${{ matrix.platform-tag }}"
+          $BundleDir = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          # .exe (NSIS installer)
+          $Exe = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.exe" | Select-Object -First 1
+          if ($Exe) { Copy-Item $Exe.FullName "dist-artifacts/mcphub-desktop-$Tag.exe" }
+          # .msi
+          $Msi = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.msi" | Select-Object -First 1
+          if ($Msi) { Copy-Item $Msi.FullName "dist-artifacts/mcphub-desktop-$Tag.msi" }
+          # .nsis.zip (updater payload)
+          $Nsis = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip" | Where-Object { $_.Name -notmatch '\.sig$' } | Select-Object -First 1
+          if ($Nsis) { Copy-Item $Nsis.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip" }
+          # .nsis.zip.sig (updater signature)
+          $Nsig = Get-ChildItem -Recurse -Path $BundleDir -Filter "*.nsis.zip.sig" | Select-Object -First 1
+          if ($Nsig) { Copy-Item $Nsig.FullName "dist-artifacts/mcphub-desktop-$Tag.nsis.zip.sig" }
 
       # ─── 上传产物到 Actions Artifacts ─────────────────────────────────────
       - name: Upload artifacts
