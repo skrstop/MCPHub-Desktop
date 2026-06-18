@@ -331,7 +331,7 @@ jobs:
         shell: bash
         run: |
           echo "========================================="
-          echo "  [1/7] Locate key file"
+          echo "  [1/6] Locate key file"
           echo "========================================="
           KEY_FILE="src-tauri/updater/mcphub.key"
           echo "KEY_FILE=$KEY_FILE"
@@ -348,7 +348,7 @@ jobs:
 
           echo ""
           echo "========================================="
-          echo "  [2/7] Read raw file bytes (hex dump)"
+          echo "  [2/6] Read raw file bytes"
           echo "========================================="
           xxd "$KEY_FILE"
           echo ""
@@ -362,85 +362,38 @@ jobs:
 
           echo ""
           echo "========================================="
-          echo "  [3/7] base64 decode"
+          echo "  [3/6] Prepare key for Tauri"
           echo "========================================="
-          echo "Detecting base64 variant..."
-          if base64 -D </dev/null >/dev/null 2>&1; then
-            echo "Using: base64 -D (macOS variant)"
-            DECODED=$(tr -d '\r' < "$KEY_FILE" | base64 -D)
-          elif base64 -d </dev/null >/dev/null 2>&1; then
-            echo "Using: base64 -d (Linux variant)"
-            DECODED=$(tr -d '\r' < "$KEY_FILE" | base64 -d)
-          else
-            echo "❌ ERROR: base64 command not available"
-            exit 1
-          fi
+          # Tauri CLI 报错 "Invalid symbol 32, offset 9" — 空格在 "untrusted comment:" 的第 9 位
+          # 说明 Tauri CLI 对 TAURI_SIGNING_PRIVATE_KEY 会做 base64 解码
+          # 所以直接传文件原始 base64 内容，不做 decode
+          echo "Strategy: pass RAW base64 content from file (no decode)"
           echo ""
-          echo "DECODED length: ${#DECODED} chars"
+          RAW=$(tr -d '\r\n' < "$KEY_FILE")
+          echo "RAW length: ${#RAW} chars"
+          echo "RAW content:"
+          echo "$RAW"
           echo ""
-          echo "--- decoded content START ---"
-          echo "$DECODED"
-          echo "--- decoded content END ---"
+          echo "RAW hex dump:"
+          printf '%s' "$RAW" | xxd
           echo ""
-          echo "--- decoded hex dump START ---"
-          echo "$DECODED" | xxd
-          echo "--- decoded hex dump END ---"
+          echo "First 30 chars: ${RAW:0:30}"
+          echo "✅ RAW content prepared"
 
           echo ""
           echo "========================================="
-          echo "  [4/7] Strip \\r and trailing whitespace"
-          echo "========================================="
-          # tr -d '\r' 去掉 Windows 换行符
-          # awk 去掉尾部空行
-          CLEAN=$(printf '%s' "$DECODED" | tr -d '\r' | awk 'NF{p=1} p{print}' | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--){if(lines[i]!=""){last=i;break}} for(i=1;i<=last;i++) print lines[i]}')
-          echo "CLEAN length: ${#CLEAN} chars"
-          echo ""
-          echo "--- clean content START ---"
-          printf '%s\n' "$CLEAN"
-          echo "--- clean content END ---"
-          echo ""
-          echo "--- clean hex dump START ---"
-          printf '%s\n' "$CLEAN" | xxd
-          echo "--- clean hex dump END ---"
-          echo ""
-          LINE_COUNT=$(printf '%s\n' "$CLEAN" | wc -l | tr -d ' ')
-          echo "Line count: $LINE_COUNT"
-          echo "First line: $(printf '%s\n' "$CLEAN" | head -1)"
-          echo "Last line:  $(printf '%s\n' "$CLEAN" | tail -1)"
-          echo ""
-
-          # 验证格式
-          FIRST_LINE=$(printf '%s\n' "$CLEAN" | head -1)
-          if [[ "$FIRST_LINE" == untrusted\ comment:* ]]; then
-            echo "✅ First line starts with 'untrusted comment:' — format OK"
-          else
-            echo "❌ ERROR: First line does NOT start with 'untrusted comment:'"
-            echo "   Actual first line: $FIRST_LINE"
-            echo "   This key format is invalid!"
-            exit 1
-          fi
-
-          echo ""
-          echo "========================================="
-          echo "  [5/7] Write to GITHUB_ENV"
+          echo "  [4/6] Write to GITHUB_ENV"
           echo "========================================="
           echo "GITHUB_ENV=$GITHUB_ENV"
           echo ""
-          echo "Writing heredoc format:"
-          echo "  Header: TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF"
-          echo "  Body:   <CLEAN content>"
-          echo "  Footer: TAURI_KEY_EOF"
-          echo ""
           {
-            printf 'TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF\n'
-            printf '%s\n' "$CLEAN"
-            printf 'TAURI_KEY_EOF\n'
+            printf 'TAURI_SIGNING_PRIVATE_KEY=%s\n' "$RAW"
           } >> "$GITHUB_ENV"
           echo "✅ Written to GITHUB_ENV"
 
           echo ""
           echo "========================================="
-          echo "  [6/7] Dump GITHUB_ENV file"
+          echo "  [5/6] Dump GITHUB_ENV file"
           echo "========================================="
           echo "--- GITHUB_ENV hex dump START ---"
           xxd "$GITHUB_ENV"
@@ -452,24 +405,21 @@ jobs:
 
           echo ""
           echo "========================================="
-          echo "  [7/7] Verify env var (read back)"
+          echo "  [6/6] Verify env var (read back)"
           echo "========================================="
-          VERIFY=$(sed -n '/^TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF$/,/^TAURI_KEY_EOF$/{/^TAURI_SIGNING_PRIVATE_KEY<<TAURI_KEY_EOF$/d;/^TAURI_KEY_EOF$/d;p;}' "$GITHUB_ENV")
+          VERIFY=$(grep '^TAURI_SIGNING_PRIVATE_KEY=' "$GITHUB_ENV" | cut -d= -f2-)
           echo "Read-back value length: ${#VERIFY} chars"
+          echo "Read-back first 50 chars: ${VERIFY:0:50}"
+          echo "Read-back last 10 chars:  ${VERIFY: -10}"
           echo ""
-          echo "--- read-back content START ---"
-          echo "$VERIFY"
-          echo "--- read-back content END ---"
+          if [ "$VERIFY" = "$RAW" ]; then
+            echo "✅ Read-back matches RAW content"
+          else
+            echo "❌ MISMATCH between RAW and read-back!"
+            echo "RAW length: ${#RAW}, Read-back length: ${#VERIFY}"
+          fi
           echo ""
-          echo "--- read-back hex dump START ---"
-          echo "$VERIFY" | xxd
-          echo "--- read-back hex dump END ---"
-          echo ""
-          VERIFY_FIRST=$(echo "$VERIFY" | head -1)
-          echo "Read-back first line: $VERIFY_FIRST"
-          echo "Starts with 'untrusted comment:' -> $( [[ "$VERIFY_FIRST" == untrusted\ comment:* ]] && echo YES || echo NO )"
-          echo ""
-          echo "✅ DONE — signing key decoded and set"
+          echo "✅ DONE — signing key set"
 
       # ─── 编译 Tauri 应用 ───────────────────────────────────────────────────
       - name: Build Tauri app
