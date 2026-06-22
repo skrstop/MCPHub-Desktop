@@ -34,33 +34,33 @@ jobs:
             bundles: app,dmg
             platform-tag: macos-x64
 
-#          # Linux x64 — native
-#          - platform: ubuntu-22.04
-#            target: x86_64-unknown-linux-gnu
-#            runtime-arch: x64
-#            bundles: deb,rpm
-#            platform-tag: linux-x64
-#
-#          # Linux arm64 — GitHub hosted ARM runner
-#          - platform: ubuntu-22.04-arm
-#            target: aarch64-unknown-linux-gnu
-#            runtime-arch: arm64
-#            bundles: deb,rpm
-#            platform-tag: linux-arm64
-#
-#          # Windows x64 — native
-#          - platform: windows-latest
-#            target: x86_64-pc-windows-msvc
-#            runtime-arch: x64
-#            bundles: nsis,msi
-#            platform-tag: windows-x64
-#
-#          # Windows arm64 — cross-compile on x64 runner
-#          - platform: windows-latest
-#            target: aarch64-pc-windows-msvc
-#            runtime-arch: arm64
-#            bundles: nsis,msi
-#            platform-tag: windows-arm64
+         # Linux x64 — native
+         - platform: ubuntu-22.04
+           target: x86_64-unknown-linux-gnu
+           runtime-arch: x64
+           bundles: deb,rpm
+           platform-tag: linux-x64
+
+         # Linux arm64 — GitHub hosted ARM runner
+         - platform: ubuntu-22.04-arm
+           target: aarch64-unknown-linux-gnu
+           runtime-arch: arm64
+           bundles: deb,rpm
+           platform-tag: linux-arm64
+
+         # Windows x64 — native
+         - platform: windows-latest
+           target: x86_64-pc-windows-msvc
+           runtime-arch: x64
+           bundles: nsis,msi
+           platform-tag: windows-x64
+
+         # Windows arm64 — cross-compile on x64 runner
+         - platform: windows-latest
+           target: aarch64-pc-windows-msvc
+           runtime-arch: arm64
+           bundles: nsis,msi
+           platform-tag: windows-arm64
 
     runs-on: ${{ matrix.platform }}
 
