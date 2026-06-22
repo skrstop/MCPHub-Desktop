@@ -18,10 +18,7 @@ interface GroupCardProps {
 const getServerNames = (servers: string[] | IGroupServerConfig[]): string[] =>
   servers.map((server) => (typeof server === 'string' ? server : server.name));
 
-const getServerConfig = (
-  group: Group,
-  serverName: string,
-): IGroupServerConfig => {
+const getServerConfig = (group: Group, serverName: string): IGroupServerConfig => {
   const server = group.servers.find((s) =>
     typeof s === 'string' ? s === serverName : s.name === serverName,
   );
@@ -30,6 +27,11 @@ const getServerConfig = (
     return { name: server, tools: 'all', prompts: 'all', resources: 'all' };
   }
   return server;
+};
+
+const getServerDisplayName = (group: Group, serverName: string): string => {
+  const config = getServerConfig(group, serverName);
+  return config.alias?.trim() || serverName;
 };
 
 const copyText = async (value: string): Promise<boolean> => {
@@ -281,7 +283,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
                     }}
                   />
                   <span className="hub-mono truncate flex-1" style={{ fontSize: 12.5 }}>
-                    {s.name}
+                    <span title={s.name}>{getServerDisplayName(group, s.name)}</span>
                   </span>
                   <span
                     className="hub-mono hub-num flex-shrink-0"

@@ -6,6 +6,8 @@ use serde_json::Value as JsonValue;
 #[serde(rename_all = "camelCase")]
 pub struct GroupServerConfig {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     #[serde(default = "default_all")]
     pub tools: JsonValue,  // "all" or ["tool1", "tool2"]
     #[serde(default = "default_all")]

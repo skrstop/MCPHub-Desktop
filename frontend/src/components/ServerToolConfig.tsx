@@ -170,6 +170,20 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     onChange([...normalizedValue, nextConfig]);
   };
 
+  const updateServerAlias = (serverName: string, alias: string) => {
+    const existingServer = normalizedValue.find((config) => config.name === serverName);
+    if (!existingServer) return;
+
+    const nextConfig: IGroupServerConfig = { ...existingServer };
+    if (alias) {
+      nextConfig.alias = alias;
+    } else {
+      delete nextConfig.alias;
+    }
+
+    onChange(normalizedValue.map((config) => (config.name === serverName ? nextConfig : config)));
+  };
+
   const normalizeNamedCapability = (serverName: string, name: string) => {
     const prefix = `${serverName}${nameSeparator}`;
     return name.startsWith(prefix) ? name.slice(prefix.length) : name;
@@ -403,6 +417,20 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="space-y-4">
+                    {serverConfig && (
+                      <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                        <label className="block text-xs font-medium text-gray-600">
+                          {t('groups.alias')}
+                        </label>
+                        <input
+                          type="text"
+                          value={serverConfig.alias || ''}
+                          placeholder={server.name}
+                          onChange={(event) => updateServerAlias(server.name, event.target.value)}
+                          className="w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm text-gray-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                        />
+                      </div>
+                    )}
                     {serverCapabilities.map(({ key, titleKey, countKey, allKey }) => {
                       const items = getCapabilityItems(server, key);
                       const selectedCount = getSelectedCapabilityCount(server, key);
