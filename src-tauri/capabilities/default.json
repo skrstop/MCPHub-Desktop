@@ -23,6 +23,7 @@
     "fs:scope-appdata-recursive",
     "fs:scope-home-recursive",
     "updater:default",
-    "process:default"
+    "process:default",
+    "notification:default"
   ]
 }

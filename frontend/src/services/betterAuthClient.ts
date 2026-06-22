@@ -14,7 +14,12 @@ const resolveBaseUrl = (basePathOverride?: string): string => {
   }
   const basePath = getBasePath();
   const authPath = normalizePath(basePathOverride || '/api/auth/better');
-  return `${window.location.origin}${basePath}${authPath}`;
+  // In Tauri, window.location.origin is "tauri://localhost" which BetterAuth rejects.
+  // Fall back to http://localhost so the client can be created without errors.
+  const origin = window.location.origin.startsWith('tauri://')
+    ? 'http://localhost'
+    : window.location.origin;
+  return `${origin}${basePath}${authPath}`;
 };
 
 interface StartOidcLoginOptions {

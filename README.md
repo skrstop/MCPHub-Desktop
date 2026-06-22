@@ -121,6 +121,26 @@ npm run dev   # 等价于 tauri dev，自动启动前端 dev server 并加载 Ru
 npm run build # 等价于 tauri build，产物输出至 src-tauri/target/release/bundle/
 ```
 
+## 安装使用
+
+从 [Releases](https://github.com/skrstop/MCPHub-Desktop/releases) 页面下载对应平台的安装包。
+
+### macOS
+
+安装后打开应用时，如果系统提示 **"MCPHub Desktop.app 已损坏，无法打开"**，这是因为应用未使用 Apple 开发者证书签名导致的。请在终端中执行以下命令后重新打开即可：
+
+```bash
+xattr -cr "/Applications/MCPHub Desktop.app"
+```
+
+### Windows
+
+下载并运行 `.msi` 或 `.exe` 安装程序。
+
+### Linux
+
+根据你的发行版下载 `.deb`、`.AppImage` 或 `.rpm` 包安装。
+
 ## 文档
 
 - [`agent.md`](./agent.md)：迁移背景、目录约定、模块划分、待办事项等完整开发参考。
