@@ -1,11 +1,11 @@
 name: Release
 
 # 触发条件：推送 v* 格式的 tag 或手动触发
-#on:
+on:
 #  push:
 #    tags:
 #      - 'v*'
-#  workflow_dispatch:
+  workflow_dispatch:
 
 # 允许写入 release
 permissions:
