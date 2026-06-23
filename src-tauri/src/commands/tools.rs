@@ -1,7 +1,7 @@
 use crate::{
     mcp::pool,
     models::server::{Tool, ToolCallResult},
-    services::{log_service, server_tool_config_service},
+    services::{app_logger, log_service, server_tool_config_service},
 };
 use std::collections::HashMap;
 use serde_json::Value;
@@ -45,6 +45,16 @@ pub async fn call_tool(
         Ok(tool_result) => {
             let status = if tool_result.is_error { "error" } else { "success" };
             let output = serde_json::to_value(&tool_result).ok();
+
+            // Log to system logs (app_log)
+            let log_msg = format!("[{}] Tool '{}' call {} ({}ms)", server_name, tool_name, status, duration_ms);
+            if tool_result.is_error {
+                app_logger::log_to_db("warn", &log_msg);
+            } else {
+                app_logger::log_to_db("info", &log_msg);
+            }
+
+            // Log to activity_log
             let _ = log_service::write_activity(
                 &server_name,
                 &tool_name,
@@ -59,6 +69,12 @@ pub async fn call_tool(
         }
         Err(e) => {
             let err_msg = e.to_string();
+
+            // Log to system logs (app_log)
+            let log_msg = format!("[{}] Tool '{}' call failed ({}ms): {}", server_name, tool_name, duration_ms, err_msg);
+            app_logger::log_to_db("error", &log_msg);
+
+            // Log to activity_log
             let _ = log_service::write_activity(
                 &server_name,
                 &tool_name,

@@ -104,6 +104,7 @@ tokio-stream = "0.1"
 # Archive extraction for bundled runtime installation
 flate2 = "1"
 tar = "0.4"
+rmcp-openapi = "0.31"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -108,17 +108,10 @@ const ActivityPage: React.FC = () => {
     }
   }, [pagination, currentPage]);
 
-  // Handle view activity details
-  const handleViewDetails = async (activity: Activity) => {
-    try {
-      const response = await getActivityById(activity.id);
-      if (response?.success && response.data) {
-        setSelectedActivity(response.data);
-        setShowDetailModal(true);
-      }
-    } catch (err) {
-      console.error('Error fetching activity details:', err);
-    }
+  // Handle view activity details — use data directly from the list (no extra fetch)
+  const handleViewDetails = (activity: Activity) => {
+    setSelectedActivity(activity);
+    setShowDetailModal(true);
   };
 
   // Handle cleanup old activities
@@ -144,8 +137,16 @@ const ActivityPage: React.FC = () => {
     const filters: ActivityFilter = {};
     if (searchServer) filters.server = searchServer;
     if (searchTool) filters.tool = searchTool;
-    if (searchStatus && isValidStatus(searchStatus)) {
-      filters.status = searchStatus;
+    if (searchStatus) {
+      // Map translated status back to raw value
+      const statusLower = searchStatus.toLowerCase();
+      const successLabel = t('activity.statusSuccess').toLowerCase();
+      const errorLabel = t('activity.statusError').toLowerCase();
+      if (statusLower === successLabel || statusLower === 'success') {
+        filters.status = 'success';
+      } else if (statusLower === errorLabel || statusLower === 'error') {
+        filters.status = 'error';
+      }
     }
     if (searchGroup) filters.group = searchGroup;
     if (searchUsername) filters.username = searchUsername;
@@ -168,7 +169,8 @@ const ActivityPage: React.FC = () => {
   };
 
   // Format duration
-  const formatDuration = (ms: number): string => {
+  const formatDuration = (ms: number | null | undefined): string => {
+    if (ms == null || isNaN(ms)) return '—';
     if (ms < 1000) return `${ms}ms`;
     if (ms < 60000) return `${(ms / 1000).toFixed(2)}s`;
     return `${(ms / 60000).toFixed(2)}m`;
@@ -176,7 +178,12 @@ const ActivityPage: React.FC = () => {
 
   // Format timestamp
   const formatTimestamp = (timestamp: string): string => {
-    return new Date(timestamp).toLocaleString();
+    if (!timestamp) return '—';
+    // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" (no timezone)
+    // Treat as UTC and convert to local time
+    const date = new Date(timestamp.replace(' ', 'T') + 'Z');
+    if (isNaN(date.getTime())) return timestamp; // fallback to raw string
+    return date.toLocaleString();
   };
 
   // Parse JSON safely
@@ -364,7 +371,10 @@ const ActivityPage: React.FC = () => {
             </div>
             <datalist id="activity-status-options">
               {STATUS_OPTIONS.map((status) => (
-                <option key={status} value={status} />
+                <option
+                  key={status}
+                  value={status === 'success' ? t('activity.statusSuccess') : t('activity.statusError')}
+                />
               ))}
             </datalist>
           </div>
@@ -538,7 +548,7 @@ const ActivityPage: React.FC = () => {
     return (
       <div className="hub-card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full">
+          <table className="min-w-full" style={{ minWidth: 900 }}>
             <thead style={{ background: 'var(--hub-bg-2)' }}>
               <tr>
                 {[
@@ -627,10 +637,10 @@ const ActivityPage: React.FC = () => {
                   >
                     {activity.sourceIp || '—'}
                   </td>
-                  <td style={{ padding: '10px 14px' }}>
+                  <td style={{ padding: '10px 14px' }} className="whitespace-nowrap">
                     <button
                       onClick={() => handleViewDetails(activity)}
-                      className="hub-btn ghost sm"
+                      className="hub-btn ghost sm whitespace-nowrap"
                       style={{ color: 'var(--hub-accent)' }}
                     >
                       {t('common.view')}

@@ -1,3 +1,4 @@
+pub mod app_logger;
 pub mod mcp_manager;
 pub mod runtime_env;
 pub mod server_service;

@@ -17,7 +17,7 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
   const [autoScroll, setAutoScroll] = useState(true);
   const [filter, setFilter] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<Array<'info' | 'error' | 'warn' | 'debug'>>(['info', 'error', 'warn', 'debug']);
-  const [sourceFilter, setSourceFilter] = useState<Array<'main' | 'child'>>(['main', 'child']);
+  const [sourceFilter, setSourceFilter] = useState<string[]>([]); // empty = show all sources
 
   // Auto scroll to bottom when new logs come in if autoScroll is enabled
   useEffect(() => {
@@ -30,7 +30,8 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
   const filteredLogs = logs.filter(log => {
     const matchesText = filter ? log.message.toLowerCase().includes(filter.toLowerCase()) : true;
     const matchesType = typeFilter.includes(log.type);
-    const matchesSource = sourceFilter.includes(log.source as 'main' | 'child');
+    // Empty sourceFilter means show all sources
+    const matchesSource = sourceFilter.length === 0 || sourceFilter.includes(log.source);
     return matchesText && matchesType && matchesSource;
   });
 
@@ -100,25 +101,7 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
             ))}
           </div>
 
-          {/* Log source filters */}
-          <div className="flex gap-1 items-center ml-2">
-            {(['main', 'child'] as const).map(source => (
-              <Badge
-                key={source}
-                variant={sourceFilter.includes(source) ? 'default' : 'outline'}
-                className={`cursor-pointer ${sourceFilter.includes(source) ? getSourceColor(source) : ''}`}
-                onClick={() => {
-                  if (sourceFilter.includes(source)) {
-                    setSourceFilter(prev => prev.filter(s => s !== source));
-                  } else {
-                    setSourceFilter(prev => [...prev, source]);
-                  }
-                }}
-              >
-                {source === 'main' ? t('logs.mainProcess') : t('logs.childProcess')}
-              </Badge>
-            ))}
-          </div>
+          {/* Source filter removed — desktop logs use server names as source */}
         </div>
 
         <div className="flex items-center gap-2">
@@ -158,7 +141,7 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
           </div>
         ) : filteredLogs.length === 0 ? (
           <div className="text-center text-muted-foreground p-8">
-            {filter || typeFilter.length < 4 || sourceFilter.length < 2
+            {filter || typeFilter.length < 4
               ? t('logs.noMatch')
               : t('logs.noLogs')}
           </div>

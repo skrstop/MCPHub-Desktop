@@ -1,6 +1,7 @@
 /// Streamable HTTP transport — MCP over plain HTTP POST with streaming responses.
 use super::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
+use crate::services::app_logger;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -102,6 +103,10 @@ impl HttpTransport {
 #[async_trait]
 impl McpTransport for HttpTransport {
     async fn connect(&mut self) -> Result<()> {
+        let conn_msg = format!("[{}] Connecting to HTTP endpoint: {}", self.server_name, self.url);
+        log::info!("{}", conn_msg);
+        app_logger::log_to_db("info", &conn_msg);
+
         self.post(
             "initialize",
             json!({
@@ -112,12 +117,18 @@ impl McpTransport for HttpTransport {
         )
         .await?;
         self.connected = true;
-        log::info!("[{}] HTTP transport connected", self.server_name);
+
+        let ok_msg = format!("[{}] HTTP transport connected", self.server_name);
+        log::info!("{}", ok_msg);
+        app_logger::log_to_db("info", &ok_msg);
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
+        let msg = format!("[{}] HTTP transport disconnected", self.server_name);
+        log::info!("{}", msg);
+        app_logger::log_to_db("info", &msg);
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 /// using the MCP JSON-RPC protocol framing.
 use super::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
-use crate::services::runtime_env;
+use crate::services::{app_logger, runtime_env};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -138,12 +138,9 @@ impl McpTransport for StdioTransport {
             }
         }
 
-        log::info!(
-            "[{}] spawning: {} {:?}",
-            self.server_name,
-            resolved_cmd,
-            resolved_args
-        );
+        let spawn_msg = format!("[{}] spawning: {} {:?}", self.server_name, resolved_cmd, resolved_args);
+        log::info!("{}", spawn_msg);
+        app_logger::log_to_db("info", &spawn_msg);
 
         let mut cmd = Command::new(&resolved_cmd);
         cmd.args(&resolved_args)
@@ -165,7 +162,18 @@ impl McpTransport for StdioTransport {
             cmd.current_dir(cwd);
         }
 
-        let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn()
+            .map_err(|e| {
+                let err_msg = format!("[{}] Failed to spawn process: {}", self.server_name, e);
+                log::error!("{}", err_msg);
+                app_logger::log_to_db("error", &err_msg);
+                e
+            })?;
+        let pid = child.id().unwrap_or(0);
+        let spawn_ok_msg = format!("[{}] Process spawned (pid={})", self.server_name, pid);
+        log::info!("{}", spawn_ok_msg);
+        app_logger::log_to_db("info", &spawn_ok_msg);
+
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to get stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to get stdout"))?;
 
@@ -212,15 +220,21 @@ impl McpTransport for StdioTransport {
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
         if let Some(mut child) = self.child.take() {
+            let pid = child.id().unwrap_or(0);
+            let msg = format!("[{}] Killing process (pid={})...", self.server_name, pid);
+            log::info!("{}", msg);
+            app_logger::log_to_db("info", &msg);
+
             // Kill the entire process group to ensure child processes spawned
-            // by wrappers like npx/uvx are also terminated. Without this,
-            // the real server process can become an orphan that leaks resources.
-            let pid = child.id();
-            if let Some(pid) = pid {
+            // by wrappers like npx/uvx are also terminated.
+            if pid > 0 {
                 kill_process_tree(pid);
             }
-            // Also kill the direct child process
             child.kill().await.ok();
+
+            let done_msg = format!("[{}] Process killed (pid={})", self.server_name, pid);
+            log::info!("{}", done_msg);
+            app_logger::log_to_db("info", &done_msg);
         }
         Ok(())
     }

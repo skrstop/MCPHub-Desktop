@@ -146,7 +146,8 @@ pub async fn get_activity_stats() -> Result<ActivityStats> {
         "SELECT \
            COUNT(*) as total, \
            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success, \
-           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error \
+           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error, \
+           COALESCE(AVG(duration_ms), 0) as avg_duration \
          FROM activity_log",
     )
     .fetch_one(db::pool())
@@ -155,6 +156,7 @@ pub async fn get_activity_stats() -> Result<ActivityStats> {
         total: row.try_get("total")?,
         success: row.try_get::<Option<i64>, _>("success")?.unwrap_or(0),
         error: row.try_get::<Option<i64>, _>("error")?.unwrap_or(0),
+        avg_duration: row.try_get::<Option<f64>, _>("avg_duration")?.unwrap_or(0.0),
     })
 }
 
@@ -182,4 +184,79 @@ pub async fn clear_logs() -> Result<()> {
         .execute(db::pool())
         .await?;
     Ok(())
+}
+
+/// Retention period for logs (days).
+const LOG_RETENTION_DAYS: i64 = 15;
+
+/// Clean up logs older than the retention period and vacuum the database.
+///
+/// This function:
+/// 1. Deletes app_log entries older than 15 days
+/// 2. Deletes activity_log entries older than 15 days
+/// 3. Runs VACUUM to reclaim disk space
+///
+/// Returns (app_log_deleted, activity_log_deleted, vacuum_done).
+pub async fn cleanup_old_logs() -> Result<(i64, i64, bool)> {
+    let cutoff = format!("datetime('now', '-{} days')", LOG_RETENTION_DAYS);
+
+    // Delete old app_log entries
+    let app_log_sql = format!(
+        "DELETE FROM app_log WHERE created_at < {}",
+        cutoff
+    );
+    let app_result = sqlx::query(&app_log_sql)
+        .execute(db::pool())
+        .await?;
+    let app_deleted = app_result.rows_affected() as i64;
+
+    // Delete old activity_log entries
+    let activity_sql = format!(
+        "DELETE FROM activity_log WHERE created_at < {}",
+        cutoff
+    );
+    let activity_result = sqlx::query(&activity_sql)
+        .execute(db::pool())
+        .await?;
+    let activity_deleted = activity_result.rows_affected() as i64;
+
+    // Run VACUUM to reclaim disk space
+    let vacuum_done = if app_deleted > 0 || activity_deleted > 0 {
+        match sqlx::raw_sql("VACUUM")
+            .execute(db::pool())
+            .await
+        {
+            Ok(_) => {
+                log::info!(
+                    "[log_cleanup] VACUUM completed (deleted {} app_log, {} activity_log)",
+                    app_deleted, activity_deleted
+                );
+                true
+            }
+            Err(e) => {
+                log::warn!("[log_cleanup] VACUUM failed: {}", e);
+                false
+            }
+        }
+    } else {
+        true // nothing to vacuum
+    };
+
+    Ok((app_deleted, activity_deleted, vacuum_done))
+}
+
+/// Run log cleanup and return a summary message.
+pub async fn run_cleanup_with_summary() -> String {
+    match cleanup_old_logs().await {
+        Ok((app_deleted, activity_deleted, vacuum_done)) => {
+            let vacuum_status = if vacuum_done { "done" } else { "failed" };
+            format!(
+                "Cleanup completed: {} app_log, {} activity_log deleted (retention={}d), vacuum={}",
+                app_deleted, activity_deleted, LOG_RETENTION_DAYS, vacuum_status
+            )
+        }
+        Err(e) => {
+            format!("Cleanup failed: {}", e)
+        }
+    }
 }

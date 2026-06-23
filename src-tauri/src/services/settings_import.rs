@@ -66,6 +66,7 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 url: raw.url,
                 headers: None,
                 options: None,
+                openapi: None,
                 enabled: !raw.disabled.unwrap_or(false),
             };
 

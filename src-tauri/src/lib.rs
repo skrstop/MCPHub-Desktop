@@ -28,6 +28,8 @@ pub fn run() {
         let _: () = msg_send![info, setProcessName: ns_str];
     }
 
+    // Initialize env_logger for stderr output first.
+    // After DB is ready, we'll also enable database logging via app_logger.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -70,6 +72,10 @@ pub fn run() {
                 std::process::exit(1);
             }
 
+            // Initialize database log writer
+            services::app_logger::init();
+            services::app_logger::log_to_db("info", "Application started, database initialized");
+
             // Start MCP servers and HTTP server in background after DB is ready
             let app_handle2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -99,6 +105,18 @@ pub fn run() {
                     log::error!("Failed to start MCP servers: {}", e);
                 }
                 services::http_server::maybe_start().await;
+
+                // Periodic log cleanup: run every 6 hours, first run after 5 minutes
+                tokio::spawn(async {
+                    // Wait 5 minutes before first cleanup to avoid startup contention
+                    tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                    loop {
+                        let msg = services::log_service::run_cleanup_with_summary().await;
+                        log::info!("[log_cleanup] {}", msg);
+                        services::app_logger::log_to_db("info", &format!("[log_cleanup] {}", msg));
+                        tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
+                    }
+                });
             });
 
             // Set up system tray icon with menu
@@ -195,6 +213,7 @@ pub fn run() {
             commands::logs::get_activity_stats,
             commands::logs::get_tool_activities,
             commands::logs::clear_tool_activities,
+            commands::logs::cleanup_old_logs,
             // Bearer key commands
             commands::bearer_keys::list_bearer_keys,
             commands::bearer_keys::create_bearer_key,

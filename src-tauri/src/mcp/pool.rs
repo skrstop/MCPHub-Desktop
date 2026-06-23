@@ -2,10 +2,12 @@
 use super::{
     client::McpClient,
     http_transport::HttpTransport,
+    openapi_transport::{OpenApiConfig as TransportOpenApiConfig, OpenApiSecurity as TransportOpenApiSecurity, OpenapiTransport},
     sse_transport::SseTransport,
     stdio_transport::StdioTransport,
 };
 use crate::models::server::{ServerConfig, ServerStatus, ServerType, Tool, ToolCallResult};
+use crate::services::app_logger;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::{
@@ -16,7 +18,7 @@ use tokio::sync::RwLock;
 
 /// Holds a live client + last known status + cached tools
 struct PoolEntry {
-    client: McpClient,
+    client: Option<McpClient>,
     status: ServerStatus,
     tools: Vec<Tool>,  // cached at connect time; refreshed on reconnect
 }
@@ -65,28 +67,118 @@ fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
             Ok(McpClient::new(name, Box::new(transport)))
         }
         ServerType::Openapi => {
-            Err(anyhow!("OpenAPI servers are not yet supported in desktop client"))
+            let openapi_cfg = cfg.openapi.as_ref()
+                .ok_or_else(|| anyhow!("OpenAPI server '{}' missing openapi config", name))?;
+
+            let security = openapi_cfg.security.as_ref().map(|s| {
+                let security_type = s.security_type.clone();
+                match security_type.as_str() {
+                    "apiKey" => {
+                        let ak = s.api_key.as_ref().unwrap();
+                        TransportOpenApiSecurity::ApiKey {
+                            name: ak.name.clone(),
+                            location: ak.location.clone(),
+                            value: ak.value.clone(),
+                        }
+                    }
+                    "http" => {
+                        let h = s.http.as_ref().unwrap();
+                        TransportOpenApiSecurity::Http {
+                            scheme: h.scheme.clone(),
+                            credentials: h.credentials.clone(),
+                        }
+                    }
+                    "oauth2" => {
+                        let o = s.oauth2.as_ref().unwrap();
+                        TransportOpenApiSecurity::OAuth2 {
+                            token: o.token.clone(),
+                        }
+                    }
+                    "openIdConnect" => {
+                        let oidc = s.open_id_connect.as_ref().unwrap();
+                        TransportOpenApiSecurity::OpenIdConnect {
+                            url: oidc.url.clone(),
+                            token: oidc.token.clone(),
+                        }
+                    }
+                    _ => TransportOpenApiSecurity::Http {
+                        scheme: "bearer".to_string(),
+                        credentials: String::new(),
+                    },
+                }
+            });
+
+            // Build passthrough headers from the config
+            let mut passthrough_headers = HashMap::new();
+            for header_name in &openapi_cfg.passthrough_headers {
+                if let Some(ref hdrs) = cfg.headers {
+                    if let Some(val) = hdrs.get(header_name) {
+                        passthrough_headers.insert(header_name.clone(), val.clone());
+                    }
+                }
+            }
+
+            let transport_config = TransportOpenApiConfig {
+                spec_url: openapi_cfg.url.clone(),
+                spec_schema: openapi_cfg.schema.clone(),
+                version: openapi_cfg.version.clone(),
+                security,
+                passthrough_headers,
+                headers: cfg.headers.clone().unwrap_or_default(),
+            };
+
+            let transport = OpenapiTransport::new(&name, transport_config);
+            Ok(McpClient::new(name, Box::new(transport)))
         }
     }
 }
 
-/// Connect a single server and insert into pool
+/// Connect a single server and insert into pool.
+/// Immediately inserts a "starting" placeholder so the frontend can show "connecting" status
+/// while the actual connect (process spawn, handshake) is in progress.
 pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     let name = cfg.name.clone();
+
+    // 1. Insert "starting" placeholder immediately
+    let start_msg = format!("[{}] Starting connection (type={:?})...", name, cfg.server_type);
+    log::info!("{}", start_msg);
+    app_logger::log_to_db("info", &start_msg);
+    {
+        let mut map = pool().write().await;
+        map.insert(name.clone(), PoolEntry {
+            client: None,
+            status: ServerStatus {
+                name: name.clone(),
+                connected: false,
+                starting: true,
+                tool_count: 0,
+                error: None,
+                last_connected: None,
+            },
+            tools: vec![],
+        });
+    }
+
+    // 2. Build client
     let mut entry_client = match build_client(cfg) {
         Ok(c) => c,
         Err(e) => {
             log::error!("[{}] Failed to build client: {}", name, e);
-            return ServerStatus {
+            let status = ServerStatus {
                 name: name.clone(),
                 connected: false,
+                starting: false,
                 tool_count: 0,
                 error: Some(e.to_string()),
                 last_connected: None,
             };
+            let mut map = pool().write().await;
+            map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+            return status;
         }
     };
 
+    // 3. Attempt connect
     match entry_client.connect().await {
         Ok(()) => {
             let tools = entry_client.list_tools().await.unwrap_or_default();
@@ -95,6 +187,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
             let status = ServerStatus {
                 name: name.clone(),
                 connected: true,
+                starting: false,
                 tool_count,
                 error: None,
                 last_connected,
@@ -103,23 +196,31 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
             map.insert(
                 name.clone(),
                 PoolEntry {
-                    client: entry_client,
+                    client: Some(entry_client),
                     status: status.clone(),
                     tools,
                 },
             );
-            log::info!("[{}] Connected ({} tools)", name, tool_count);
+            let conn_msg = format!("[{}] Connected ({} tools)", name, tool_count);
+            log::info!("{}", conn_msg);
+            app_logger::log_to_db("info", &conn_msg);
             status
         }
         Err(e) => {
-            log::error!("[{}] Connect failed: {}", name, e);
-            ServerStatus {
-                name,
+            let err_msg = format!("[{}] Connect failed: {}", name, e);
+            log::error!("{}", err_msg);
+            app_logger::log_to_db("error", &err_msg);
+            let status = ServerStatus {
+                name: name.clone(),
                 connected: false,
+                starting: false,
                 tool_count: 0,
                 error: Some(e.to_string()),
                 last_connected: None,
-            }
+            };
+            let mut map = pool().write().await;
+            map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+            status
         }
     }
 }
@@ -129,13 +230,19 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
 /// actual disconnect I/O happens after the lock is released so that read
 /// operations are not blocked during the network round-trip.
 pub async fn disconnect_server(name: &str) -> Result<()> {
+    log::info!("[{}] Disconnecting...", name);
+    app_logger::log_to_db("info", &format!("[{}] Disconnecting...", name));
     let entry = {
         let mut map = pool().write().await;
         map.remove(name)
     }; // write lock released before any I/O
     if let Some(mut e) = entry {
-        e.client.disconnect().await?;
+        if let Some(mut client) = e.client.take() {
+            client.disconnect().await?;
+        }
     }
+    log::info!("[{}] Disconnected", name);
+    app_logger::log_to_db("info", &format!("[{}] Disconnected", name));
     Ok(())
 }
 
@@ -179,5 +286,19 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
     let entry = map
         .get(server_name)
         .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
-    entry.client.call_tool(tool_name, arguments).await
+    let client = entry.client.as_ref()
+        .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?;
+
+    log::debug!("[{}] Calling tool '{}'...", server_name, tool_name);
+    let result = client.call_tool(tool_name, arguments).await;
+    match &result {
+        Ok(r) => {
+            let status = if r.is_error { "error" } else { "success" };
+            log::debug!("[{}] Tool '{}' call {}", server_name, tool_name, status);
+        }
+        Err(e) => {
+            log::warn!("[{}] Tool '{}' call failed: {}", server_name, tool_name, e);
+        }
+    }
+    result
 }

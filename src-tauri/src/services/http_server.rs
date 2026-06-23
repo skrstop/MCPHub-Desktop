@@ -13,7 +13,7 @@
 use crate::{
     mcp::pool,
     models::{bearer_key::BearerKey, server::Tool},
-    services::{bearer_key_service, config_service, group_service, server_tool_config_service},
+    services::{app_logger, bearer_key_service, config_service, group_service, log_service, server_tool_config_service},
 };
 use axum::response::IntoResponse;
 use axum::{
@@ -547,6 +547,13 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
 
 /// Core MCP JSON-RPC dispatcher.
 async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Response {
+    let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("unknown");
+    let client_ip = headers.get("x-forwarded-for")
+        .or_else(|| headers.get("x-real-ip"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    log::debug!("[HTTP] MCP request: method={}, scope={}, client={}", method, scope, client_ip);
+
     let bearer_key = match check_bearer_auth(&headers).await {
         Ok(k) => k,
         Err(r) => return r,
@@ -708,11 +715,53 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
                 }
             }
             match target {
-                None => jsonrpc_error(id, -32602, format!("Tool '{}' not found", tool_name)),
-                Some((sn, orig_name)) => match pool::call_tool(&sn, &orig_name, args).await {
-                    Ok(r) => jsonrpc_response(id, json!({"content": r.content, "isError": r.is_error})),
-                    Err(e) => jsonrpc_error(id, -32603, e.to_string()),
-                },
+                None => {
+                    log::warn!("[HTTP] Tool '{}' not found in scope '{}'", tool_name, scope);
+                    jsonrpc_error(id, -32602, format!("Tool '{}' not found", tool_name))
+                }
+                Some((sn, orig_name)) => {
+                    log::debug!("[HTTP] Calling tool '{}' on server '{}'", orig_name, sn);
+                    let start = std::time::Instant::now();
+                    match pool::call_tool(&sn, &orig_name, args.clone()).await {
+                        Ok(r) => {
+                            let duration_ms = start.elapsed().as_millis() as i64;
+                            let status = if r.is_error { "error" } else { "success" };
+                            log::info!("[HTTP] Tool '{}' call {} on server '{}' ({}ms)", orig_name, status, sn, duration_ms);
+
+                            // Write to activity_log
+                            let output = serde_json::to_value(&r).ok();
+                            let _ = log_service::write_activity(
+                                &sn,
+                                &orig_name,
+                                Some(duration_ms),
+                                status,
+                                Some(args),
+                                output,
+                                None,
+                            ).await;
+
+                            jsonrpc_response(id, json!({"content": r.content, "isError": r.is_error}))
+                        }
+                        Err(e) => {
+                            let duration_ms = start.elapsed().as_millis() as i64;
+                            let err_msg = e.to_string();
+                            log::error!("[HTTP] Tool '{}' call failed on server '{}' ({}ms): {}", orig_name, sn, duration_ms, err_msg);
+
+                            // Write to activity_log
+                            let _ = log_service::write_activity(
+                                &sn,
+                                &orig_name,
+                                Some(duration_ms),
+                                "error",
+                                Some(args),
+                                None,
+                                Some(&err_msg),
+                            ).await;
+
+                            jsonrpc_error(id, -32603, err_msg)
+                        }
+                    }
+                }
             }
         }
         _ => jsonrpc_error(id, -32601, "Method not found"),
@@ -834,8 +883,21 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     let trust_proxy = trust_proxy == "true" || trust_proxy == "1" || trust_proxy == "yes";
 
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-    let listener = TcpListener::bind(addr).await?;
-    log::info!("MCPHub HTTP server listening on http://0.0.0.0:{} (body limit: {} bytes, trust_proxy: {})", port, body_limit_bytes, trust_proxy);
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            let err_msg = format!(
+                "Failed to bind HTTP server to port {}: {}. The port may be occupied by another application.",
+                port, e
+            );
+            log::error!("{}", err_msg);
+            app_logger::log_to_db("error", &err_msg);
+            return Err(anyhow::anyhow!(err_msg));
+        }
+    };
+    let http_msg = format!("MCPHub HTTP server listening on http://0.0.0.0:{} (body limit: {} bytes, trust_proxy: {})", port, body_limit_bytes, trust_proxy);
+    log::info!("{}", http_msg);
+    app_logger::log_to_db("info", &http_msg);
 
     let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -888,11 +950,17 @@ pub async fn maybe_start() {
                     .unwrap_or("1mb");
                 let body_limit_bytes = parse_body_limit(body_limit_str);
                 if let Err(e) = start(port, body_limit_bytes).await {
-                    log::error!("Failed to start HTTP server: {}", e);
+                    let err_msg = format!("Failed to start HTTP server on port {}: {}", port, e);
+                    log::error!("{}", err_msg);
+                    app_logger::log_to_db("error", &err_msg);
                 }
             }
         }
-        Err(e) => log::warn!("Could not read config for HTTP server startup: {}", e),
+        Err(e) => {
+            let warn_msg = format!("Could not read config for HTTP server startup: {}", e);
+            log::warn!("{}", warn_msg);
+            app_logger::log_to_db("warn", &warn_msg);
+        }
     }
 }
 

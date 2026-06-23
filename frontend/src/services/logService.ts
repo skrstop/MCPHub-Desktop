@@ -168,6 +168,7 @@ export const useLogs = () => {
 
   useEffect(() => {
     let mounted = true;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
     // Fetch initial logs
     const loadInitialLogs = async () => {
@@ -187,7 +188,23 @@ export const useLogs = () => {
 
     loadInitialLogs();
 
-    // Subscribe to SSE stream for new logs
+    // In Tauri, SSE is disabled — use polling instead (every 5 seconds)
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (isTauri) {
+      pollTimer = setInterval(async () => {
+        if (!mounted) return;
+        try {
+          const freshLogs = await fetchLogs();
+          if (mounted) {
+            setLogs(freshLogs);
+          }
+        } catch {
+          // Ignore polling errors
+        }
+      }, 5000);
+    }
+
+    // Subscribe to SSE stream for new logs (non-Tauri only)
     const handleMessage = (event: MessageEvent) => {
       if (!mounted) return;
       try {
@@ -208,6 +225,7 @@ export const useLogs = () => {
 
     return () => {
       mounted = false;
+      if (pollTimer) clearInterval(pollTimer);
       unsubscribe();
     };
   }, []);

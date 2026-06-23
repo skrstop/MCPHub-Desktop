@@ -310,7 +310,7 @@ const PromptCard = ({ prompt, server, readOnly = false, onToggle, onDescriptionU
             }}
             className="hub-btn sm"
             style={{ color: 'var(--hub-accent)' }}
-            disabled={isRunning || !prompt.enabled}
+            disabled={isRunning || prompt.enabled === false}
           >
             {isRunning ? <Loader size={12} className="animate-spin" /> : <Play size={12} />}
             <span>{isRunning ? t('tool.running') : t('tool.run')}</span>

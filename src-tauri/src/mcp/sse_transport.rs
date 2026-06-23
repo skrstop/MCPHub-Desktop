@@ -1,6 +1,7 @@
 /// SSE transport — connects to a remote MCP server via Server-Sent Events.
 use super::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
+use crate::services::app_logger;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -197,7 +198,9 @@ impl McpTransport for SseTransport {
         // Use the URL as-is without adding any suffix
         let sse_url = self.base_url.trim_end_matches('/').to_string();
 
-        log::info!("[{}] Connecting to SSE endpoint: {}", self.server_name, sse_url);
+        let conn_msg = format!("[{}] Connecting to SSE endpoint: {}", self.server_name, sse_url);
+        log::info!("{}", conn_msg);
+        app_logger::log_to_db("info", &conn_msg);
 
         // Try GET first (traditional SSE), then POST (Streamable HTTP with SSE response)
 
@@ -449,6 +452,10 @@ impl McpTransport for SseTransport {
 
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
+        let msg = format!("[{}] Disconnecting SSE transport...", self.server_name);
+        log::info!("{}", msg);
+        app_logger::log_to_db("info", &msg);
+
         // Stop the background reader if it's running
         if let Some(stop_tx) = self.stop_signal.take() {
             let _ = stop_tx.send(());

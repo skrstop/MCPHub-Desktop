@@ -14,6 +14,7 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
             ServerStatus {
                 name: cfg.name.clone(),
                 connected: false,
+                starting: false,
                 tool_count: 0,
                 error: None,
                 last_connected: None,
@@ -36,6 +37,7 @@ pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
             ServerStatus {
                 name: name.clone(),
                 connected: false,
+                starting: false,
                 tool_count: 0,
                 error: None,
                 last_connected: None,
@@ -57,6 +59,7 @@ pub async fn add_server(config: ServerConfig) -> Result<ServerInfo, String> {
         ServerStatus {
             name: saved.name.clone(),
             connected: false,
+            starting: false,
             tool_count: 0,
             error: None,
             last_connected: None,
@@ -83,6 +86,7 @@ pub async fn update_server(name: String, config: ServerConfig) -> Result<ServerI
         ServerStatus {
             name: saved.name.clone(),
             connected: false,
+            starting: false,
             tool_count: 0,
             error: None,
             last_connected: None,
@@ -117,6 +121,7 @@ pub async fn reload_server(name: String) -> Result<ServerStatus, String> {
     let status = pool::get_status(&name).await.unwrap_or(ServerStatus {
         name: name.clone(),
         connected: false,
+        starting: false,
         tool_count: 0,
         error: Some("Not connected".to_string()),
         last_connected: None,

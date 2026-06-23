@@ -491,7 +491,7 @@ const ServerCard = ({
                 flexShrink: 0,
               }}
             />
-            <div className="min-w-0">
+            <div className="min-w-0 overflow-visible">
               <div className="flex items-center gap-2">
                 <span
                   className="hub-mono truncate"
@@ -521,14 +521,14 @@ const ServerCard = ({
                     </button>
                     {showErrorPopover && (
                       <div
-                        className="absolute z-20 mt-1.5 hub-card"
+                        className="fixed z-50 hub-card"
                         style={{
-                          left: 0,
-                          top: '100%',
+                          left: '50%',
+                          top: '50%',
+                          transform: 'translate(-50%, -50%)',
                           width: 460,
                           maxHeight: 320,
-                          overflow: 'hidden',
-                          boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+                          boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
                         }}
                         onClick={(e) => e.stopPropagation()}
                       >
@@ -568,7 +568,7 @@ const ServerCard = ({
                           style={{ maxHeight: 260, fontSize: 12 }}
                         >
                           <pre className="whitespace-pre-wrap break-words m-0" style={{ color: 'var(--hub-ink-2)' }}>
-                            {server.error}
+                            {typeof server.error === 'string' ? server.error : JSON.stringify(server.error, null, 2) || t('server.unknownError') || 'Unknown error'}
                           </pre>
                         </div>
                       </div>

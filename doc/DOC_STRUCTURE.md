@@ -35,30 +35,30 @@ mcphub-desktop/
 
 ### 🚀 快速开始
 
-- [doc/OPENSOURCE_QUICK_START.md](./doc/OPENSOURCE_QUICK_START.md) - 开源项目快速开始指南
-- [doc/NEXT_STEPS.md](./doc/NEXT_STEPS.md) - 下一步操作指南
+- [doc/OPENSOURCE_QUICK_START.md](OPENSOURCE_QUICK_START.md) - 开源项目快速开始指南
+- [doc/NEXT_STEPS.md](NEXT_STEPS.md) - 下一步操作指南
 
 ### 🔧 配置指南
 
-- [doc/CONFIGURATION_FINAL.md](./doc/CONFIGURATION_FINAL.md) - 完整配置说明（推荐）
-- [doc/CONFIGURATION_COMPLETE.md](./doc/CONFIGURATION_COMPLETE.md) - 配置完成说明
-- [doc/UPDATER_CONFIGURED.md](./doc/UPDATER_CONFIGURED.md) - 自动更新配置说明
+- [doc/CONFIGURATION_FINAL.md](CONFIGURATION_FINAL.md) - 完整配置说明（推荐）
+- [doc/CONFIGURATION_COMPLETE.md](CONFIGURATION_COMPLETE.md) - 配置完成说明
+- [doc/UPDATER_CONFIGURED.md](UPDATER_CONFIGURED.md) - 自动更新配置说明
 
 ### 🔑 密钥管理
 
-- [doc/SIGNING_SETUP.md](./doc/SIGNING_SETUP.md) - 签名密钥配置指南
-- [doc/GENERATE_KEYS.md](./doc/GENERATE_KEYS.md) - 密钥生成说明
+- [doc/SIGNING_SETUP.md](SIGNING_SETUP.md) - 签名密钥配置指南
+- [doc/GENERATE_KEYS.md](GENERATE_KEYS.md) - 密钥生成说明
 
 ### 📝 更新日志
 
-- [doc/FIXES_SUMMARY.md](./doc/FIXES_SUMMARY.md) - 修复总结
-- [doc/UPDATER_README_UPDATED.md](./doc/UPDATER_README_UPDATED.md) - 文档更新说明
+- [doc/FIXES_SUMMARY.md](FIXES_SUMMARY.md) - 修复总结
+- [doc/UPDATER_README_UPDATED.md](UPDATER_README_UPDATED.md) - 文档更新说明
 
 ### 📖 参考文档
 
-- [README.md](./README.md) - 项目主文档
-- [agent.md](./agent.md) - 开发参考文档
-- [src-tauri/updater/README.md](./src-tauri/updater/README.md) - 自动更新配置指南
+- [README.md](../README.md) - 项目主文档
+- [agent.md](../agent.md) - 开发参考文档
+- [src-tauri/updater/README.md](../src-tauri/updater/README.md) - 自动更新配置指南
 
 ## 🎯 文档用途
 
@@ -84,20 +84,20 @@ mcphub-desktop/
 
 ### 新开发者
 
-1. 阅读 [doc/OPENSOURCE_QUICK_START.md](./doc/OPENSOURCE_QUICK_START.md) 了解快速开始
-2. 阅读 [doc/CONFIGURATION_FINAL.md](./doc/CONFIGURATION_FINAL.md) 了解完整配置
-3. 阅读 [doc/SIGNING_SETUP.md](./doc/SIGNING_SETUP.md) 了解密钥管理
+1. 阅读 [doc/OPENSOURCE_QUICK_START.md](OPENSOURCE_QUICK_START.md) 了解快速开始
+2. 阅读 [doc/CONFIGURATION_FINAL.md](CONFIGURATION_FINAL.md) 了解完整配置
+3. 阅读 [doc/SIGNING_SETUP.md](SIGNING_SETUP.md) 了解密钥管理
 
 ### 用户
 
-1. 阅读 [doc/OPENSOURCE_QUICK_START.md](./doc/OPENSOURCE_QUICK_START.md) 了解快速开始
-2. 阅读 [doc/SETUP_UPDATER.md](./doc/SETUP_UPDATER.md) 了解自动更新功能
+1. 阅读 [doc/OPENSOURCE_QUICK_START.md](OPENSOURCE_QUICK_START.md) 了解快速开始
+2. 阅读 [doc/SETUP_UPDATER.md](SETUP_UPDATER.md) 了解自动更新功能
 
 ### 维护者
 
-1. 阅读 [doc/CONFIGURATION_FINAL.md](./doc/CONFIGURATION_FINAL.md) 了解配置状态
-2. 阅读 [doc/SIGNING_SETUP.md](./doc/SIGNING_SETUP.md) 了解密钥轮换
-3. 阅读 [doc/FIXES_SUMMARY.md](./doc/FIXES_SUMMARY.md) 了解修复历史
+1. 阅读 [doc/CONFIGURATION_FINAL.md](CONFIGURATION_FINAL.md) 了解配置状态
+2. 阅读 [doc/SIGNING_SETUP.md](SIGNING_SETUP.md) 了解密钥轮换
+3. 阅读 [doc/FIXES_SUMMARY.md](FIXES_SUMMARY.md) 了解修复历史
 
 ## 🔍 文档查找
 
@@ -119,18 +119,18 @@ mcphub-desktop/
 
 ### 项目根目录
 
-- [README.md](./README.md) - 项目主文档
-- [agent.md](./agent.md) - 开发参考文档
+- [README.md](../README.md) - 项目主文档
+- [agent.md](../agent.md) - 开发参考文档
 
 ### 源码目录
 
-- [src-tauri/updater/README.md](./src-tauri/updater/README.md) - 自动更新配置指南
+- [src-tauri/updater/README.md](../src-tauri/updater/README.md) - 自动更新配置指南
 
 ### 脚本目录
 
-- [scripts/verify-signing.sh](./scripts/verify-signing.sh) - 验证配置脚本
-- [scripts/setup-github-secrets.sh](./scripts/setup-github-secrets.sh) - 配置 GitHub Secrets
-- [scripts/update-pubkey.sh](./scripts/update-pubkey.sh) - 更新公钥脚本
+- [scripts/verify-signing.sh](../scripts/verify-signing.sh) - 验证配置脚本
+- [scripts/setup-github-secrets.sh](../scripts/setup-github-secrets.sh) - 配置 GitHub Secrets
+- [scripts/update-pubkey.sh](../scripts/update-pubkey.sh) - 更新公钥脚本
 
 ## 🎉 总结
 
@@ -138,4 +138,4 @@ mcphub-desktop/
 
 ---
 
-💡 **提示**：查看 [doc/README.md](./doc/README.md) 获取完整的文档索引。
+💡 **提示**：查看 [doc/README.md](README.md) 获取完整的文档索引。

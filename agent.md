@@ -81,14 +81,16 @@ mcphub-desktop/
 │   │   ├── 0002_schema_fix.sql
 │   │   ├── 0003_config_json.sql
 │   │   ├── 0004_default_admin.sql
-│   │   └── 0005_default_skip_auth.sql  # 🆕 桌面端：默认开启免登录
+│   │   ├── 0005_default_skip_auth.sql  # 🆕 桌面端：默认开启免登录
+│   │   └── 0006_openapi_column.sql    # 🆕 servers 表添加 openapi 列
 │   └── src/
 │       ├── main.rs
 │       ├── lib.rs              # 应用核心：插件注册、setup hook、invoke_handler
 │       ├── auth/
 │       │   └── mod.rs          # JWT + bcrypt + guest token 签发
 │       ├── db/
-│       │   └── mod.rs          # SQLite 连接池
+│       │   ├── mod.rs          # SQLite 连接池 + 初始化入口
+│       │   └── migration.rs    # 🆕 版本化 DB 迁移管理模块
 │       ├── models/
 │       │   ├── server.rs       # ServerType, ServerConfig, ServerStatus, Tool
 │       │   ├── user.rs         # User, UserRole(Admin|User|Guest), UserInfo
@@ -102,6 +104,7 @@ mcphub-desktop/
 │       │   ├── stdio_transport.rs
 │       │   ├── sse_transport.rs    # ⚠️ 本地修改：改进 SSE 事件解析
 │       │   ├── http_transport.rs   # Streamable HTTP POST 传输
+│       │   ├── openapi_transport.rs # 🆕 OpenAPI → MCP 传输（spawn rmcp-openapi）
 │       │   └── pool.rs         # 全局连接池
 │       ├── services/
 │       │   ├── mod.rs
@@ -613,7 +616,112 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
   - `set_active_node_version` / `set_active_python_version`
   - `get_active_node_version` / `get_active_python_version`
 
-#### 3.5.5 内置 HTTP 服务器
+#### 3.5.5 DB 版本化迁移管理
+
+**文件**：`src-tauri/src/db/migration.rs`
+
+##### 设计目标
+
+替代 `sqlx::migrate!()` 宏，实现可控的版本化数据库迁移管理：
+- 使用 `schema_version` 表跟踪当前 DB 版本号
+- 每个迁移是独立的异步函数，按版本号顺序执行
+- 自动兼容旧版 `sqlx::migrate!()` 系统（检测 `_sqlx_migrations` 表）
+- 启动时只执行缺失的迁移，幂等安全
+
+##### 核心结构
+
+```rust
+// src-tauri/src/db/migration.rs
+
+pub const TARGET_VERSION: i64 = 6; // 当前最新 schema 版本，每次新增迁移递增
+
+/// 启动时调用，检测当前版本并执行所有缺失的迁移
+pub async fn run_pending(pool: &SqlitePool) -> Result<()>
+
+/// 获取当前 DB 版本（从 schema_version 表读取）
+async fn get_current_version(pool: &SqlitePool) -> Result<i64>
+
+/// 更新 schema_version 表
+async fn set_version(pool: &SqlitePool, version: i64) -> Result<()>
+
+/// 按版本号分发到对应的迁移函数
+async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()>
+```
+
+##### 迁移函数命名规范
+
+```rust
+/// v{N-1} → v{N}: 迁移描述
+async fn migrate_v{N}(pool: &SqlitePool) -> Result<()> { ... }
+```
+
+##### 当前迁移版本映射
+
+| 版本 | 函数 | 对应旧 migration 文件 | 说明 |
+|------|------|----------------------|------|
+| v1 | `migrate_v1` | `0001_initial.sql` | 初始 schema（users, servers, groups, system_config, bearer_keys, activity_log, app_log, builtin_prompts, builtin_resources） |
+| v2 | `migrate_v2` | `0002_schema_fix.sql` | schema 修复（mcprouter 字段, templates, server_tool_config） |
+| v3 | `migrate_v3` | `0003_config_json.sql` | system_config 合并为 config_json |
+| v4 | `migrate_v4` | `0004_default_admin.sql` | 默认 admin 用户 |
+| v5 | `migrate_v5` | `0005_default_skip_auth.sql` | 默认免登录 |
+| v6 | `migrate_v6` | `0006_openapi_column.sql` | servers 表添加 openapi 列 |
+
+##### 新增迁移步骤（MUST FOLLOW）
+
+1. 在 `migration.rs` 中递增 `TARGET_VERSION`
+2. 新增 `async fn migrate_v{N}(pool: &SqlitePool) -> Result<()>` 函数
+3. 在 `apply_migration` 的 match 中添加 `N => migrate_v{N}(pool).await` 分支
+4. 同步新增对应的 `migrations/000N_xxx.sql` 文件（供 `sqlx::migrate!` 兼容）
+5. 更新本章节的版本映射表
+
+##### 兼容性处理
+
+- **旧版 → 新版**：`get_current_version()` 检测 `_sqlx_migrations` 表，自动初始化 `schema_version` 到对应版本
+- **新版 → 旧版降级**：旧代码不引用新列，`schema_version` 表保留但旧代码忽略
+- **全新安装**：`schema_version = 0`，执行全部迁移
+
+##### 调用入口
+
+```rust
+// src-tauri/src/db/mod.rs
+pub mod migration;
+
+pub async fn initialize(app: &AppHandle) -> Result<()> {
+    // ...
+    migration::run_pending(&pool).await?;
+    // ...
+}
+```
+
+##### 与 server_service.rs 的关系
+
+迁移完成后，`server_service.rs` 中的所有 SQL 查询可以直接引用所有列（包括 `openapi`），**不需要运行时列检测**。迁移保证了 schema 的完整性。
+
+#### 3.5.6 OpenAPI 传输层
+
+**文件**：`src-tauri/src/mcp/openapi_transport.rs`
+
+- 使用 `rmcp-openapi` v0.31 作为**库**（非子进程）集成
+- 实现 `McpTransport` trait，通过 `rmcp_openapi::Server` 解析 OpenAPI spec 并生成 MCP tools
+- 支持两种 spec 输入模式：
+  - **URL 模式**：`openapi.url` — 通过 HTTP 获取 spec JSON
+  - **Schema 模式**：`openapi.schema` — 内联 JSON 直接使用
+- `rmcp-openapi` 内部处理 HTTP 调用（使用 reqwest v0.13）
+
+**已知限制**：
+- `reqwest` 版本不兼容：项目用 v0.12，`rmcp-openapi` 用 v0.13，`HeaderMap` 类型不同
+- 自定义 headers 无法透传到 `rmcp-openapi` 的 HTTP 客户端（类型不匹配）
+- 认证应通过 OpenAPI spec 的 security schemes 配置，而非自定义 headers
+
+**认证支持**：
+- `rmcp-openapi` 原生支持 OpenAPI spec 中定义的 security schemes（apiKey, http, oauth2, openIdConnect）
+- 前端配置的 `openapi.security` 映射到 `OpenApiSecurity` 模型，但当前未传递给 `rmcp-openapi`（待后续集成 `AuthorizationMode`）
+
+**模型定义**：`src-tauri/src/models/server.rs` 新增 `OpenApiConfig`, `OpenApiSecurity` 等结构体
+
+**数据库**：`servers.openapi` 列（JSON TEXT），由 `migrate_v6` 创建
+
+#### 3.5.7 内置 HTTP 服务器
 
 **文件**：`src-tauri/src/services/http_server.rs`
 
@@ -815,8 +923,9 @@ let id: String = rows[0].try_get("id")?;
 
 // ❌ 禁止：sqlx::query!() 宏（需要 DATABASE_URL 编译时检查，桌面应用无法提供）
 
-// ✅ 例外：sqlx::migrate!() 是嵌入文件宏，不需要 DATABASE_URL，可以使用
-sqlx::migrate!("./migrations").run(&pool).await?;
+// ✅ DB 迁移：使用 db::migration 模块（版本化管理），不再使用 sqlx::migrate!()
+// 见 3.5.5 节
+migration::run_pending(&pool).await?;
 ```
 
 ### 5.3 开发命令
@@ -881,6 +990,9 @@ npm run build
 - [X]  Registry Proxy
 - [X]  Cloud Proxy（MCPRouter）
 - [X]  SSE 传输改进
+- [X]  DB 版本化迁移管理（schema_version + 迁移函数）
+- [X]  OpenAPI 传输层（rmcp-openapi stdio 模式）
+- [X]  MCP 服务器启动中状态（starting → connecting）
 
 ### 待办
 
@@ -888,7 +1000,6 @@ npm run build
 - [ ]  OAuth Server
 - [ ]  Better Auth 集成
 - [ ]  Tool Result Compression
-- [ ]  OpenAPI 生成
 - [ ]  MCPB/DXT 文件安装
 - [ ]  Templates（配置模板）
 - [ ]  CI/CD 打包配置

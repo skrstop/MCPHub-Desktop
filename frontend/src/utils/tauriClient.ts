@@ -309,6 +309,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (p === 'logs' && m === 'DELETE') return { command: 'clear_logs', args: {} };
   if (p === 'logs/activity' && m === 'GET')
     return { command: 'get_tool_activities', args: { page: 1, pageSize: 50 } };
+  if (p === 'logs/cleanup' && m === 'POST') return { command: 'cleanup_old_logs', args: {} };
 
   // Bearer key management
   if (segs[0] === 'auth' && segs[1] === 'keys') {
@@ -516,7 +517,7 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     const st = si.status as Record<string, unknown> | undefined;
     return {
       name: cfg?.name ?? st?.name ?? '',
-      status: st?.connected ? 'connected' : 'disconnected',
+      status: st?.starting ? 'connecting' : st?.connected ? 'connected' : 'disconnected',
       error: st?.error ?? null,
       tools: si.tools ?? [],
       config: cfg,
@@ -547,15 +548,42 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     return { success: true, data: arr };
   }
   if (command === 'get_activity_stats') {
-    return { success: true, data: result };
+    const r = result as Record<string, unknown> | null;
+    if (!r) return { success: true, data: { totalCalls: 0, successCount: 0, errorCount: 0, avgDuration: 0 } };
+    return {
+      success: true,
+      data: {
+        totalCalls: (r.total as number) ?? 0,
+        successCount: (r.success as number) ?? 0,
+        errorCount: (r.error as number) ?? 0,
+        avgDuration: Math.round((r.avgDuration as number) ?? 0),
+      },
+    };
   }
   if (command === 'get_tool_activities') {
     const r = result as { data: unknown[]; page: number; pageSize: number; total: number } | null;
     if (!r) return { success: true, data: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 1, hasNextPage: false, hasPrevPage: false } };
     const totalPages = Math.max(1, Math.ceil(r.total / (r.pageSize || 20)));
+    // Transform backend camelCase fields to frontend expected format
+    const activities = (r.data || []).map((e: Record<string, unknown>) => ({
+      id: e.id,
+      timestamp: e.timestamp,
+      server: e.server,
+      tool: e.tool,
+      duration: (e.durationMs as number) ?? 0,  // durationMs → duration
+      status: e.status,
+      input: typeof e.input === 'string' ? e.input : JSON.stringify(e.input),
+      output: typeof e.output === 'string' ? e.output : JSON.stringify(e.output),
+      group: e.groupName,        // groupName → group
+      username: e.username,
+      keyId: e.keyId,
+      keyName: e.keyName,
+      sourceIp: e.sourceIp,
+      errorMessage: e.errorMessage,
+    }));
     return {
       success: true,
-      data: r.data,
+      data: activities,
       pagination: {
         page: r.page,
         limit: r.pageSize,

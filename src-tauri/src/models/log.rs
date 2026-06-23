@@ -46,6 +46,7 @@ pub struct ActivityStats {
     pub total: i64,
     pub success: i64,
     pub error: i64,
+    pub avg_duration: f64,
 }
 
 /// Paginated result returned by query_tool_activities.

@@ -1,7 +1,7 @@
 /// mcp_manager — loads server configs from DB and connects all enabled servers at startup.
 use crate::{
     mcp::pool,
-    services::{config_service, server_service},
+    services::{app_logger, config_service, server_service},
 };
 use anyhow::Result;
 use tauri::AppHandle;
@@ -10,20 +10,23 @@ use tauri::AppHandle;
 pub async fn start_all(app: &AppHandle) -> Result<()> {
     let _ = app; // AppHandle reserved for future event emitting
     let configs = server_service::list_all_enabled().await?;
-    log::info!("Starting {} MCP servers...", configs.len());
+    let msg = format!("Starting {} MCP servers...", configs.len());
+    log::info!("{}", msg);
+    app_logger::log_to_db("info", &msg);
 
     for cfg in configs {
         let name = cfg.name.clone();
         tokio::spawn(async move {
             let status = pool::connect_server(&cfg).await;
             if status.connected {
-                log::info!("Server '{}' connected with {} tools", name, status.tool_count);
+                let msg = format!("Server '{}' connected ({} tools)", name, status.tool_count);
+                log::info!("{}", msg);
+                app_logger::log_to_db("info", &msg);
             } else {
-                log::warn!(
-                    "Server '{}' failed to connect: {}",
-                    name,
-                    status.error.as_deref().unwrap_or("unknown")
-                );
+                let err = status.error.as_deref().unwrap_or("unknown");
+                let msg = format!("Server '{}' failed to connect: {}", name, err);
+                log::warn!("{}", msg);
+                app_logger::log_to_db("warn", &msg);
             }
         });
     }
@@ -78,6 +81,9 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
 
 /// Reload (disconnect + reconnect) a single server
 pub async fn reload_server(server_name: &str) -> Result<()> {
+    log::info!("[{}] Reloading server...", server_name);
+    app_logger::log_to_db("info", &format!("[{}] Reloading server...", server_name));
+
     // Disconnect if connected
     pool::disconnect_server(server_name).await.ok();
 
@@ -93,6 +99,10 @@ pub async fn reload_server(server_name: &str) -> Result<()> {
 /// Toggle enabled/disabled for a server
 pub async fn toggle_server(server_name: &str) -> Result<bool> {
     let cfg = server_service::toggle_enabled(server_name).await?;
+    let action = if cfg.enabled { "Enabling" } else { "Disabling" };
+    log::info!("[{}] {} server...", server_name, action);
+    app_logger::log_to_db("info", &format!("[{}] {} server...", server_name, action));
+
     if cfg.enabled {
         pool::connect_server(&cfg).await;
     } else {

@@ -28,6 +28,69 @@ pub struct ServerOptions {
     pub max_total_timeout: Option<u64>,
 }
 
+/// OpenAPI security configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiSecurity {
+    #[serde(rename = "type")]
+    pub security_type: String,
+    pub api_key: Option<OpenApiApiKey>,
+    pub http: Option<OpenApiHttpAuth>,
+    pub oauth2: Option<OpenApiOAuth2>,
+    pub open_id_connect: Option<OpenApiOpenIdConnect>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiApiKey {
+    pub name: String,
+    #[serde(rename = "in")]
+    pub location: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiHttpAuth {
+    pub scheme: String,
+    pub credentials: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiOAuth2 {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiOpenIdConnect {
+    pub url: String,
+    pub token: String,
+}
+
+/// OpenAPI server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenApiConfig {
+    /// URL to fetch the OpenAPI spec from
+    pub url: Option<String>,
+    /// Inline OpenAPI spec JSON
+    pub schema: Option<serde_json::Value>,
+    /// OpenAPI version (default "3.1.0")
+    #[serde(default = "default_openapi_version")]
+    pub version: String,
+    /// Security configuration
+    pub security: Option<OpenApiSecurity>,
+    /// Headers to pass through to the target API
+    #[serde(default)]
+    pub passthrough_headers: Vec<String>,
+}
+
+fn default_openapi_version() -> String {
+    "3.1.0".to_string()
+}
+
 /// Full server configuration stored in DB / returned to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +113,8 @@ pub struct ServerConfig {
     pub headers: Option<HashMap<String, String>>,
     // connection options
     pub options: Option<ServerOptions>,
+    // openapi fields
+    pub openapi: Option<OpenApiConfig>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -62,6 +127,9 @@ fn default_true() -> bool { true }
 pub struct ServerStatus {
     pub name: String,
     pub connected: bool,
+    /// True while the server is in the process of starting up (before connect completes).
+    #[serde(default)]
+    pub starting: bool,
     pub tool_count: usize,
     pub error: Option<String>,
     pub last_connected: Option<String>,
