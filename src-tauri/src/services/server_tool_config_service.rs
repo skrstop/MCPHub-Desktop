@@ -165,16 +165,14 @@ pub async fn apply_tool_filters(server_name: &str, tools: Vec<Tool>) -> Result<V
 
     Ok(tools
         .into_iter()
-        .filter_map(|mut tool| {
+        .map(|mut tool| {
             if let Some(cfg) = config_map.get(&tool.name) {
-                if !cfg.enabled {
-                    return None; // Skip disabled tool
-                }
+                tool.enabled = cfg.enabled;
                 if let Some(ref desc) = cfg.description {
                     tool.description = Some(desc.clone());
                 }
             }
-            Some(tool)
+            tool
         })
         .collect())
 }

@@ -270,6 +270,7 @@
   align-items: center;
   gap: 10px;
   width: 100%;
+  min-width: 100%;
   grid-template-columns:
     1fr
     90px
@@ -277,7 +278,7 @@
     80px
     80px
     80px
-    80px
+    140px
     50px
     32px;
 }
@@ -398,7 +399,7 @@
       70px
       70px
       70px
-      70px
+      120px
       44px
       28px;
   }

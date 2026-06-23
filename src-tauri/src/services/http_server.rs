@@ -546,12 +546,14 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
 }
 
 /// Core MCP JSON-RPC dispatcher.
-async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Response {
+async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_ip: Option<String>) -> Response {
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("unknown");
     let client_ip = headers.get("x-forwarded-for")
         .or_else(|| headers.get("x-real-ip"))
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .or(fallback_ip)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     log::debug!("[HTTP] MCP request: method={}, scope={}, client={}", method, scope, client_ip);
 
     let bearer_key = match check_bearer_auth(&headers).await {
@@ -643,6 +645,10 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
                         .await
                         .unwrap_or_else(|_| vec![]);
                     for t in &filtered {
+                        // Skip disabled tools
+                        if !t.enabled {
+                            continue;
+                        }
                         // Apply group-level tool filter
                         if let Some(ref allowed_tools) = sf.tools {
                             if !allowed_tools.contains(&t.name) {
@@ -720,6 +726,17 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
                     jsonrpc_error(id, -32602, format!("Tool '{}' not found", tool_name))
                 }
                 Some((sn, orig_name)) => {
+                    // Check if tool is enabled
+                    if let Ok(ts) = pool::list_tools_for(&sn).await {
+                        let filtered = server_tool_config_service::apply_tool_filters(&sn, ts).await.unwrap_or_default();
+                        if let Some(t) = filtered.iter().find(|t| t.name == orig_name) {
+                            if !t.enabled {
+                                log::warn!("[HTTP] Tool '{}' is disabled on server '{}'", orig_name, sn);
+                                return jsonrpc_error(id, -32602, format!("Tool '{}' is disabled", orig_name));
+                            }
+                        }
+                    }
+
                     log::debug!("[HTTP] Calling tool '{}' on server '{}'", orig_name, sn);
                     let start = std::time::Instant::now();
                     match pool::call_tool(&sn, &orig_name, args.clone()).await {
@@ -738,6 +755,7 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
                                 Some(args),
                                 output,
                                 None,
+                                Some(&client_ip),
                             ).await;
 
                             jsonrpc_response(id, json!({"content": r.content, "isError": r.is_error}))
@@ -756,6 +774,7 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
                                 Some(args),
                                 None,
                                 Some(&err_msg),
+                                Some(&client_ip),
                             ).await;
 
                             jsonrpc_error(id, -32603, err_msg)
@@ -769,7 +788,11 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value) -> Respons
 }
 
 async fn mcp_root_post(headers: HeaderMap, Json(body): Json<Value>) -> Response {
-    dispatch_mcp(headers, String::new(), body).await
+    let socket_ip = headers.get("host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.split(':').next())
+        .map(|s| s.to_string());
+    dispatch_mcp(headers, String::new(), body, socket_ip).await
 }
 
 async fn mcp_scope_post(
@@ -777,7 +800,11 @@ async fn mcp_scope_post(
     Path(path): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    dispatch_mcp(headers, path, body).await
+    let socket_ip = headers.get("host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.split(':').next())
+        .map(|s| s.to_string());
+    dispatch_mcp(headers, path, body, socket_ip).await
 }
 
 async fn mcp_root_get(headers: HeaderMap) -> Response {

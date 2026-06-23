@@ -53,13 +53,14 @@ pub async fn write_activity(
     input: Option<serde_json::Value>,
     output: Option<serde_json::Value>,
     error_message: Option<&str>,
+    source_ip: Option<&str>,
 ) -> Result<()> {
     let id = Uuid::new_v4().to_string();
     let input_str = input.map(|v| serde_json::to_string(&v)).transpose()?;
     let output_str = output.map(|v| serde_json::to_string(&v)).transpose()?;
     sqlx::query(
-        "INSERT INTO activity_log (id, server, tool, duration_ms, status, input, output, error_message) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO activity_log (id, server, tool, duration_ms, status, input, output, error_message, source_ip) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(server)
@@ -69,6 +70,7 @@ pub async fn write_activity(
     .bind(&input_str)
     .bind(&output_str)
     .bind(error_message)
+    .bind(source_ip)
     .execute(db::pool())
     .await?;
     Ok(())
@@ -90,6 +92,7 @@ fn row_to_activity(r: &sqlx::sqlite::SqliteRow) -> Result<ActivityEntry> {
         key_id: r.try_get("key_id")?,
         key_name: r.try_get("key_name")?,
         error_message: r.try_get("error_message")?,
+        source_ip: r.try_get("source_ip").ok().flatten(),
     })
 }
 
@@ -126,7 +129,7 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     // Data query
     let data_sql = format!(
         "SELECT id, timestamp, server, tool, duration_ms, status, input, output, \
-         group_name, key_id, key_name, error_message FROM activity_log {} \
+         group_name, key_id, key_name, error_message, source_ip FROM activity_log {} \
          ORDER BY timestamp DESC LIMIT ? OFFSET ?",
         where_clause
     );
@@ -170,19 +173,23 @@ pub async fn get_activity_filters() -> Result<Vec<String>> {
     rows.into_iter().map(|r| Ok(r.try_get("server")?)).collect()
 }
 
-/// Delete all activity log entries.
+/// Delete all activity log entries and vacuum.
 pub async fn clear_activities() -> Result<()> {
     sqlx::query("DELETE FROM activity_log")
         .execute(db::pool())
         .await?;
+    // Reclaim disk space after bulk delete
+    let _ = sqlx::raw_sql("VACUUM").execute(db::pool()).await;
     Ok(())
 }
 
-/// Delete all application log entries.
+/// Delete all application log entries and vacuum.
 pub async fn clear_logs() -> Result<()> {
     sqlx::query("DELETE FROM app_log")
         .execute(db::pool())
         .await?;
+    // Reclaim disk space after bulk delete
+    let _ = sqlx::raw_sql("VACUUM").execute(db::pool()).await;
     Ok(())
 }
 
@@ -200,7 +207,7 @@ const LOG_RETENTION_DAYS: i64 = 15;
 pub async fn cleanup_old_logs() -> Result<(i64, i64, bool)> {
     let cutoff = format!("datetime('now', '-{} days')", LOG_RETENTION_DAYS);
 
-    // Delete old app_log entries
+    // Delete old app_log entries (uses created_at column)
     let app_log_sql = format!(
         "DELETE FROM app_log WHERE created_at < {}",
         cutoff
@@ -210,9 +217,9 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool)> {
         .await?;
     let app_deleted = app_result.rows_affected() as i64;
 
-    // Delete old activity_log entries
+    // Delete old activity_log entries (uses timestamp column)
     let activity_sql = format!(
-        "DELETE FROM activity_log WHERE created_at < {}",
+        "DELETE FROM activity_log WHERE timestamp < {}",
         cutoff
     );
     let activity_result = sqlx::query(&activity_sql)
@@ -256,6 +263,7 @@ pub async fn run_cleanup_with_summary() -> String {
             )
         }
         Err(e) => {
+            log::warn!("[log_cleanup] Cleanup failed: {}", e);
             format!("Cleanup failed: {}", e)
         }
     }

@@ -268,6 +268,7 @@ impl McpTransport for OpenapiTransport {
                     description,
                     input_schema,
                     server_name: self.server_name.clone(),
+                    enabled: true,
                 }
             })
             .collect();

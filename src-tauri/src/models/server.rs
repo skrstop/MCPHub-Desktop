@@ -143,6 +143,9 @@ pub struct Tool {
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
     pub server_name: String,
+    /// Whether this tool is enabled (default: true). Set from server_tool_config.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Result of a tool invocation

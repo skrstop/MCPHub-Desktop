@@ -558,7 +558,6 @@ const ActivityPage: React.FC = () => {
                   t('activity.duration'),
                   t('activity.status'),
                   t('activity.group'),
-                  t('activity.user'),
                   t('activity.key'),
                   t('activity.sourceIp'),
                   t('common.actions'),
@@ -620,11 +619,6 @@ const ActivityPage: React.FC = () => {
                     style={{ padding: '10px 14px', fontSize: 12, color: 'var(--hub-ink-3)' }}
                   >
                     {activity.group || '—'}
-                  </td>
-                  <td
-                    style={{ padding: '10px 14px', fontSize: 12, color: 'var(--hub-ink-3)' }}
-                  >
-                    {activity.username || '—'}
                   </td>
                   <td
                     style={{ padding: '10px 14px', fontSize: 12, color: 'var(--hub-ink-3)' }}
@@ -739,12 +733,6 @@ const ActivityPage: React.FC = () => {
                   {t('activity.group')}
                 </label>
                 <p className="text-gray-900 dark:text-white">{selectedActivity.group || '-'}</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-                  {t('activity.user')}
-                </label>
-                <p className="text-gray-900 dark:text-white">{selectedActivity.username || '-'}</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">

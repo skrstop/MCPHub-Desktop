@@ -1,7 +1,7 @@
 use crate::{
     mcp::pool,
     models::server::{ServerConfig, ServerInfo, ServerStatus},
-    services::{mcp_manager, server_service, runtime_env},
+    services::{mcp_manager, server_service, server_tool_config_service, runtime_env},
 };
 
 #[tauri::command]
@@ -21,6 +21,10 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
             },
             vec![],
         ));
+        // Apply tool enabled/description configs
+        let tools = server_tool_config_service::apply_tool_filters(&cfg.name, tools)
+            .await
+            .unwrap_or_default();
         result.push(ServerInfo { config: cfg, status, tools });
     }
     Ok(result)
@@ -44,6 +48,10 @@ pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
             },
             vec![],
         ));
+        // Apply tool enabled/description configs
+        let tools = server_tool_config_service::apply_tool_filters(&name, tools)
+            .await
+            .unwrap_or_default();
         Ok(Some(ServerInfo { config: cfg, status, tools }))
     } else {
         Ok(None)

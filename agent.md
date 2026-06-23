@@ -732,6 +732,48 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
 - 支持分组路由（`/mcp/{group}`）
 - 支持单服务器路由（`/mcp/{server}`）
 
+#### 3.5.8 日志自动清理
+
+**文件**：`src-tauri/src/services/log_service.rs`、`src-tauri/src/lib.rs`
+
+- 保留最近 **15 天** 的 `app_log` 和 `activity_log` 记录
+- 清理后自动执行 `VACUUM` 瘦身数据库
+- 手动清理（UI 按钮）也会执行 `VACUUM`
+
+**触发时机：**
+| 时机 | 说明 |
+|------|------|
+| 每 6 小时 | 后台定时任务自动清理，首次延迟 5 分钟 |
+| 手动触发 | 系统日志/活动管理页面的清除按钮 |
+
+**清理 SQL：**
+```sql
+DELETE FROM app_log WHERE created_at < datetime('now', '-15 days');
+DELETE FROM activity_log WHERE timestamp < datetime('now', '-15 days');
+VACUUM;
+```
+
+**DB 迁移版本：**
+- `TARGET_VERSION = 7`
+- `0007_activity_source_ip.sql`：activity_log 添加 `source_ip` 列
+
+#### 3.5.9 活动管理 UI 定制
+
+**文件**：`frontend/src/pages/ActivityPage.tsx`
+
+- **隐藏"来源用户"列** — 桌面端不需要用户追踪，已从列表和详情弹窗中移除
+- **活动日志记录客户端 IP** — HTTP 端点调用时从 `x-forwarded-for` / `x-real-ip` 提取 IP 写入 `source_ip` 列
+- **工具禁用状态同步** — `Tool` 模型添加 `enabled` 字段，`list_servers`/`get_server` 返回完整工具列表含启用状态，禁用工具在 HTTP 端点 `tools/list` 中不暴露、`tools/call` 中拒绝调用
+
+#### 3.5.10 上下文占用（Context Footprint）
+
+**文件**：`src-tauri/src/commands/cost.rs`、`frontend/src/utils/tauriClient.ts`
+
+- 实现后端 `get_server_costs` / `get_group_costs` 命令
+- 基于工具描述和输入 schema 估算 token 数（约 4 字符 = 1 token）
+- `exposed` = 已启用项 token 总和，`gross` = 所有项 token 总和
+- 禁用服务器显示 `0/{gross}`，不再显示 `—`
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录
@@ -993,6 +1035,11 @@ npm run build
 - [X]  DB 版本化迁移管理（schema_version + 迁移函数）
 - [X]  OpenAPI 传输层（rmcp-openapi stdio 模式）
 - [X]  MCP 服务器启动中状态（starting → connecting）
+- [X]  日志自动清理（15 天保留 + VACUUM 瘦身）
+- [X]  活动管理 UI 定制（隐藏用户列、记录客户端 IP）
+- [X]  工具禁用状态同步（enabled 字段 + HTTP 端点过滤）
+- [X]  上下文占用（Context Footprint）计算
+- [X]  系统日志面板（app_logger 写入 DB + 轮询刷新）
 
 ### 待办
 

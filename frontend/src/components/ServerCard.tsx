@@ -632,19 +632,18 @@ const ServerCard = ({
           })}
 
           {/* Context Footprint stat */}
-          {cost && cost.connected ? (
+          {cost ? (
             <span
-              className="hub-server-capability-stat hub-mono hub-num"
-              title={`${t('cost.exposed')} ${cost.exposed} / ${t('cost.gross')} ${cost.gross} · ${t('cost.estimate')}`}
+              className={`hub-server-capability-stat hub-mono hub-num ${cost.connected ? '' : 'is-empty'}`}
+              title={cost.connected
+                ? `${t('cost.exposed')} ${cost.exposed} / ${t('cost.gross')} ${cost.gross} · ${t('cost.estimate')}`
+                : t('cost.notConnected') || 'Server not connected'
+              }
             >
               <span className="text-[var(--hub-ink-3)]">Σ</span>
               <span className="hub-server-capability-value">
-                {formatTokens(cost.exposed)}/{formatTokens(cost.gross)}
+                {cost.connected ? `${formatTokens(cost.exposed)}/${formatTokens(cost.gross)}` : `0/${formatTokens(cost.gross)}`}
               </span>
-            </span>
-          ) : cost ? (
-            <span className="hub-server-capability-stat hub-mono is-empty" title={t('cost.notConnected')}>
-              <span className="hub-server-capability-value">—</span>
             </span>
           ) : null}
 

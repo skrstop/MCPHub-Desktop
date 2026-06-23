@@ -112,8 +112,13 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
                     loop {
                         let msg = services::log_service::run_cleanup_with_summary().await;
-                        log::info!("[log_cleanup] {}", msg);
-                        services::app_logger::log_to_db("info", &format!("[log_cleanup] {}", msg));
+                        if msg.starts_with("Cleanup failed") {
+                            log::warn!("[log_cleanup] {}", msg);
+                            services::app_logger::log_to_db("warn", &format!("[log_cleanup] {}", msg));
+                        } else {
+                            log::info!("[log_cleanup] {}", msg);
+                            services::app_logger::log_to_db("info", &format!("[log_cleanup] {}", msg));
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
                     }
                 });
@@ -263,6 +268,9 @@ pub fn run() {
             commands::runtime::get_active_python_version,
             commands::runtime::set_active_node_version,
             commands::runtime::set_active_python_version,
+            // Context footprint / cost calculation
+            commands::cost::get_server_costs,
+            commands::cost::get_group_costs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCPHub application");

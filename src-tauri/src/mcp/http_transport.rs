@@ -148,6 +148,7 @@ impl McpTransport for HttpTransport {
                 description: t["description"].as_str().map(|s| s.to_string()),
                 input_schema: t["inputSchema"].clone(),
                 server_name: self.server_name.clone(),
+                enabled: true,
             })
             .collect();
         Ok(tools)

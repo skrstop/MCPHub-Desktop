@@ -26,6 +26,7 @@ pub struct ActivityEntry {
     pub key_id: Option<String>,
     pub key_name: Option<String>,
     pub error_message: Option<String>,
+    pub source_ip: Option<String>,
 }
 
 /// Filter / pagination parameters for querying activity_log.

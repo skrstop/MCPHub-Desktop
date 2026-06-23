@@ -441,6 +441,13 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   }
 
   // Cost endpoints — not implemented in desktop client
+  // Context footprint / cost calculation
+  if (segs[0] === 'cost' && segs[1] === 'servers') {
+    return { command: 'get_server_costs', args: {} };
+  }
+  if (segs[0] === 'cost' && segs[1] === 'groups') {
+    return { command: 'get_group_costs', args: {} };
+  }
   if (segs[0] === 'cost') {
     return { command: '__stub__', args: { __response: { success: true, data: [] } } };
   }

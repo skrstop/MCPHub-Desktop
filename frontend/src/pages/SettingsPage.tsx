@@ -506,6 +506,7 @@ const SettingsPage: React.FC = () => {
   const [createdBearerToken, setCreatedBearerToken] = useState('');
   const [users, setUsers] = useState<User[]>([]);
   const [bearerKeyScopeFilter, setBearerKeyScopeFilter] = useState<BearerKeyScopeFilterValue>('all');
+  const [bearerKeySearch, setBearerKeySearch] = useState('');
   const [isClearingCache, setIsClearingCache] = useState(false);
   const [showClearCacheDialog, setShowClearCacheDialog] = useState(false);
 
@@ -668,10 +669,17 @@ const SettingsPage: React.FC = () => {
     [t, bearerKeys, users],
   );
 
-  const filteredBearerKeys = useMemo(
-    () => filterBearerKeysByScopeFilter(bearerKeys, bearerKeyScopeFilter),
-    [bearerKeys, bearerKeyScopeFilter],
-  );
+  const filteredBearerKeys = useMemo(() => {
+    let filtered = filterBearerKeysByScopeFilter(bearerKeys, bearerKeyScopeFilter);
+    if (bearerKeySearch.trim()) {
+      const query = bearerKeySearch.trim().toLowerCase();
+      filtered = filtered.filter((key) =>
+        key.name.toLowerCase().includes(query) ||
+        key.token.toLowerCase().includes(query)
+      );
+    }
+    return filtered;
+  }, [bearerKeys, bearerKeyScopeFilter, bearerKeySearch]);
 
   useEffect(() => {
     if (!bearerKeyScopeFilterOptions.some((option) => option.value === bearerKeyScopeFilter)) {
@@ -1570,6 +1578,15 @@ const SettingsPage: React.FC = () => {
                     'Manage multiple bearer authentication keys with different access scopes.'}
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
+                  {bearerKeys.length > 0 && (
+                    <input
+                      type="text"
+                      placeholder={t('common.search') || 'Search...'}
+                      value={bearerKeySearch}
+                      onChange={(e) => setBearerKeySearch(e.target.value)}
+                      className="block w-40 py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                    />
+                  )}
                   {bearerKeys.length > 0 && bearerKeyScopeFilterOptions.length > 1 && (
                     <div className="flex items-center gap-2">
                       <label htmlFor="bearer-key-scope-filter" className="text-sm text-gray-600 whitespace-nowrap">

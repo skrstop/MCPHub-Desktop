@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 6;
+pub const TARGET_VERSION: i64 = 7;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -110,6 +110,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         4 => migrate_v4(pool).await,
         5 => migrate_v5(pool).await,
         6 => migrate_v6(pool).await,
+        7 => migrate_v7(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -386,6 +387,15 @@ async fn migrate_v5(pool: &SqlitePool) -> Result<()> {
 /// v5 → v6: Add openapi column to servers table
 async fn migrate_v6(pool: &SqlitePool) -> Result<()> {
     sqlx::query("ALTER TABLE servers ADD COLUMN openapi TEXT")
+        .execute(pool)
+        .await
+        .ok(); // ignore if column already exists
+    Ok(())
+}
+
+/// v6 → v7: Add source_ip column to activity_log
+async fn migrate_v7(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("ALTER TABLE activity_log ADD COLUMN source_ip TEXT")
         .execute(pool)
         .await
         .ok(); // ignore if column already exists

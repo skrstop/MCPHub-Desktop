@@ -37,6 +37,17 @@ pub async fn call_tool(
     tool_name: String,
     arguments: Value,
 ) -> Result<ToolCallResult, String> {
+    // Check if tool is enabled before calling
+    let tools = pool::list_tools_for(&server_name).await.map_err(|e| e.to_string())?;
+    let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(tool) = filtered.iter().find(|t| t.name == tool_name) {
+        if !tool.enabled {
+            return Err(format!("Tool '{}' is disabled", tool_name));
+        }
+    }
+
     let start = std::time::Instant::now();
     let result = pool::call_tool(&server_name, &tool_name, arguments.clone()).await;
     let duration_ms = start.elapsed().as_millis() as i64;
@@ -63,6 +74,7 @@ pub async fn call_tool(
                 Some(arguments),
                 output,
                 None,
+                None, // No client IP for Tauri commands
             )
             .await;
             Ok(tool_result)
@@ -83,6 +95,7 @@ pub async fn call_tool(
                 Some(arguments),
                 None,
                 Some(&err_msg),
+                None, // No client IP for Tauri commands
             )
             .await;
             Err(err_msg)
