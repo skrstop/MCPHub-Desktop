@@ -670,7 +670,7 @@ const ServerCard = ({
           </div>
 
           {/* Menu */}
-          <div className="relative" ref={menuRef}>
+          <div className="relative" ref={menuRef} style={{ overflow: 'visible' }}>
             {canManage && (
               <button
                 className="hub-icon-btn"

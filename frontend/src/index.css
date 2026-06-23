@@ -273,7 +273,7 @@
   grid-template-columns:
     1fr
     90px
-    70px
+    minmax(80px, max-content)
     80px
     80px
     80px
@@ -322,6 +322,8 @@
   border-radius: 999px;
   font-size: 10.5px;
   letter-spacing: 0.02em;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .hub-server-card-select,
@@ -392,7 +394,7 @@
     grid-template-columns:
       1fr
       80px
-      60px
+      minmax(70px, max-content)
       70px
       70px
       70px

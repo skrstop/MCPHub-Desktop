@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "MCPHub 控制面板",
+    "title": "MCPHub Desktop",
     "error": "错误",
     "closeButton": "关闭",
     "noServers": "没有可用的 MCP 服务器",
@@ -268,6 +268,7 @@
     "failedToUpdateBetterAuthConfig": "更新 Better Auth 配置失败"
   },
   "common": {
+    "loading": "加载中...",
     "processing": "处理中...",
     "save": "保存",
     "cancel": "取消",
@@ -276,6 +277,7 @@
     "search": "搜索",
     "clear": "清除",
     "view": "查看",
+    "edit": "编辑",
     "create": "创建",
     "creating": "创建中...",
     "update": "更新",
@@ -730,6 +732,7 @@
     "pythonVersionDescription": "选择或安装特定的 Python 版本用于运行 MCP 服务器",
     "runtimeSystemDefault": "系统默认",
     "runtimeInstalled": "已安装",
+    "runtimeBundled": "内置",
     "runtimeBroken": "异常",
     "runtimeBrokenWarning": "版本 {{version}} 安装不完整，建议重新安装",
     "runtimeReinstall": "重新安装",

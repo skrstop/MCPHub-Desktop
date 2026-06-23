@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "MCPHub Dashboard",
+    "title": "MCPHub Desktop",
     "error": "Error",
     "closeButton": "Close",
     "noServers": "No MCP servers available",
@@ -266,6 +266,7 @@
     "failedToUpdateBetterAuthConfig": "Failed to update Better Auth configuration"
   },
   "common": {
+    "loading": "Loading...",
     "processing": "Processing...",
     "save": "Save",
     "cancel": "Cancel",
@@ -274,6 +275,7 @@
     "search": "Search",
     "clear": "Clear",
     "view": "View",
+    "edit": "Edit",
     "create": "Create",
     "creating": "Creating...",
     "update": "Update",
@@ -728,6 +730,7 @@
     "pythonVersionDescription": "Select or install a specific Python version for running MCP servers",
     "runtimeSystemDefault": "System Default",
     "runtimeInstalled": "Installed",
+    "runtimeBundled": "Bundled",
     "runtimeBroken": "Broken",
     "runtimeBrokenWarning": "Version {{version}} is not fully installed. Consider reinstalling.",
     "runtimeReinstall": "Reinstall",

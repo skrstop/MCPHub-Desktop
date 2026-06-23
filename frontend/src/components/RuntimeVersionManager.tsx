@@ -9,6 +9,10 @@ interface RuntimeVersion {
   active: boolean;
   /** 已安装版本是否完整可用；未安装项与 system 默认 true */
   healthy: boolean;
+  /** When version == "system", holds the detected system version (e.g. "22.14.0") */
+  system_version?: string;
+  /** Whether this version is bundled with the app (read-only, shipped in resources) */
+  bundled?: boolean;
 }
 
 /** 与后端 RuntimeProgress 一一对应 */
@@ -81,6 +85,19 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
       unlisten?.();
     };
   }, [runtime]);
+
+  // 监听缓存清除事件，刷新版本列表
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    listen('cache://cleared', () => {
+      fetchVersions();
+    }).then((un) => {
+      unlisten = un;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [fetchVersions]);
 
   // 滚动日志到底部
   useEffect(() => {
@@ -161,12 +178,13 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
   }
 
   const activeEntry = versions.find((v) => v.version === selectedVersion);
-  const showReinstall = !!activeEntry && activeEntry.version !== 'system';
+  const showReinstall = !!activeEntry && activeEntry.version !== 'system' && !activeEntry.bundled;
   const showUninstall =
     !!activeEntry &&
     activeEntry.version !== 'system' &&
     activeEntry.installed &&
-    !activeEntry.active;
+    !activeEntry.active &&
+    !activeEntry.bundled;
   // 当前选中的版本已安装但不健康 → 提示用户重装
   const isBroken =
     !!activeEntry &&
@@ -242,7 +260,10 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
             {versions.map((v) => {
               let label: string;
               if (v.version === 'system') {
-                label = t('settings.runtimeSystemDefault');
+                const sysLabel = t('settings.runtimeSystemDefault');
+                label = v.system_version ? `${sysLabel} (v${v.system_version})` : sysLabel;
+              } else if (v.installed && v.bundled) {
+                label = `v${v.version} — ${t('settings.runtimeBundled') || '内置'} ${t('settings.runtimeInstalled')}`;
               } else if (v.installed && !v.healthy) {
                 label = `v${v.version} — ⚠ ${t('settings.runtimeBroken')}`;
               } else if (v.installed) {

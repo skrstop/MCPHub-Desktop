@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "MCPHub Kontrol Paneli",
+    "title": "MCPHub Desktop",
     "error": "Hata",
     "closeButton": "Kapat",
     "noServers": "Kullanılabilir MCP sunucusu yok",
@@ -258,6 +258,7 @@
     "failedToUpdateBetterAuthConfig": "Better Auth yapılandırması güncellenemedi"
   },
   "common": {
+    "loading": "Yükleniyor...",
     "processing": "İşleniyor...",
     "save": "Kaydet",
     "cancel": "İptal",
@@ -266,6 +267,7 @@
     "search": "Ara",
     "clear": "Temizle",
     "view": "Görüntüle",
+    "edit": "Düzenle",
     "create": "Oluştur",
     "creating": "Oluşturuluyor...",
     "update": "Güncelle",
@@ -833,7 +835,22 @@
     "dynamicRegistrationAllowedGrantTypesPlaceholder": "örn. authorization_code, refresh_token",
     "dynamicRegistrationAuth": "Kayıt için kimlik doğrulaması iste",
     "dynamicRegistrationAuthDescription": "Kayıt uç noktasını korur, yalnızca kimliği doğrulanmış istekler yeni istemci oluşturabilir",
-    "invalidNumberInput": "Lütfen sıfırdan küçük olmayan geçerli bir sayı girin"
+    "invalidNumberInput": "Lütfen sıfırdan küçük olmayan geçerli bir sayı girin",
+    "runtimeSystemDefault": "Sistem varsayılanı",
+    "runtimeInstalled": "Yüklü",
+    "runtimeBundled": "Dahili",
+    "runtimeBroken": "Hatalı",
+    "runtimeBrokenWarning": "{{version}} sürümü eksik, yeniden yükleme önerilir",
+    "runtimeReinstall": "Yeniden Yükle",
+    "runtimeReinstallTip": "Seçili sürümü zorla yeniden yükle",
+    "runtimeUninstall": "Kaldır",
+    "runtimePhase.started": "Başlatıldı",
+    "runtimePhase.downloading": "İndiriliyor",
+    "runtimePhase.extracting": "Çıkarılıyor",
+    "runtimePhase.verifying": "Doğrulanıyor",
+    "runtimePhase.running": "Çalışıyor",
+    "runtimePhase.done": "Tamamlandı",
+    "runtimePhase.error": "Hata"
   },
   "mcpb": {
     "upload": "Yükle",

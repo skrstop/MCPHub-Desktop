@@ -105,12 +105,28 @@ pub fn get_uv_path() -> Option<PathBuf> {
     if p.exists() { Some(p) } else { None }
 }
 
-/// Returns the directory where uv installs Python versions (isolated from system).
-pub fn uv_python_install_dir() -> Option<PathBuf> {
+/// Returns the path to the bundled Node.js binary in the resource directory.
+/// This is the read-only copy shipped with the app.
+pub fn get_bundled_node_path() -> Option<PathBuf> {
+    let rt = runtimes_dir()?;
+    let p = node_bin_path(rt);
+    if p.exists() { Some(p) } else { None }
+}
+
+/// Returns the path to the bundled Python directory in the resource directory.
+/// e.g. <resources>/runtimes/uv/python/
+/// This is the read-only copy shipped with the app.
+pub fn get_bundled_python_dir() -> Option<PathBuf> {
     let rt = runtimes_dir()?;
     let dir = uv_dir(rt).join("python");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    if dir.exists() { Some(dir) } else { None }
+}
+
+/// Returns the writable directory where the app installs Python versions at runtime.
+/// e.g. ~/Library/Application Support/mcphub-desktop/python/ (macOS)
+/// Distinct from the bundled resource directory which may be read-only.
+pub fn uv_python_install_dir() -> Option<PathBuf> {
+    app_data_dir("python")
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +145,12 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
                 return (command.to_string(), args.to_vec());
             }
             // Specific version → look in user-managed node-versions directory
-            if active != "system" {
-                if let Some(base) = node_versions_base() {
-                    let ver_dir = base.join(&active);
-                    if ver_dir.exists() {
-                        let resolved = resolve_node_command_in_dir(command, args, &ver_dir);
-                        if resolved.is_some() {
-                            return resolved.unwrap();
-                        }
+            if let Some(base) = node_versions_base() {
+                let ver_dir = base.join(&active);
+                if ver_dir.exists() {
+                    let resolved = resolve_node_command_in_dir(command, args, &ver_dir);
+                    if resolved.is_some() {
+                        return resolved.unwrap();
                     }
                 }
             }
@@ -144,6 +158,7 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
         }
         "python" | "python3" => {
             let active = get_active_python();
+            // "system" → let the OS find python on PATH, no override
             if active == "system" {
                 return (command.to_string(), args.to_vec());
             }
@@ -239,20 +254,18 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
     match original_command {
         "node" | "npx" | "npm" => {
             let active = get_active_node();
-            if active == "system" {
-                return vec![]; // use system node, no injection
-            }
-            // User-managed version in node-versions directory
-            if let Some(base) = node_versions_base() {
-                let ver_dir = base.join(&active);
-                if ver_dir.exists() {
-                    let bin_dir = node_bin_dir_in(&ver_dir);
-                    prepend_dirs.push(bin_dir.to_string_lossy().into_owned());
+            // Always prepend bundled node to PATH so child processes spawned by
+            // a GUI app (which may lack the user's shell PATH) can find npx/npm.
+            prepend_dirs.push(node_bin_dir(rt).to_string_lossy().into_owned());
+            if active != "system" {
+                // User-managed version takes priority over bundled
+                if let Some(base) = node_versions_base() {
+                    let ver_dir = base.join(&active);
+                    if ver_dir.exists() {
+                        let bin_dir = node_bin_dir_in(&ver_dir);
+                        prepend_dirs.insert(0, bin_dir.to_string_lossy().into_owned());
+                    }
                 }
-            }
-            // Fallback to bundled
-            if prepend_dirs.is_empty() {
-                prepend_dirs.push(node_bin_dir(rt).to_string_lossy().into_owned());
             }
         }
         "uv" | "uvx" | "python" | "python3" => {
@@ -271,13 +284,12 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
         }
     }
 
-    // Point uv to our bundled Python and use app-local cache/tool dirs
+    // Point uv to our Python install dir (writable user data) and use app-local cache/tool dirs
     if matches!(original_command, "uv" | "uvx" | "python" | "python3") {
-        let python_install_dir = uv_dir(rt).join("python");
-        if python_install_dir.exists() {
+        if let Some(python_dir) = uv_python_install_dir() {
             env.push((
                 "UV_PYTHON_INSTALL_DIR".to_string(),
-                python_install_dir.to_string_lossy().into_owned(),
+                python_dir.to_string_lossy().into_owned(),
             ));
         }
         if let Some(cache) = app_local_dir("uv-cache") {

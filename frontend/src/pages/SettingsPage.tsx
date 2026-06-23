@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { emit } from '@tauri-apps/api/event';
 import ChangePasswordForm from '@/components/ChangePasswordForm';
 import { Switch } from '@/components/ui/ToggleGroup';
 import { MultiSelect } from '@/components/ui/MultiSelect';
@@ -786,6 +787,9 @@ const SettingsPage: React.FC = () => {
 
       const summary = parts.length > 0 ? parts.join(', ') : t('settings.clearCacheSuccess');
       showToast(summary, 'success');
+
+      // Notify RuntimeVersionManager to refresh version lists
+      emit('cache://cleared');
     } catch (err) {
       console.error('Failed to clear cache:', err);
       showToast(t('settings.clearCacheError') || 'Failed to clear cache', 'error');

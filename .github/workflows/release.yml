@@ -261,64 +261,18 @@ jobs:
           echo "✅ Frontend deps installed"
           echo "========================================="
 
-      # ─── 下载 bundled runtimes（Unix）─────────────────────────────────────
-      - name: Download bundled runtimes (Unix)
-        if: runner.os != 'Windows'
+      # ─── 运行时说明 ─────────────────────────────────────────────────────
+      - name: Runtime info
         shell: bash
         run: |
           echo "========================================="
-          echo "  Downloading Bundled Runtimes (Unix)"
+          echo "  Runtime Info"
           echo "========================================="
-          echo "TARGET_ARCH=${{ matrix.runtime-arch }}"
-          echo "Script: scripts/download-runtimes.sh"
-          echo ""
-          echo "[1/3] Script content:"
-          cat scripts/download-runtimes.sh
-          echo ""
-          echo "[2/3] Running download script..."
-          bash scripts/download-runtimes.sh
-          echo ""
-          echo "[3/3] Verify downloaded files:"
-          echo "=== src-tauri/runtimes/ ==="
-          ls -la src-tauri/runtimes/ 2>/dev/null || echo "No runtimes directory"
-          echo ""
-          echo "=== src-tauri/runtimes/node/bin/ ==="
-          ls -la src-tauri/runtimes/node/bin/ 2>/dev/null || echo "No node binary"
-          echo ""
-          echo "=== src-tauri/runtimes/uv/ ==="
-          ls -la src-tauri/runtimes/uv/ 2>/dev/null || echo "No uv binary"
-          echo ""
-          echo "=== Full runtimes tree ==="
-          find src-tauri/runtimes/ -type f 2>/dev/null | sort || echo "No runtimes"
-          echo ""
-          echo "✅ Runtimes downloaded"
+          echo "Runtimes are NOT bundled in the app."
+          echo "Users should:"
+          echo "  1. Select 'system' in Settings to use their installed Node.js/Python"
+          echo "  2. Or install runtimes via the app's Settings page"
           echo "========================================="
-        env:
-          TARGET_ARCH: ${{ matrix.runtime-arch }}
-
-      # ─── 下载 bundled runtimes（Windows）──────────────────────────────────
-      - name: Download bundled runtimes (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Write-Host "========================================="
-          Write-Host "  Downloading Bundled Runtimes (Windows)"
-          Write-Host "========================================="
-          Write-Host "TargetArch=${{ matrix.runtime-arch }}"
-          Write-Host "Script: scripts/download-runtimes.ps1"
-          Write-Host ""
-          Write-Host "[1/3] Script content:"
-          Get-Content scripts/download-runtimes.ps1
-          Write-Host ""
-          Write-Host "[2/3] Running download script..."
-          .\scripts\download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
-          Write-Host ""
-          Write-Host "[3/3] Verify downloaded files:"
-          Write-Host "=== src-tauri\runtimes ==="
-          Get-ChildItem -Path src-tauri\runtimes -Recurse -Depth 2 | Format-Table Name, Length, FullName
-          Write-Host ""
-          Write-Host "✅ Runtimes downloaded"
-          Write-Host "========================================="
 
       # ─── 解码签名密钥 ─────────────────────────────────────────────────────
       - name: Decode signing key

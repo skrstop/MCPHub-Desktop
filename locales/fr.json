@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "Tableau de bord MCPHub",
+    "title": "MCPHub Desktop",
     "error": "Erreur",
     "closeButton": "Fermer",
     "noServers": "Aucun serveur MCP disponible",
@@ -258,6 +258,7 @@
     "failedToUpdateBetterAuthConfig": "Échec de la mise à jour de la configuration Better Auth"
   },
   "common": {
+    "loading": "Chargement...",
     "processing": "En cours de traitement...",
     "save": "Enregistrer",
     "cancel": "Annuler",
@@ -266,6 +267,7 @@
     "search": "Rechercher",
     "clear": "Effacer",
     "view": "Voir",
+    "edit": "Modifier",
     "create": "Créer",
     "creating": "Création en cours...",
     "update": "Mettre à jour",
@@ -834,7 +836,22 @@
     "dynamicRegistrationAllowedGrantTypesPlaceholder": "ex. authorization_code, refresh_token",
     "dynamicRegistrationAuth": "Exiger une authentification",
     "dynamicRegistrationAuthDescription": "Protège l'endpoint d'enregistrement afin que seules les requêtes authentifiées puissent créer des clients",
-    "invalidNumberInput": "Veuillez saisir un nombre valide supérieur ou égal à zéro"
+    "invalidNumberInput": "Veuillez saisir un nombre valide supérieur ou égal à zéro",
+    "runtimeSystemDefault": "Par défaut du système",
+    "runtimeInstalled": "Installé",
+    "runtimeBundled": "Intégré",
+    "runtimeBroken": "Anomalie",
+    "runtimeBrokenWarning": "La version {{version}} est incomplète, une réinstallation est recommandée",
+    "runtimeReinstall": "Réinstaller",
+    "runtimeReinstallTip": "Forcer la réinstallation de la version sélectionnée",
+    "runtimeUninstall": "Désinstaller",
+    "runtimePhase.started": "Démarré",
+    "runtimePhase.downloading": "Téléchargement",
+    "runtimePhase.extracting": "Extraction",
+    "runtimePhase.verifying": "Vérification",
+    "runtimePhase.running": "Exécution",
+    "runtimePhase.done": "Terminé",
+    "runtimePhase.error": "Erreur"
   },
   "mcpb": {
     "upload": "Télécharger",

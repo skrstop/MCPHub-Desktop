@@ -79,8 +79,8 @@ ls -la src-tauri/target/release/bundle/*.sig
 
 应该看到类似文件：
 - `MCPHub Desktop.app.tar.gz.sig` (macOS)
-- `mcphub-desktop_1.0.16_amd64.AppImage.tar.gz.sig` (Linux)
-- `mcphub-desktop_1.0.16_x64-setup.nsis.zip.sig` (Windows)
+- `mcphub-desktop_1.0.18001_amd64.AppImage.tar.gz.sig` (Linux)
+- `mcphub-desktop_1.0.18001_x64-setup.nsis.zip.sig` (Windows)
 
 ## 发布新版本
 

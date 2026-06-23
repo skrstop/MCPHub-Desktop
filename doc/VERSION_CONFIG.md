@@ -40,7 +40,7 @@ version = tauri_conf.get('version', '')
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MCPHub Desktop",
-  "version": "1.0.16",  // ← 版本号在这里
+  "version": "1.0.18001",  // ← 版本号在这里
   "identifier": "app.mcphub.desktop",
   ...
 }
@@ -49,7 +49,7 @@ version = tauri_conf.get('version', '')
 ### 版本号格式
 
 - 使用语义化版本号：`主版本.次版本.修订版本`
-- 示例：`1.0.16`、`1.1.0`、`2.0.0`
+- 示例：`1.0.18001`、`1.1.0`、`2.0.0`
 
 ## 🚀 使用流程
 
@@ -110,7 +110,7 @@ if tag != expected_tag:
 **不一致的情况**：
 ```
 ✅ Version from tauri.conf.json: 1.0.17
-WARNING: Tag "v1.0.16" does not match version "v1.0.17"
+WARNING: Tag "v1.0.18001" does not match version "v1.0.17"
          Expected tag: v1.0.17
 ```
 
@@ -140,14 +140,14 @@ WARNING: Tag "v1.0.16" does not match version "v1.0.17"
 
 **症状**：GitHub Actions 显示警告
 ```
-WARNING: Tag "v1.0.16" does not match version "v1.0.17"
+WARNING: Tag "v1.0.18001" does not match version "v1.0.17"
 ```
 
 **原因**：tag 和 `tauri.conf.json` 中的版本号不一致
 
 **解决**：
 1. 检查 `src-tauri/tauri.conf.json` 中的版本号
-2. 删除错误的 tag：`git tag -d v1.0.16 && git push origin :refs/tags/v1.0.16`
+2. 删除错误的 tag：`git tag -d v1.0.18001 && git push origin :refs/tags/v1.0.18001`
 3. 创建正确的 tag：`git tag v1.0.17 && git push origin v1.0.17`
 
 ### 问题：版本号读取失败

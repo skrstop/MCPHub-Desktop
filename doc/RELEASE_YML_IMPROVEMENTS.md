@@ -84,7 +84,7 @@ mcphub-desktop/
 **来源**：`src-tauri/tauri.conf.json`
 ```json
 {
-  "version": "1.0.16"
+  "version": "1.0.18001"
 }
 ```
 

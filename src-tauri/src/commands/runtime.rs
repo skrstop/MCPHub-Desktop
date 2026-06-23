@@ -24,6 +24,14 @@ pub struct RuntimeVersion {
     /// 安装目录残缺、可执行文件无法运行、版本号不匹配等情况会标记为 false。
     #[serde(default = "default_true")]
     pub healthy: bool,
+    /// When `version == "system"`, holds the detected system version (e.g. "22.14.0").
+    /// Null if system runtime is not found or version is not "system".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_version: Option<String>,
+    /// Whether this version is bundled with the app (read-only, shipped in resources).
+    /// Bundled versions cannot be reinstalled or uninstalled.
+    #[serde(default)]
+    pub bundled: bool,
 }
 
 fn default_true() -> bool {
@@ -214,6 +222,7 @@ async fn fetch_python_versions() -> Vec<String> {
 /// 网络异常时使用的内置 Node.js LTS 版本列表（保底）
 fn fallback_node_versions() -> Vec<String> {
     vec![
+        "24.17.0".to_string(),
         "22.14.0".to_string(),
         "20.18.3".to_string(),
         "18.20.7".to_string(),
@@ -221,23 +230,19 @@ fn fallback_node_versions() -> Vec<String> {
         "14.21.3".to_string(),
         "12.22.12".to_string(),
         "10.24.1".to_string(),
-        "8.17.0".to_string(),
-        "6.17.1".to_string(),
-        "4.9.1".to_string(),
     ]
 }
 
 /// 网络异常时使用的内置 Python 版本列表（保底）
 fn fallback_python_versions() -> Vec<String> {
     vec![
+        "3.14.0".to_string(),
         "3.13.1".to_string(),
         "3.12.8".to_string(),
         "3.11.11".to_string(),
         "3.10.16".to_string(),
         "3.9.21".to_string(),
         "3.8.20".to_string(),
-        "3.7.17".to_string(),
-        "2.7.18".to_string(),
     ]
 }
 
@@ -248,23 +253,48 @@ fn fallback_python_versions() -> Vec<String> {
 #[tauri::command]
 pub async fn list_node_versions() -> Result<Vec<RuntimeVersion>, String> {
     let active = runtime_env::get_active_node();
-    let mut result = vec![RuntimeVersion {
-        version: "system".to_string(),
-        installed: true,
-        active: active == "system",
-        healthy: true,
-    }];
+    let system_ver = detect_system_node_version();
+    let bundled_ver = detect_bundled_node_version();
+    let mut result: Vec<RuntimeVersion> = Vec::new();
 
-    let versions = get_node_versions().await;
+    // Only include "system" if the system actually has Node.js installed
+    if let Some(ref ver) = system_ver {
+        result.push(RuntimeVersion {
+            version: "system".to_string(),
+            installed: true,
+            active: active == "system",
+            healthy: true,
+            system_version: Some(ver.clone()),
+            bundled: false,
+        });
+    }
+
+    let mut versions = get_node_versions().await;
+
+    // Ensure bundled version is in the list (insert at correct sorted position)
+    if let Some(ref bv) = bundled_ver {
+        if !versions.iter().any(|v| v == bv) {
+            insert_version_sorted(&mut versions, bv);
+        }
+    }
+
     for ver in versions {
         let installed = node_version_installed(&ver);
-        // 仅对已安装的非 system 版本做实际可执行性校验
         let healthy = if installed { verify_node_version(&ver).await } else { true };
+        let is_bundled = bundled_ver.as_deref() == Some(&ver);
+        // If system has no runtime and user has "system" selected, activate the first installed (bundled) version
+        let is_active = if active == "system" && system_ver.is_none() {
+            installed && !result.iter().any(|r| r.active)
+        } else {
+            active == ver
+        };
         result.push(RuntimeVersion {
-            active: active == ver,
+            active: is_active,
             installed,
             healthy,
             version: ver,
+            system_version: None,
+            bundled: is_bundled,
         });
     }
     Ok(result)
@@ -274,17 +304,35 @@ pub async fn list_node_versions() -> Result<Vec<RuntimeVersion>, String> {
 pub async fn list_python_versions() -> Result<Vec<RuntimeVersion>, String> {
     let active = runtime_env::get_active_python();
     let installed_entries = get_installed_python_versions().await;
+    let system_ver = detect_system_python_version();
 
-    let mut result = vec![RuntimeVersion {
-        version: "system".to_string(),
-        installed: true,
-        active: active == "system",
-        healthy: true,
-    }];
+    let mut result: Vec<RuntimeVersion> = Vec::new();
 
-    let versions = get_python_versions().await;
+    // Only include "system" if the system actually has Python installed
+    if let Some(ref ver) = system_ver {
+        result.push(RuntimeVersion {
+            version: "system".to_string(),
+            installed: true,
+            active: active == "system",
+            healthy: true,
+            system_version: Some(ver.clone()),
+            bundled: false,
+        });
+    }
+
+    let mut versions = get_python_versions().await;
+
+    // Ensure bundled Python versions (from installed_entries) are in the list
+    for (mm, _, _) in &installed_entries {
+        if !versions.iter().any(|v| {
+            v.splitn(3, '.').take(2).collect::<Vec<_>>().join(".") == *mm
+        }) {
+            // Construct a representative version string, e.g. "3.12" → "3.12.0"
+            insert_version_sorted(&mut versions, &format!("{mm}.0"));
+        }
+    }
+
     for ver in versions {
-        // 已安装列表为 major.minor 形式，比较时把展示版本截到 major.minor
         let major_minor = ver
             .splitn(3, '.')
             .take(2)
@@ -292,19 +340,27 @@ pub async fn list_python_versions() -> Result<Vec<RuntimeVersion>, String> {
             .join(".");
         let installed_entry = installed_entries
             .iter()
-            .find(|(mm, _)| mm == &major_minor)
+            .find(|(mm, _, _)| mm == &major_minor)
             .cloned();
         let is_installed = installed_entry.is_some();
-        // 仅对已安装版本运行 `<exec> --version` 校验
+        let is_bundled = installed_entry.as_ref().map(|(_, _, b)| *b).unwrap_or(false);
         let healthy = match installed_entry {
-            Some((_, exec)) => verify_python_executable(&exec).await,
+            Some((_, exec, _)) => verify_python_executable(&exec).await,
             None => true,
         };
+        // If system has no runtime and user has "system" selected, activate the first installed version
+        let is_active = if active == "system" && system_ver.is_none() {
+            is_installed && !result.iter().any(|r| r.active)
+        } else {
+            active == ver
+        };
         result.push(RuntimeVersion {
-            active: active == ver,
+            active: is_active,
             installed: is_installed,
             healthy,
             version: ver,
+            system_version: None,
+            bundled: is_bundled,
         });
     }
     Ok(result)
@@ -777,10 +833,110 @@ pub async fn set_active_python_version(version: String) -> Result<(), String> {
 // Internal helpers
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Parse a version string like "22.14.0" into (major, minor, patch) for comparison.
+fn parse_version(v: &str) -> (u64, u64, u64) {
+    let parts: Vec<u64> = v.split('.').filter_map(|s| s.parse().ok()).collect();
+    (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    )
+}
+
+/// Insert a version string into a sorted (newest→oldest) list at the correct position.
+fn insert_version_sorted(list: &mut Vec<String>, version: &str) {
+    let parsed = parse_version(version);
+    let pos = list
+        .iter()
+        .position(|v| parse_version(v) < parsed)
+        .unwrap_or(list.len());
+    list.insert(pos, version.to_string());
+}
+
+/// Detect the system's Node.js version by running `node -v`.
+/// Returns the version string (e.g. "22.14.0") or None if not found.
+fn detect_system_node_version() -> Option<String> {
+    let output = std::process::Command::new("node")
+        .arg("-v")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let ver = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
+    if ver.is_empty() { None } else { Some(ver) }
+}
+
+/// Detect the bundled Node.js version by running the bundled `node -v`.
+/// Returns the version string (e.g. "22.14.0") or None if not available.
+fn detect_bundled_node_version() -> Option<String> {
+    let bundled = runtime_env::get_bundled_node_path()?;
+    let output = std::process::Command::new(&bundled)
+        .arg("-v")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let ver = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
+    if ver.is_empty() { None } else { Some(ver) }
+}
+
+/// Detect the system's Python version by running `python3 --version` (then `python`).
+/// Returns the version string (e.g. "3.12.8") or None if not found.
+fn detect_system_python_version() -> Option<String> {
+    for cmd in &["python3", "python"] {
+        if let Ok(output) = std::process::Command::new(cmd)
+            .arg("--version")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                // Output like "Python 3.12.8"
+                let ver = raw.trim().strip_prefix("Python ").unwrap_or(raw.trim());
+                let ver = ver.trim();
+                if !ver.is_empty() {
+                    return Some(ver.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn node_version_installed(version: &str) -> bool {
-    runtime_env::node_versions_base()
+    // Check user-managed node-versions directory
+    let in_user_dir = runtime_env::node_versions_base()
         .map(|b| node_bin_in(&b.join(version)).exists())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if in_user_dir {
+        return true;
+    }
+    // Check bundled node: run `node --version` and compare
+    if let Some(bundled) = runtime_env::get_bundled_node_path() {
+        if let Ok(output) = std::process::Command::new(&bundled).arg("-v").output() {
+            if output.status.success() {
+                let reported = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .trim_start_matches('v')
+                    .to_string();
+                return reported == version;
+            }
+        }
+    }
+    false
 }
 
 fn node_download_url(version: &str) -> String {
@@ -873,75 +1029,112 @@ fn set_executable(path: &Path) {
     }
 }
 
-async fn get_installed_python_versions() -> Vec<(String, PathBuf)> {
-    let Some(uv) = runtime_env::get_uv_path() else {
-        return vec![];
-    };
-    let Some(python_dir) = runtime_env::uv_python_install_dir() else {
-        return vec![];
-    };
+/// Returns (major_minor, exec_path, is_bundled)
+async fn get_installed_python_versions() -> Vec<(String, PathBuf, bool)> {
+    let mut result: Vec<(String, PathBuf, bool)> = Vec::new();
 
-    let Ok(output) = tokio::process::Command::new(&uv)
-        .args(["python", "list", "--only-installed"])
-        .env("UV_PYTHON_INSTALL_DIR", &python_dir)
-        .output()
-        .await
-    else {
-        return vec![];
-    };
-
-    if !output.status.success() {
-        return vec![];
+    // ── 1. Scan bundled Python directory (read-only, in resource dir) ──
+    if let Some(bundled_dir) = runtime_env::get_bundled_python_dir() {
+        if let Ok(entries) = std::fs::read_dir(&bundled_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Directory names look like: cpython-3.12.13-macos-aarch64-none
+                if !name.starts_with("cpython-") {
+                    continue;
+                }
+                let ver = name.strip_prefix("cpython-").unwrap_or(&name);
+                let major_minor = ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+                if major_minor.is_empty() {
+                    continue;
+                }
+                // Find the python3 binary
+                #[cfg(target_os = "windows")]
+                let exec = entry.path().join("python.exe");
+                #[cfg(not(target_os = "windows"))]
+                let exec = entry.path().join("bin").join("python3");
+                if exec.exists() {
+                    result.push((major_minor, exec, true));
+                }
+            }
+        }
     }
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            // 行示例：`cpython-3.12.8-macos-aarch64  /path/to/python`
-            // 注意路径可能包含空格，按首段空白切成两半，第一段是 token，剩余是路径
-            let mut iter = trimmed.splitn(2, char::is_whitespace);
-            let ver_part = iter.next()?;
-            let exec_path = iter.next()?.trim();
-            if exec_path.is_empty() {
-                return None;
+    // ── 2. Scan user-installed Python directory (writable, via uv) ──
+    if let Some(uv) = runtime_env::get_uv_path() {
+        if let Some(python_dir) = runtime_env::uv_python_install_dir() {
+            if let Ok(output) = tokio::process::Command::new(&uv)
+                .args(["python", "list", "--only-installed"])
+                .env("UV_PYTHON_INSTALL_DIR", &python_dir)
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    for line in String::from_utf8_lossy(&output.stdout).lines() {
+                        let trimmed = line.trim();
+                        let mut iter = trimmed.splitn(2, char::is_whitespace);
+                        let ver_part = match iter.next() {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        let exec_path = iter.next().unwrap_or("").trim();
+                        if exec_path.is_empty() {
+                            continue;
+                        }
+                        let ver = ver_part.strip_prefix("cpython-").unwrap_or(ver_part);
+                        let major_minor = ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+                        if !major_minor.is_empty() {
+                            // Avoid duplicates from bundled dir
+                            if !result.iter().any(|(mm, _, _)| mm == &major_minor) {
+                                result.push((major_minor, PathBuf::from(exec_path), false));
+                            }
+                        }
+                    }
+                }
             }
-            // 去掉 "cpython-" 前缀，截取 major.minor
-            let ver = ver_part.strip_prefix("cpython-").unwrap_or(ver_part);
-            let major_minor = ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
-            if major_minor.is_empty() {
-                None
-            } else {
-                Some((major_minor, PathBuf::from(exec_path)))
-            }
-        })
-        .collect()
+        }
+    }
+
+    result
 }
 
 /// 校验 Node.js 指定版本是否可用：执行 `node -v` 并验证版本号匹配
 async fn verify_node_version(version: &str) -> bool {
-    let Some(base) = runtime_env::node_versions_base() else {
-        return false;
-    };
-    let bin = node_bin_in(&base.join(version));
-    if !bin.exists() {
-        return false;
+    // Check user-managed node-versions directory
+    if let Some(base) = runtime_env::node_versions_base() {
+        let bin = node_bin_in(&base.join(version));
+        if bin.exists() {
+            if let Ok(output) = tokio::process::Command::new(&bin)
+                .arg("-v")
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let reported = String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .trim_start_matches('v')
+                        .to_string();
+                    return reported == version;
+                }
+            }
+        }
     }
-    let Ok(output) = tokio::process::Command::new(&bin)
-        .arg("-v")
-        .output()
-        .await
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
+    // Check bundled node
+    if let Some(bundled) = runtime_env::get_bundled_node_path() {
+        if let Ok(output) = tokio::process::Command::new(&bundled)
+            .arg("-v")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let reported = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .trim_start_matches('v')
+                    .to_string();
+                return reported == version;
+            }
+        }
     }
-    let reported = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .trim_start_matches('v')
-        .to_string();
-    reported == version
+    false
 }
 
 /// 校验 Python 解释器是否可用：执行 `python --version`

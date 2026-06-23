@@ -7,9 +7,9 @@
 set -euo pipefail
 
 # Versions — override via env vars if needed
-NODE_VERSION="${NODE_VERSION:-22.14.0}"
-UV_VERSION="${UV_VERSION:-0.6.12}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+NODE_VERSION="${NODE_VERSION:-24.17.0}"
+UV_VERSION="${UV_VERSION:-0.11.23}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR/../src-tauri/runtimes"
@@ -110,6 +110,7 @@ if [[ ! -f "$NODE_DEST/bin/node" ]]; then
   # Copy the node binary
   cp "$EXTRACTED/bin/node" "$NODE_DEST/bin/node"
   chmod +x "$NODE_DEST/bin/node"
+  chmod u+w "$NODE_DEST/bin/node"
 
   # Copy the npm module directory (required for npx/npm to work)
   cp -r "$EXTRACTED/lib/node_modules" "$NODE_DEST/lib/"
@@ -138,54 +139,22 @@ if [[ ! -f "$UV_DEST/uv" ]]; then
   mkdir -p "$UV_DEST"
   UV_OBTAINED=false
 
-  # ── Method 1: Copy from any existing system uv ──────────────────────────
+  # ── Method 1: Copy from any existing system uv (version must match) ─────
   SYSTEM_UV=$(command -v uv 2>/dev/null || true)
   if [[ -n "$SYSTEM_UV" && -x "$SYSTEM_UV" ]]; then
-    echo "--> Using system uv at $SYSTEM_UV"
-    cp "$SYSTEM_UV" "$UV_DEST/uv"
-    chmod +x "$UV_DEST/uv"
-    UV_OBTAINED=true
-  fi
-
-  # ── Method 2: Install via pip3 into a temp venv ─────────────────────────
-  if [[ "$UV_OBTAINED" == "false" ]]; then
-    PYTHON3=$(command -v python3 2>/dev/null || true)
-    if [[ -n "$PYTHON3" ]]; then
-      echo "--> Installing uv via pip (python3)..."
-      TMP_VENV=$(mktemp -d)
-      if "$PYTHON3" -m venv "$TMP_VENV" 2>/dev/null; then
-        if "$TMP_VENV/bin/pip" install --quiet uv 2>/dev/null; then
-          PIP_UV=$(find "$TMP_VENV/bin" -maxdepth 1 -name "uv" -type f | head -1)
-          if [[ -z "$PIP_UV" ]]; then
-            PIP_UV=$(find "$TMP_VENV" -name "uv" ! -name "*.py" -type f | head -1)
-          fi
-          if [[ -n "$PIP_UV" && -x "$PIP_UV" ]]; then
-            cp "$PIP_UV" "$UV_DEST/uv"
-            chmod +x "$UV_DEST/uv"
-            UV_OBTAINED=true
-            echo "--> uv installed via pip3"
-          fi
-        fi
-      fi
-      rm -rf "$TMP_VENV"
+    SYSTEM_UV_VER=$("$SYSTEM_UV" self version 2>/dev/null | awk '{print $2}' || echo "unknown")
+    if [[ "$SYSTEM_UV_VER" == "${UV_VERSION}" ]]; then
+      echo "--> Using system uv $SYSTEM_UV_VER at $SYSTEM_UV"
+      cp "$SYSTEM_UV" "$UV_DEST/uv"
+      chmod +x "$UV_DEST/uv"
+      chmod u+w "$UV_DEST/uv"
+      UV_OBTAINED=true
+    else
+      echo "--> System uv version ($SYSTEM_UV_VER) != target ($UV_VERSION), skipping"
     fi
   fi
 
-  # ── Method 3: Install via Homebrew (macOS) — slow due to auto-update ─────
-  if [[ "$UV_OBTAINED" == "false" ]] && command -v brew &>/dev/null; then
-    echo "--> Installing uv via Homebrew (HOMEBREW_NO_AUTO_UPDATE=1)..."
-    if HOMEBREW_NO_AUTO_UPDATE=1 brew install uv 2>&1; then
-      BREW_UV=$(command -v uv 2>/dev/null || true)
-      if [[ -n "$BREW_UV" && -x "$BREW_UV" ]]; then
-        cp "$BREW_UV" "$UV_DEST/uv"
-        chmod +x "$UV_DEST/uv"
-        UV_OBTAINED=true
-        echo "--> uv installed via Homebrew: $BREW_UV"
-      fi
-    fi
-  fi
-
-  # ── Method 4: Direct download with resume support ───────────────────────
+  # ── Method 2: Direct download with resume support (preferred — no quarantine) ──
   if [[ "$UV_OBTAINED" == "false" ]]; then
     echo "--> Downloading uv v${UV_VERSION} from GitHub (slow network fallback)..."
     PARTIAL="$UV_DEST/uv.tar.gz.partial"
@@ -220,7 +189,8 @@ if [[ ! -f "$UV_DEST/uv" ]]; then
     EXTRACTED=$(ls -d "$TMP_UV"/uv-*/ | head -1)
     cp "$EXTRACTED/uv" "$UV_DEST/uv"
     chmod +x "$UV_DEST/uv"
-    [[ -f "$EXTRACTED/uvx" ]] && cp "$EXTRACTED/uvx" "$UV_DEST/uvx" && chmod +x "$UV_DEST/uvx"
+    chmod u+w "$UV_DEST/uv"
+    [[ -f "$EXTRACTED/uvx" ]] && cp "$EXTRACTED/uvx" "$UV_DEST/uvx" && chmod +x "$UV_DEST/uvx" && chmod u+w "$UV_DEST/uvx"
     rm -rf "$TMP_UV"
     UV_OBTAINED=true
     echo "--> uv v${UV_VERSION} downloaded: $UV_DEST/uv"

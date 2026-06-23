@@ -141,13 +141,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         {!collapsed && (
           <div className="flex items-baseline gap-1.5 min-w-0">
             <span className="font-semibold tracking-tight text-[var(--hub-ink)] truncate">
-              {t('app.title')}
+              MCPHub Desktop
             </span>
-            {appVersion && (
-              <span className="hub-mono text-[10.5px] text-[var(--hub-ink-3)] flex-shrink-0">
-                {appVersion === 'dev' ? appVersion : `v${appVersion}`}
-              </span>
-            )}
           </div>
         )}
       </div>

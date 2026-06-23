@@ -100,13 +100,13 @@ git push origin v1.0.17
 
 ```json
 {
-  "version": "1.0.16",
-  "notes": "MCPHub Desktop 1.0.16\n\nSee release page for full changelog.",
+  "version": "1.0.18001",
+  "notes": "MCPHub Desktop 1.0.18001\n\nSee release page for full changelog.",
   "pub_date": "2026-06-17T12:00:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRcm...",
-      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.16/MCPHub.Desktop_1.0.16_aarch64.app.tar.gz"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18001/MCPHub.Desktop_1.0.18001_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "...",
