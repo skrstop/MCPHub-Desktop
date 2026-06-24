@@ -623,6 +623,7 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 ##### 设计目标
 
 替代 `sqlx::migrate!()` 宏，实现可控的版本化数据库迁移管理：
+
 - 使用 `schema_version` 表跟踪当前 DB 版本号
 - 每个迁移是独立的异步函数，按版本号顺序执行
 - 自动兼容旧版 `sqlx::migrate!()` 系统（检测 `_sqlx_migrations` 表）
@@ -657,14 +658,15 @@ async fn migrate_v{N}(pool: &SqlitePool) -> Result<()> { ... }
 
 ##### 当前迁移版本映射
 
-| 版本 | 函数 | 对应旧 migration 文件 | 说明 |
-|------|------|----------------------|------|
-| v1 | `migrate_v1` | `0001_initial.sql` | 初始 schema（users, servers, groups, system_config, bearer_keys, activity_log, app_log, builtin_prompts, builtin_resources） |
-| v2 | `migrate_v2` | `0002_schema_fix.sql` | schema 修复（mcprouter 字段, templates, server_tool_config） |
-| v3 | `migrate_v3` | `0003_config_json.sql` | system_config 合并为 config_json |
-| v4 | `migrate_v4` | `0004_default_admin.sql` | 默认 admin 用户 |
-| v5 | `migrate_v5` | `0005_default_skip_auth.sql` | 默认免登录 |
-| v6 | `migrate_v6` | `0006_openapi_column.sql` | servers 表添加 openapi 列 |
+
+| 版本 | 函数         | 对应旧 migration 文件        | 说明                                                                                                                         |
+| ---- | ------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| v1   | `migrate_v1` | `0001_initial.sql`           | 初始 schema（users, servers, groups, system_config, bearer_keys, activity_log, app_log, builtin_prompts, builtin_resources） |
+| v2   | `migrate_v2` | `0002_schema_fix.sql`        | schema 修复（mcprouter 字段, templates, server_tool_config）                                                                 |
+| v3   | `migrate_v3` | `0003_config_json.sql`       | system_config 合并为 config_json                                                                                             |
+| v4   | `migrate_v4` | `0004_default_admin.sql`     | 默认 admin 用户                                                                                                              |
+| v5   | `migrate_v5` | `0005_default_skip_auth.sql` | 默认免登录                                                                                                                   |
+| v6   | `migrate_v6` | `0006_openapi_column.sql`    | servers 表添加 openapi 列                                                                                                    |
 
 ##### 新增迁移步骤（MUST FOLLOW）
 
@@ -709,11 +711,13 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
 - `rmcp-openapi` 内部处理 HTTP 调用（使用 reqwest v0.13）
 
 **已知限制**：
+
 - `reqwest` 版本不兼容：项目用 v0.12，`rmcp-openapi` 用 v0.13，`HeaderMap` 类型不同
 - 自定义 headers 无法透传到 `rmcp-openapi` 的 HTTP 客户端（类型不匹配）
 - 认证应通过 OpenAPI spec 的 security schemes 配置，而非自定义 headers
 
 **认证支持**：
+
 - `rmcp-openapi` 原生支持 OpenAPI spec 中定义的 security schemes（apiKey, http, oauth2, openIdConnect）
 - 前端配置的 `openapi.security` 映射到 `OpenApiSecurity` 模型，但当前未传递给 `rmcp-openapi`（待后续集成 `AuthorizationMode`）
 
@@ -721,7 +725,7 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
 
 **数据库**：`servers.openapi` 列（JSON TEXT），由 `migrate_v6` 创建
 
-#### 3.5.7 内置 HTTP 服务器
+#### 3.5.7 内置 HTTP 服务器[](https://)
 
 **文件**：`src-tauri/src/services/http_server.rs`
 
@@ -741,12 +745,15 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
 - 手动清理（UI 按钮）也会执行 `VACUUM`
 
 **触发时机：**
-| 时机 | 说明 |
-|------|------|
+
+
+| 时机      | 说明                                  |
+| --------- | ------------------------------------- |
 | 每 6 小时 | 后台定时任务自动清理，首次延迟 5 分钟 |
-| 手动触发 | 系统日志/活动管理页面的清除按钮 |
+| 手动触发  | 系统日志/活动管理页面的清除按钮       |
 
 **清理 SQL：**
+
 ```sql
 DELETE FROM app_log WHERE created_at < datetime('now', '-15 days');
 DELETE FROM activity_log WHERE timestamp < datetime('now', '-15 days');
@@ -754,6 +761,7 @@ VACUUM;
 ```
 
 **DB 迁移版本：**
+
 - `TARGET_VERSION = 7`
 - `0007_activity_source_ip.sql`：activity_log 添加 `source_ip` 列
 
@@ -787,7 +795,52 @@ VACUUM;
 3. 后端由 Rust 重写在 `src-tauri/`，**Node 后端代码不直接同步**，但需评估安全相关 fix 是否要在 Rust 端镜像实现。
 4. `package.json`、`pnpm-lock.yaml`、`docs/`、`Dockerfile`、`docker-compose*.yml` 等部署/文档文件**不同步**。
 
-### 4.2 同步操作流程（标准 SOP）
+### 4.2 同步规则（MUST FOLLOW）
+
+> ⚠️ **核心原则：禁止直接覆盖文件，必须逐文件检查差异后合并。**
+
+#### 同步前检查清单
+
+1. **识别桌面端自定义文件**：第 3 节列出的所有文件（标记为 ⚠️ 或 🆕 的）**绝对不能直接覆盖**
+2. **逐文件对比**：对每个待同步文件，执行 `diff desktop-file origin-file` 确认差异来源
+3. **分类处理**：
+   - 桌面端无自定义修改的文件 → 可直接覆盖
+   - 桌面端有自定义修改的文件 → 必须手动合并，保留桌面端差异
+   - locales/*.json → 必须保留桌面端新增的 runtime* 翻译键
+
+#### 桌面端自定义文件清单（同步时不可覆盖）
+
+
+| 文件                                             | 自定义内容                                                |
+| ------------------------------------------------ | --------------------------------------------------------- |
+| `frontend/src/components/ServerCard.tsx`         | 移除 sponsor/wechat/discord、样式调整                     |
+| `frontend/src/components/ServerForm.tsx`         | hub-* 样式、隐藏 visibility、保留 OAuth2                  |
+| `frontend/src/components/LogViewer.tsx`          | source 类型改为 string[]、source filter UI 移除、滚动方向 |
+| `frontend/src/components/layout/Header.tsx`      | GitHub 链接、移除文档按钮                                 |
+| `frontend/src/components/layout/Sidebar.tsx`     | Logo 使用应用图标                                         |
+| `frontend/src/components/ui/UserProfileMenu.tsx` | 移除 sponsor/wechat/discord 按钮                          |
+| `frontend/src/components/ui/AboutDialog.tsx`     | MCPHub Desktop 标识、canAutoUpdate 逻辑                   |
+| `frontend/src/contexts/AuthContext.tsx`          | skipAuth/guest 模式                                       |
+| `frontend/src/contexts/SettingsContext.tsx`      | httpPort/exposeHttp 字段                                  |
+| `frontend/src/services/configService.ts`         | getPublicConfig 使用 apiGet                               |
+| `frontend/src/services/changelogService.ts`      | Tauri 中禁用                                              |
+| `frontend/src/pages/SettingsPage.tsx`            | 隐藏未实现模块、RuntimeVersionManager、HTTP 端口          |
+| `frontend/src/pages/LoginPage.tsx`               | admin 默认填充、密码提示、Logo 图标                       |
+| `frontend/src/pages/Dashboard.tsx`               | 隐藏 SMART/Docs                                           |
+| `frontend/src/pages/ActivityPage.tsx`            | 隐藏用户列、timestamp UTC 转换                            |
+| `frontend/src/utils/tauriClient.ts`              | 桌面端新增                                                |
+| `frontend/src/utils/fetchInterceptor.ts`         | isTauri() 拦截                                            |
+| `frontend/src/utils/runtime.ts`                  | 运行时配置                                                |
+| `locales/*.json`                                 | runtime* 翻译键（~18 个）                                 |
+
+#### 同步后验证清单
+
+1. `cd frontend && npm run build` — 前端构建通过
+2. `cd src-tauri && cargo check` — Rust 编译通过
+3. 检查 `locales/*.json` 中 runtime* 翻译键是否完整
+4. 检查桌面端自定义文件未被覆盖（抽查关键文件的 diff）
+
+### 4.3 同步操作流程（标准 SOP）
 
 ```bash
 # 1. 更新 origin 子模块到 latest main
@@ -802,9 +855,17 @@ git --no-pager diff <last-sync-sha>..HEAD -- frontend/ locales/ > /tmp/origin_fr
 # 4. dry-run 检查冲突
 cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin_frontend.patch
 
-# 5. 对未冲突文件直接 cp 覆盖；对冲突文件手动合并（保留桌面端差异）
-# 6. 升级版本号
-# 7. cd frontend && npm run build 验证
+# 5. ⚠️ 逐文件处理（禁止批量覆盖！）
+#    - 对桌面端无自定义的文件：直接 cp 覆盖
+#    - 对桌面端有自定义的文件：手动合并，保留桌面端差异
+#    - 对 locales/*.json：只添加新增键值，不删除桌面端 runtime* 键
+
+# 6. 评估 Node 后端 commit，决定是否在 Rust 端镜像实现
+
+# 7. 验证
+cd frontend && npm run build
+cd src-tauri && cargo check
+
 # 8. 更新本章节「最近同步基线」与「同步条目」
 ```
 
@@ -813,131 +874,31 @@ cd .. && patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /t
 
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `96c16d9` (origin/main) |
-| **对应 origin tag**            | `v0.12.15+8`            |
-| **桌面端版本号**               | `1.0.17`                |
-| **同步执行日期**               | 2026-06-18              |
+| **当前已同步到 origin commit** | `89deccd` (origin/main) |
+| **对应 origin tag**            | `v0.12.15+11`           |
+| **桌面端版本号**               | `1.0.18002`             |
+| **同步执行日期**               | 2026-06-24              |
 
-> 下次同步时，使用 `96c16d9` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 96c16d9..HEAD`）。
+> 下次同步时，使用 `89deccd` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 89deccd..HEAD`）。
 
-### 4.4 同步条目历史
+### 4.4 最近同步记录
 
-#### 2026-06-18：同步 `6067aa9` → `96c16d9`（2 个 commit）
-
-**已评估 — 无需同步到 desktop**
-
-| 来源 commit | 说明                                                                 | 处理决策                                                                                                                           |
-| ----------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `21decd9`   | fix: attach request user context for system-level all-access bearer auth | **不同步**：Node 端修复 dashboard API 的 bearer auth 用户上下文；Rust 端 HTTP 服务器已返回 BearerKey 对象，dashboard 走 JWT/Tauri IPC |
-| `96c16d9`   | feat: release-notes skill + relaxed bilingual release notes validation | **不同步**：仅涉及 `.claude/`、`.github/`、`scripts/`，与桌面端无关                                                                |
-
-#### 2026-06-18：同步 `a34dbac` → `6067aa9`（6 个 commit）
+#### 2026-06-24：同步 `96c16d9` → `89deccd`（3 个 commit）
 
 **已同步到 desktop（前端 / locales / Rust 后端）**
 
 
-| 来源 commit | 说明                                                             | desktop 应用方式                                                                                                                                                  |
-| ----------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `f163674`   | feat: add cache refresh/reinstall for npx/uvx MCP servers        | 前端：ServerCard/ServerContext/ServersPage/SettingsPage 添加 reinstall 和 clearCache 功能；locales 四语言翻译；Rust：添加`reinstall_server` 和 `clear_cache` 命令 |
-| `b6d9fd4`   | fix: scope single-server reload to only that server              | Rust 后端已确认无需修改（`reload_server` 已只作用于单个服务器）                                                                                                   |
-| `16eed01`   | fix: terminate stdio process tree on server delete and disable   | Rust 后端：`stdio_transport.rs` 添加 `kill_process_tree()` 函数，使用 `process_group(0)` 创建进程组，disconnect 时杀死整个进程树；`Cargo.toml` 添加 `libc` 依赖   |
-| `626ae36`   | fix: handle null/primitive tool result payloads without crashing | Rust 后端已确认无需修改（Rust 端使用`as_bool()`/`as_array()` 安全处理）                                                                                           |
+| 来源 commit | 说明                                                               | desktop 应用方式                                                                                          |
+| ----------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `75e497f`   | feat: introduce group server alias                                 | 前端：GroupCard.tsx, ServerToolConfig.tsx, types/index.ts 直接覆盖；locales 四语言翻译添加 alias 相关键值 |
+| `89deccd`   | fix: record system-key user in activity logs and reserve usernames | Rust 后端：user_service.rs 添加保留用户名检查（system/admin/guest/root）；修复时间使用本地时间            |
 
 **未同步（后端 / 不适用）**
 
 
-| 来源 commit | 类型                       | 处理决策               |
-| ----------- | -------------------------- | ---------------------- |
-| `6067aa9`   | chore(deps): bump hono     | **不同步**（依赖更新） |
-| `5772aeb`   | chore(deps-dev): bump vite | **不同步**（依赖更新） |
-
-#### 2026-06-17：同步 `3ea0bbe` → `a34dbac`（77 个 commit）
-
-**已同步到 desktop（前端 / locales）**
-
-
-| 来源 commit | 说明                         | desktop 应用方式                      |
-| ----------- | ---------------------------- | ------------------------------------- |
-| `bbc8f00`   | 更新 skipAuth 描述           | `locales/{en,fr,tr,zh}.json` 直接覆盖 |
-| `c44a32b`   | 代码分割与懒加载             | `frontend/src/App.tsx` 手动合并       |
-| `bcf993e`   | UI 重新设计（32 个组件文件） | 大部分文件直接覆盖                    |
-| `3ea2019`   | 按钮样式更新                 | 直接覆盖                              |
-| `c2b16da`   | 宽屏布局优化                 | 直接覆盖                              |
-| `f04eb69`   | 服务器可见性列               | 直接覆盖                              |
-| `8977514`   | 轮询优化                     | 直接覆盖                              |
-| `3142206`   | OIDC 支持                    | 直接覆盖                              |
-| `62d706d`   | 活动日志 IP 追踪             | 直接覆盖                              |
-| `ee1aa9d`   | 基础 URL 解析增强            | 直接覆盖                              |
-| `c951f63`   | Discord 链接更新             | 直接覆盖                              |
-| `bfbf6b6`   | 可见性权限修复               | 直接覆盖                              |
-| `ff05c9b`   | OAuth2 客户端凭证            | 直接覆盖                              |
-| `f2baf0a`   | stdio 请求选项保留           | 直接覆盖                              |
-| `ed622fc`   | ssoUserId 匹配               | 直接覆盖                              |
-| `79730a8`   | 服务器可见性编辑             | 直接覆盖                              |
-| `a37bad5`   | 用户级 bearer keys           | 直接覆盖                              |
-| `b344aba`   | 隐藏系统日志导航             | 直接覆盖                              |
-| `f783ef2`   | 访问范围过滤                 | 直接覆盖                              |
-| `92625b2`   | 用户名列过滤                 | 直接覆盖                              |
-| `b721275`   | OIDC 账户链接                | 直接覆盖                              |
-| `58e11ab`   | Bearer Keys 样式修复         | 直接覆盖                              |
-| `bb2652e`   | MCP Apps 支持                | 直接覆盖                              |
-| `3ce8bc2`   | Context Footprint            | 直接覆盖                              |
-| `c0050d8`   | 工具结果压缩                 | 直接覆盖                              |
-| `deff236`   | Changelog 功能               | 直接覆盖（新增`changelogService.ts`） |
-| `33b6613`   | 禁用过滤标签                 | 直接覆盖                              |
-| `2982a08`   | 自定义 Switch 组件           | 直接覆盖                              |
-| `fd43a8b`   | ServerCard 样式修复          | 直接覆盖                              |
-| `e84ff7e`   | 工具描述管理增强             | 直接覆盖                              |
-| `a34dbac`   | UUID 正则检查                | 直接覆盖                              |
-| `6a0256a`   | 用户级密钥查看公共服务器     | 直接覆盖                              |
-
-**新增文件**
-
-
-| 文件                                          | 来源 commit | 说明                |
-| --------------------------------------------- | ----------- | ------------------- |
-| `frontend/src/services/changelogService.ts`   | `deff236`   | Changelog 服务      |
-| `frontend/src/utils/bearerKeyScopeFilter.ts`  | `a37bad5`   | Bearer key 范围过滤 |
-| `frontend/src/utils/contextCost.ts`           | `3ce8bc2`   | Context 成本计算    |
-| `frontend/src/utils/jsonImport.ts`            | `f2baf0a`   | JSON 导入工具       |
-| `frontend/src/utils/navigationPermissions.ts` | `b344aba`   | 导航权限            |
-| `frontend/src/utils/serverFilters.ts`         | `33b6613`   | 服务器过滤          |
-| `frontend/src/utils/serverListState.ts`       | `33b6613`   | 服务器列表状态      |
-| `frontend/src/utils/serverPermissions.ts`     | `bfbf6b6`   | 服务器权限          |
-| `frontend/src/utils/serverVisibility.ts`      | `f04eb69`   | 服务器可见性        |
-| `frontend/src/utils/toolDescription.ts`       | `e84ff7e`   | 工具描述            |
-| `frontend/src/components/ui/EndpointCopy.tsx` | `bcf993e`   | 端点复制组件        |
-| `frontend/src/components/ui/StatusDot.tsx`    | `bcf993e`   | 状态点组件          |
-
-**未同步（后端 / 不适用）**
-
-
-| 来源 commit      | 类型                                            | 处理决策         |
-| ---------------- | ----------------------------------------------- | ---------------- |
-| `077eed9`        | Add headless mode                               | **Rust 端 TODO** |
-| `7300b74`        | skipAuth guest access                           | ✅ 已实现        |
-| `927e98d`        | reject scoped bearer keys (CWE-863)             | **Rust 端 TODO** |
-| `60a4da4`        | require admin for MCP settings export (CWE-862) | **Rust 端 TODO** |
-| `2de5057`        | TRUST_PROXY 环境变量                            | **Rust 端 TODO** |
-| `45b1f05`        | scoped bearer auth on smart routes              | **Rust 端 TODO** |
-| `8fe47e2`        | load server config from DB after OAuth          | **Rust 端 TODO** |
-| `87f241a`        | exclude tool description from hash              | **Rust 端 TODO** |
-| `6377812`        | skip reconnect for disabled servers             | **Rust 端 TODO** |
-| `3fb39f0`        | harden JWT binding (GHSA-wf8q-wvv8-p8jf)        | **Rust 端 TODO** |
-| `06b18cb`        | server env interpolation in headers             | **Rust 端 TODO** |
-| `da23f69`        | return MCP initialize metadata                  | **Rust 端 TODO** |
-| `5ca154a`        | prevent embedding regeneration                  | **Rust 端 TODO** |
-| `c8779df`        | SSO/OIDC user matching                          | **Rust 端 TODO** |
-| `b1e7a52`        | smart routing arbitrary args                    | **Rust 端 TODO** |
-| `030d12e`        | DEFAULT_REQUEST_TIMEOUT                         | **Rust 端 TODO** |
-| `f42c828`        | Redis error handling                            | **Rust 端 TODO** |
-| `330e0f7`        | env-first better auth config                    | **Rust 端 TODO** |
-| `20adf81`        | hosted mode                                     | **Rust 端 TODO** |
-| `61a59b4`        | runtime config resolution                       | **Rust 端 TODO** |
-| `e894500`        | IPv4-mapped IPv6 normalization                  | **Rust 端 TODO** |
-| `0c30aad`        | Better Auth trusted origins                     | **Rust 端 TODO** |
-| `bbec0c6`        | bridge Better Auth session                      | **Rust 端 TODO** |
-| 依赖更新 commits | chore(deps)                                     | **不同步**       |
+| 来源 commit | 类型                            | 处理决策               |
+| ----------- | ------------------------------- | ---------------------- |
+| `537f393`   | chore: resolve pnpm audit vulns | **不同步**（依赖更新） |
 
 ---
 

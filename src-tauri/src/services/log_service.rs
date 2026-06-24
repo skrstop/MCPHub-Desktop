@@ -1,17 +1,20 @@
 use crate::{db, models::log::{ActivityEntry, ActivityPage, ActivityQuery, ActivityStats, LogEntry, LogQuery}};
 use anyhow::Result;
+use chrono::Local;
 use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn add_log(level: &str, message: &str, server_name: Option<&str>) -> Result<()> {
     let id = Uuid::new_v4().to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     sqlx::query(
-        "INSERT INTO app_log (id, level, message, server_name) VALUES (?, ?, ?, ?)",
+        "INSERT INTO app_log (id, level, message, server_name, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(level)
     .bind(message)
     .bind(server_name)
+    .bind(&now)
     .execute(db::pool())
     .await?;
     Ok(())
@@ -196,16 +199,59 @@ pub async fn clear_logs() -> Result<()> {
 /// Retention period for logs (days).
 const LOG_RETENTION_DAYS: i64 = 15;
 
+/// Get the database file size in bytes by querying SQLite page count and page size.
+async fn get_db_size() -> u64 {
+    let page_count: i64 = sqlx::query_scalar("SELECT page_count FROM pragma_page_count()")
+        .fetch_one(db::pool())
+        .await
+        .unwrap_or(0);
+    let page_size: i64 = sqlx::query_scalar("SELECT page_size FROM pragma_page_size()")
+        .fetch_one(db::pool())
+        .await
+        .unwrap_or(4096);
+    (page_count * page_size).max(0) as u64
+}
+
+/// Format bytes to human readable string (KB/MB/GB).
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// Clean up logs older than the retention period and vacuum the database.
 ///
 /// This function:
-/// 1. Deletes app_log entries older than 15 days
-/// 2. Deletes activity_log entries older than 15 days
-/// 3. Runs VACUUM to reclaim disk space
+/// 1. Gets DB size before cleanup
+/// 2. Deletes app_log entries older than 15 days
+/// 3. Deletes activity_log entries older than 15 days
+/// 4. Runs VACUUM to reclaim disk space
+/// 5. Gets DB size after cleanup
 ///
-/// Returns (app_log_deleted, activity_log_deleted, vacuum_done).
-pub async fn cleanup_old_logs() -> Result<(i64, i64, bool)> {
-    let cutoff = format!("datetime('now', '-{} days')", LOG_RETENTION_DAYS);
+/// Returns (app_log_deleted, activity_log_deleted, vacuum_done, size_before, size_after).
+pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
+    let cutoff = format!("datetime('now', 'localtime', '-{} days')", LOG_RETENTION_DAYS);
+
+    // Get DB size before cleanup
+    let size_before = get_db_size().await;
+    log::info!("[log_cleanup] DB size before cleanup: {}", format_size(size_before));
+
+    // Count entries before deletion
+    let app_log_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_log")
+        .fetch_one(db::pool())
+        .await
+        .unwrap_or(0);
+    let activity_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM activity_log")
+        .fetch_one(db::pool())
+        .await
+        .unwrap_or(0);
+    log::info!("[log_cleanup] Current entries: app_log={}, activity_log={}", app_log_total, activity_total);
 
     // Delete old app_log entries (uses created_at column)
     let app_log_sql = format!(
@@ -217,9 +263,9 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool)> {
         .await?;
     let app_deleted = app_result.rows_affected() as i64;
 
-    // Delete old activity_log entries (uses timestamp column)
+    // Delete old activity_log entries (uses created_at column)
     let activity_sql = format!(
-        "DELETE FROM activity_log WHERE timestamp < {}",
+        "DELETE FROM activity_log WHERE created_at < {}",
         cutoff
     );
     let activity_result = sqlx::query(&activity_sql)
@@ -227,44 +273,59 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool)> {
         .await?;
     let activity_deleted = activity_result.rows_affected() as i64;
 
+    log::info!(
+        "[log_cleanup] Deleted: app_log={}, activity_log={} (retention={}d)",
+        app_deleted, activity_deleted, LOG_RETENTION_DAYS
+    );
+
     // Run VACUUM to reclaim disk space
-    let vacuum_done = if app_deleted > 0 || activity_deleted > 0 {
+    let (vacuum_done, size_after) = if app_deleted > 0 || activity_deleted > 0 {
         match sqlx::raw_sql("VACUUM")
             .execute(db::pool())
             .await
         {
             Ok(_) => {
+                let size = get_db_size().await;
                 log::info!(
-                    "[log_cleanup] VACUUM completed (deleted {} app_log, {} activity_log)",
-                    app_deleted, activity_deleted
+                    "[log_cleanup] VACUUM completed: {} -> {}",
+                    format_size(size_before), format_size(size)
                 );
-                true
+                (true, size)
             }
             Err(e) => {
                 log::warn!("[log_cleanup] VACUUM failed: {}", e);
-                false
+                (false, size_before)
             }
         }
     } else {
-        true // nothing to vacuum
+        log::info!("[log_cleanup] No old entries to delete, skipping VACUUM");
+        (true, size_before)
     };
 
-    Ok((app_deleted, activity_deleted, vacuum_done))
+    Ok((app_deleted, activity_deleted, vacuum_done, size_before, size_after))
 }
 
 /// Run log cleanup and return a summary message.
+/// Logs the result to both stderr and database.
 pub async fn run_cleanup_with_summary() -> String {
     match cleanup_old_logs().await {
-        Ok((app_deleted, activity_deleted, vacuum_done)) => {
+        Ok((app_deleted, activity_deleted, vacuum_done, size_before, size_after)) => {
             let vacuum_status = if vacuum_done { "done" } else { "failed" };
-            format!(
-                "Cleanup completed: {} app_log, {} activity_log deleted (retention={}d), vacuum={}",
-                app_deleted, activity_deleted, LOG_RETENTION_DAYS, vacuum_status
-            )
+            let msg = format!(
+                "Log cleanup: deleted {} app_log + {} activity_log (retention={}d), DB {} -> {}, vacuum={}",
+                app_deleted, activity_deleted, LOG_RETENTION_DAYS,
+                format_size(size_before), format_size(size_after), vacuum_status
+            );
+            log::info!("[log_cleanup] {}", msg);
+            // Write to database so it shows in the app's log view
+            crate::services::app_logger::log_to_db("info", &format!("[log_cleanup] {}", msg));
+            msg
         }
         Err(e) => {
-            log::warn!("[log_cleanup] Cleanup failed: {}", e);
-            format!("Cleanup failed: {}", e)
+            let msg = format!("Log cleanup failed: {}", e);
+            log::warn!("[log_cleanup] {}", msg);
+            crate::services::app_logger::log_to_db("warn", &format!("[log_cleanup] {}", msg));
+            msg
         }
     }
 }

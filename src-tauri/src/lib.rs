@@ -28,9 +28,22 @@ pub fn run() {
         let _: () = msg_send![info, setProcessName: ns_str];
     }
 
-    // Initialize env_logger for stderr output first.
-    // After DB is ready, we'll also enable database logging via app_logger.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Initialize env_logger for stderr output with local time format.
+    // Database logging is handled separately by app_logger.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format(|buf, record| {
+            use chrono::Local;
+            use std::io::Write;
+            let now = Local::now();
+            writeln!(
+                buf,
+                "{} [{:<5}] {}",
+                now.format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.args()
+            )
+        })
+        .init();
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -76,6 +89,13 @@ pub fn run() {
             services::app_logger::init();
             services::app_logger::log_to_db("info", "Application started, database initialized");
 
+            // Log the enhanced PATH at startup (after DB is ready so it's persisted)
+            {
+                let path = commands::runtime::get_enhanced_path_for_logging();
+                log::info!("[startup] Enhanced PATH: {}", path);
+                services::app_logger::log_to_db("info", &format!("[startup] Enhanced PATH: {}", path));
+            }
+
             // Start MCP servers and HTTP server in background after DB is ready
             let app_handle2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -111,14 +131,8 @@ pub fn run() {
                     // Wait 5 minutes before first cleanup to avoid startup contention
                     tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
                     loop {
-                        let msg = services::log_service::run_cleanup_with_summary().await;
-                        if msg.starts_with("Cleanup failed") {
-                            log::warn!("[log_cleanup] {}", msg);
-                            services::app_logger::log_to_db("warn", &format!("[log_cleanup] {}", msg));
-                        } else {
-                            log::info!("[log_cleanup] {}", msg);
-                            services::app_logger::log_to_db("info", &format!("[log_cleanup] {}", msg));
-                        }
+                        // run_cleanup_with_summary already logs to both stderr and database
+                        let _ = services::log_service::run_cleanup_with_summary().await;
                         tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
                     }
                 });

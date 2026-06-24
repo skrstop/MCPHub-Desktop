@@ -261,17 +261,21 @@ jobs:
           echo "✅ Frontend deps installed"
           echo "========================================="
 
-      # ─── 运行时说明 ─────────────────────────────────────────────────────
-      - name: Runtime info
+      # ─── 下载运行时（Node.js + uv + Python）────────────────────────────────
+      - name: Download runtimes
         shell: bash
         run: |
           echo "========================================="
-          echo "  Runtime Info"
+          echo "  Downloading Runtimes"
           echo "========================================="
-          echo "Runtimes are NOT bundled in the app."
-          echo "Users should:"
-          echo "  1. Select 'system' in Settings to use their installed Node.js/Python"
-          echo "  2. Or install runtimes via the app's Settings page"
+          echo "Target arch: ${{ matrix.runtime-arch }}"
+          echo ""
+          TARGET_ARCH=${{ matrix.runtime-arch }} bash scripts/download-runtimes.sh
+          echo ""
+          echo "=== Runtimes directory ==="
+          ls -la src-tauri/runtimes/
+          echo ""
+          du -sh src-tauri/runtimes/
           echo "========================================="
 
       # ─── 解码签名密钥 ─────────────────────────────────────────────────────

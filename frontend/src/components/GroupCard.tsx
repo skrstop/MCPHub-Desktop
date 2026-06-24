@@ -104,26 +104,23 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
     const allPrompts = server.prompts || [];
     const allResources = server.resources || [];
 
-    const visibleTools =
-      Array.isArray(cfg.tools)
-        ? allTools.filter((t) => {
-            if (t.enabled === false) return false;
-            const short = t.name.startsWith(prefix) ? t.name.slice(prefix.length) : t.name;
-            return cfg.tools!.includes(short);
-          }).length
-        : allTools.filter((t) => t.enabled !== false).length;
-    const visiblePrompts =
-      Array.isArray(cfg.prompts)
-        ? allPrompts.filter((p) => {
-            if (p.enabled === false) return false;
-            const short = p.name.startsWith(prefix) ? p.name.slice(prefix.length) : p.name;
-            return cfg.prompts!.includes(short);
-          }).length
-        : allPrompts.filter((p) => p.enabled !== false).length;
-    const visibleResources =
-      Array.isArray(cfg.resources)
-        ? allResources.filter((r) => r.enabled !== false && cfg.resources!.includes(r.uri)).length
-        : allResources.filter((r) => r.enabled !== false).length;
+    const visibleTools = Array.isArray(cfg.tools)
+      ? allTools.filter((t) => {
+          if (t.enabled === false) return false;
+          const short = t.name.startsWith(prefix) ? t.name.slice(prefix.length) : t.name;
+          return cfg.tools!.includes(short);
+        }).length
+      : allTools.filter((t) => t.enabled !== false).length;
+    const visiblePrompts = Array.isArray(cfg.prompts)
+      ? allPrompts.filter((p) => {
+          if (p.enabled === false) return false;
+          const short = p.name.startsWith(prefix) ? p.name.slice(prefix.length) : p.name;
+          return cfg.prompts!.includes(short);
+        }).length
+      : allPrompts.filter((p) => p.enabled !== false).length;
+    const visibleResources = Array.isArray(cfg.resources)
+      ? allResources.filter((r) => r.enabled !== false && cfg.resources!.includes(r.uri)).length
+      : allResources.filter((r) => r.enabled !== false).length;
 
     return {
       visibleTools,
@@ -135,10 +132,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
     };
   };
 
-  const totalVisibleTools = groupServers.reduce(
-    (acc, s) => acc + tally(s).visibleTools,
-    0,
-  );
+  const totalVisibleTools = groupServers.reduce((acc, s) => acc + tally(s).visibleTools, 0);
 
   return (
     <div className="hub-card overflow-visible">
@@ -182,11 +176,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
               className="hub-icon-btn sm"
               title={t('common.copy')}
             >
-              {copied ? (
-                <Check size={13} className="text-[var(--hub-ok)]" />
-              ) : (
-                <Copy size={13} />
-              )}
+              {copied ? <Check size={13} className="text-[var(--hub-ok)]" /> : <Copy size={13} />}
             </button>
             {showCopyDropdown && (
               <div
@@ -300,7 +290,13 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
         {/* Flow */}
         <svg width="80" height="80" viewBox="0 0 80 80" className="self-center">
           {groupServers.length === 0 ? (
-            <path d="M0,40 C30,40 50,40 80,40" stroke="var(--hub-line)" strokeWidth="1" fill="none" strokeDasharray="3 3" />
+            <path
+              d="M0,40 C30,40 50,40 80,40"
+              stroke="var(--hub-line)"
+              strokeWidth="1"
+              fill="none"
+              strokeDasharray="3 3"
+            />
           ) : (
             groupServers.map((_, i) => {
               const y1 = 12 + (60 / Math.max(groupServers.length, 1)) * (i + 0.5);
@@ -327,10 +323,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
             background: 'var(--hub-bg-2)',
           }}
         >
-          <div
-            className="hub-sect"
-            style={{ marginBottom: 4 }}
-          >
+          <div className="hub-sect" style={{ marginBottom: 4 }}>
             endpoint
           </div>
           <div
@@ -371,21 +364,31 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
           {cost && (
             <div className="hub-mono mt-1" style={{ fontSize: 11.5, color: 'var(--hub-ink-3)' }}>
               <div title={t('cost.estimate')}>
-                {t('cost.totalFootprint')}: {formatTokens(cost.direct.exposed)}/{formatTokens(cost.direct.gross)}
+                {t('cost.totalFootprint')}: {formatTokens(cost.direct.exposed)}/
+                {formatTokens(cost.direct.gross)}
               </div>
               {cost.smartRouting && (
                 <>
                   <div>
-                    {t('cost.smartRouting')}: {formatTokens(cost.smartRouting.base)}{' '}
-                    ({t('cost.saved', { percent: percentSaved(cost.direct.exposed, cost.smartRouting.base) })})
+                    {t('cost.smartRouting')}: {formatTokens(cost.smartRouting.base)} (
+                    {t('cost.saved', {
+                      percent: percentSaved(cost.direct.exposed, cost.smartRouting.base),
+                    })}
+                    )
                   </div>
                   <div title={t('cost.smartRoutingPdHint')}>
-                    {t('cost.smartRoutingPd')}: {formatTokens(cost.smartRouting.progressiveDisclosure)}
+                    {t('cost.smartRoutingPd')}:{' '}
+                    {formatTokens(cost.smartRouting.progressiveDisclosure)}
                   </div>
                 </>
               )}
               {cost.connectedCount < cost.totalCount && (
-                <div>{t('cost.connectedOf', { connected: cost.connectedCount, total: cost.totalCount })}</div>
+                <div>
+                  {t('cost.connectedOf', {
+                    connected: cost.connectedCount,
+                    total: cost.totalCount,
+                  })}
+                </div>
               )}
             </div>
           )}

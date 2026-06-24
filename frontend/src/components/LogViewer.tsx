@@ -19,10 +19,11 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
   const [typeFilter, setTypeFilter] = useState<Array<'info' | 'error' | 'warn' | 'debug'>>(['info', 'error', 'warn', 'debug']);
   const [sourceFilter, setSourceFilter] = useState<string[]>([]); // empty = show all sources
 
-  // Auto scroll to bottom when new logs come in if autoScroll is enabled
+  // Auto scroll to top when new logs come in if autoScroll is enabled.
+  // Logs are displayed in reverse order (newest first), so we scroll to top.
   useEffect(() => {
     if (autoScroll && logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      logContainerRef.current.scrollTop = 0;
     }
   }, [logs, autoScroll]);
 

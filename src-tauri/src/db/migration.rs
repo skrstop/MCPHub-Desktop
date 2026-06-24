@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 7;
+pub const TARGET_VERSION: i64 = 8;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -18,7 +18,7 @@ async fn get_current_version(pool: &SqlitePool) -> Result<i64> {
         "CREATE TABLE IF NOT EXISTS schema_version (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             version INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -70,7 +70,7 @@ async fn get_current_version(pool: &SqlitePool) -> Result<i64> {
 async fn set_version(pool: &SqlitePool, version: i64) -> Result<()> {
     sqlx::query(
         "INSERT INTO schema_version (id, version, updated_at)
-         VALUES (1, ?, datetime('now'))
+         VALUES (1, ?, datetime('now', 'localtime'))
          ON CONFLICT(id) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at",
     )
     .bind(version)
@@ -111,6 +111,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         5 => migrate_v5(pool).await,
         6 => migrate_v6(pool).await,
         7 => migrate_v7(pool).await,
+        8 => migrate_v8(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -127,8 +128,8 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             username    TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             role        TEXT NOT NULL DEFAULT 'user',
-            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -147,8 +148,8 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             headers     TEXT,
             options     TEXT,
             enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -160,7 +161,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             name        TEXT NOT NULL UNIQUE,
             description TEXT,
             servers     TEXT NOT NULL DEFAULT '[]',
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -174,7 +175,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             log_level   TEXT DEFAULT 'info',
             expose_http INTEGER DEFAULT 0,
             http_port   INTEGER DEFAULT 3000,
-            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -191,7 +192,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             key_hash    TEXT NOT NULL,
             user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at  TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -204,7 +205,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             action      TEXT NOT NULL,
             resource    TEXT NOT NULL,
             detail      TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -216,7 +217,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             level       TEXT NOT NULL,
             message     TEXT NOT NULL,
             server_name TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -230,7 +231,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             description TEXT,
             arguments   TEXT,
             enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -245,7 +246,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             description TEXT,
             mime_type   TEXT,
             enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -263,7 +264,7 @@ async fn migrate_v2(pool: &SqlitePool) -> Result<()> {
             action      TEXT NOT NULL,
             resource    TEXT NOT NULL,
             detail      TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -285,8 +286,8 @@ async fn migrate_v2(pool: &SqlitePool) -> Result<()> {
             name        TEXT NOT NULL UNIQUE,
             description TEXT,
             content     TEXT NOT NULL,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
     .execute(pool)
@@ -300,8 +301,8 @@ async fn migrate_v2(pool: &SqlitePool) -> Result<()> {
             item_name   TEXT NOT NULL,
             enabled     INTEGER NOT NULL DEFAULT 1,
             description TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             UNIQUE(server_name, item_type, item_name)
         )",
     )
@@ -366,7 +367,7 @@ async fn migrate_v4(pool: &SqlitePool) -> Result<()> {
     let admin_hash = "$2b$10$68DpNRgEB4V88lMXDK46J.ahxYKObFIUnuff5x2oxkhtaWt2dMUO6";
     sqlx::query(
         "INSERT OR IGNORE INTO users (id, username, password_hash, role, created_at, updated_at)
-         SELECT 'admin-default', 'admin', ?, 'admin', datetime('now'), datetime('now')
+         SELECT 'admin-default', 'admin', ?, 'admin', datetime('now', 'localtime'), datetime('now', 'localtime')
          WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = 'admin')",
     )
     .bind(admin_hash)
@@ -399,5 +400,35 @@ async fn migrate_v7(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await
         .ok(); // ignore if column already exists
+    Ok(())
+}
+
+/// v7 → v8: Fix timezone — convert all UTC timestamps to local time
+async fn migrate_v8(pool: &SqlitePool) -> Result<()> {
+    // Update app_log: shift created_at from UTC to local time
+    sqlx::query(
+        "UPDATE app_log SET created_at = datetime(created_at, 'localtime') WHERE created_at IS NOT NULL"
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    // Update other tables with created_at/updated_at columns
+    for table in &["users", "servers", "groups", "bearer_keys", "templates", "server_tool_config", "builtin_prompts", "builtin_resources"] {
+        let sql = format!(
+            "UPDATE {} SET created_at = datetime(created_at, 'localtime') WHERE created_at IS NOT NULL",
+            table
+        );
+        sqlx::query(&sql).execute(pool).await.ok();
+    }
+    for table in &["users", "servers", "templates", "server_tool_config"] {
+        let sql = format!(
+            "UPDATE {} SET updated_at = datetime(updated_at, 'localtime') WHERE updated_at IS NOT NULL",
+            table
+        );
+        sqlx::query(&sql).execute(pool).await.ok();
+    }
+
+    log::info!("[db] migration v8: converted existing timestamps to local time");
     Ok(())
 }

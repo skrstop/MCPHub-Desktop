@@ -860,6 +860,7 @@ fn detect_system_node_version() -> Option<String> {
         .arg("-v")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .env("PATH", get_enhanced_path())
         .output()
         .ok()?;
     if !output.status.success() {
@@ -895,11 +896,13 @@ fn detect_bundled_node_version() -> Option<String> {
 /// Detect the system's Python version by running `python3 --version` (then `python`).
 /// Returns the version string (e.g. "3.12.8") or None if not found.
 fn detect_system_python_version() -> Option<String> {
+    let enhanced_path = get_enhanced_path();
     for cmd in &["python3", "python"] {
         if let Ok(output) = std::process::Command::new(cmd)
             .arg("--version")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .env("PATH", &enhanced_path)
             .output()
         {
             if output.status.success() {
@@ -1200,5 +1203,193 @@ fn push_recent(buf: &Arc<Mutex<Vec<String>>>, line: &str, max: usize) {
             v.drain(0..(len - max));
         }
     }
+}
+
+/// Get the user's full PATH by executing their login shell.
+/// GUI apps don't inherit the user's shell PATH on macOS/Linux, so we need to
+/// source their shell profile to get the complete PATH with tools like
+/// asdf, nvm, pyenv, volta, homebrew, etc.
+fn get_enhanced_path() -> String {
+    log::info!("[runtime] Getting enhanced PATH from user's login shell");
+    crate::services::app_logger::log_to_db("info", "[runtime] Getting enhanced PATH from user's login shell");
+
+    let path = {
+        #[cfg(target_os = "windows")]
+        { get_windows_path() }
+
+        #[cfg(not(target_os = "windows"))]
+        { get_unix_path() }
+    };
+
+    // Log the result (truncated for readability)
+    let display_path = if path.len() > 300 {
+        format!("{}...", &path[..300])
+    } else {
+        path.clone()
+    };
+    log::info!("[runtime] Enhanced PATH: {}", display_path);
+    crate::services::app_logger::log_to_db("info", &format!("[runtime] Enhanced PATH: {}", display_path));
+
+    path
+}
+
+/// Public wrapper for get_enhanced_path, used at startup for logging.
+pub fn get_enhanced_path_for_logging() -> String {
+    get_enhanced_path()
+}
+
+/// Get PATH from user's login shell on Unix (macOS/Linux)
+/// Uses the shell's natural startup sequence to load all profile files,
+/// without manually sourcing any files.
+#[cfg(not(target_os = "windows"))]
+fn get_unix_path() -> String {
+    // Try to get PATH from user's login shell
+    if let Some(shell_path) = get_user_shell() {
+        log::info!("[runtime] Detected user shell: {:?}", shell_path);
+        crate::services::app_logger::log_to_db("info", &format!("[runtime] Detected user shell: {:?}", shell_path));
+
+        // Execute shell with -l (login) and -i (interactive) flags
+        // -l: loads .bash_profile/.zprofile (login scripts)
+        // -i: loads .bashrc/.zshrc (interactive scripts where tools like asdf are configured)
+        // This mimics what happens when user opens a terminal
+        log::info!("[runtime] Executing shell with -l -i flags to get PATH");
+        crate::services::app_logger::log_to_db("info", "[runtime] Executing shell with -l -i flags to get PATH");
+
+        if let Ok(output) = std::process::Command::new(&shell_path)
+            .arg("-l")      // login shell
+            .arg("-i")      // interactive shell - loads .bashrc/.zshrc
+            .arg("-c")      // execute command
+            .arg("echo $PATH")  // just output PATH
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    log::info!("[runtime] Successfully got PATH from shell (length: {})", path.len());
+                    crate::services::app_logger::log_to_db("info", &format!("[runtime] Successfully got PATH from shell (length: {})", path.len()));
+                    return path;
+                } else {
+                    log::warn!("[runtime] Shell returned empty PATH");
+                    crate::services::app_logger::log_to_db("warn", "[runtime] Shell returned empty PATH");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("[runtime] Shell command failed: {}", stderr);
+                crate::services::app_logger::log_to_db("warn", &format!("[runtime] Shell command failed: {}", stderr));
+            }
+        } else {
+            log::warn!("[runtime] Failed to execute shell: {:?}", shell_path);
+            crate::services::app_logger::log_to_db("warn", &format!("[runtime] Failed to execute shell: {:?}", shell_path));
+        }
+    } else {
+        log::warn!("[runtime] No user shell detected, using fallback PATH");
+        crate::services::app_logger::log_to_db("warn", "[runtime] No user shell detected, using fallback PATH");
+    }
+
+    // Fallback: return current PATH
+    let fallback_path = std::env::var("PATH").unwrap_or_default();
+    log::info!("[runtime] Using fallback PATH (length: {})", fallback_path.len());
+    crate::services::app_logger::log_to_db("info", &format!("[runtime] Using fallback PATH (length: {})", fallback_path.len()));
+    fallback_path
+}
+
+/// Get the user's default shell from SHELL env var or common locations
+#[cfg(not(target_os = "windows"))]
+fn get_user_shell() -> Option<std::path::PathBuf> {
+    log::info!("[runtime] Detecting user shell");
+    crate::services::app_logger::log_to_db("info", "[runtime] Detecting user shell");
+
+    // Try SHELL environment variable first
+    if let Ok(shell) = std::env::var("SHELL") {
+        log::info!("[runtime] SHELL env var: {}", shell);
+        crate::services::app_logger::log_to_db("info", &format!("[runtime] SHELL env var: {}", shell));
+        let path = std::path::PathBuf::from(&shell);
+        if path.exists() {
+            log::info!("[runtime] Using shell from SHELL env: {:?}", path);
+            crate::services::app_logger::log_to_db("info", &format!("[runtime] Using shell from SHELL env: {:?}", path));
+            return Some(path);
+        } else {
+            log::warn!("[runtime] SHELL env var points to non-existent path: {}", shell);
+            crate::services::app_logger::log_to_db("warn", &format!("[runtime] SHELL env var points to non-existent path: {}", shell));
+        }
+    } else {
+        log::info!("[runtime] SHELL env var not set");
+        crate::services::app_logger::log_to_db("info", "[runtime] SHELL env var not set");
+    }
+
+    // Fallback: common shell locations
+    #[cfg(target_os = "macos")]
+    let shells = ["/bin/zsh", "/bin/bash", "/usr/local/bin/fish"];
+
+    #[cfg(target_os = "linux")]
+    let shells = ["/bin/bash", "/bin/sh", "/usr/bin/zsh", "/usr/bin/fish"];
+
+    log::info!("[runtime] Trying fallback shells: {:?}", shells);
+    crate::services::app_logger::log_to_db("info", &format!("[runtime] Trying fallback shells: {:?}", shells));
+    for shell in &shells {
+        let path = std::path::PathBuf::from(shell);
+        if path.exists() {
+            log::info!("[runtime] Found fallback shell: {:?}", path);
+            crate::services::app_logger::log_to_db("info", &format!("[runtime] Found fallback shell: {:?}", path));
+            return Some(path);
+        }
+    }
+
+    log::warn!("[runtime] No shell found");
+    crate::services::app_logger::log_to_db("warn", "[runtime] No shell found");
+    None
+}
+
+/// Get PATH on Windows using PowerShell
+#[cfg(target_os = "windows")]
+fn get_windows_path() -> String {
+    log::info!("[runtime] Getting PATH on Windows using PowerShell");
+    crate::services::app_logger::log_to_db("info", "[runtime] Getting PATH on Windows using PowerShell");
+
+    // On Windows, PATH is inherited from the system, but we can try to get
+    // user-specific paths that might not be in the process environment
+    log::info!("[runtime] Executing PowerShell to get user PATH");
+    crate::services::app_logger::log_to_db("info", "[runtime] Executing PowerShell to get user PATH");
+
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let user_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !user_path.is_empty() {
+                log::info!("[runtime] Got user PATH from PowerShell (length: {})", user_path.len());
+                crate::services::app_logger::log_to_db("info", &format!("[runtime] Got user PATH from PowerShell (length: {})", user_path.len()));
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                log::info!("[runtime] Current system PATH length: {}", current_path.len());
+                crate::services::app_logger::log_to_db("info", &format!("[runtime] Current system PATH length: {}", current_path.len()));
+                // Combine: user PATH + system PATH
+                let combined_path = format!("{};{}", user_path, current_path);
+                log::info!("[runtime] Combined PATH length: {}", combined_path.len());
+                crate::services::app_logger::log_to_db("info", &format!("[runtime] Combined PATH length: {}", combined_path.len()));
+                return combined_path;
+            } else {
+                log::warn!("[runtime] PowerShell returned empty user PATH");
+                crate::services::app_logger::log_to_db("warn", "[runtime] PowerShell returned empty user PATH");
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!("[runtime] PowerShell command failed: {}", stderr);
+            crate::services::app_logger::log_to_db("warn", &format!("[runtime] PowerShell command failed: {}", stderr));
+        }
+    } else {
+        log::warn!("[runtime] Failed to execute PowerShell");
+        crate::services::app_logger::log_to_db("warn", "[runtime] Failed to execute PowerShell");
+    }
+
+    // Fallback: return current PATH
+    let fallback_path = std::env::var("PATH").unwrap_or_default();
+    log::info!("[runtime] Using fallback PATH (length: {})", fallback_path.len());
+    crate::services::app_logger::log_to_db("info", &format!("[runtime] Using fallback PATH (length: {})", fallback_path.len()));
+    fallback_path
 }
 

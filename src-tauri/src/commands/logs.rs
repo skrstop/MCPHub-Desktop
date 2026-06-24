@@ -60,12 +60,14 @@ pub async fn clear_tool_activities() -> Result<(), String> {
 /// Manually trigger log cleanup: delete entries older than 15 days and VACUUM.
 #[tauri::command]
 pub async fn cleanup_old_logs() -> Result<serde_json::Value, String> {
-    let (app_deleted, activity_deleted, vacuum_done) = log_service::cleanup_old_logs()
+    let (app_deleted, activity_deleted, vacuum_done, size_before, size_after) = log_service::cleanup_old_logs()
         .await
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "appLogDeleted": app_deleted,
         "activityLogDeleted": activity_deleted,
         "vacuumDone": vacuum_done,
+        "sizeBefore": size_before,
+        "sizeAfter": size_after,
     }))
 }
