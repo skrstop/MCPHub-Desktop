@@ -5,8 +5,8 @@ import tailwindcss from '@tailwindcss/vite';
 // Import the package.json to get the version
 import { readFileSync } from 'fs';
 
-// Get package.json version (reads from tauri/frontend/package.json)
-const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, './package.json'), 'utf-8'));
+// Get version from tauri.conf.json (single source of truth)
+const tauriConf = JSON.parse(readFileSync(path.resolve(__dirname, '../src-tauri/tauri.conf.json'), 'utf-8'));
 
 // For runtime configuration, we'll always use relative paths
 // BASE_PATH will be determined at runtime
@@ -24,7 +24,7 @@ export default defineConfig({
   define: {
     // Make package version available as global variable
     // BASE_PATH will be loaded at runtime
-    'import.meta.env.PACKAGE_VERSION': JSON.stringify(packageJson.version),
+    'import.meta.env.PACKAGE_VERSION': JSON.stringify(tauriConf.version),
   },
   build: {
     sourcemap: true, // Enable source maps for production build

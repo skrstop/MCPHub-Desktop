@@ -46,6 +46,14 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
 
   const checkForUpdates = async (force = false) => {
     setIsChecking(true);
+    // 立即设置 updateInfo 为"检查更新中"状态
+    setUpdateInfo({
+      hasUpdate: false,
+      latestVersion: '',
+      entries: [],
+      totalUpdateCount: 0,
+      source: 'checking',
+    });
     try {
       // 在 Tauri 环境下使用原生 updater 插件
       if (isTauri()) {
@@ -71,8 +79,19 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
             source: 'tauri-fallback',
           });
         } else {
-          setUpdateInfo(info);
-          onUpdateInfoChange?.(info);
+          // 确保在正常完成时也设置 updateInfo，避免一直显示"检查更新中..."
+          if (info) {
+            setUpdateInfo(info);
+            onUpdateInfoChange?.(info);
+          } else {
+            setUpdateInfo({
+              hasUpdate: false,
+              latestVersion: '',
+              entries: [],
+              totalUpdateCount: 0,
+              source: 'no-update',
+            });
+          }
         }
       } else {
         // Web 环境下使用 changelog API
@@ -81,11 +100,32 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
           locale: i18n.language,
           force,
         });
-        setUpdateInfo(info);
-        onUpdateInfoChange?.(info);
+        // 确保在正常完成时也设置 updateInfo，避免一直显示"检查更新中..."
+        if (info) {
+          setUpdateInfo(info);
+          onUpdateInfoChange?.(info);
+        } else {
+          setUpdateInfo({
+            hasUpdate: false,
+            latestVersion: '',
+            entries: [],
+            totalUpdateCount: 0,
+            source: 'no-update',
+          });
+        }
       }
     } catch (error) {
       console.error('Failed to check for updates:', error);
+      // 确保在错误时也设置 updateInfo，避免一直显示"检查更新中..."
+      if (!updateInfo) {
+        setUpdateInfo({
+          hasUpdate: false,
+          latestVersion: '',
+          entries: [],
+          totalUpdateCount: 0,
+          source: 'error',
+        });
+      }
     } finally {
       setIsChecking(false);
     }
@@ -106,10 +146,10 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
   };
 
   useEffect(() => {
-    if (isOpen && !updateInfo) {
+    if (isOpen) {
       checkForUpdates(false);
     }
-  }, [isOpen, updateInfo]);
+  }, [isOpen]);
 
   const latestEntry = updateInfo?.entries[0] ?? null;
   const hasNewVersion = Boolean(updateInfo?.hasUpdate && updateInfo.latestVersion);
@@ -150,7 +190,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
           </div>
 
           <div className="mt-5 space-y-4">
-            {isChecking && !updateInfo ? (
+            {isChecking || updateInfo?.source === 'checking' ? (
               <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
                 <RefreshCw className="h-4 w-4 animate-spin" style={{ color: 'var(--hub-accent)' }} />
                 {t('about.checking')}
