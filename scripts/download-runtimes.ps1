@@ -3,9 +3,9 @@
 # Run from the repository root before building the Tauri app.
 
 param(
-    [string]$NodeVersion = "22.14.0",
-    [string]$UvVersion = "0.6.12",
-    [string]$PythonVersion = "3.12",
+    [string]$NodeVersion = "24.17.0",
+    [string]$UvVersion = "0.11.23",
+    [string]$PythonVersion = "3.14",
     # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
     # 注意: TargetArch 控制 Node.js 和 Python 的目标架构，但 uv 始终使用宿主架构以便能执行
     [string]$TargetArch = ""
@@ -135,31 +135,75 @@ if (Test-Path $UvExe) {
 }
 
 if (-not (Test-Path $UvExe)) {
-    Write-Host "--> Downloading uv v$UvVersion..."
-    $UvUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-$UvArch.zip"
-    $TmpZip = [System.IO.Path]::GetTempFileName() + ".zip"
-    $TmpDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid()
-
-    Invoke-WebRequest -Uri $UvUrl -OutFile $TmpZip
-    Expand-Archive -Path $TmpZip -DestinationPath $TmpDir
-
-    # uv zip may contain a subdirectory or have files directly at the root
-    $Extracted = Get-ChildItem $TmpDir -Directory | Select-Object -First 1
-    if ($null -eq $Extracted) {
-        $ExtractedDir = $TmpDir
-    } else {
-        $ExtractedDir = $Extracted.FullName
-    }
-
     New-Item -ItemType Directory -Force -Path $UvDest | Out-Null
-    Copy-Item (Join-Path $ExtractedDir "uv.exe") $UvDest
-    if (Test-Path (Join-Path $ExtractedDir "uvx.exe")) {
-        Copy-Item (Join-Path $ExtractedDir "uvx.exe") $UvDest
+    $UvObtained = $false
+
+    # ── Method 1: Copy from any existing system uv (version must match) ─────
+    $SystemUv = Get-Command uv -ErrorAction SilentlyContinue
+    if ($SystemUv) {
+        $SystemUvVerRaw = Get-ExeOutput $SystemUv.Source @("self", "version")
+        $SystemUvVer = ($SystemUvVerRaw -split " ")[1]
+        if ($SystemUvVer -eq $UvVersion) {
+            Write-Host "--> Using system uv $SystemUvVer at $($SystemUv.Source)"
+            Copy-Item $SystemUv.Source (Join-Path $UvDest "uv.exe")
+            $UvObtained = $true
+        } else {
+            Write-Host "--> System uv version ($SystemUvVer) != target ($UvVersion), skipping"
+        }
     }
 
-    Remove-Item $TmpZip -Force
-    Remove-Item -Recurse -Force $TmpDir
-    Write-Host "--> uv v$UvVersion downloaded: $UvExe"
+    # ── Method 2: Direct download with retry support ──
+    if (-not $UvObtained) {
+        Write-Host "--> Downloading uv v$UvVersion from GitHub..."
+        $UvUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-$UvArch.zip"
+        $TmpZip = [System.IO.Path]::GetTempFileName() + ".zip"
+        $TmpDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid()
+
+        $DownloadOk = $false
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            Write-Host "    Attempt $attempt/5..."
+            try {
+                Invoke-WebRequest -Uri $UvUrl -OutFile $TmpZip -UseBasicParsing
+                $DownloadOk = $true
+                break
+            } catch {
+                Write-Host "    Download failed: $($_.Exception.Message)"
+                if ($attempt -lt 5) {
+                    Write-Host "    Retrying in 5 seconds..."
+                    Start-Sleep -Seconds 5
+                }
+            }
+        }
+
+        if (-not $DownloadOk) {
+            Write-Host ""
+            Write-Host "ERROR: All download methods failed."
+            Write-Host "Please install uv manually and re-run:"
+            Write-Host "  winget install astral-sh.uv"
+            Write-Host "  pip install uv"
+            exit 1
+        }
+
+        Expand-Archive -Path $TmpZip -DestinationPath $TmpDir
+
+        # uv zip may contain a subdirectory or have files directly at the root
+        $Extracted = Get-ChildItem $TmpDir -Directory | Select-Object -First 1
+        if ($null -eq $Extracted) {
+            $ExtractedDir = $TmpDir
+        } else {
+            $ExtractedDir = $Extracted.FullName
+        }
+
+        Copy-Item (Join-Path $ExtractedDir "uv.exe") $UvDest
+        if (Test-Path (Join-Path $ExtractedDir "uvx.exe")) {
+            Copy-Item (Join-Path $ExtractedDir "uvx.exe") $UvDest
+        }
+
+        Remove-Item $TmpZip -Force
+        Remove-Item -Recurse -Force $TmpDir
+        $UvObtained = $true
+        Write-Host "--> uv v$UvVersion downloaded: $UvExe"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -189,22 +233,44 @@ if (-not $PythonExists) {
         }
         Write-Host "--> Cross-compiling: downloading Python $PythonVersion for $PyTriple directly..."
         # 通过 GitHub API 获取 python-build-standalone 最新 release 中匹配的 asset
-        $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5"
+        # 先尝试 GitHub API，失败时回退到直接构造 URL
         $AssetName = $null
         $DownloadUrl = $null
-        foreach ($Rel in $Releases) {
-            foreach ($A in $Rel.assets) {
-                if ($A.name -match "cpython-$PythonVersion\.\d+\+.*-$PyTriple-install_only\.tar\.gz" -and
-                    $A.name -notmatch "stripped") {
-                    $AssetName = $A.name
-                    $DownloadUrl = $A.browser_download_url
-                    break
+        try {
+            $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5"
+            foreach ($Rel in $Releases) {
+                foreach ($A in $Rel.assets) {
+                    if ($A.name -match "cpython-$PythonVersion\.\d+\+.*-$PyTriple-install_only\.tar\.gz" -and
+                        $A.name -notmatch "stripped") {
+                        $AssetName = $A.name
+                        $DownloadUrl = $A.browser_download_url
+                        break
+                    }
                 }
+                if ($AssetName) { break }
             }
-            if ($AssetName) { break }
+        } catch {
+            Write-Host "    GitHub API unavailable: $($_.Exception.Message)"
         }
+
+        # 回退：直接构造已知版本的下载 URL
         if (-not $DownloadUrl) {
-            Write-Error "ERROR: Could not find Python $PythonVersion for $PyTriple in python-build-standalone releases"
+            Write-Host "--> GitHub API unavailable or no matching asset found, trying direct URL construction..."
+            $PythonReleaseVersion = "2024.10.16"
+            $DirectUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$PythonReleaseVersion/cpython-$PythonVersion.1+$PythonReleaseVersion-$PyTriple-install_only.tar.gz"
+            try {
+                $Response = Invoke-WebRequest -Uri $DirectUrl -Method Head -UseBasicParsing
+                if ($Response.StatusCode -eq 200) {
+                    $DownloadUrl = $DirectUrl
+                    Write-Host "--> Found Python via direct URL: $(Split-Path $DownloadUrl -Leaf)"
+                }
+            } catch {
+                Write-Host "    Direct URL also unavailable: $DirectUrl"
+            }
+        }
+
+        if (-not $DownloadUrl) {
+            Write-Error "ERROR: Could not find Python $PythonVersion for $PyTriple"
             exit 1
         }
         Write-Host "--> Found: $AssetName"

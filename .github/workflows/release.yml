@@ -270,7 +270,13 @@ jobs:
           echo "========================================="
           echo "Target arch: ${{ matrix.runtime-arch }}"
           echo ""
-          TARGET_ARCH=${{ matrix.runtime-arch }} bash scripts/download-runtimes.sh
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            echo "Using PowerShell script for Windows..."
+            pwsh -File scripts/download-runtimes.ps1 -TargetArch "${{ matrix.runtime-arch }}"
+          else
+            echo "Using bash script for Linux/macOS..."
+            TARGET_ARCH=${{ matrix.runtime-arch }} bash scripts/download-runtimes.sh
+          fi
           echo ""
           echo "=== Runtimes directory ==="
           ls -la src-tauri/runtimes/
