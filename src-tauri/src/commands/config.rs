@@ -74,6 +74,51 @@ pub async fn import_settings(json: String) -> Result<settings_import::ImportSumm
         .map_err(|e| e.to_string())
 }
 
+/// Get a single server's config for copying (no admin auth required).
+/// Sensitive values (API keys, tokens) are redacted.
+#[tauri::command]
+pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_json::Value, String> {
+    use crate::services::server_service;
+
+    let server = server_service::get_by_name(&server_name)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Server '{}' not found", server_name))?;
+
+    // Redact sensitive environment variables
+    let redacted_env = server.env.as_ref().map(|env| {
+        env.iter()
+            .map(|(k, v)| {
+                let lower_k = k.to_lowercase();
+                if lower_k.contains("key")
+                    || lower_k.contains("token")
+                    || lower_k.contains("secret")
+                    || lower_k.contains("password")
+                    || lower_k.contains("auth")
+                {
+                    (k.clone(), "***REDACTED***".to_string())
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect::<std::collections::HashMap<String, String>>()
+    });
+
+    Ok(serde_json::json!({
+        "mcpServers": {
+            server.name: {
+                "type": server.server_type,
+                "description": server.description,
+                "command": server.command,
+                "args": server.args,
+                "env": redacted_env,
+                "url": server.url,
+                "disabled": !server.enabled,
+            }
+        }
+    }))
+}
+
 /// Export current server/group/system config as a JSON string (mcp_settings.json compatible)
 /// Requires admin access. Sensitive values (API keys, tokens) are redacted.
 #[tauri::command]

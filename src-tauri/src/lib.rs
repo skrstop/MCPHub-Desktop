@@ -224,6 +224,7 @@ pub fn run() {
             commands::config::get_public_config,
             commands::config::import_settings,
             commands::config::export_settings,
+            commands::config::get_server_config_for_copy,
             // Log commands
             commands::logs::get_logs,
             commands::logs::clear_logs,

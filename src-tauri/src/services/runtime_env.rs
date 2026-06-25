@@ -357,10 +357,6 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
 /// cache/install dirs so everything stays self-contained within the app's
 /// data directory.
 pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
-    let Some(rt) = runtimes_dir() else {
-        return vec![];
-    };
-
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
     // Use cached enhanced PATH from user's shell instead of process PATH
     // GUI apps on macOS/Linux don't inherit the shell PATH
@@ -368,6 +364,12 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
         .get()
         .cloned()
         .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+
+    // If runtimes directory is not available, still return the enhanced PATH
+    // so that commands installed via homebrew, nvm, etc. can be found
+    let Some(rt) = runtimes_dir() else {
+        return vec![("PATH".to_string(), existing_path)];
+    };
 
     let mut prepend_dirs: Vec<String> = vec![];
 
@@ -391,7 +393,11 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
         "uv" | "uvx" | "python" | "python3" => {
             prepend_dirs.push(uv_dir(rt).to_string_lossy().into_owned());
         }
-        _ => return vec![],
+        _ => {
+            // For unknown commands, still return the enhanced PATH
+            // so that commands installed via homebrew, nvm, etc. can be found
+            return vec![("PATH".to_string(), existing_path)];
+        },
     }
 
     let new_path = format!("{}{}{}", prepend_dirs.join(sep), sep, existing_path);

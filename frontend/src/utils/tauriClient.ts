@@ -293,8 +293,16 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (p === 'system-config' && m === 'PUT')
     return { command: 'update_system_config', args: { config: body } };
   // MCP settings export (query string included in segs[1])
-  if (segs[0] === 'mcp-settings' && segs[1]?.startsWith('export') && m === 'GET')
+  if (segs[0] === 'mcp-settings' && segs[1]?.startsWith('export') && m === 'GET') {
+    // If serverName is provided, use the no-auth command for single server copy
+    const qsIdx = endpoint.indexOf('?');
+    const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
+    const serverName = qs.get('serverName');
+    if (serverName) {
+      return { command: 'get_server_config_for_copy', args: { serverName } };
+    }
     return { command: 'export_settings', args: {} };
+  }
 
   // Config (legacy paths kept for compatibility)
   if (p === 'config' && m === 'GET') return { command: 'get_system_config', args: {} };
