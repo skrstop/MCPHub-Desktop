@@ -22,10 +22,13 @@ struct McpSettings {
 struct RawServerConfig {
     #[serde(rename = "type")]
     server_type: Option<String>,
+    #[serde(rename = "serverType")]
+    server_type_alt: Option<String>,
     command: Option<String>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
     url: Option<String>,
+    headers: Option<HashMap<String, String>>,
     description: Option<String>,
     disabled: Option<bool>,
 }
@@ -40,6 +43,34 @@ struct RawUser {
     admin: Option<bool>,
 }
 
+/// Parse server type from string, handling various formats
+fn parse_server_type(type_str: &str) -> ServerType {
+    let normalized = type_str
+        .trim()
+        .to_lowercase()
+        .replace('_', "-")
+        .replace(" ", "-");
+
+    match normalized.as_str() {
+        "sse" => ServerType::Sse,
+        "streamable-http" | "streamablehttp" | "streamable" => ServerType::StreamableHttp,
+        "openapi" | "open-api" => ServerType::Openapi,
+        "stdio" => ServerType::Stdio,
+        _ => {
+            // Try to detect from common patterns
+            if normalized.contains("sse") {
+                ServerType::Sse
+            } else if normalized.contains("http") || normalized.contains("stream") {
+                ServerType::StreamableHttp
+            } else if normalized.contains("openapi") || normalized.contains("open-api") {
+                ServerType::Openapi
+            } else {
+                ServerType::Stdio
+            }
+        }
+    }
+}
+
 /// Import from a JSON string (contents of mcp_settings.json)
 pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
     let settings: McpSettings = serde_json::from_str(json)?;
@@ -48,11 +79,23 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
     // Import servers
     if let Some(servers) = settings.mcp_servers {
         for (name, raw) in servers {
-            let server_type = match raw.server_type.as_deref().unwrap_or("stdio") {
-                "sse" => ServerType::Sse,
-                "streamable-http" => ServerType::StreamableHttp,
-                "openapi" => ServerType::Openapi,
-                _ => ServerType::Stdio,
+            // Try to get server type from multiple possible fields
+            let type_str = raw.server_type
+                .or(raw.server_type_alt)
+                .unwrap_or_else(|| "stdio".to_string());
+
+            let server_type = parse_server_type(&type_str);
+
+            // Auto-detect type from URL if still stdio but url is present
+            let server_type = if server_type == ServerType::Stdio && raw.url.is_some() {
+                // If url is present but no command, likely SSE or HTTP
+                if raw.command.is_none() {
+                    ServerType::Sse
+                } else {
+                    server_type
+                }
+            } else {
+                server_type
             };
 
             let cfg = ServerConfig {
@@ -64,7 +107,7 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 args: raw.args,
                 env: raw.env,
                 url: raw.url,
-                headers: None,
+                headers: raw.headers,
                 options: None,
                 openapi: None,
                 enabled: !raw.disabled.unwrap_or(false),
