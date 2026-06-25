@@ -13,6 +13,11 @@ static ACTIVE_NODE: OnceLock<RwLock<String>> = OnceLock::new();
 /// Active Python version: "system" or a version string like "3.12"
 static ACTIVE_PYTHON: OnceLock<RwLock<String>> = OnceLock::new();
 
+/// Cached enhanced PATH from user's login shell (lazily initialized).
+/// GUI apps on macOS/Linux don't inherit the shell PATH, so we need to
+/// source the user's shell profile to get tools like nvm, asdf, pyenv, etc.
+static ENHANCED_PATH: OnceLock<String> = OnceLock::new();
+
 /// Initialize with the resolved runtimes directory.
 /// Call once on app startup before spawning any MCP servers.
 pub fn init(runtimes: PathBuf) {
@@ -27,6 +32,10 @@ pub fn init(runtimes: PathBuf) {
 
     let _ = RUNTIMES_DIR.set(runtimes.clone());
     log::info!("[runtime_env] Initialized: {:?}", runtimes);
+
+    // Pre-cache the enhanced PATH from user's shell
+    let enhanced = get_enhanced_path();
+    let _ = ENHANCED_PATH.set(enhanced);
 }
 
 #[cfg(unix)]
@@ -50,6 +59,112 @@ fn ensure_executable(runtimes: &Path) {
 
 fn runtimes_dir() -> Option<&'static PathBuf> {
     RUNTIMES_DIR.get()
+}
+
+/// Get the enhanced PATH from user's login shell.
+/// GUI apps on macOS/Linux don't inherit the shell PATH, so we need to
+/// execute the user's shell to get the full PATH with tools like nvm, asdf, etc.
+fn get_enhanced_path() -> String {
+    log::info!("[runtime_env] Getting enhanced PATH from user's login shell");
+
+    let path = {
+        #[cfg(target_os = "windows")]
+        { get_windows_path() }
+
+        #[cfg(not(target_os = "windows"))]
+        { get_unix_path() }
+    };
+
+    let display_path = if path.len() > 300 {
+        format!("{}...", &path[..300])
+    } else {
+        path.clone()
+    };
+    log::info!("[runtime_env] Enhanced PATH: {}", display_path);
+
+    path
+}
+
+/// Get PATH from user's login shell on Unix (macOS/Linux)
+#[cfg(not(target_os = "windows"))]
+fn get_unix_path() -> String {
+    if let Some(shell_path) = get_user_shell() {
+        log::info!("[runtime_env] Detected user shell: {:?}", shell_path);
+
+        // Execute shell with -l (login) and -i (interactive) flags
+        // to load .bash_profile/.zprofile and .bashrc/.zshrc
+        if let Ok(output) = std::process::Command::new(&shell_path)
+            .arg("-l")
+            .arg("-i")
+            .arg("-c")
+            .arg("echo $PATH")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    log::info!("[runtime_env] Successfully got PATH from shell (length: {})", path.len());
+                    return path;
+                }
+            }
+        }
+    }
+
+    // Fallback: return current PATH
+    let fallback_path = std::env::var("PATH").unwrap_or_default();
+    log::info!("[runtime_env] Using fallback PATH (length: {})", fallback_path.len());
+    fallback_path
+}
+
+/// Get the user's default shell from SHELL env var or common locations
+#[cfg(not(target_os = "windows"))]
+fn get_user_shell() -> Option<PathBuf> {
+    // Try SHELL environment variable first
+    if let Ok(shell) = std::env::var("SHELL") {
+        let path = PathBuf::from(&shell);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // Fallback: common shell locations
+    #[cfg(target_os = "macos")]
+    let shells = ["/bin/zsh", "/bin/bash", "/usr/local/bin/fish"];
+
+    #[cfg(target_os = "linux")]
+    let shells = ["/bin/bash", "/bin/sh", "/usr/bin/zsh", "/usr/bin/fish"];
+
+    for shell in &shells {
+        let path = PathBuf::from(shell);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Get PATH on Windows using PowerShell
+#[cfg(target_os = "windows")]
+fn get_windows_path() -> String {
+    if let Ok(output) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let user_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !user_path.is_empty() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                return format!("{};{}", user_path, current_path);
+            }
+        }
+    }
+
+    std::env::var("PATH").unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +362,12 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
     };
 
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
-    let existing_path = std::env::var("PATH").unwrap_or_default();
+    // Use cached enhanced PATH from user's shell instead of process PATH
+    // GUI apps on macOS/Linux don't inherit the shell PATH
+    let existing_path = ENHANCED_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
 
     let mut prepend_dirs: Vec<String> = vec![];
 
