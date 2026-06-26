@@ -321,11 +321,15 @@ if (-not $PythonExists) {
                 Write-Host "      $($_.Name) (IsDir=$($_.PSIsContainer))"
             }
         }
-        Write-Host "    Running: & $UvExe python install $PythonVersion"
+        # Use cmd /c to reliably pass subcommand arguments on Windows CI.
+        # PowerShell's `& $exe arg1 arg2` invocation can mangle arguments in some
+        # CI environments, causing uv to misinterpret the subcommand.
+        $cmdLine = "`"$UvExe`" python install $PythonVersion"
+        Write-Host "    Running via cmd /c: $cmdLine"
         Write-Host "    --- uv output start ---"
         $oldEA = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        & $UvExe python install $PythonVersion
+        cmd /c $cmdLine
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $oldEA
         Write-Host "    --- uv output end ---"
