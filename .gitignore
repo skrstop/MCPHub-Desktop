@@ -5,8 +5,7 @@ build/
 *.log
 .DS_Store
 .agent-work
+.codegraph
 .agentbridge
-.agentbridge/**
 .idea
 src-tauri/.codegraph
-src-tauri/.codegraph/**
