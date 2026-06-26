@@ -833,7 +833,8 @@ VACUUM;
 **代码模式**：
 
 ```rust
-// 同步进程
+// 同步进程 — 需要导入 std::os::windows::process::CommandExt
+use std::os::windows::process::CommandExt; // #[cfg(windows)]
 let mut c = std::process::Command::new("powershell");
 c.args(["-NoProfile", "-Command", "..."])
     .stdout(std::process::Stdio::piped())
@@ -842,7 +843,8 @@ c.args(["-NoProfile", "-Command", "..."])
 { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
 let output = c.output()?;
 
-// 异步进程（tokio）
+// 异步进程（tokio）— 需要导入 tokio::os::windows::process::CommandExt
+use tokio::os::windows::process::CommandExt; // #[cfg(windows)]
 let mut c = tokio::process::Command::new(&uv);
 c.args(["python", "install", &version])
     .stdout(Stdio::piped())
@@ -852,7 +854,10 @@ c.args(["python", "install", &version])
 let child = c.spawn()?;
 ```
 
-> ⚠️ **注意**：`creation_flags` 方法仅在 Windows 上存在，必须使用 `#[cfg(windows)]` 条件编译，否则其他平台编译会失败。
+> ⚠️ **注意**：
+> - `creation_flags` 方法仅在 Windows 上存在，必须使用 `#[cfg(windows)]` 条件编译，否则其他平台编译会失败。
+> - `std::process::Command` 需要导入 `std::os::windows::process::CommandExt`
+> - `tokio::process::Command` 需要导入 `tokio::os::windows::process::CommandExt`（两者的 trait 不同）
 
 ##### Python 运行时版本
 

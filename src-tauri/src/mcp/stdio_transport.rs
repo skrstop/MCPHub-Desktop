@@ -11,6 +11,10 @@ use std::{
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as StdCommandExt;
+#[cfg(windows)]
+use tokio::os::windows::process::CommandExt as TokioCommandExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
