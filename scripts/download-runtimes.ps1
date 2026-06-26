@@ -306,7 +306,8 @@ if (-not $PythonExists) {
         New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
         $TmpTar = Join-Path $TmpDir "python.tar.gz"
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpTar
-        tar -xzf $TmpTar -C $TmpDir
+        # --force-local: don't treat ':' in Windows paths as remote host
+        tar --force-local -xzf $TmpTar -C $TmpDir
         Remove-Item $TmpTar -Force
         # tar 解压后目录名为 python/，将其内容移到 PythonInstallDir
         $ExtractedPy = Join-Path $TmpDir "python"

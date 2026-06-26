@@ -280,6 +280,21 @@ pub fn uv_python_install_dir() -> Option<PathBuf> {
 // Command resolution
 // ---------------------------------------------------------------------------
 
+/// Strip the `\\?\` extended-length path prefix on Windows.
+/// `PathBuf::to_string_lossy()` on Windows may produce `\\?\C:\...` for paths
+/// under the app's resource directory, but child processes (node, npx, etc.)
+/// don't understand this prefix when used as arguments.
+#[cfg(target_os = "windows")]
+fn normalize_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_path(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
 /// Resolve a command + args, remapping known runtimes to bundled binaries.
 ///
 /// Returns `(resolved_command, resolved_args)`.
@@ -319,7 +334,7 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
         "node" => {
             let bin = node_bin_path(rt);
             if bin.exists() {
-                return (bin.to_string_lossy().into_owned(), args.to_vec());
+                return (normalize_path(&bin), args.to_vec());
             }
         }
         "npx" => {
@@ -328,16 +343,16 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
             let node = node_bin_path(rt);
             let cli = npx_cli_path(rt);
             if node.exists() && cli.exists() {
-                let mut new_args = vec![cli.to_string_lossy().into_owned()];
+                let mut new_args = vec![normalize_path(&cli)];
                 new_args.extend_from_slice(args);
-                return (node.to_string_lossy().into_owned(), new_args);
+                return (normalize_path(&node), new_args);
             }
             // Fallback: use npx.cmd directly (Windows batch wrapper)
             #[cfg(target_os = "windows")]
             {
                 let npx_cmd = node_bin_dir(rt).join("npx.cmd");
                 if npx_cmd.exists() {
-                    return (npx_cmd.to_string_lossy().into_owned(), args.to_vec());
+                    return (normalize_path(&npx_cmd), args.to_vec());
                 }
             }
         }
@@ -345,16 +360,16 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
             let node = node_bin_path(rt);
             let cli = npm_cli_path(rt);
             if node.exists() && cli.exists() {
-                let mut new_args = vec![cli.to_string_lossy().into_owned()];
+                let mut new_args = vec![normalize_path(&cli)];
                 new_args.extend_from_slice(args);
-                return (node.to_string_lossy().into_owned(), new_args);
+                return (normalize_path(&node), new_args);
             }
             // Fallback: use npm.cmd directly (Windows batch wrapper)
             #[cfg(target_os = "windows")]
             {
                 let npm_cmd = node_bin_dir(rt).join("npm.cmd");
                 if npm_cmd.exists() {
-                    return (npm_cmd.to_string_lossy().into_owned(), args.to_vec());
+                    return (normalize_path(&npm_cmd), args.to_vec());
                 }
             }
         }
@@ -362,32 +377,32 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
             // Try dedicated uvx binary first; fall back to `uv tool run`
             let uvx = uv_dir(rt).join(uvx_exe());
             if uvx.exists() {
-                return (uvx.to_string_lossy().into_owned(), args.to_vec());
+                return (normalize_path(&uvx), args.to_vec());
             }
             let uv = uv_bin_path(rt);
             if uv.exists() {
                 let mut new_args = vec!["tool".to_string(), "run".to_string()];
                 new_args.extend_from_slice(args);
-                return (uv.to_string_lossy().into_owned(), new_args);
+                return (normalize_path(&uv), new_args);
             }
         }
         "uv" => {
             let bin = uv_bin_path(rt);
             if bin.exists() {
-                return (bin.to_string_lossy().into_owned(), args.to_vec());
+                return (normalize_path(&bin), args.to_vec());
             }
         }
         "python" | "python3" => {
             // Prefer a managed Python inside the bundled uv python dir
             if let Some(py) = find_bundled_python(rt) {
-                return (py.to_string_lossy().into_owned(), args.to_vec());
+                return (normalize_path(&py), args.to_vec());
             }
             // Fallback: use `uv run python`
             let uv = uv_bin_path(rt);
             if uv.exists() {
                 let mut new_args = vec!["run".to_string(), "python".to_string()];
                 new_args.extend_from_slice(args);
-                return (uv.to_string_lossy().into_owned(), new_args);
+                return (normalize_path(&uv), new_args);
             }
         }
         _ => {}
@@ -423,25 +438,33 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
             let active = get_active_node();
             // Always prepend bundled node to PATH so child processes spawned by
             // a GUI app (which may lack the user's shell PATH) can find npx/npm.
-            prepend_dirs.push(node_bin_dir(rt).to_string_lossy().into_owned());
+            prepend_dirs.push(normalize_path(&node_bin_dir(rt)));
             if active != "system" {
                 // User-managed version takes priority over bundled
                 if let Some(base) = node_versions_base() {
                     let ver_dir = base.join(&active);
                     if ver_dir.exists() {
                         let bin_dir = node_bin_dir_in(&ver_dir);
-                        prepend_dirs.insert(0, bin_dir.to_string_lossy().into_owned());
+                        prepend_dirs.insert(0, normalize_path(&bin_dir));
                     }
                 }
             }
         }
         "uv" | "uvx" | "python" | "python3" => {
-            prepend_dirs.push(uv_dir(rt).to_string_lossy().into_owned());
+            prepend_dirs.push(normalize_path(&uv_dir(rt)));
         }
         _ => {
-            // For unknown commands, still return the enhanced PATH
-            // so that commands installed via homebrew, nvm, etc. can be found
-            return vec![("PATH".to_string(), existing_path)];
+            // For unknown commands, merge enhanced PATH with current process PATH
+            // so that commands installed after app startup (e.g. codegraph) can be found
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let merged = if current_path.is_empty() {
+                existing_path
+            } else if existing_path.is_empty() {
+                current_path
+            } else {
+                format!("{}{}{}", current_path, sep, existing_path)
+            };
+            return vec![("PATH".to_string(), merged)];
         },
     }
 
@@ -460,7 +483,7 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
         if let Some(python_dir) = uv_python_install_dir() {
             env.push((
                 "UV_PYTHON_INSTALL_DIR".to_string(),
-                python_dir.to_string_lossy().into_owned(),
+                normalize_path(&python_dir),
             ));
         }
         if let Some(cache) = app_local_dir("uv-cache") {
@@ -489,25 +512,25 @@ fn resolve_node_command_in_dir(command: &str, args: &[String], dir: &Path) -> Op
         "node" => {
             let bin = node_bin_in(dir);
             if bin.exists() {
-                return Some((bin.to_string_lossy().into_owned(), args.to_vec()));
+                return Some((normalize_path(&bin), args.to_vec()));
             }
         }
         "npx" => {
             let node = node_bin_in(dir);
             let cli = npx_cli_in(dir);
             if node.exists() && cli.exists() {
-                let mut new_args = vec![cli.to_string_lossy().into_owned()];
+                let mut new_args = vec![normalize_path(&cli)];
                 new_args.extend_from_slice(args);
-                return Some((node.to_string_lossy().into_owned(), new_args));
+                return Some((normalize_path(&node), new_args));
             }
         }
         "npm" => {
             let node = node_bin_in(dir);
             let cli = npm_cli_in(dir);
             if node.exists() && cli.exists() {
-                let mut new_args = vec![cli.to_string_lossy().into_owned()];
+                let mut new_args = vec![normalize_path(&cli)];
                 new_args.extend_from_slice(args);
-                return Some((node.to_string_lossy().into_owned(), new_args));
+                return Some((normalize_path(&node), new_args));
             }
         }
         _ => {}
@@ -658,7 +681,7 @@ fn app_local_dir(name: &str) -> Option<String> {
 
     let dir = base?.join("mcphub-desktop").join(name);
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.to_string_lossy().into_owned())
+    Some(normalize_path(&dir))
 }
 
 /// Returns an app data subdirectory (persistent, not cache) for storing managed runtimes.

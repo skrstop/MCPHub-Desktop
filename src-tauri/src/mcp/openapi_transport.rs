@@ -77,20 +77,29 @@ impl OpenapiTransport {
     async fn fetch_spec(&self) -> Result<Value> {
         if let Some(ref schema) = self.config.spec_schema {
             // Use inline schema directly
+            log::info!("[{}] Using inline OpenAPI schema", self.server_name);
             return Ok(schema.clone());
         }
 
         if let Some(ref url) = self.config.spec_url {
             // Fetch spec from URL
+            log::info!("[{}] Fetching OpenAPI spec from URL: {}", self.server_name, url);
             let client = reqwest::Client::new();
             let mut req = client.get(url);
 
             // Add any configured headers
             for (k, v) in &self.config.headers {
+                log::debug!("[{}] Adding header: {}={}", self.server_name, k, v);
                 req = req.header(k, v);
             }
 
-            let resp = req.send().await?;
+            let resp = req.send().await.map_err(|e| {
+                log::error!("[{}] Failed to fetch OpenAPI spec: {}", self.server_name, e);
+                e
+            })?;
+
+            log::info!("[{}] OpenAPI spec response: status={}", self.server_name, resp.status());
+
             if !resp.status().is_success() {
                 return Err(anyhow!(
                     "Failed to fetch OpenAPI spec from {}: HTTP {}",
@@ -99,6 +108,7 @@ impl OpenapiTransport {
                 ));
             }
             let spec: Value = resp.json().await?;
+            log::info!("[{}] OpenAPI spec fetched successfully", self.server_name);
             return Ok(spec);
         }
 
@@ -190,6 +200,13 @@ impl McpTransport for OpenapiTransport {
             self.config.spec_url,
             self.config.spec_schema.as_ref().map(|_| "<inline>")
         );
+        log::info!(
+            "[{}] OpenAPI config: version={}, headers={:?}, security={:?}",
+            self.server_name,
+            self.config.version,
+            self.config.headers,
+            self.config.security
+        );
 
         // 1. Fetch the spec
         let spec_value = self.fetch_spec().await?;
@@ -200,12 +217,15 @@ impl McpTransport for OpenapiTransport {
                 "OpenAPI spec for '{}' has no base URL. Add one of:\n  - servers: [{{url: \"https://api.example.com\"}}]\n  - host + basePath (Swagger 2.0)\n  - x-base-url extension",
                 self.server_name
             ))?;
+        log::info!("[{}] OpenAPI base_url: {}", self.server_name, base_url);
 
         // 3. Create the rmcp-openapi server
         // Note: default_headers is None because reqwest v0.12 HeaderMap != v0.13 HeaderMap.
         // Authentication is handled via the OpenAPI spec's security schemes.
         if let Some(hdrs) = self.build_headers_json() {
-            log::debug!("[{}] custom headers configured: {}", self.server_name, hdrs);
+            log::info!("[{}] custom headers configured: {}", self.server_name, hdrs);
+        } else {
+            log::info!("[{}] no custom headers configured", self.server_name);
         }
 
         let mut server = OpenApiServer::new(
@@ -229,6 +249,12 @@ impl McpTransport for OpenapiTransport {
             tool_count,
             base_url
         );
+
+        // Log tool names for debugging
+        let mcp_tools = server.tool_collection.to_mcp_tools();
+        for t in &mcp_tools {
+            log::info!("[{}] OpenAPI tool: {}", self.server_name, t.name);
+        }
 
         self.server = Some(server);
         self.base_url = Some(base_url);
@@ -284,9 +310,25 @@ impl McpTransport for OpenapiTransport {
         let tool = server.tool_collection.get_tool(name)
             .ok_or_else(|| anyhow!("Tool '{}' not found in OpenAPI server '{}'", name, self.server_name))?;
 
+        log::info!(
+            "[{}] OpenAPI call_tool: name={}, base_url={:?}, arguments={}",
+            self.server_name, name, self.base_url, arguments
+        );
+
         // Execute the tool call with no authorization (auth is handled by headers)
         let result = tool.call(&arguments, Authorization::None, None).await
-            .map_err(|e| anyhow!("Tool '{}' call failed: {}", name, e))?;
+            .map_err(|e| {
+                log::error!(
+                    "[{}] OpenAPI call_tool failed: name={}, error={:#}",
+                    self.server_name, name, e
+                );
+                anyhow!("Tool '{}' call failed: {:#}", name, e)
+            })?;
+
+        log::info!(
+            "[{}] OpenAPI call_tool success: name={}, is_error={}",
+            self.server_name, name, result.is_error.unwrap_or(false)
+        );
 
         // Convert rmcp CallToolResult to our ToolCallResult
         let content: Vec<Value> = result.content
