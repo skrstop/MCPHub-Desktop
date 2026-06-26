@@ -878,7 +878,8 @@ let child = c.spawn()?;
 
 **文件**：`scripts/download-runtimes.sh`、`scripts/download-runtimes.ps1`
 
-捆绑的 Python 版本从 `3.14`（开发版）改为 `3.12`（稳定版），确保 CI 构建时能正确下载和打包。
+捆绑的 Python 版本已更新为 `3.14`（最新稳定版），Node.js 更新为 `24.18.0`，uv 更新为 `0.11.24`。
+详见 `scripts/download-runtimes.sh` 和 `scripts/download-runtimes.ps1` 中的默认版本配置。
 
 ---
 
@@ -925,7 +926,7 @@ let child = c.spawn()?;
 | `frontend/src/pages/SettingsPage.tsx`            | 隐藏未实现模块、RuntimeVersionManager、HTTP 端口          |
 | `frontend/src/pages/LoginPage.tsx`               | admin 默认填充、密码提示、Logo 图标                       |
 | `frontend/src/pages/Dashboard.tsx`               | 隐藏 SMART/Docs                                           |
-| `frontend/src/pages/ActivityPage.tsx`            | 隐藏用户列、timestamp UTC 转换                            |
+| `frontend/src/pages/ActivityPage.tsx`            | 隐藏用户列、createdAt UTC 转换、字段名统一为 createdAt     |
 | `frontend/src/utils/tauriClient.ts`              | 桌面端新增                                                |
 | `frontend/src/utils/fetchInterceptor.ts`         | isTauri() 拦截                                            |
 | `frontend/src/utils/runtime.ts`                  | 运行时配置                                                |
@@ -973,14 +974,38 @@ cd src-tauri && cargo check
 
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `89deccd` (origin/main) |
-| **对应 origin tag**            | `v0.12.15+11`           |
-| **桌面端版本号**               | `1.0.18007`             |
-| **同步执行日期**               | 2026-06-24              |
+| **当前已同步到 origin commit** | `8ff743f` (origin/main) |
+| **对应 origin tag**            | `v0.12.15+12`           |
+| **桌面端版本号**               | `1.0.18008`             |
+| **同步执行日期**               | 2026-06-26              |
 
-> 下次同步时，使用 `89deccd` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 89deccd..HEAD`）。
+> 下次同步时，使用 `8ff743f` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8ff743f..HEAD`）。
 
 ### 4.4 最近同步记录
+
+#### 2026-06-26：同步 `89deccd` → `8ff743f`（1 个 commit）
+
+**未同步（安全修复 — 客户端不需要 SSRF 防护）**
+
+| 来源 commit | 说明                                                            | 处理决策                                                                                           |
+| ----------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `8ff743f`   | fix: block SSRF via URL/OpenAPI servers with owner-aware egress filter | **不同步** — SSRF 是服务端防攻击机制，桌面端是客户端应用，不对外提供服务，无需此防护 |
+
+**本次桌面端独立修复（非 origin 同步）**
+
+| 修复项 | 说明 | 涉及文件 |
+|--------|------|----------|
+| Windows 启动白屏 5-10s | 将 PATH 读取从 PowerShell 改为 Registry 直读，消除冷启动延迟 | `runtime_env.rs`, `runtime.rs`, `Cargo.toml`（添加 winreg 依赖） |
+| PATH 环境变量未展开 | Registry 返回的 `%USERPROFILE%` 等变量未展开为实际路径，添加 `expand_env_vars()` | `runtime_env.rs`, `runtime.rs` |
+| stdio "program not found" | `resolve_command` 在 active="system" 时跳过内置二进制检查，Windows 找不到裸命令名 | `runtime_env.rs` |
+| npx/npm 找不到 | 下载脚本未复制 `npx.cmd`/`npm.cmd`，添加 fallback 到 `.cmd` 包装脚本 | `download-runtimes.ps1`, `runtime_env.rs` |
+| Python "内置" 标签缺失 | 目录扁平化移除了 `cpython-*` 目录名，Rust 检测逻辑依赖此命名，回滚扁平化 | `download-runtimes.ps1` |
+| activity_log 表结构错误 | migration 创建旧表结构（`user_id, action, resource`），代码使用新结构（`server, tool, duration_ms`），添加 v9 migration 重建表 | `migration.rs`, `log_service.rs` |
+| activity_log 字段名不统一 | `timestamp` vs `created_at`，统一为 `created_at`，前端通过 serde rename 保持 JSON 兼容 | `models/log.rs`, `log_service.rs`, `migration.rs`, `ActivityPage.tsx`, `types/index.ts`, `tauriClient.ts` |
+| log_cleanup 报错 | cleanup 查询用了不存在的 `timestamp` 列，改为 `created_at` | `log_service.rs` |
+| OpenAPI 复制内容错误 | OpenAPI 类型服务器点击复制应复制 schema JSON（含 URL 模式 fetch），而非 MCP 设置 | `ServerCard.tsx` |
+| 运行时版本更新 | Node 24.17.0→24.18.0, uv 0.11.23→0.11.24, Python 3.12→3.14 | `download-runtimes.sh`, `download-runtimes.ps1` |
+| 版本号更新 | 1.0.18007 → 1.0.18008 | `tauri.conf.json`, `Cargo.toml`, `package.json` |
 
 #### 2026-06-24：同步 `96c16d9` → `89deccd`（3 个 commit）
 
