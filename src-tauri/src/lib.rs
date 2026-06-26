@@ -51,6 +51,15 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            log::info!("Single instance triggered with args: {:?}, cwd: {:?}", argv, cwd);
+
+            // 当第二个实例尝试启动时，聚焦到已有窗口
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             // Register session state
             app.manage(commands::auth::SessionState(tokio::sync::Mutex::new(None)));
