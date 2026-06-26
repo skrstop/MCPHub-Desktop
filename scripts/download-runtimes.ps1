@@ -291,25 +291,62 @@ if (-not $PythonExists) {
         # uv python install uses UV_PYTHON_INSTALL_DIR env var to control install location
         $env:UV_PYTHON_INSTALL_DIR = $PythonInstallDir
         Write-Host "    UV_PYTHON_INSTALL_DIR=$PythonInstallDir"
+        Write-Host "    uv exe: $UvExe"
+        Write-Host "    uv exists: $(Test-Path $UvExe)"
+        Write-Host "    PythonInstallDir exists before install: $(Test-Path $PythonInstallDir)"
+        if (Test-Path $PythonInstallDir) {
+            Write-Host "    PythonInstallDir contents before install:"
+            Get-ChildItem $PythonInstallDir -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "      $($_.Name) (IsDir=$($_.PSIsContainer))"
+            }
+        }
+        Write-Host "    Running: & $UvExe python install $PythonVersion"
+        Write-Host "    --- uv output start ---"
         $oldEA = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         & $UvExe python install $PythonVersion
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $oldEA
+        Write-Host "    --- uv output end ---"
+        Write-Host "    uv python install exit code: $exitCode"
         if ($exitCode -ne 0) {
             Write-Warning "uv python install exited with code $exitCode"
         }
+        Write-Host "    PythonInstallDir exists after install: $(Test-Path $PythonInstallDir)"
+        if (Test-Path $PythonInstallDir) {
+            Write-Host "    PythonInstallDir contents after install:"
+            Get-ChildItem $PythonInstallDir -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "      $($_.Name) (IsDir=$($_.PSIsContainer))"
+            }
+        } else {
+            Write-Warning "    PythonInstallDir does NOT exist after install!"
+        }
     }
     # Verify Python was actually installed
-    $PyBin = Get-ChildItem $PythonInstallDir -Recurse -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    # uv on Windows installs python3.x.exe (e.g. python3.12.exe), NOT python.exe
+    # Search for any python*.exe to handle different naming conventions
+    Write-Host "--> Searching for Python executable in $PythonInstallDir..."
+    $AllPythonExes = Get-ChildItem $PythonInstallDir -Recurse -Filter "python*.exe" -ErrorAction SilentlyContinue
+    Write-Host "    Found $($AllPythonExes.Count) python*.exe file(s):"
+    foreach ($ex in $AllPythonExes) {
+        Write-Host "      $($ex.Name) at $($ex.FullName)"
+    }
+    $PyBin = $AllPythonExes |
+             Where-Object { $_.Name -match '^python3?\.\d+\.exe$' -or $_.Name -eq 'python.exe' } |
+             Select-Object -First 1
     if ($PyBin) {
         $PyVer = Get-ExeOutput $PyBin.FullName @("--version")
         Write-Host "--> Python installed: $PyVer at $($PyBin.FullName)"
     } else {
         Write-Warning "Python executable not found in $PythonInstallDir after installation!"
-        Write-Host "Contents of ${PythonInstallDir}:"
+        Write-Host "Full recursive listing of ${PythonInstallDir}:"
         if (Test-Path $PythonInstallDir) {
-            Get-ChildItem $PythonInstallDir -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
+            Get-ChildItem $PythonInstallDir -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                $size = if ($_.PSIsContainer) { "<DIR>" } else { "$($_.Length) bytes" }
+                Write-Host "  $($_.FullName) [$size]"
+            }
+        } else {
+            Write-Host "  (directory does not exist)"
         }
     }
 } else {
@@ -326,11 +363,25 @@ if ($TargetArch -ne "" -and $TargetArch -ne $HostTargetArch) {
     $NodeVer = Get-ExeOutput $NodeExe @("--version")
     if (-not $NodeVer) { $NodeVer = "(version check failed)" }
 }
-$UvVer = Get-ExeOutput $UvExe @("version")
+$UvVer = Get-ExeOutput $UvExe @("self", "version")
 if (-not $UvVer) { $UvVer = "(version check failed)" }
+$PythonInstallDir = Join-Path $UvDest "python"
+$PySummary = "(not installed)"
+if (Test-Path $PythonInstallDir) {
+    $PyExe = Get-ChildItem $PythonInstallDir -Recurse -Filter "python*.exe" -ErrorAction SilentlyContinue |
+             Where-Object { $_.Name -match '^python3?\.\d+\.exe$' -or $_.Name -eq 'python.exe' } |
+             Select-Object -First 1
+    if ($PyExe) {
+        $PyVerStr = Get-ExeOutput $PyExe.FullName @("--version")
+        $PySummary = "$PyVerStr at $($PyExe.FullName)"
+    } else {
+        $PySummary = "(installed but python*.exe not found in $PythonInstallDir)"
+    }
+}
 Write-Host ""
 Write-Host "==> Runtimes ready in src-tauri/runtimes/"
 Write-Host "    Node.js : $NodeVer"
 Write-Host "    uv      : $UvVer"
+Write-Host "    Python  : $PySummary"
 Write-Host ""
 Write-Host "Run 'cargo tauri build' or 'cargo tauri dev' to use bundled runtimes."
