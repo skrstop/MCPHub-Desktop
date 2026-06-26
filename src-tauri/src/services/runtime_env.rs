@@ -5,8 +5,6 @@
 /// Python installed on their system.
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 static RUNTIMES_DIR: OnceLock<PathBuf> = OnceLock::new();
 

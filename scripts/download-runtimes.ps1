@@ -306,8 +306,17 @@ if (-not $PythonExists) {
         New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
         $TmpTar = Join-Path $TmpDir "python.tar.gz"
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpTar
-        # --force-local: don't treat ':' in Windows paths as remote host
-        tar --force-local -xzf $TmpTar -C $TmpDir
+        # Use Windows native tar (C:\Windows\System32\tar.exe) which handles
+        # Windows paths correctly, unlike Git Bash's /usr/bin/tar
+        $WinTar = Join-Path $env:SystemRoot "System32\tar.exe"
+        if (Test-Path $WinTar) {
+            & $WinTar -xzf $TmpTar -C $TmpDir
+        } else {
+            # Fallback to system tar (Git Bash tar needs Unix-style paths)
+            $TmpTarUnix = $TmpTar -replace '\\', '/'
+            $TmpDirUnix = $TmpDir -replace '\\', '/'
+            tar --force-local -xzf $TmpTarUnix -C $TmpDirUnix
+        }
         Remove-Item $TmpTar -Force
         # tar 解压后目录名为 python/，将其内容移到 PythonInstallDir
         $ExtractedPy = Join-Path $TmpDir "python"
