@@ -638,12 +638,12 @@ fn find_bundled_python(rt: &Path) -> Option<PathBuf> {
     if !python_dir.exists() {
         return None;
     }
-    // uv installs Python as: python/cpython-3.12.x-{platform}/bin/python3
     let bin_name = if cfg!(target_os = "windows") {
         "python.exe"
     } else {
         "python3"
     };
+    // Case 1: uv install → python/cpython-3.12.x-{platform}/bin/python3
     let entries = std::fs::read_dir(&python_dir).ok()?;
     for entry in entries.flatten() {
         let candidate = if cfg!(target_os = "windows") {
@@ -654,6 +654,11 @@ fn find_bundled_python(rt: &Path) -> Option<PathBuf> {
         if candidate.exists() {
             return Some(candidate);
         }
+    }
+    // Case 2: cross-compilation → python/python.exe (files directly in python/)
+    let direct = python_dir.join(bin_name);
+    if direct.exists() {
+        return Some(direct);
     }
     None
 }

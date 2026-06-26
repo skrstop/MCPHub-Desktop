@@ -363,26 +363,36 @@ if (-not $PythonExists) {
             Write-Warning "    PythonInstallDir does NOT exist after install!"
         }
     }
-    # Verify Python was actually installed — look for cpython-* directories
-    # (Rust code's get_installed_python_versions() depends on this naming convention)
+    # Verify Python was actually installed
+    # Case 1: uv install → creates cpython-X.Y.Z-platform/ subdirectory
+    # Case 2: cross-compilation → files directly in python/ (no cpython-* subdir)
     Write-Host "--> Verifying Python installation in $PythonInstallDir..."
+    $PyExe = $null
     $CpythonDirs = Get-ChildItem $PythonInstallDir -Directory | Where-Object {
         $_.Name -like "cpython-*"
     }
     if ($CpythonDirs.Count -gt 0) {
-        foreach ($d in $CpythonDirs) {
-            Write-Host "    Found: $($d.Name)"
-        }
-        # Find python.exe inside the cpython directory
+        # uv install: python.exe inside cpython-* directory
         $PyExe = Get-ChildItem $CpythonDirs[0].FullName -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        Write-Host "    Found cpython dir: $($CpythonDirs[0].Name)"
+    } else {
+        # Cross-compilation: python.exe directly in PythonInstallDir
+        $PyExe = Get-ChildItem $PythonInstallDir -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($PyExe) {
+            Write-Host "    Found python.exe directly in PythonInstallDir (cross-compiled)"
+        }
+    }
+    if ($PyExe) {
+        # Skip version check when cross-compiling (ARM64 binary can't run on x64 host)
+        $isCrossCompile = ($TargetArch -ne "" -and $TargetArch -ne $HostTargetArch)
+        if ($isCrossCompile) {
+            Write-Host "--> Python installed (cross-compiled, version check skipped): $($PyExe.FullName)"
+        } else {
             $PyVer = Get-ExeOutput $PyExe.FullName @("--version")
             Write-Host "--> Python installed: $PyVer at $($PyExe.FullName)"
-        } else {
-            Write-Host "--> Python installed (cpython dir found, python.exe not in root)"
         }
     } else {
-        Write-Warning "No cpython-* directories found in $PythonInstallDir!"
+        Write-Warning "Python executable not found in $PythonInstallDir!"
         Write-Host "Contents:"
         Get-ChildItem $PythonInstallDir -ErrorAction SilentlyContinue | ForEach-Object {
             $ft = if ($_.PSIsContainer) { "DIR" } else { "FILE" }

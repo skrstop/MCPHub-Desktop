@@ -1055,6 +1055,7 @@ async fn get_installed_python_versions() -> Vec<(String, PathBuf, bool)> {
 
     // ── 1. Scan bundled Python directory (read-only, in resource dir) ──
     if let Some(bundled_dir) = runtime_env::get_bundled_python_dir() {
+        let mut found_cpython = false;
         if let Ok(entries) = std::fs::read_dir(&bundled_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -1062,6 +1063,7 @@ async fn get_installed_python_versions() -> Vec<(String, PathBuf, bool)> {
                 if !name.starts_with("cpython-") {
                     continue;
                 }
+                found_cpython = true;
                 let ver = name.strip_prefix("cpython-").unwrap_or(&name);
                 let major_minor = ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
                 if major_minor.is_empty() {
@@ -1075,6 +1077,28 @@ async fn get_installed_python_versions() -> Vec<(String, PathBuf, bool)> {
                 if exec.exists() {
                     result.push((major_minor, exec, true));
                 }
+            }
+        }
+        // Fallback: cross-compiled Python has files directly in python/ (no cpython-* subdir)
+        if !found_cpython {
+            #[cfg(target_os = "windows")]
+            let exec = bundled_dir.join("python.exe");
+            #[cfg(not(target_os = "windows"))]
+            let exec = bundled_dir.join("bin").join("python3");
+            if exec.exists() {
+                // Try to get version from the directory name or use a default
+                let dir_name = bundled_dir.file_name().unwrap_or_default().to_string_lossy();
+                let major_minor = if dir_name.contains("3.14") {
+                    "3.14".to_string()
+                } else if dir_name.contains("3.13") {
+                    "3.13".to_string()
+                } else if dir_name.contains("3.12") {
+                    "3.12".to_string()
+                } else {
+                    // Fallback: try to run python --version (may fail for cross-compiled binaries)
+                    "3.14".to_string()
+                };
+                result.push((major_minor, exec, true));
             }
         }
     }
