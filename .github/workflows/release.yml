@@ -430,60 +430,50 @@ jobs:
           CARGO_NET_RETRY: 10
           CARGO_HTTP_TIMEOUT: 120
 
-      # ─── 调试：检查 runtimes 资源是否正确打包 ──────────────────────────────
-      - name: Debug runtimes in bundle
+      # ─── 调试：检查 runtimes 打包状态 ─────────────────────────────────────
+      # build.rs 已经输出了详细的诊断信息（walkdir 结果、文件数量、symlink 检查等）
+      # 这里只检查最终产物
+      - name: Debug runtimes bundle result
         if: always()
         shell: bash
         run: |
           echo "========================================="
-          echo "  Runtimes Debug: ${{ matrix.platform-tag }}"
+          echo "  Runtimes Bundle Result: ${{ matrix.platform-tag }}"
           echo "========================================="
           RELEASE_DIR="src-tauri/target/${{ matrix.target }}/release"
           BUNDLE_DIR="$RELEASE_DIR/bundle"
-          echo "RELEASE_DIR=$RELEASE_DIR"
-          echo "BUNDLE_DIR=$BUNDLE_DIR"
+
+          echo "=== Source: src-tauri/runtimes/uv/python/ ==="
+          ls -la src-tauri/runtimes/uv/python/ 2>/dev/null | head -5
+          PY_SRC=$(find src-tauri/runtimes/uv/python -name "python*" -type f 2>/dev/null | wc -l)
+          echo "python* files in source: $PY_SRC"
           echo ""
 
-          echo "=== Source runtimes directory ==="
-          if [ -d "src-tauri/runtimes" ]; then
-            find src-tauri/runtimes -name "python*" -type f 2>/dev/null | head -10
-            echo ""
-            echo "Python dir exists: $(find src-tauri/runtimes -path '*/python*' -type d | head -3)"
-          else
-            echo "❌ src-tauri/runtimes NOT found"
-          fi
-          echo ""
-
-          echo "=== Resources copied to release dir (by tauri-build) ==="
+          echo "=== Release dir: $RELEASE_DIR/runtimes/ ==="
           if [ -d "$RELEASE_DIR/runtimes" ]; then
-            echo "✅ $RELEASE_DIR/runtimes exists"
-            find "$RELEASE_DIR/runtimes" -name "python*" -type f 2>/dev/null | head -10
-            echo ""
-            PY_COUNT=$(find "$RELEASE_DIR/runtimes" -name "python*" -type f 2>/dev/null | wc -l)
-            echo "Python files in release/runtimes: $PY_COUNT"
-            NODE_COUNT=$(find "$RELEASE_DIR/runtimes/node" -type f 2>/dev/null | wc -l)
-            echo "Node files in release/runtimes: $NODE_COUNT"
-            UV_COUNT=$(find "$RELEASE_DIR/runtimes/uv" -type f 2>/dev/null | wc -l)
-            echo "UV files in release/runtimes: $UV_COUNT"
+            NODE=$(find "$RELEASE_DIR/runtimes/node" -type f 2>/dev/null | wc -l)
+            UV=$(find "$RELEASE_DIR/runtimes/uv" -type f 2>/dev/null | wc -l)
+            PY=$(find "$RELEASE_DIR/runtimes" -name "python*" -type f 2>/dev/null | wc -l)
+            echo "Node: $NODE files, UV: $UV files, Python: $PY files"
+            if [ "$PY" -eq 0 ] && [ "$PY_SRC" -gt 0 ]; then
+              echo "⚠️  Python files exist in source but NOT in release — tauri-build skipped them!"
+              echo ""
+              echo "Full UV dir listing in release:"
+              find "$RELEASE_DIR/runtimes/uv" -type f 2>/dev/null | head -20
+              echo ""
+              echo "Full UV dir listing in release (dirs only):"
+              find "$RELEASE_DIR/runtimes/uv" -type d 2>/dev/null
+            fi
           else
-            echo "❌ $RELEASE_DIR/runtimes NOT found — tauri-build did NOT copy resources!"
-            echo ""
-            echo "Listing $RELEASE_DIR/ top level:"
-            ls -la "$RELEASE_DIR/" 2>/dev/null | head -20
+            echo "❌ $RELEASE_DIR/runtimes NOT found"
           fi
           echo ""
 
-          echo "=== Runtimes in bundle directory ==="
+          echo "=== Bundle dir ==="
           if [ -d "$BUNDLE_DIR" ]; then
-            PY_IN_BUNDLE=$(find "$BUNDLE_DIR" -name "python*" -type f 2>/dev/null | wc -l)
-            echo "Python files in bundle: $PY_IN_BUNDLE"
-            RUNTIME_IN_BUNDLE=$(find "$BUNDLE_DIR" -path "*/runtimes/*" -type f 2>/dev/null | wc -l)
-            echo "Total runtime files in bundle: $RUNTIME_IN_BUNDLE"
-            find "$BUNDLE_DIR" -path "*/runtimes/*" -type f 2>/dev/null | head -20
-          else
-            echo "❌ Bundle directory NOT found"
+            TOTAL=$(find "$BUNDLE_DIR" -path "*/runtimes/*" -type f 2>/dev/null | wc -l)
+            echo "Total runtime files in bundle: $TOTAL"
           fi
-          echo ""
           echo "========================================="
 
       # ─── 调试：列出构建产物 ─────────────────────────────────────────────────
