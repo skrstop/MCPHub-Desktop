@@ -1,23 +1,23 @@
 {
-  "version": "1.0.18006",
-  "notes": "MCPHub Desktop 1.0.18006\n\nSee release page for full changelog.",
+  "version": "1.0.18007",
+  "notes": "MCPHub Desktop 1.0.18007\n\nSee release page for full changelog.",
   "pub_date": "2026-06-26T00:00:00Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "",
-      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18006/mcphub-desktop-macos-arm64.app.tar.gz"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18007/mcphub-desktop-macos-arm64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "",
-      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18006/mcphub-desktop-macos-x64.app.tar.gz"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18007/mcphub-desktop-macos-x64.app.tar.gz"
     },
     "windows-x86_64": {
       "signature": "",
-      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18006/mcphub-desktop-windows-x64.nsis.zip"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18007/mcphub-desktop-windows-x64.nsis.zip"
     },
     "windows-aarch64": {
       "signature": "",
-      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18006/mcphub-desktop-windows-arm64.nsis.zip"
+      "url": "https://github.com/skrstop/MCPHub-Desktop/releases/download/v1.0.18007/mcphub-desktop-windows-arm64.nsis.zip"
     }
   }
 }

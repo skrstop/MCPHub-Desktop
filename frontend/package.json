@@ -1,6 +1,6 @@
 {
   "name": "mcphub-desktop-frontend",
-  "version": "1.0.18006",
+  "version": "1.0.18007",
   "private": true,
   "type": "module",
   "scripts": {

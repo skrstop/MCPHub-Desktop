@@ -975,7 +975,7 @@ cd src-tauri && cargo check
 | ------------------------------ | ----------------------- |
 | **当前已同步到 origin commit** | `89deccd` (origin/main) |
 | **对应 origin tag**            | `v0.12.15+11`           |
-| **桌面端版本号**               | `1.0.18002`             |
+| **桌面端版本号**               | `1.0.18007`             |
 | **同步执行日期**               | 2026-06-24              |
 
 > 下次同步时，使用 `89deccd` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 89deccd..HEAD`）。

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MCPHub Desktop",
-  "version": "1.0.18006",
+  "version": "1.0.18007",
   "identifier": "app.mcphub.desktop",
   "build": {
     "frontendDist": "../frontend/dist",
