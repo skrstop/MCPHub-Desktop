@@ -346,57 +346,30 @@ if (-not $PythonExists) {
             Write-Warning "    PythonInstallDir does NOT exist after install!"
         }
     }
-    # Flatten the cpython directory: move contents of cpython-X.Y.Z-.../ up to python/
-    # uv installs into a versioned subdirectory like cpython-3.12.13-windows-x86_64-none/
-    # but Tauri's resource bundler may have issues with deeply nested paths on Windows.
-    # Flattening reduces path depth and avoids potential MAX_PATH issues.
-    Write-Host "--> Flattening Python directory structure..."
+    # Verify Python was actually installed — look for cpython-* directories
+    # (Rust code's get_installed_python_versions() depends on this naming convention)
+    Write-Host "--> Verifying Python installation in $PythonInstallDir..."
     $CpythonDirs = Get-ChildItem $PythonInstallDir -Directory | Where-Object {
         $_.Name -like "cpython-*"
     }
-    foreach ($CpyDir in $CpythonDirs) {
-        Write-Host "    Moving contents of $($CpyDir.Name) up to $PythonInstallDir..."
-        Get-ChildItem $CpyDir.FullName -Force | ForEach-Object {
-            $dest = Join-Path $PythonInstallDir $_.Name
-            if (Test-Path $dest) {
-                # If destination exists (e.g. from a previous cpython version), remove it first
-                Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            Move-Item $_.FullName $PythonInstallDir -Force
+    if ($CpythonDirs.Count -gt 0) {
+        foreach ($d in $CpythonDirs) {
+            Write-Host "    Found: $($d.Name)"
         }
-        Remove-Item $CpyDir.FullName -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "    Removed $($CpyDir.Name)"
-    }
-    # Also remove .temp and other non-Python artifacts
-    $TempDir = Join-Path $PythonInstallDir ".temp"
-    if (Test-Path $TempDir) {
-        Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "    Removed .temp directory"
-    }
-    # Verify Python was actually installed
-    # Search for any python*.exe to handle different naming conventions
-    Write-Host "--> Searching for Python executable in $PythonInstallDir..."
-    $AllPythonExes = Get-ChildItem $PythonInstallDir -Recurse -Filter "python*.exe" -ErrorAction SilentlyContinue
-    Write-Host "    Found $($AllPythonExes.Count) python*.exe file(s):"
-    foreach ($ex in $AllPythonExes) {
-        Write-Host "      $($ex.Name) at $($ex.FullName)"
-    }
-    $PyBin = $AllPythonExes |
-             Where-Object { $_.Name -match '^python3?\.\d+\.exe$' -or $_.Name -eq 'python.exe' } |
-             Select-Object -First 1
-    if ($PyBin) {
-        $PyVer = Get-ExeOutput $PyBin.FullName @("--version")
-        Write-Host "--> Python installed: $PyVer at $($PyBin.FullName)"
-    } else {
-        Write-Warning "Python executable not found in $PythonInstallDir after installation!"
-        Write-Host "Full recursive listing of ${PythonInstallDir}:"
-        if (Test-Path $PythonInstallDir) {
-            Get-ChildItem $PythonInstallDir -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                $size = if ($_.PSIsContainer) { "<DIR>" } else { "$($_.Length) bytes" }
-                Write-Host "  $($_.FullName) [$size]"
-            }
+        # Find python.exe inside the cpython directory
+        $PyExe = Get-ChildItem $CpythonDirs[0].FullName -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($PyExe) {
+            $PyVer = Get-ExeOutput $PyExe.FullName @("--version")
+            Write-Host "--> Python installed: $PyVer at $($PyExe.FullName)"
         } else {
-            Write-Host "  (directory does not exist)"
+            Write-Host "--> Python installed (cpython dir found, python.exe not in root)"
+        }
+    } else {
+        Write-Warning "No cpython-* directories found in $PythonInstallDir!"
+        Write-Host "Contents:"
+        Get-ChildItem $PythonInstallDir -ErrorAction SilentlyContinue | ForEach-Object {
+            $ft = if ($_.PSIsContainer) { "DIR" } else { "FILE" }
+            Write-Host "  [$ft] $($_.Name)"
         }
     }
 } else {

@@ -148,26 +148,37 @@ fn get_user_shell() -> Option<PathBuf> {
     None
 }
 
-/// Get PATH on Windows using PowerShell
+/// Get PATH on Windows by reading the registry directly (fast, no PowerShell).
 #[cfg(target_os = "windows")]
 fn get_windows_path() -> String {
-    if let Ok(output) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .output()
-    {
-        if output.status.success() {
-            let user_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !user_path.is_empty() {
-                let current_path = std::env::var("PATH").unwrap_or_default();
-                return format!("{};{}", user_path, current_path);
-            }
-        }
-    }
+    use winreg::enums::*;
+    use winreg::RegKey;
 
-    std::env::var("PATH").unwrap_or_default()
+    // Read User PATH from registry — instant, no subprocess needed.
+    let user_path = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Environment")
+        .and_then(|k| k.get_value::<String, _>("Path"))
+        .unwrap_or_default();
+
+    let machine_path = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        .and_then(|k| k.get_value::<String, _>("Path"))
+        .unwrap_or_default();
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+
+    // Merge: user PATH + machine PATH + process PATH (dedup not needed, Windows handles it)
+    let mut parts: Vec<&str> = Vec::new();
+    if !user_path.is_empty() {
+        parts.push(&user_path);
+    }
+    if !machine_path.is_empty() {
+        parts.push(&machine_path);
+    }
+    if !current_path.is_empty() {
+        parts.push(&current_path);
+    }
+    parts.join(";")
 }
 
 // ---------------------------------------------------------------------------
