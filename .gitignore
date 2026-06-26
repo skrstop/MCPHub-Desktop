@@ -7,4 +7,4 @@ build/
 .agent-work
 .agentbridge
 .idea
-.agentbridge/**
+src-tauri/.codegraph
