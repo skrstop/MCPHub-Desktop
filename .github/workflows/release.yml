@@ -430,6 +430,45 @@ jobs:
           CARGO_NET_RETRY: 10
           CARGO_HTTP_TIMEOUT: 120
 
+      # ─── 调试：检查 runtimes 资源是否正确打包 ──────────────────────────────
+      - name: Debug runtimes in bundle
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "  Runtimes Debug: ${{ matrix.platform-tag }}"
+          echo "========================================="
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          echo "BUNDLE_DIR=$BUNDLE_DIR"
+          echo ""
+
+          echo "=== Source runtimes directory ==="
+          if [ -d "src-tauri/runtimes" ]; then
+            find src-tauri/runtimes -name "python*" -type f 2>/dev/null | head -10
+            echo ""
+            echo "Python dir exists: $(find src-tauri/runtimes -path '*/python*' -type d | head -3)"
+          else
+            echo "❌ src-tauri/runtimes NOT found"
+          fi
+          echo ""
+
+          echo "=== Python files in bundle ==="
+          if [ -d "$BUNDLE_DIR" ]; then
+            PY_COUNT=$(find "$BUNDLE_DIR" -name "python*" -type f 2>/dev/null | wc -l)
+            echo "Python files found in bundle: $PY_COUNT"
+            find "$BUNDLE_DIR" -name "python*" -type f 2>/dev/null | head -20
+            echo ""
+            echo "=== Runtimes in bundle ==="
+            find "$BUNDLE_DIR" -path "*/runtimes/*" -type f 2>/dev/null | head -30
+            echo ""
+            echo "=== Runtimes dirs in bundle ==="
+            find "$BUNDLE_DIR" -path "*/runtimes/*" -type d 2>/dev/null | head -20
+          else
+            echo "❌ Bundle directory NOT found"
+          fi
+          echo ""
+          echo "========================================="
+
       # ─── 调试：列出构建产物 ─────────────────────────────────────────────────
       - name: List build artifacts
         if: always()

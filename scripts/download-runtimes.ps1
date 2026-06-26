@@ -15,8 +15,14 @@ $ErrorActionPreference = "Stop"
 
 # Helper: run an external executable and capture its stdout without triggering
 # the PowerShell "StandardOutputEncoding" error that occurs in some CI environments.
+# Uses async stderr read to avoid the classic .NET Process deadlock when both
+# stdout and stderr buffers fill up simultaneously.
 function Get-ExeOutput {
     param([string]$ExePath, [string[]]$Args)
+    if (-not (Test-Path $ExePath)) {
+        Write-Host "    [Get-ExeOutput] File not found: $ExePath"
+        return ""
+    }
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $ExePath
@@ -25,11 +31,26 @@ function Get-ExeOutput {
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
         $proc = [System.Diagnostics.Process]::Start($psi)
+        # Read stderr asynchronously to prevent deadlock when both buffers fill
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
         $stdout = $proc.StandardOutput.ReadToEnd()
         $proc.WaitForExit()
-        return $stdout.Trim()
+        $stderr = $stderrTask.Result
+        $code = $proc.ExitCode
+        $result = $stdout.Trim()
+        if (-not $result) {
+            # stdout empty — try stderr (some tools print version to stderr)
+            $result = $stderr.Trim()
+        }
+        if (-not $result) {
+            Write-Host "    [Get-ExeOutput] $ExePath $($Args -join ' ') => exit=$code, stdout=<empty>, stderr=<empty>"
+        }
+        return $result
     } catch {
+        Write-Host "    [Get-ExeOutput] $ExePath => EXCEPTION: $($_.Exception.Message)"
         return ""
     }
 }
