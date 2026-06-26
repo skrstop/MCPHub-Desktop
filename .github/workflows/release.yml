@@ -47,13 +47,13 @@ jobs:
 #            runtime-arch: arm64
 #            bundles: deb,rpm
 #            platform-tag: linux-arm64
-
-          # Windows x64 — native
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            runtime-arch: x64
-            bundles: nsis,msi
-            platform-tag: windows-x64
+#
+#          # Windows x64 — native
+#          - platform: windows-latest
+#            target: x86_64-pc-windows-msvc
+#            runtime-arch: x64
+#            bundles: nsis,msi
+#            platform-tag: windows-x64
 
           # Windows arm64 — cross-compile on x64 runner
           - platform: windows-latest

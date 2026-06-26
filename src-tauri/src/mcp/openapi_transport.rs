@@ -310,25 +310,32 @@ impl McpTransport for OpenapiTransport {
         let tool = server.tool_collection.get_tool(name)
             .ok_or_else(|| anyhow!("Tool '{}' not found in OpenAPI server '{}'", name, self.server_name))?;
 
-        log::info!(
-            "[{}] OpenAPI call_tool: name={}, base_url={:?}, arguments={}",
+        // Log to database so it shows in the app's log viewer
+        let start_msg = format!(
+            "[{}] OpenAPI call_tool: name={}, base_url={:?}, args={}",
             self.server_name, name, self.base_url, arguments
         );
+        log::info!("{}", start_msg);
+        app_logger::log_to_db("info", &start_msg);
 
         // Execute the tool call with no authorization (auth is handled by headers)
         let result = tool.call(&arguments, Authorization::None, None).await
             .map_err(|e| {
-                log::error!(
-                    "[{}] OpenAPI call_tool failed: name={}, error={:#}",
+                let err_msg = format!(
+                    "[{}] OpenAPI call_tool FAILED: name={}, error={:#}",
                     self.server_name, name, e
                 );
+                log::warn!("{}", err_msg);
+                app_logger::log_to_db("warn", &err_msg);
                 anyhow!("Tool '{}' call failed: {:#}", name, e)
             })?;
 
-        log::info!(
-            "[{}] OpenAPI call_tool success: name={}, is_error={}",
+        let ok_msg = format!(
+            "[{}] OpenAPI call_tool OK: name={}, is_error={}",
             self.server_name, name, result.is_error.unwrap_or(false)
         );
+        log::info!("{}", ok_msg);
+        app_logger::log_to_db("info", &ok_msg);
 
         // Convert rmcp CallToolResult to our ToolCallResult
         let content: Vec<Value> = result.content
