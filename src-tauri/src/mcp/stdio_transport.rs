@@ -123,12 +123,17 @@ impl McpTransport for StdioTransport {
             runtime_env::resolve_command(&self.command, &self.args);
 
         // Build the merged environment:
-        //   1. Start with runtime overrides (PATH prepend + cache dirs)
-        //   2. Merge user-supplied server env; if user also supplies PATH, append it
+        //   1. Inherit the parent process environment (so child keeps HOME, USER, etc.)
+        //   2. Apply runtime overrides (PATH prepend + cache dirs)
+        //   3. Merge user-supplied server env; if user also supplies PATH, append it
         //      after our prepended dirs so our bundled binaries still take priority.
         let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
-        let mut merged_env: HashMap<String, String> =
-            runtime_env::env_overrides(&self.command).into_iter().collect();
+        let mut merged_env: HashMap<String, String> = std::env::vars().collect();
+
+        // Apply runtime overrides (PATH is prepended with bundled binary dirs)
+        for (k, v) in runtime_env::env_overrides(&self.command) {
+            merged_env.insert(k, v);
+        }
 
         for (k, v) in &self.env {
             if k.to_ascii_uppercase() == "PATH" {

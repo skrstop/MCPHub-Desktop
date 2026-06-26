@@ -1363,55 +1363,43 @@ fn get_user_shell() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Get PATH on Windows using PowerShell
+/// Get PATH on Windows by reading the registry directly (fast, no PowerShell).
 #[cfg(target_os = "windows")]
 fn get_windows_path() -> String {
-    log::info!("[runtime] Getting PATH on Windows using PowerShell");
-    crate::services::app_logger::log_to_db("info", "[runtime] Getting PATH on Windows using PowerShell");
+    use winreg::enums::*;
+    use winreg::RegKey;
 
-    // On Windows, PATH is inherited from the system, but we can try to get
-    // user-specific paths that might not be in the process environment
-    log::info!("[runtime] Executing PowerShell to get user PATH");
-    crate::services::app_logger::log_to_db("info", "[runtime] Executing PowerShell to get user PATH");
+    log::info!("[runtime] Getting PATH on Windows from registry");
+    crate::services::app_logger::log_to_db("info", "[runtime] Getting PATH on Windows from registry");
 
-    let mut c = std::process::Command::new("powershell");
-    c.args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    if let Ok(output) = c.output()
-    {
-        if output.status.success() {
-            let user_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !user_path.is_empty() {
-                log::info!("[runtime] Got user PATH from PowerShell (length: {})", user_path.len());
-                crate::services::app_logger::log_to_db("info", &format!("[runtime] Got user PATH from PowerShell (length: {})", user_path.len()));
-                let current_path = std::env::var("PATH").unwrap_or_default();
-                log::info!("[runtime] Current system PATH length: {}", current_path.len());
-                crate::services::app_logger::log_to_db("info", &format!("[runtime] Current system PATH length: {}", current_path.len()));
-                // Combine: user PATH + system PATH
-                let combined_path = format!("{};{}", user_path, current_path);
-                log::info!("[runtime] Combined PATH length: {}", combined_path.len());
-                crate::services::app_logger::log_to_db("info", &format!("[runtime] Combined PATH length: {}", combined_path.len()));
-                return combined_path;
-            } else {
-                log::warn!("[runtime] PowerShell returned empty user PATH");
-                crate::services::app_logger::log_to_db("warn", "[runtime] PowerShell returned empty user PATH");
-            }
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("[runtime] PowerShell command failed: {}", stderr);
-            crate::services::app_logger::log_to_db("warn", &format!("[runtime] PowerShell command failed: {}", stderr));
-        }
-    } else {
-        log::warn!("[runtime] Failed to execute PowerShell");
-        crate::services::app_logger::log_to_db("warn", "[runtime] Failed to execute PowerShell");
+    // Read User PATH from registry — instant, no subprocess needed.
+    let user_path = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Environment")
+        .and_then(|k| k.get_value::<String, _>("Path"))
+        .unwrap_or_default();
+
+    let machine_path = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        .and_then(|k| k.get_value::<String, _>("Path"))
+        .unwrap_or_default();
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+
+    // Merge: user PATH + machine PATH + process PATH
+    let mut parts: Vec<&str> = Vec::new();
+    if !user_path.is_empty() {
+        parts.push(&user_path);
     }
+    if !machine_path.is_empty() {
+        parts.push(&machine_path);
+    }
+    if !current_path.is_empty() {
+        parts.push(&current_path);
+    }
+    let combined = parts.join(";");
 
-    // Fallback: return current PATH
-    let fallback_path = std::env::var("PATH").unwrap_or_default();
-    log::info!("[runtime] Using fallback PATH (length: {})", fallback_path.len());
-    crate::services::app_logger::log_to_db("info", &format!("[runtime] Using fallback PATH (length: {})", fallback_path.len()));
-    fallback_path
+    log::info!("[runtime] Combined PATH length: {}", combined.len());
+    crate::services::app_logger::log_to_db("info", &format!("[runtime] Combined PATH length: {}", combined.len()));
+    combined
 }
 
