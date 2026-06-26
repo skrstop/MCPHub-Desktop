@@ -7,3 +7,4 @@ build/
 .agent-work
 .agentbridge
 .idea
+.agentbridge/**
