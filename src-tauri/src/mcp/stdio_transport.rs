@@ -35,8 +35,10 @@ fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         // On Windows, use taskkill /F /T /PID to kill the process tree
+        // CREATE_NO_WINDOW prevents a visible console window from flashing
         let _ = std::process::Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(0x0800_0000)
             .spawn();
     }
 }
@@ -149,6 +151,13 @@ impl McpTransport for StdioTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+
+        // On Windows, suppress the console window that would otherwise flash on screen.
+        // CREATE_NO_WINDOW (0x08000000) keeps stdio handles intact but prevents a visible window.
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
 
         // On Unix, create a new process group so we can kill the entire tree
         // (including npx/uvx wrapper children) on disconnect.

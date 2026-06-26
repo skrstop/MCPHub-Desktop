@@ -153,6 +153,7 @@ fn get_windows_path() -> String {
         .args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
     {
         if output.status.success() {

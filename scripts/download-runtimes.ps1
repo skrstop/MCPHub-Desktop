@@ -5,7 +5,7 @@
 param(
     [string]$NodeVersion = "24.17.0",
     [string]$UvVersion = "0.11.23",
-    [string]$PythonVersion = "3.14",
+    [string]$PythonVersion = "3.12",
     # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
     # 注意: TargetArch 控制 Node.js 和 Python 的目标架构，但 uv 始终使用宿主架构以便能执行
     [string]$TargetArch = ""

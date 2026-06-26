@@ -596,8 +596,9 @@ pub async fn install_python_version(
 
     log::info!("[runtime] Installing Python {version} via uv...");
 
-    let mut child = tokio::process::Command::new(&uv)
-        .args([
+    let mut child = {
+        let mut c = tokio::process::Command::new(&uv);
+        c.args([
             "python",
             "install",
             "--reinstall",
@@ -605,8 +606,11 @@ pub async fn install_python_version(
         ])
         .env("UV_PYTHON_INSTALL_DIR", &python_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+        #[cfg(windows)]
+        { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+        c.spawn()
+    }
         .map_err(|e| {
             let msg = format!("启动 uv 失败: {e}");
             emit_error(&app, "python", &version, &msg);
@@ -783,11 +787,14 @@ pub async fn uninstall_python_version(version: String) -> Result<(), String> {
     let python_dir = runtime_env::uv_python_install_dir()
         .ok_or_else(|| "Cannot determine Python install directory".to_string())?;
 
-    let output = tokio::process::Command::new(&uv)
-        .args(["python", "uninstall", &format!("cpython-{version}")])
-        .env("UV_PYTHON_INSTALL_DIR", &python_dir)
-        .output()
-        .await
+    let output = {
+        let mut c = tokio::process::Command::new(&uv);
+        c.args(["python", "uninstall", &format!("cpython-{version}")])
+        .env("UV_PYTHON_INSTALL_DIR", &python_dir);
+        #[cfg(windows)]
+        { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+        c.output().await
+    }
         .map_err(|e| format!("Failed to run uv: {e}"))?;
 
     if !output.status.success() {
@@ -856,13 +863,14 @@ fn insert_version_sorted(list: &mut Vec<String>, version: &str) {
 /// Detect the system's Node.js version by running `node -v`.
 /// Returns the version string (e.g. "22.14.0") or None if not found.
 fn detect_system_node_version() -> Option<String> {
-    let output = std::process::Command::new("node")
-        .arg("-v")
+    let mut c = std::process::Command::new("node");
+    c.arg("-v")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .env("PATH", get_enhanced_path())
-        .output()
-        .ok()?;
+        .env("PATH", get_enhanced_path());
+    #[cfg(windows)]
+    { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+    let output = c.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -877,12 +885,13 @@ fn detect_system_node_version() -> Option<String> {
 /// Returns the version string (e.g. "22.14.0") or None if not available.
 fn detect_bundled_node_version() -> Option<String> {
     let bundled = runtime_env::get_bundled_node_path()?;
-    let output = std::process::Command::new(&bundled)
-        .arg("-v")
+    let mut c = std::process::Command::new(&bundled);
+    c.arg("-v")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+    let output = c.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -898,12 +907,14 @@ fn detect_bundled_node_version() -> Option<String> {
 fn detect_system_python_version() -> Option<String> {
     let enhanced_path = get_enhanced_path();
     for cmd in &["python3", "python"] {
-        if let Ok(output) = std::process::Command::new(cmd)
-            .arg("--version")
+        let mut c = std::process::Command::new(cmd);
+        c.arg("--version")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .env("PATH", &enhanced_path)
-            .output()
+            .env("PATH", &enhanced_path);
+        #[cfg(windows)]
+        { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+        if let Ok(output) = c.output()
         {
             if output.status.success() {
                 let raw = String::from_utf8_lossy(&output.stdout);
@@ -929,7 +940,11 @@ fn node_version_installed(version: &str) -> bool {
     }
     // Check bundled node: run `node --version` and compare
     if let Some(bundled) = runtime_env::get_bundled_node_path() {
-        if let Ok(output) = std::process::Command::new(&bundled).arg("-v").output() {
+        let mut c = std::process::Command::new(&bundled);
+        c.arg("-v");
+        #[cfg(windows)]
+        { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+        if let Ok(output) = c.output() {
             if output.status.success() {
                 let reported = String::from_utf8_lossy(&output.stdout)
                     .trim()
@@ -1065,11 +1080,12 @@ async fn get_installed_python_versions() -> Vec<(String, PathBuf, bool)> {
     // ── 2. Scan user-installed Python directory (writable, via uv) ──
     if let Some(uv) = runtime_env::get_uv_path() {
         if let Some(python_dir) = runtime_env::uv_python_install_dir() {
-            if let Ok(output) = tokio::process::Command::new(&uv)
-                .args(["python", "list", "--only-installed"])
-                .env("UV_PYTHON_INSTALL_DIR", &python_dir)
-                .output()
-                .await
+            let mut c = tokio::process::Command::new(&uv);
+            c.args(["python", "list", "--only-installed"])
+                .env("UV_PYTHON_INSTALL_DIR", &python_dir);
+            #[cfg(windows)]
+            { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+            if let Ok(output) = c.output().await
             {
                 if output.status.success() {
                     for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -1106,10 +1122,11 @@ async fn verify_node_version(version: &str) -> bool {
     if let Some(base) = runtime_env::node_versions_base() {
         let bin = node_bin_in(&base.join(version));
         if bin.exists() {
-            if let Ok(output) = tokio::process::Command::new(&bin)
-                .arg("-v")
-                .output()
-                .await
+            let mut c = tokio::process::Command::new(&bin);
+            c.arg("-v");
+            #[cfg(windows)]
+            { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+            if let Ok(output) = c.output().await
             {
                 if output.status.success() {
                     let reported = String::from_utf8_lossy(&output.stdout)
@@ -1123,10 +1140,11 @@ async fn verify_node_version(version: &str) -> bool {
     }
     // Check bundled node
     if let Some(bundled) = runtime_env::get_bundled_node_path() {
-        if let Ok(output) = tokio::process::Command::new(&bundled)
-            .arg("-v")
-            .output()
-            .await
+        let mut c = tokio::process::Command::new(&bundled);
+        c.arg("-v");
+        #[cfg(windows)]
+        { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+        if let Ok(output) = c.output().await
         {
             if output.status.success() {
                 let reported = String::from_utf8_lossy(&output.stdout)
@@ -1145,10 +1163,11 @@ async fn verify_python_executable(exec: &Path) -> bool {
     if !exec.exists() {
         return false;
     }
-    let Ok(output) = tokio::process::Command::new(exec)
-        .arg("--version")
-        .output()
-        .await
+    let mut c = tokio::process::Command::new(exec);
+    c.arg("--version");
+    #[cfg(windows)]
+    { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+    let Ok(output) = c.output().await
     else {
         return false;
     };
@@ -1353,11 +1372,12 @@ fn get_windows_path() -> String {
     log::info!("[runtime] Executing PowerShell to get user PATH");
     crate::services::app_logger::log_to_db("info", "[runtime] Executing PowerShell to get user PATH");
 
-    if let Ok(output) = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
+    let mut c = std::process::Command::new("powershell");
+    c.args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('PATH', 'User')"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    if let Ok(output) = c.output()
     {
         if output.status.success() {
             let user_path = String::from_utf8_lossy(&output.stdout).trim().to_string();

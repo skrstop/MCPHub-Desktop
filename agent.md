@@ -782,6 +782,84 @@ VACUUM;
 - `exposed` = 已启用项 token 总和，`gross` = 所有项 token 总和
 - 禁用服务器显示 `0/{gross}`，不再显示 `—`
 
+#### 3.5.11 Windows 打包定制
+
+**文件**：`src-tauri/tauri.conf.json`、`src-tauri/src/mcp/stdio_transport.rs`、`src-tauri/src/services/runtime_env.rs`、`src-tauri/src/commands/runtime.rs`、`scripts/download-runtimes.sh`、`scripts/download-runtimes.ps1`
+
+##### NSIS 安装路径选择
+
+`tauri.conf.json` 中配置了 `installMode: "both"`，允许用户在安装时选择：
+- **当前用户（AppData）**：`%LOCALAPPDATA%\MCPHub Desktop`，无需管理员权限
+- **所有用户（Program Files）**：`C:\Program Files\MCPHub Desktop`，需要管理员权限
+
+```json
+{
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "installMode": "both"
+      }
+    }
+  }
+}
+```
+
+##### Windows 静默进程执行（CREATE_NO_WINDOW）
+
+**问题**：Windows 上每次执行 shell 命令（`powershell`、`node`、`python`、`taskkill` 等）都会弹出黑色 CMD 窗口并瞬间关闭，用户体验极差。
+
+**解决方案**：在所有 `std::process::Command` 和 `tokio::process::Command` 调用中，对 Windows 平台添加 `creation_flags(0x0800_0000)`（`CREATE_NO_WINDOW` 标志）。
+
+该标志保留 stdio 管道（stdin/stdout/stderr）但阻止创建可见的控制台窗口。
+
+**已修改的文件和位置**：
+
+| 文件 | 函数/位置 | 命令 |
+|------|-----------|------|
+| `mcp/stdio_transport.rs` | `connect()` | MCP 服务器子进程 |
+| `mcp/stdio_transport.rs` | `kill_process_tree()` | `taskkill` |
+| `services/runtime_env.rs` | `get_windows_path()` | `powershell` 获取 PATH |
+| `commands/runtime.rs` | `install_python_version()` | `uv python install` |
+| `commands/runtime.rs` | `uninstall_python_version()` | `uv python uninstall` |
+| `commands/runtime.rs` | `detect_system_node_version()` | `node -v` |
+| `commands/runtime.rs` | `detect_bundled_node_version()` | 捆绑的 `node -v` |
+| `commands/runtime.rs` | `detect_system_python_version()` | `python --version` |
+| `commands/runtime.rs` | `node_version_installed()` | 捆绑的 `node -v` |
+| `commands/runtime.rs` | `get_installed_python_versions()` | `uv python list` |
+| `commands/runtime.rs` | `verify_node_version()` | `node -v` |
+| `commands/runtime.rs` | `verify_python_executable()` | `python --version` |
+| `commands/runtime.rs` | `get_windows_path()` | `powershell` 获取 PATH |
+
+**代码模式**：
+
+```rust
+// 同步进程
+let mut c = std::process::Command::new("powershell");
+c.args(["-NoProfile", "-Command", "..."])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null());
+#[cfg(windows)]
+{ c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+let output = c.output()?;
+
+// 异步进程（tokio）
+let mut c = tokio::process::Command::new(&uv);
+c.args(["python", "install", &version])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+#[cfg(windows)]
+{ c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+let child = c.spawn()?;
+```
+
+> ⚠️ **注意**：`creation_flags` 方法仅在 Windows 上存在，必须使用 `#[cfg(windows)]` 条件编译，否则其他平台编译会失败。
+
+##### Python 运行时版本
+
+**文件**：`scripts/download-runtimes.sh`、`scripts/download-runtimes.ps1`
+
+捆绑的 Python 版本从 `3.14`（开发版）改为 `3.12`（稳定版），确保 CI 构建时能正确下载和打包。
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录
