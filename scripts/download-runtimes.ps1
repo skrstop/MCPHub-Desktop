@@ -287,10 +287,31 @@ if (-not $PythonExists) {
         }
         Remove-Item -Recurse -Force $TmpDir
     } else {
+        Write-Host "--> Installing Python $PythonVersion via uv..."
+        # uv python install uses UV_PYTHON_INSTALL_DIR env var to control install location
         $env:UV_PYTHON_INSTALL_DIR = $PythonInstallDir
+        Write-Host "    UV_PYTHON_INSTALL_DIR=$PythonInstallDir"
+        $oldEA = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $UvExe python install $PythonVersion
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldEA
+        if ($exitCode -ne 0) {
+            Write-Warning "uv python install exited with code $exitCode"
+        }
     }
-    Write-Host "--> Python $PythonVersion downloaded to: $PythonInstallDir"
+    # Verify Python was actually installed
+    $PyBin = Get-ChildItem $PythonInstallDir -Recurse -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($PyBin) {
+        $PyVer = Get-ExeOutput $PyBin.FullName @("--version")
+        Write-Host "--> Python installed: $PyVer at $($PyBin.FullName)"
+    } else {
+        Write-Warning "Python executable not found in $PythonInstallDir after installation!"
+        Write-Host "Contents of ${PythonInstallDir}:"
+        if (Test-Path $PythonInstallDir) {
+            Get-ChildItem $PythonInstallDir -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
+        }
+    }
 } else {
     Write-Host "--> Python $PythonVersion already present, skipping"
 }

@@ -306,6 +306,18 @@ services/ (业务逻辑 = 原 services/)
 - `RoutingConfig` 接口新增 `httpPort: number` 和 `exposeHttp: boolean` 字段
 - 默认值：`httpPort: 23333`，`exposeHttp: true`
 
+#### 3.2.8 Splash 加载画面
+
+**文件**：`frontend/index.html`、`frontend/src/main.tsx`
+
+- 在 `index.html` 中内嵌 CSS 动画的加载画面（Spinner + 文字），在 WebView 加载时立即显示
+- **加载文字使用内联 `<script>` 实现国际化**（不依赖 React/i18next）：
+  - 通过 `navigator.language` 检测浏览器语言
+  - 支持 zh（正在加载中…）、en（Loading…）、fr（Chargement…）、tr（Yükleniyor…）
+  - 默认回退到英文
+- React 挂载后，`main.tsx` 中的 `removeSplash()` 函数添加 `fade-out` CSS 类实现 300ms 淡出动画后移除 DOM 元素
+- 桌面端的 `index.html` 已加入「自定义文件清单」（同步时不可覆盖）
+
 ### 3.3 国际化差异
 
 #### 3.3.1 中文翻译
@@ -917,6 +929,7 @@ let child = c.spawn()?;
 | `frontend/src/utils/tauriClient.ts`              | 桌面端新增                                                |
 | `frontend/src/utils/fetchInterceptor.ts`         | isTauri() 拦截                                            |
 | `frontend/src/utils/runtime.ts`                  | 运行时配置                                                |
+| `frontend/index.html`                            | Splash 加载画面（内嵌 CSS 动画 + 内联 i18n 脚本）         |
 | `locales/*.json`                                 | runtime* 翻译键（~18 个）                                 |
 
 #### 同步后验证清单
@@ -1087,6 +1100,8 @@ npm run build
 - [X]  工具禁用状态同步（enabled 字段 + HTTP 端点过滤）
 - [X]  上下文占用（Context Footprint）计算
 - [X]  系统日志面板（app_logger 写入 DB + 轮询刷新）
+- [X]  启动 Splash 加载画面（index.html 内嵌动画 + 内联 i18n + main.tsx 移除）
+- [X]  首页统计面板空状态修复（hasLoaded 逻辑简化）
 
 ### 待办
 

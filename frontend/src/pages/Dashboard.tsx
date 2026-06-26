@@ -69,18 +69,14 @@ const DashboardPage: React.FC = () => {
   const { serverCosts } = useCostData();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);
-  const loadingStartedRef = React.useRef(false);
   React.useEffect(() => {
-    if (isLoading) {
-      loadingStartedRef.current = true;
-      return;
-    }
-    if (loadingStartedRef.current) {
+    // Mark as loaded once the first loading cycle finishes (isLoading went true → false).
+    // If the initial load returns 0 servers with no error, isLoading transitions
+    // true → false which still triggers this effect with isLoading=false.
+    if (!isLoading && !hasLoaded) {
       setHasLoaded(true);
-      return;
     }
-    if (allServers.length > 0 || error) setHasLoaded(true);
-  }, [isLoading, allServers.length, error]);
+  }, [isLoading, hasLoaded]);
 
   const stats = useMemo(
     () => ({

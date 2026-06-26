@@ -8,6 +8,15 @@ import './i18n';
 import './utils/setupInterceptors';
 import { loadRuntimeConfig } from './utils/runtime';
 
+/** Remove the splash loading screen (index.html) with a fade-out animation */
+function removeSplash() {
+  const splash = document.getElementById('splash-loader');
+  if (splash) {
+    splash.classList.add('fade-out');
+    setTimeout(() => splash.remove(), 350);
+  }
+}
+
 // Load runtime configuration before starting the app
 async function initializeApp() {
   try {
@@ -41,6 +50,9 @@ async function initializeApp() {
       </React.StrictMode>,
     );
   }
+
+  // Hide splash once React has mounted
+  removeSplash();
 }
 
 // Initialize the app
