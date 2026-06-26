@@ -184,14 +184,32 @@ fn get_windows_path() -> String {
 }
 
 /// Expand %VAR% references in a string using the current process environment.
+/// On Windows, environment variables are case-insensitive, so we match case-insensitively.
 #[cfg(target_os = "windows")]
 fn expand_env_vars(input: &str) -> String {
     let mut result = input.to_string();
-    // Iterate over all environment variables and replace %VAR% references
-    for (key, value) in std::env::vars() {
-        let pattern = format!("%{}%", key);
-        if result.contains(&pattern) {
-            result = result.replace(&pattern, &value);
+    // Collect all env vars into a vec for case-insensitive matching
+    let env_vars: Vec<(String, String)> = std::env::vars().collect();
+
+    // Find all %VAR% patterns in the input and replace them
+    let mut start = 0;
+    while let Some(open_pos) = result[start..].find('%') {
+        let abs_open = start + open_pos;
+        if let Some(close_pos) = result[abs_open + 1..].find('%') {
+            let abs_close = abs_open + 1 + close_pos;
+            let var_name = &result[abs_open + 1..abs_close];
+            // Case-insensitive lookup
+            let replacement = env_vars.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(var_name))
+                .map(|(_, v)| v.clone());
+            if let Some(value) = replacement {
+                result = format!("{}{}{}", &result[..abs_open], value, &result[abs_close + 1..]);
+                start = abs_open + value.len();
+            } else {
+                start = abs_close + 1;
+            }
+        } else {
+            break;
         }
     }
     result

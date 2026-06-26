@@ -617,7 +617,23 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   if (command === 'call_tool') {
     const r = result as { content?: unknown[]; isError?: boolean } | null;
     if (r?.isError) {
-      return { success: false, content: r.content ?? [], message: 'Tool returned an error' };
+      // Extract detailed error message from content
+      const contentArr = r.content ?? [];
+      const errorTexts: string[] = [];
+      for (const item of contentArr) {
+        if (item && typeof item === 'object') {
+          const c = item as Record<string, unknown>;
+          if (c.type === 'text' && typeof c.text === 'string') {
+            errorTexts.push(c.text);
+          } else if (typeof c.text === 'string') {
+            errorTexts.push(c.text);
+          }
+        } else if (typeof item === 'string') {
+          errorTexts.push(item);
+        }
+      }
+      const detail = errorTexts.length > 0 ? errorTexts.join('\n') : 'Unknown error';
+      return { success: false, content: contentArr, message: detail };
     }
     return { success: true, content: r?.content ?? [] };
   }

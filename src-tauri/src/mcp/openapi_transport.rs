@@ -330,13 +330,6 @@ impl McpTransport for OpenapiTransport {
                 anyhow!("Tool '{}' call failed: {:#}", name, e)
             })?;
 
-        let ok_msg = format!(
-            "[{}] OpenAPI call_tool OK: name={}, is_error={}",
-            self.server_name, name, result.is_error.unwrap_or(false)
-        );
-        log::info!("{}", ok_msg);
-        app_logger::log_to_db("info", &ok_msg);
-
         // Convert rmcp CallToolResult to our ToolCallResult
         let content: Vec<Value> = result.content
             .into_iter()
@@ -344,6 +337,23 @@ impl McpTransport for OpenapiTransport {
             .collect();
 
         let is_error = result.is_error.unwrap_or(false);
+
+        // Log the full response including content for debugging
+        let content_summary = if content.len() <= 3 {
+            format!("{:?}", content)
+        } else {
+            format!("{:?}... ({} items)", &content[..3], content.len())
+        };
+        let ok_msg = format!(
+            "[{}] OpenAPI call_tool OK: name={}, is_error={}, content={}",
+            self.server_name, name, is_error, content_summary
+        );
+        if is_error {
+            log::warn!("{}", ok_msg);
+            app_logger::log_to_db("warn", &ok_msg);
+        } else {
+            log::info!("{}", ok_msg);
+        }
 
         Ok(ToolCallResult { content, is_error })
     }

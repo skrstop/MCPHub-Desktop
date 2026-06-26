@@ -21,6 +21,43 @@ use tokio::{
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Resolve a command name to a full path by searching in PATH.
+/// On Windows, also checks for .exe, .cmd, .bat extensions.
+fn resolve_in_path(cmd: &str, path_env: &str) -> Option<String> {
+    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    let extensions: &[&str] = if cfg!(target_os = "windows") {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+
+    let dirs: Vec<&str> = path_env.split(sep).filter(|d| !d.is_empty()).collect();
+    log::info!("[resolve_in_path] Searching for '{}' in {} PATH dirs", cmd, dirs.len());
+
+    for dir in &dirs {
+        let dir_path = std::path::Path::new(dir);
+        // Check if directory exists first
+        if !dir_path.exists() {
+            continue;
+        }
+        for ext in extensions {
+            let candidate = dir_path.join(format!("{}{}", cmd, ext));
+            if candidate.exists() {
+                log::info!("[resolve_in_path] Found: {}", candidate.display());
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    log::warn!("[resolve_in_path] '{}' not found in any PATH directory", cmd);
+    // Log all dirs for debugging
+    for (i, dir) in dirs.iter().enumerate() {
+        let exists = std::path::Path::new(dir).exists();
+        log::warn!("[resolve_in_path]   PATH[{}]: {} (exists={})", i, dir, exists);
+    }
+    None
+}
+
 /// Kill the entire process tree of a stdio transport's child process.
 /// When the server is launched through a wrapper like `npx` / `npm exec`,
 /// the wrapper does not forward signals to its descendants, so the real
@@ -147,11 +184,41 @@ impl McpTransport for StdioTransport {
             }
         }
 
-        let spawn_msg = format!("[{}] spawning: {} {:?}", self.server_name, resolved_cmd, resolved_args);
+        // Debug: log PATH for troubleshooting
+        if let Some(path) = merged_env.get("PATH") {
+            let path_entries: Vec<&str> = path.split(sep).filter(|d| !d.is_empty()).collect();
+            log::warn!("[{}] Merged PATH has {} entries:", self.server_name, path_entries.len());
+            for (i, entry) in path_entries.iter().enumerate() {
+                log::warn!("[{}]   PATH[{}]: {}", self.server_name, i, entry);
+            }
+        }
+
+        // Resolve the command to a full path using the merged PATH.
+        // Command::new() uses the current process PATH, but we need to use
+        // the merged PATH (which includes bundled dirs + user-added paths).
+        let final_cmd = if resolved_cmd.contains('/') || resolved_cmd.contains('\\') {
+            // Already a full path, use as-is
+            log::info!("[{}] Command is already a full path: {}", self.server_name, resolved_cmd);
+            resolved_cmd.clone()
+        } else {
+            // Search in merged PATH
+            match resolve_in_path(&resolved_cmd, merged_env.get("PATH").map(|s| s.as_str()).unwrap_or("")) {
+                Some(full_path) => {
+                    log::info!("[{}] Resolved '{}' to '{}'", self.server_name, resolved_cmd, full_path);
+                    full_path
+                }
+                None => {
+                    log::warn!("[{}] Command '{}' not found in PATH, using as-is", self.server_name, resolved_cmd);
+                    resolved_cmd.clone()
+                }
+            }
+        };
+
+        let spawn_msg = format!("[{}] spawning: {} {:?}", self.server_name, final_cmd, resolved_args);
         log::info!("{}", spawn_msg);
         app_logger::log_to_db("info", &spawn_msg);
 
-        let mut cmd = Command::new(&resolved_cmd);
+        let mut cmd = Command::new(&final_cmd);
         cmd.args(&resolved_args)
             .envs(&merged_env)
             .stdin(Stdio::piped())
