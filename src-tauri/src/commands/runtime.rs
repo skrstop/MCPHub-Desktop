@@ -14,8 +14,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use tokio::os::windows::process::CommandExt as TokioCommandExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeVersion {

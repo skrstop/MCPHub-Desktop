@@ -1,4 +1,4 @@
-# [](https://)[](https://)MCPHub Desktop (Tauri) — Agent 开发文档
+# [](https://)[](https://)[](https://)MCPHub Desktop (Tauri) — Agent 开发文档
 
 > 本文档是 Tauri 桌面客户端迁移的**完整参考**，供 AI Agent 和开发者续接工作使用。
 > 包含：原项目架构、桌面端架构、已完成内容、待办事项及所有关键技术细节。
@@ -789,6 +789,7 @@ VACUUM;
 ##### NSIS 安装路径选择
 
 `tauri.conf.json` 中配置了 `installMode: "both"`，允许用户在安装时选择：
+
 - **当前用户（AppData）**：`%LOCALAPPDATA%\MCPHub Desktop`，无需管理员权限
 - **所有用户（Program Files）**：`C:\Program Files\MCPHub Desktop`，需要管理员权限
 
@@ -814,21 +815,22 @@ VACUUM;
 
 **已修改的文件和位置**：
 
-| 文件 | 函数/位置 | 命令 |
-|------|-----------|------|
-| `mcp/stdio_transport.rs` | `connect()` | MCP 服务器子进程 |
-| `mcp/stdio_transport.rs` | `kill_process_tree()` | `taskkill` |
-| `services/runtime_env.rs` | `get_windows_path()` | `powershell` 获取 PATH |
-| `commands/runtime.rs` | `install_python_version()` | `uv python install` |
-| `commands/runtime.rs` | `uninstall_python_version()` | `uv python uninstall` |
-| `commands/runtime.rs` | `detect_system_node_version()` | `node -v` |
-| `commands/runtime.rs` | `detect_bundled_node_version()` | 捆绑的 `node -v` |
-| `commands/runtime.rs` | `detect_system_python_version()` | `python --version` |
-| `commands/runtime.rs` | `node_version_installed()` | 捆绑的 `node -v` |
-| `commands/runtime.rs` | `get_installed_python_versions()` | `uv python list` |
-| `commands/runtime.rs` | `verify_node_version()` | `node -v` |
-| `commands/runtime.rs` | `verify_python_executable()` | `python --version` |
-| `commands/runtime.rs` | `get_windows_path()` | `powershell` 获取 PATH |
+
+| 文件                      | 函数/位置                         | 命令                   |
+| ------------------------- | --------------------------------- | ---------------------- |
+| `mcp/stdio_transport.rs`  | `connect()`                       | MCP 服务器子进程       |
+| `mcp/stdio_transport.rs`  | `kill_process_tree()`             | `taskkill`             |
+| `services/runtime_env.rs` | `get_windows_path()`              | `powershell` 获取 PATH |
+| `commands/runtime.rs`     | `install_python_version()`        | `uv python install`    |
+| `commands/runtime.rs`     | `uninstall_python_version()`      | `uv python uninstall`  |
+| `commands/runtime.rs`     | `detect_system_node_version()`    | `node -v`              |
+| `commands/runtime.rs`     | `detect_bundled_node_version()`   | 捆绑的`node -v`        |
+| `commands/runtime.rs`     | `detect_system_python_version()`  | `python --version`     |
+| `commands/runtime.rs`     | `node_version_installed()`        | 捆绑的`node -v`        |
+| `commands/runtime.rs`     | `get_installed_python_versions()` | `uv python list`       |
+| `commands/runtime.rs`     | `verify_node_version()`           | `node -v`              |
+| `commands/runtime.rs`     | `verify_python_executable()`      | `python --version`     |
+| `commands/runtime.rs`     | `get_windows_path()`              | `powershell` 获取 PATH |
 
 **代码模式**：
 
@@ -843,8 +845,8 @@ c.args(["-NoProfile", "-Command", "..."])
 { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
 let output = c.output()?;
 
-// 异步进程（tokio）— 需要导入 tokio::os::windows::process::CommandExt
-use tokio::os::windows::process::CommandExt; // #[cfg(windows)]
+// 异步进程（tokio）— 同样使用 std 的 CommandExt，tokio::process::Command 通过 Deref 继承
+use std::os::windows::process::CommandExt; // #[cfg(windows)]
 let mut c = tokio::process::Command::new(&uv);
 c.args(["python", "install", &version])
     .stdout(Stdio::piped())
@@ -855,9 +857,10 @@ let child = c.spawn()?;
 ```
 
 > ⚠️ **注意**：
+>
 > - `creation_flags` 方法仅在 Windows 上存在，必须使用 `#[cfg(windows)]` 条件编译，否则其他平台编译会失败。
 > - `std::process::Command` 需要导入 `std::os::windows::process::CommandExt`
-> - `tokio::process::Command` 需要导入 `tokio::os::windows::process::CommandExt`（两者的 trait 不同）
+> - `tokio::process::Command` 通过 `Deref<Target=std::process::Command>` 继承了 `creation_flags`，所以只需导入 `std::os::windows::process::CommandExt`（`tokio::os` 模块是私有的，不能直接导入）
 
 ##### Python 运行时版本
 
