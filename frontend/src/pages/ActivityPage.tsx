@@ -177,11 +177,10 @@ const ActivityPage: React.FC = () => {
   };
 
   // Format timestamp
+  // SQLite stores local time via datetime('now', 'localtime'), so no UTC conversion needed
   const formatTimestamp = (timestamp: string): string => {
     if (!timestamp) return '—';
-    // SQLite datetime('now') returns "YYYY-MM-DD HH:MM:SS" (no timezone)
-    // Treat as UTC and convert to local time
-    const date = new Date(timestamp.replace(' ', 'T') + 'Z');
+    const date = new Date(timestamp.replace(' ', 'T'));
     if (isNaN(date.getTime())) return timestamp; // fallback to raw string
     return date.toLocaleString();
   };
@@ -548,11 +547,11 @@ const ActivityPage: React.FC = () => {
     return (
       <div className="hub-card overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full" style={{ minWidth: 900 }}>
+          <table className="w-full" style={{ minWidth: 900 }}>
             <thead style={{ background: 'var(--hub-bg-2)' }}>
               <tr>
                 {[
-                  t('activity.createdAt'),
+                  t('activity.timestamp'),
                   t('activity.server'),
                   t('activity.tool'),
                   t('activity.duration'),
@@ -686,7 +685,7 @@ const ActivityPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
                 <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-                  {t('activity.createdAt')}
+                  {t('activity.timestamp')}
                 </label>
                 <p className="text-gray-900 dark:text-white">
                   {formatTimestamp(selectedActivity.createdAt)}

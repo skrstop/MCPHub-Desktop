@@ -3135,7 +3135,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcphub"
-version = "1.0.18006"
+version = "1.0.18008"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3173,6 +3173,7 @@ dependencies = [
  "tower-http 0.5.2",
  "url",
  "uuid",
+ "winreg 0.55.0",
  "zip 2.4.2",
 ]
 
