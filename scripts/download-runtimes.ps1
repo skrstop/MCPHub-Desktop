@@ -3,9 +3,9 @@
 # Run from the repository root before building the Tauri app.
 
 param(
-    [string]$NodeVersion = "24.17.0",
-    [string]$UvVersion = "0.11.23",
-    [string]$PythonVersion = "3.12",
+    [string]$NodeVersion = "24.18.0",
+    [string]$UvVersion = "0.11.24",
+    [string]$PythonVersion = "3.14",
     # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
     # 注意: TargetArch 控制 Node.js 和 Python 的目标架构，但 uv 始终使用宿主架构以便能执行
     [string]$TargetArch = ""
@@ -321,10 +321,9 @@ if (-not $PythonExists) {
                 Write-Host "      $($_.Name) (IsDir=$($_.PSIsContainer))"
             }
         }
-        # Use cmd /c to reliably pass subcommand arguments on Windows CI.
-        # PowerShell's `& $exe arg1 arg2` invocation can mangle arguments in some
-        # CI environments, causing uv to misinterpret the subcommand.
-        $cmdLine = "`"$UvExe`" python install $PythonVersion"
+        # Use cmd /c to avoid PowerShell argument-mangling on Windows CI.
+        # Set UV_PYTHON_INSTALL_DIR via set command in the same cmd session.
+        $cmdLine = "set `"UV_PYTHON_INSTALL_DIR=$PythonInstallDir`" && `"$UvExe`" python install $PythonVersion"
         Write-Host "    Running via cmd /c: $cmdLine"
         Write-Host "    --- uv output start ---"
         $oldEA = $ErrorActionPreference
@@ -347,8 +346,34 @@ if (-not $PythonExists) {
             Write-Warning "    PythonInstallDir does NOT exist after install!"
         }
     }
+    # Flatten the cpython directory: move contents of cpython-X.Y.Z-.../ up to python/
+    # uv installs into a versioned subdirectory like cpython-3.12.13-windows-x86_64-none/
+    # but Tauri's resource bundler may have issues with deeply nested paths on Windows.
+    # Flattening reduces path depth and avoids potential MAX_PATH issues.
+    Write-Host "--> Flattening Python directory structure..."
+    $CpythonDirs = Get-ChildItem $PythonInstallDir -Directory | Where-Object {
+        $_.Name -like "cpython-*"
+    }
+    foreach ($CpyDir in $CpythonDirs) {
+        Write-Host "    Moving contents of $($CpyDir.Name) up to $PythonInstallDir..."
+        Get-ChildItem $CpyDir.FullName -Force | ForEach-Object {
+            $dest = Join-Path $PythonInstallDir $_.Name
+            if (Test-Path $dest) {
+                # If destination exists (e.g. from a previous cpython version), remove it first
+                Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item $_.FullName $PythonInstallDir -Force
+        }
+        Remove-Item $CpyDir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "    Removed $($CpyDir.Name)"
+    }
+    # Also remove .temp and other non-Python artifacts
+    $TempDir = Join-Path $PythonInstallDir ".temp"
+    if (Test-Path $TempDir) {
+        Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "    Removed .temp directory"
+    }
     # Verify Python was actually installed
-    # uv on Windows installs python3.x.exe (e.g. python3.12.exe), NOT python.exe
     # Search for any python*.exe to handle different naming conventions
     Write-Host "--> Searching for Python executable in $PythonInstallDir..."
     $AllPythonExes = Get-ChildItem $PythonInstallDir -Recurse -Filter "python*.exe" -ErrorAction SilentlyContinue

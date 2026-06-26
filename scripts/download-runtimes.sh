@@ -7,9 +7,9 @@
 set -euo pipefail
 
 # Versions — override via env vars if needed
-NODE_VERSION="${NODE_VERSION:-24.17.0}"
-UV_VERSION="${UV_VERSION:-0.11.23}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+NODE_VERSION="${NODE_VERSION:-24.18.0}"
+UV_VERSION="${UV_VERSION:-0.11.24}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR/../src-tauri/runtimes"
