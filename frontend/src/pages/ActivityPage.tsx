@@ -552,7 +552,7 @@ const ActivityPage: React.FC = () => {
             <thead style={{ background: 'var(--hub-bg-2)' }}>
               <tr>
                 {[
-                  t('activity.timestamp'),
+                  t('activity.createdAt'),
                   t('activity.server'),
                   t('activity.tool'),
                   t('activity.duration'),
@@ -591,7 +591,7 @@ const ActivityPage: React.FC = () => {
                     className="hub-mono whitespace-nowrap"
                     style={{ padding: '10px 14px', fontSize: 12, color: 'var(--hub-ink-2)' }}
                   >
-                    {formatTimestamp(activity.timestamp)}
+                    {formatTimestamp(activity.createdAt)}
                   </td>
                   <td style={{ padding: '10px 14px' }}>
                     <span className="hub-tag">{activity.server}</span>
@@ -686,10 +686,10 @@ const ActivityPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
                 <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-                  {t('activity.timestamp')}
+                  {t('activity.createdAt')}
                 </label>
                 <p className="text-gray-900 dark:text-white">
-                  {formatTimestamp(selectedActivity.timestamp)}
+                  {formatTimestamp(selectedActivity.createdAt)}
                 </p>
               </div>
               <div>

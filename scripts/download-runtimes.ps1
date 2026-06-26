@@ -128,9 +128,16 @@ if (-not (Test-Path $NodeExe)) {
 
     New-Item -ItemType Directory -Force -Path $NodeDest | Out-Null
 
-    # On Windows, node.exe and node_modules are in the root
+    # On Windows, node.exe, node_modules, and wrapper scripts are in the root
     Copy-Item (Join-Path $Extracted.FullName "node.exe") $NodeDest
     Copy-Item -Recurse (Join-Path $Extracted.FullName "node_modules") $NodeDest
+    # Copy wrapper scripts (npx.cmd, npm.cmd) so they can be found on PATH
+    foreach ($wrapper in @("npx.cmd", "npm.cmd", "npx", "npm")) {
+        $src = Join-Path $Extracted.FullName $wrapper
+        if (Test-Path $src) {
+            Copy-Item $src $NodeDest
+        }
+    }
 
     Remove-Item $TmpZip -Force
     Remove-Item -Recurse -Force $TmpDir

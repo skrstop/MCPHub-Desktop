@@ -295,14 +295,26 @@ const ServerCard = ({
     if (!canManage) return;
     try {
       // For OpenAPI servers, copy the OpenAPI spec JSON instead of MCP settings
-      if (server.type === 'openapi' && server.openapi?.schema) {
-        const json = JSON.stringify(server.openapi.schema, null, 2);
-        const ok = await copyText(json);
-        showToast(
-          ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Copy failed',
-          ok ? 'success' : 'error',
-        );
-        return;
+      if (server.type === 'openapi') {
+        let spec = server.openapi?.schema;
+        // URL mode: fetch the spec from the URL
+        if (!spec && server.openapi?.url) {
+          const resp = await fetch(server.openapi.url);
+          if (!resp.ok) {
+            showToast(t('common.copyFailed') || 'Copy failed', 'error');
+            return;
+          }
+          spec = await resp.json();
+        }
+        if (spec) {
+          const json = JSON.stringify(spec, null, 2);
+          const ok = await copyText(json);
+          showToast(
+            ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Copy failed',
+            ok ? 'success' : 'error',
+          );
+          return;
+        }
       }
       const result = await exportMCPSettings(server.name);
       if (!result || !result.success || !result.data) {

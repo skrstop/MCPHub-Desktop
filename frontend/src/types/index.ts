@@ -641,7 +641,7 @@ export type ActivityStatus = 'success' | 'error';
 
 export interface Activity {
   id: string;
-  timestamp: string;
+  createdAt: string;
   server: string;
   tool: string;
   duration: number;

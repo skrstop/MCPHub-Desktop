@@ -180,7 +180,11 @@ impl McpTransport for StdioTransport {
 
         let mut child = cmd.spawn()
             .map_err(|e| {
-                let err_msg = format!("[{}] Failed to spawn process: {}", self.server_name, e);
+                let cmd_exists = std::path::Path::new(&resolved_cmd).exists();
+                let err_msg = format!(
+                    "[{}] Failed to spawn process: {}\n  command: {}\n  args: {:?}\n  cmd_exists: {}",
+                    self.server_name, e, resolved_cmd, resolved_args, cmd_exists
+                );
                 log::error!("{}", err_msg);
                 app_logger::log_to_db("error", &err_msg);
                 e

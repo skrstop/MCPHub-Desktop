@@ -167,7 +167,7 @@ fn get_windows_path() -> String {
 
     let current_path = std::env::var("PATH").unwrap_or_default();
 
-    // Merge: user PATH + machine PATH + process PATH (dedup not needed, Windows handles it)
+    // Merge: user PATH + machine PATH + process PATH
     let mut parts: Vec<&str> = Vec::new();
     if !user_path.is_empty() {
         parts.push(&user_path);
@@ -178,7 +178,25 @@ fn get_windows_path() -> String {
     if !current_path.is_empty() {
         parts.push(&current_path);
     }
-    parts.join(";")
+    let combined = parts.join(";");
+
+    // Expand %VAR% references using process environment.
+    // Registry stores paths like %USERPROFILE%\AppData\Local\... which need expansion.
+    expand_env_vars(&combined)
+}
+
+/// Expand %VAR% references in a string using the current process environment.
+#[cfg(target_os = "windows")]
+fn expand_env_vars(input: &str) -> String {
+    let mut result = input.to_string();
+    // Iterate over all environment variables and replace %VAR% references
+    for (key, value) in std::env::vars() {
+        let pattern = format!("%{}%", key);
+        if result.contains(&pattern) {
+            result = result.replace(&pattern, &value);
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -269,29 +287,26 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
     match command {
         "node" | "npx" | "npm" => {
             let active = get_active_node();
-            // "system" → let the OS find node on PATH, no override
-            if active == "system" {
-                return (command.to_string(), args.to_vec());
-            }
-            // Specific version → look in user-managed node-versions directory
-            if let Some(base) = node_versions_base() {
-                let ver_dir = base.join(&active);
-                if ver_dir.exists() {
-                    let resolved = resolve_node_command_in_dir(command, args, &ver_dir);
-                    if resolved.is_some() {
-                        return resolved.unwrap();
+            if active != "system" {
+                // Specific version → look in user-managed node-versions directory
+                if let Some(base) = node_versions_base() {
+                    let ver_dir = base.join(&active);
+                    if ver_dir.exists() {
+                        let resolved = resolve_node_command_in_dir(command, args, &ver_dir);
+                        if resolved.is_some() {
+                            return resolved.unwrap();
+                        }
                     }
                 }
             }
-            // Fall through to bundled runtime if version dir not found
+            // "system" or version dir not found → fall through to bundled runtime
         }
         "python" | "python3" => {
             let active = get_active_python();
-            // "system" → let the OS find python on PATH, no override
-            if active == "system" {
-                return (command.to_string(), args.to_vec());
+            if active != "system" {
+                // For a specific python version, fall through to bundled resolution below
             }
-            // For a specific python version, fall through to uv-managed resolution below
+            // "system" → fall through to bundled runtime (don't return bare name yet)
         }
         _ => {}
     }
@@ -317,6 +332,14 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
                 new_args.extend_from_slice(args);
                 return (node.to_string_lossy().into_owned(), new_args);
             }
+            // Fallback: use npx.cmd directly (Windows batch wrapper)
+            #[cfg(target_os = "windows")]
+            {
+                let npx_cmd = node_bin_dir(rt).join("npx.cmd");
+                if npx_cmd.exists() {
+                    return (npx_cmd.to_string_lossy().into_owned(), args.to_vec());
+                }
+            }
         }
         "npm" => {
             let node = node_bin_path(rt);
@@ -325,6 +348,14 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
                 let mut new_args = vec![cli.to_string_lossy().into_owned()];
                 new_args.extend_from_slice(args);
                 return (node.to_string_lossy().into_owned(), new_args);
+            }
+            // Fallback: use npm.cmd directly (Windows batch wrapper)
+            #[cfg(target_os = "windows")]
+            {
+                let npm_cmd = node_bin_dir(rt).join("npm.cmd");
+                if npm_cmd.exists() {
+                    return (npm_cmd.to_string_lossy().into_owned(), args.to_vec());
+                }
             }
         }
         "uvx" => {

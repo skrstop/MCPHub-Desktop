@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 8;
+pub const TARGET_VERSION: i64 = 9;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -112,6 +112,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         6 => migrate_v6(pool).await,
         7 => migrate_v7(pool).await,
         8 => migrate_v8(pool).await,
+        9 => migrate_v9(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -430,5 +431,46 @@ async fn migrate_v8(pool: &SqlitePool) -> Result<()> {
     }
 
     log::info!("[db] migration v8: converted existing timestamps to local time");
+    Ok(())
+}
+
+/// v8 → v9: Recreate activity_log with correct schema.
+///
+/// The old activity_log table (created in v1/v2) had columns:
+///   id, user_id, action, resource, detail, created_at
+///
+/// The code expects columns:
+///   id, created_at, server, tool, duration_ms, status,
+///   input, output, error_message, group_name, key_id, key_name, source_ip
+///
+/// Since the schemas are incompatible, we drop and recreate the table.
+async fn migrate_v9(pool: &SqlitePool) -> Result<()> {
+    // Drop the old table with wrong schema
+    sqlx::query("DROP TABLE IF EXISTS activity_log")
+        .execute(pool)
+        .await?;
+
+    // Create with the correct schema matching log_service.rs
+    sqlx::query(
+        "CREATE TABLE activity_log (
+            id            TEXT PRIMARY KEY,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            server        TEXT NOT NULL DEFAULT '',
+            tool          TEXT NOT NULL DEFAULT '',
+            duration_ms   INTEGER,
+            status        TEXT NOT NULL DEFAULT '',
+            input         TEXT,
+            output        TEXT,
+            error_message TEXT,
+            group_name    TEXT,
+            key_id        TEXT,
+            key_name      TEXT,
+            source_ip     TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    log::info!("[db] migration v9: recreated activity_log with correct schema");
     Ok(())
 }

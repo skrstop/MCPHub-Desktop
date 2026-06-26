@@ -1104,9 +1104,10 @@ async fn get_installed_python_versions() -> Vec<(String, PathBuf, bool)> {
                         let ver = ver_part.strip_prefix("cpython-").unwrap_or(ver_part);
                         let major_minor = ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
                         if !major_minor.is_empty() {
-                            // Avoid duplicates from bundled dir
-                            if !result.iter().any(|(mm, _, _)| mm == &major_minor) {
-                                result.push((major_minor, PathBuf::from(exec_path), false));
+                            // Verify the executable actually exists before reporting as installed
+                            let exec = PathBuf::from(exec_path);
+                            if exec.exists() && !result.iter().any(|(mm, _, _)| mm == &major_minor) {
+                                result.push((major_minor, exec, false));
                             }
                         }
                     }
@@ -1398,8 +1399,25 @@ fn get_windows_path() -> String {
     }
     let combined = parts.join(";");
 
-    log::info!("[runtime] Combined PATH length: {}", combined.len());
-    crate::services::app_logger::log_to_db("info", &format!("[runtime] Combined PATH length: {}", combined.len()));
-    combined
+    // Expand %VAR% references using process environment.
+    // Registry stores paths like %USERPROFILE%\AppData\Local\... which need expansion.
+    let expanded = expand_env_vars(&combined);
+
+    log::info!("[runtime] Combined PATH length: {}", expanded.len());
+    crate::services::app_logger::log_to_db("info", &format!("[runtime] Combined PATH length: {}", expanded.len()));
+    expanded
+}
+
+/// Expand %VAR% references in a string using the current process environment.
+#[cfg(target_os = "windows")]
+fn expand_env_vars(input: &str) -> String {
+    let mut result = input.to_string();
+    for (key, value) in std::env::vars() {
+        let pattern = format!("%{}%", key);
+        if result.contains(&pattern) {
+            result = result.replace(&pattern, &value);
+        }
+    }
+    result
 }
 

@@ -84,7 +84,7 @@ fn row_to_activity(r: &sqlx::sqlite::SqliteRow) -> Result<ActivityEntry> {
     let output_str: Option<String> = r.try_get("output")?;
     Ok(ActivityEntry {
         id: r.try_get("id")?,
-        timestamp: r.try_get("timestamp")?,
+        created_at: r.try_get("created_at")?,
         server: r.try_get("server")?,
         tool: r.try_get("tool")?,
         duration_ms: r.try_get("duration_ms")?,
@@ -131,9 +131,9 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
 
     // Data query
     let data_sql = format!(
-        "SELECT id, timestamp, server, tool, duration_ms, status, input, output, \
+        "SELECT id, created_at, server, tool, duration_ms, status, input, output, \
          group_name, key_id, key_name, error_message, source_ip FROM activity_log {} \
-         ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+         ORDER BY created_at DESC LIMIT ? OFFSET ?",
         where_clause
     );
     let mut data_q = sqlx::query(&data_sql);
@@ -230,7 +230,7 @@ fn format_size(bytes: u64) -> String {
 /// This function:
 /// 1. Gets DB size before cleanup
 /// 2. Deletes app_log entries older than 15 days (uses created_at column)
-/// 3. Deletes activity_log entries older than 15 days (uses timestamp column)
+/// 3. Deletes activity_log entries older than 15 days (uses created_at column)
 /// 4. Runs VACUUM to reclaim disk space
 /// 5. Gets DB size after cleanup
 ///
@@ -263,9 +263,9 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
         .await?;
     let app_deleted = app_result.rows_affected() as i64;
 
-    // Delete old activity_log entries (uses timestamp column)
+    // Delete old activity_log entries (uses created_at column)
     let activity_sql = format!(
-        "DELETE FROM activity_log WHERE timestamp < {}",
+        "DELETE FROM activity_log WHERE created_at < {}",
         cutoff
     );
     let activity_result = sqlx::query(&activity_sql)

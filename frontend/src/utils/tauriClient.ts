@@ -582,7 +582,7 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     // Transform backend camelCase fields to frontend expected format
     const activities = (r.data || []).map((e: Record<string, unknown>) => ({
       id: e.id,
-      timestamp: e.timestamp,
+      createdAt: e.createdAt,
       server: e.server,
       tool: e.tool,
       duration: (e.durationMs as number) ?? 0,  // durationMs → duration

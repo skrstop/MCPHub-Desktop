@@ -15,7 +15,7 @@ pub struct LogEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ActivityEntry {
     pub id: String,
-    pub timestamp: String,
+    pub created_at: String,
     pub server: String,
     pub tool: String,
     pub duration_ms: Option<i64>,
