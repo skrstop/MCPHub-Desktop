@@ -116,9 +116,19 @@ pub async fn toggle_server(server_name: &str) -> Result<bool> {
         }
         pool::connect_server(&cfg).await;
     } else {
-        if let Err(e) = pool::disconnect_server(server_name).await {
-            log::error!("[{}] Failed to disconnect: {}", server_name, e);
-            app_logger::log_to_db("error", &format!("[{}] Failed to disconnect: {}", server_name, e));
+        // Check if server is still in "starting" state — if so, let the connect finish
+        // rather than killing the just-spawned process (race condition from rapid clicks)
+        let is_starting = pool::get_status(server_name).await
+            .map(|s| s.starting)
+            .unwrap_or(false);
+        if is_starting {
+            log::info!("[{}] Server is still connecting, will not kill process — waiting for connect to finish", server_name);
+            app_logger::log_to_db("info", &format!("[{}] Server still connecting, skipping disconnect to avoid race condition", server_name));
+        } else {
+            if let Err(e) = pool::disconnect_server(server_name).await {
+                log::error!("[{}] Failed to disconnect: {}", server_name, e);
+                app_logger::log_to_db("error", &format!("[{}] Failed to disconnect: {}", server_name, e));
+            }
         }
     }
     Ok(cfg.enabled)

@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -98,6 +98,8 @@ pub struct StdioTransport {
     pending: std::sync::Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     /// When stdout closes (process exits), this notifies to unblock pending requests.
     done: Arc<Notify>,
+    /// Whether the disconnect was intentional (suppress "unexpected exit" warnings).
+    intentional_disconnect: Arc<AtomicBool>,
     connected: bool,
     server_name: String,
 }
@@ -117,6 +119,7 @@ impl StdioTransport {
             stdin: std::sync::Arc::new(Mutex::new(None)),
             pending: std::sync::Arc::new(Mutex::new(HashMap::new())),
             done: Arc::new(Notify::new()),
+            intentional_disconnect: Arc::new(AtomicBool::new(false)),
             connected: false,
             server_name: server_name.into(),
         }
@@ -341,6 +344,7 @@ impl McpTransport for StdioTransport {
         let pending = self.pending.clone();
         let server_name = self.server_name.clone();
         let done = self.done.clone();
+        let intentional = self.intentional_disconnect.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
@@ -356,8 +360,12 @@ impl McpTransport for StdioTransport {
                     log::debug!("[{}] stdout: {}", server_name, line);
                 }
             }
-            log::info!("[{}] stdout reader exited (child process terminated)", server_name);
-            app_logger::log_to_db("warn", &format!("[{}] stdout reader exited — child process terminated unexpectedly", server_name));
+            if intentional.load(Ordering::SeqCst) {
+                log::info!("[{}] stdout reader exited (process intentionally stopped)", server_name);
+            } else {
+                log::warn!("[{}] stdout reader exited — child process terminated unexpectedly", server_name);
+                app_logger::log_to_db("warn", &format!("[{}] child process terminated unexpectedly", server_name));
+            }
             // Notify pending requests that the process has exited
             done.notify_waiters();
             // Fail all pending requests
@@ -411,6 +419,8 @@ impl McpTransport for StdioTransport {
 
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
+        // Mark as intentional disconnect so stdout reader doesn't log "unexpected" warning
+        self.intentional_disconnect.store(true, Ordering::SeqCst);
         if let Some(mut child) = self.child.take() {
             let pid = child.id().unwrap_or(0);
             let msg = format!("[{}] Killing process tree (pid={})...", self.server_name, pid);

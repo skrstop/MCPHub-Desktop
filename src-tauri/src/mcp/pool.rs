@@ -140,7 +140,19 @@ fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
 pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     let name = cfg.name.clone();
 
-    // 0. Clean up any existing entry (e.g., zombie process from a previous connection)
+    // 0. Check if already connecting (prevent re-entry from rapid disable/enable clicks)
+    {
+        let map = pool().read().await;
+        if let Some(entry) = map.get(&name) {
+            if entry.status.starting {
+                log::warn!("[{}] Already connecting, skipping duplicate connect_server call", name);
+                app_logger::log_to_db("warn", &format!("[{}] Already connecting, skipping duplicate connect", name));
+                return entry.status.clone();
+            }
+        }
+    }
+
+    // 1. Clean up any existing entry (e.g., zombie process from a previous connection)
     {
         let existing = {
             let mut map = pool().write().await;
@@ -175,96 +187,129 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         });
     }
 
-    // 2. Build client
-    let mut entry_client = match build_client(cfg) {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("[{}] Failed to build client: {}", name, e);
-            let status = ServerStatus {
-                name: name.clone(),
-                connected: false,
-                starting: false,
-                tool_count: 0,
-                error: Some(e.to_string()),
-                last_connected: None,
-            };
-            let mut map = pool().write().await;
-            map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
-            return status;
-        }
-    };
+    // 2. Build client + connect with retry for transient failures
+    const MAX_RETRIES: u32 = 3;
+    let mut last_error = String::new();
 
-    // 3. Attempt connect (with timeout to avoid stuck at "connecting" forever)
-    let connect_result = timeout(
-        Duration::from_secs(120),
-        entry_client.connect(),
-    ).await;
+    for attempt in 1..=MAX_RETRIES {
+        // Build client
+        let mut entry_client = match build_client(cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("[{}] Failed to build client: {}", name, e);
+                let status = ServerStatus {
+                    name: name.clone(),
+                    connected: false,
+                    starting: false,
+                    tool_count: 0,
+                    error: Some(e.to_string()),
+                    last_connected: None,
+                };
+                let mut map = pool().write().await;
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+                return status;
+            }
+        };
 
-    match connect_result {
-        Ok(Ok(())) => {
-            let tools = entry_client.list_tools().await.unwrap_or_default();
-            let tool_count = tools.len();
-            let last_connected = Some(chrono::Utc::now().to_rfc3339());
-            let status = ServerStatus {
-                name: name.clone(),
-                connected: true,
-                starting: false,
-                tool_count,
-                error: None,
-                last_connected,
-            };
-            let mut map = pool().write().await;
-            map.insert(
-                name.clone(),
-                PoolEntry {
+        // Attempt connect (with timeout)
+        let connect_result = timeout(
+            Duration::from_secs(120),
+            entry_client.connect(),
+        ).await;
+
+        match connect_result {
+            Ok(Ok(())) => {
+                let tools = entry_client.list_tools().await.unwrap_or_default();
+                let tool_count = tools.len();
+                let last_connected = Some(chrono::Utc::now().to_rfc3339());
+                let status = ServerStatus {
+                    name: name.clone(),
+                    connected: true,
+                    starting: false,
+                    tool_count,
+                    error: None,
+                    last_connected,
+                };
+                let mut map = pool().write().await;
+                map.insert(name.clone(), PoolEntry {
                     client: Some(entry_client),
                     status: status.clone(),
                     tools,
-                },
-            );
-            let conn_msg = format!("[{}] Connected ({} tools)", name, tool_count);
-            log::info!("{}", conn_msg);
-            app_logger::log_to_db("info", &conn_msg);
-            status
-        }
-        Ok(Err(e)) => {
-            let err_msg = format!("[{}] Connect failed: {}", name, e);
-            log::error!("{}", err_msg);
-            app_logger::log_to_db("error", &err_msg);
-            let status = ServerStatus {
-                name: name.clone(),
-                connected: false,
-                starting: false,
-                tool_count: 0,
-                error: Some(e.to_string()),
-                last_connected: None,
-            };
-            let mut map = pool().write().await;
-            map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
-            status
-        }
-        Err(_elapsed) => {
-            let err_msg = format!(
-                "[{}] Connect timed out after 120s — server process may be stuck or very slow to start",
-                name
-            );
-            log::error!("{}", err_msg);
-            app_logger::log_to_db("error", &err_msg);
-            // Disconnect the hung client to kill the child process
-            let _ = entry_client.disconnect().await;
-            let status = ServerStatus {
-                name: name.clone(),
-                connected: false,
-                starting: false,
-                tool_count: 0,
-                error: Some("Connection timed out after 120 seconds".to_string()),
-                last_connected: None,
-            };
-            let mut map = pool().write().await;
-            map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
-            status
+                });
+                let conn_msg = if attempt > 1 {
+                    format!("[{}] Connected ({} tools) after {} attempts", name, tool_count, attempt)
+                } else {
+                    format!("[{}] Connected ({} tools)", name, tool_count)
+                };
+                log::info!("{}", conn_msg);
+                app_logger::log_to_db("info", &conn_msg);
+                return status;
+            }
+            Ok(Err(e)) => {
+                last_error = e.to_string();
+                // Retry on transient errors (child process exited unexpectedly)
+                if attempt < MAX_RETRIES && last_error.contains("child process exited") {
+                    let retry_msg = format!(
+                        "[{}] Connect failed (attempt {}/{}): {} — retrying in 1s...",
+                        name, attempt, MAX_RETRIES, last_error
+                    );
+                    log::warn!("{}", retry_msg);
+                    app_logger::log_to_db("warn", &retry_msg);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                // Non-transient error or retries exhausted
+                let err_msg = format!("[{}] Connect failed after {} attempt(s): {}", name, attempt, last_error);
+                log::error!("{}", err_msg);
+                app_logger::log_to_db("error", &err_msg);
+                let status = ServerStatus {
+                    name: name.clone(),
+                    connected: false,
+                    starting: false,
+                    tool_count: 0,
+                    error: Some(last_error.clone()),
+                    last_connected: None,
+                };
+                let mut map = pool().write().await;
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+                return status;
+            }
+            Err(_elapsed) => {
+                last_error = "Connection timed out after 120 seconds".to_string();
+                let err_msg = format!("[{}] Connect timed out after 120s", name);
+                log::error!("{}", err_msg);
+                app_logger::log_to_db("error", &err_msg);
+                let _ = entry_client.disconnect().await;
+                let status = ServerStatus {
+                    name: name.clone(),
+                    connected: false,
+                    starting: false,
+                    tool_count: 0,
+                    error: Some(last_error.clone()),
+                    last_connected: None,
+                };
+                let mut map = pool().write().await;
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+                return status;
+            }
         }
     }
+
+    // All retries exhausted (should not reach here for timeout, only for "child process exited")
+    let err_msg = format!("[{}] Connect failed after {} attempts: {}", name, MAX_RETRIES, last_error);
+    log::error!("{}", err_msg);
+    app_logger::log_to_db("error", &err_msg);
+    let status = ServerStatus {
+        name: name.clone(),
+        connected: false,
+        starting: false,
+        tool_count: 0,
+        error: Some(last_error),
+        last_connected: None,
+    };
+    let mut map = pool().write().await;
+    map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+    status
 }
 
 /// Disconnect and remove a server from the pool.
