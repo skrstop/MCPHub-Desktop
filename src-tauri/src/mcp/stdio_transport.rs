@@ -9,14 +9,17 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::{oneshot, watch, Mutex},
+    sync::{oneshot, Mutex, Notify},
 };
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -93,8 +96,8 @@ pub struct StdioTransport {
     child: Option<Child>,
     stdin: std::sync::Arc<Mutex<Option<tokio::process::ChildStdin>>>,
     pending: std::sync::Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
-    /// When stdout closes (process exits), this channel fires to unblock pending requests.
-    done_rx: watch::Receiver<bool>,
+    /// When stdout closes (process exits), this notifies to unblock pending requests.
+    done: Arc<Notify>,
     connected: bool,
     server_name: String,
 }
@@ -106,7 +109,6 @@ impl StdioTransport {
         args: Vec<String>,
         env: HashMap<String, String>,
     ) -> Self {
-        let (_, done_rx) = watch::channel(false);
         Self {
             command: command.into(),
             args,
@@ -114,7 +116,7 @@ impl StdioTransport {
             child: None,
             stdin: std::sync::Arc::new(Mutex::new(None)),
             pending: std::sync::Arc::new(Mutex::new(HashMap::new())),
-            done_rx,
+            done: Arc::new(Notify::new()),
             connected: false,
             server_name: server_name.into(),
         }
@@ -155,7 +157,7 @@ impl StdioTransport {
             result = rx => {
                 result.map_err(|_| anyhow!("Response channel closed"))?
             }
-            _ = self.done_rx.changed() => {
+            _ = self.done.notified() => {
                 let elapsed = request_start.elapsed();
                 let err_msg = format!(
                     "[{}] Child process exited while waiting for '{}' response ({:.1}s)",
@@ -335,14 +337,10 @@ impl McpTransport for StdioTransport {
             log::info!("[{}] stderr reader exited", stderr_name);
         });
 
-        // Spawn reader task — when stdout closes (process exits), notify via done_tx
+        // Spawn reader task — when stdout closes (process exits), notify pending requests
         let pending = self.pending.clone();
         let server_name = self.server_name.clone();
-        let done_tx = {
-            let (tx, rx) = watch::channel(false);
-            self.done_rx = rx;
-            tx
-        };
+        let done = self.done.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
@@ -360,8 +358,8 @@ impl McpTransport for StdioTransport {
             }
             log::info!("[{}] stdout reader exited (child process terminated)", server_name);
             app_logger::log_to_db("warn", &format!("[{}] stdout reader exited — child process terminated unexpectedly", server_name));
-            // Notify all pending requests that the process has exited
-            let _ = done_tx.send(true);
+            // Notify pending requests that the process has exited
+            done.notify_waiters();
             // Fail all pending requests
             let mut map = pending.lock().await;
             for (_, tx) in map.drain() {
