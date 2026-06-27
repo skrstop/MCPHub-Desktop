@@ -434,8 +434,12 @@ impl McpTransport for StdioTransport {
                 app_logger::log_to_db("info", &format!("[{}] Sent kill signal to process tree (pid={})", self.server_name, pid));
             }
             child.kill().await.ok();
+            // Wait for the direct child process to fully exit
+            let _ = child.wait().await;
+            // Extra wait for process tree cleanup and file lock release (especially on Windows)
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            let done_msg = format!("[{}] Process killed (pid={})", self.server_name, pid);
+            let done_msg = format!("[{}] Process killed and cleaned up (pid={})", self.server_name, pid);
             log::info!("{}", done_msg);
             app_logger::log_to_db("info", &done_msg);
         } else {

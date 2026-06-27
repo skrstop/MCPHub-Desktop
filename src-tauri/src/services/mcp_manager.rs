@@ -111,6 +111,7 @@ pub async fn toggle_server(server_name: &str) -> Result<bool> {
 
     if cfg.enabled {
         // Always disconnect first to clean up any zombie processes before re-connecting
+        // disconnect_server is fully synchronous — waits for process exit + file lock release
         if let Err(e) = pool::disconnect_server(server_name).await {
             log::warn!("[{}] Pre-enable disconnect failed (may be already disconnected): {}", server_name, e);
         }
