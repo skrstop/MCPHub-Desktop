@@ -10,6 +10,7 @@ use crate::models::server::{ServerConfig, ServerStatus, ServerType, Tool, ToolCa
 use crate::services::app_logger;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use tokio::time::{timeout, Duration};
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
@@ -178,9 +179,14 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         }
     };
 
-    // 3. Attempt connect
-    match entry_client.connect().await {
-        Ok(()) => {
+    // 3. Attempt connect (with timeout to avoid stuck at "connecting" forever)
+    let connect_result = timeout(
+        Duration::from_secs(120),
+        entry_client.connect(),
+    ).await;
+
+    match connect_result {
+        Ok(Ok(())) => {
             let tools = entry_client.list_tools().await.unwrap_or_default();
             let tool_count = tools.len();
             let last_connected = Some(chrono::Utc::now().to_rfc3339());
@@ -206,7 +212,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
             app_logger::log_to_db("info", &conn_msg);
             status
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let err_msg = format!("[{}] Connect failed: {}", name, e);
             log::error!("{}", err_msg);
             app_logger::log_to_db("error", &err_msg);
@@ -216,6 +222,27 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                 starting: false,
                 tool_count: 0,
                 error: Some(e.to_string()),
+                last_connected: None,
+            };
+            let mut map = pool().write().await;
+            map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![] });
+            status
+        }
+        Err(_elapsed) => {
+            let err_msg = format!(
+                "[{}] Connect timed out after 120s — server process may be stuck or very slow to start",
+                name
+            );
+            log::error!("{}", err_msg);
+            app_logger::log_to_db("error", &err_msg);
+            // Disconnect the hung client to kill the child process
+            let _ = entry_client.disconnect().await;
+            let status = ServerStatus {
+                name: name.clone(),
+                connected: false,
+                starting: false,
+                tool_count: 0,
+                error: Some("Connection timed out after 120 seconds".to_string()),
                 last_connected: None,
             };
             let mut map = pool().write().await;

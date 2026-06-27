@@ -263,6 +263,18 @@ impl McpTransport for StdioTransport {
 
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to get stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to get stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to get stderr"))?;
+
+        // Spawn stderr drain task — without this, the child process blocks
+        // when the ~4KB pipe buffer fills up (npx/uvx write progress to stderr).
+        let stderr_name = self.server_name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                log::debug!("[{}] stderr: {}", stderr_name, line);
+            }
+        });
 
         // Spawn reader task
         let pending = self.pending.clone();
