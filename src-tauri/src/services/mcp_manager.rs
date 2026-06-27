@@ -14,9 +14,15 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
     log::info!("{}", msg);
     app_logger::log_to_db("info", &msg);
 
-    for cfg in configs {
+    for (idx, cfg) in configs.into_iter().enumerate() {
         let name = cfg.name.clone();
+        let delay = std::time::Duration::from_secs(idx as u64 * 2);
         tokio::spawn(async move {
+            // Stagger startup to avoid file lock conflicts on shared cache directories
+            if !delay.is_zero() {
+                log::info!("[{}] Waiting {:.0}s before starting (staggered startup)...", name, delay.as_secs_f64());
+                tokio::time::sleep(delay).await;
+            }
             let status = pool::connect_server(&cfg).await;
             if status.connected {
                 let msg = format!("Server '{}' connected ({} tools)", name, status.tool_count);
@@ -104,9 +110,16 @@ pub async fn toggle_server(server_name: &str) -> Result<bool> {
     app_logger::log_to_db("info", &format!("[{}] {} server...", server_name, action));
 
     if cfg.enabled {
+        // Always disconnect first to clean up any zombie processes before re-connecting
+        if let Err(e) = pool::disconnect_server(server_name).await {
+            log::warn!("[{}] Pre-enable disconnect failed (may be already disconnected): {}", server_name, e);
+        }
         pool::connect_server(&cfg).await;
     } else {
-        pool::disconnect_server(server_name).await.ok();
+        if let Err(e) = pool::disconnect_server(server_name).await {
+            log::error!("[{}] Failed to disconnect: {}", server_name, e);
+            app_logger::log_to_db("error", &format!("[{}] Failed to disconnect: {}", server_name, e));
+        }
     }
     Ok(cfg.enabled)
 }

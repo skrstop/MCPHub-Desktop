@@ -140,6 +140,21 @@ fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
 pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     let name = cfg.name.clone();
 
+    // 0. Clean up any existing entry (e.g., zombie process from a previous connection)
+    {
+        let existing = {
+            let mut map = pool().write().await;
+            map.remove(&name)
+        };
+        if let Some(mut e) = existing {
+            if let Some(mut client) = e.client.take() {
+                log::warn!("[{}] Cleaning up previous connection before re-connecting...", name);
+                app_logger::log_to_db("warn", &format!("[{}] Cleaning up previous connection before re-connecting", name));
+                let _ = client.disconnect().await;
+            }
+        }
+    }
+
     // 1. Insert "starting" placeholder immediately
     let start_msg = format!("[{}] Starting connection (type={:?})...", name, cfg.server_type);
     log::info!("{}", start_msg);

@@ -432,7 +432,7 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
 /// Prepends bundled binary directories to `PATH` and sets runtime-specific
 /// cache/install dirs so everything stays self-contained within the app's
 /// data directory.
-pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
+pub fn env_overrides(original_command: &str, server_name: &str) -> Vec<(String, String)> {
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
     // Use cached enhanced PATH from user's shell instead of process PATH
     // GUI apps on macOS/Linux don't inherit the shell PATH
@@ -487,15 +487,17 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
     let new_path = format!("{}{}{}", prepend_dirs.join(sep), sep, existing_path);
     let mut env: Vec<(String, String)> = vec![("PATH".to_string(), new_path)];
 
-    // Point npm cache to app-local directory to avoid permission issues
+    // Point npm cache to server-specific directory to avoid file lock conflicts
+    // when multiple npx servers start simultaneously.
     if matches!(original_command, "node" | "npx" | "npm") {
-        if let Some(cache) = app_local_dir("npm-cache") {
-            log::info!("[runtime_env] npm_config_cache: {}", cache);
+        let cache_name = format!("npm-cache-{}", server_name);
+        if let Some(cache) = app_local_dir(&cache_name) {
+            log::info!("[runtime_env] npm_config_cache (server '{}'): {}", server_name, cache);
             env.push(("npm_config_cache".to_string(), cache));
         }
     }
 
-    // Point uv to our Python install dir (writable user data) and use app-local cache/tool dirs
+    // Point uv to server-specific cache/tool dirs to avoid file lock conflicts
     if matches!(original_command, "uv" | "uvx" | "python" | "python3") {
         // Strategy: try version check first with short timeout, fall back to cache on failure.
         // uv behavior: check version (network) → success: use latest → timeout/fail: use cached
@@ -509,12 +511,14 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
                 normalize_path(&python_dir),
             ));
         }
-        if let Some(cache) = app_local_dir("uv-cache") {
-            log::info!("[runtime_env] UV_CACHE_DIR: {}", cache);
+        let cache_name = format!("uv-cache-{}", server_name);
+        if let Some(cache) = app_local_dir(&cache_name) {
+            log::info!("[runtime_env] UV_CACHE_DIR (server '{}'): {}", server_name, cache);
             env.push(("UV_CACHE_DIR".to_string(), cache));
         }
-        if let Some(tools) = app_local_dir("uv-tools") {
-            log::info!("[runtime_env] UV_TOOL_DIR: {}", tools);
+        let tools_name = format!("uv-tools-{}", server_name);
+        if let Some(tools) = app_local_dir(&tools_name) {
+            log::info!("[runtime_env] UV_TOOL_DIR (server '{}'): {}", server_name, tools);
             env.push(("UV_TOOL_DIR".to_string(), tools));
         }
         // Pin to a specific Python version if user has selected one

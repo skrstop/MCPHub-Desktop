@@ -16,7 +16,7 @@ use std::os::windows::process::CommandExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::{oneshot, Mutex},
+    sync::{oneshot, watch, Mutex},
 };
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -93,6 +93,8 @@ pub struct StdioTransport {
     child: Option<Child>,
     stdin: std::sync::Arc<Mutex<Option<tokio::process::ChildStdin>>>,
     pending: std::sync::Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+    /// When stdout closes (process exits), this channel fires to unblock pending requests.
+    done_rx: watch::Receiver<bool>,
     connected: bool,
     server_name: String,
 }
@@ -104,6 +106,7 @@ impl StdioTransport {
         args: Vec<String>,
         env: HashMap<String, String>,
     ) -> Self {
+        let (_, done_rx) = watch::channel(false);
         Self {
             command: command.into(),
             args,
@@ -111,6 +114,7 @@ impl StdioTransport {
             child: None,
             stdin: std::sync::Arc::new(Mutex::new(None)),
             pending: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            done_rx,
             connected: false,
             server_name: server_name.into(),
         }
@@ -133,18 +137,45 @@ impl StdioTransport {
         }
 
         // Write the message to stdin
+        let request_start = std::time::Instant::now();
         {
             let mut guard = self.stdin.lock().await;
             if let Some(stdin) = guard.as_mut() {
                 let line = serde_json::to_string(&msg)? + "\n";
                 stdin.write_all(line.as_bytes()).await?;
                 stdin.flush().await?;
+                log::debug!("[{}] Request '{}' sent (id={})", self.server_name, method, id);
             } else {
                 return Err(anyhow!("stdin not available"));
             }
         }
 
-        let response = rx.await.map_err(|_| anyhow!("Response channel closed"))?;
+        // Race: response from server vs process exit
+        let response = tokio::select! {
+            result = rx => {
+                result.map_err(|_| anyhow!("Response channel closed"))?
+            }
+            _ = self.done_rx.changed() => {
+                let elapsed = request_start.elapsed();
+                let err_msg = format!(
+                    "[{}] Child process exited while waiting for '{}' response ({:.1}s)",
+                    self.server_name, method, elapsed.as_secs_f64()
+                );
+                log::error!("{}", err_msg);
+                app_logger::log_to_db("error", &err_msg);
+                return Err(anyhow!(err_msg));
+            }
+        };
+
+        let request_elapsed = request_start.elapsed();
+        log::info!(
+            "[{}] Request '{}' completed in {:.1}s (id={})",
+            self.server_name, method, request_elapsed.as_secs_f64(), id
+        );
+        app_logger::log_to_db("info", &format!(
+            "[{}] MCP '{}' request completed in {:.1}s",
+            self.server_name, method, request_elapsed.as_secs_f64()
+        ));
         if let Some(err) = response.get("error") {
             return Err(anyhow!("MCP error: {}", err));
         }
@@ -177,7 +208,7 @@ impl McpTransport for StdioTransport {
         let mut merged_env: HashMap<String, String> = std::env::vars().collect();
 
         // Apply runtime overrides (PATH is prepended with bundled binary dirs)
-        for (k, v) in runtime_env::env_overrides(&self.command) {
+        for (k, v) in runtime_env::env_overrides(&self.command, &self.server_name) {
             merged_env.insert(k, v);
         }
 
@@ -304,9 +335,14 @@ impl McpTransport for StdioTransport {
             log::info!("[{}] stderr reader exited", stderr_name);
         });
 
-        // Spawn reader task
+        // Spawn reader task — when stdout closes (process exits), notify via done_tx
         let pending = self.pending.clone();
         let server_name = self.server_name.clone();
+        let done_tx = {
+            let (tx, rx) = watch::channel(false);
+            self.done_rx = rx;
+            tx
+        };
         tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
@@ -322,16 +358,24 @@ impl McpTransport for StdioTransport {
                     log::debug!("[{}] stdout: {}", server_name, line);
                 }
             }
-            log::info!("[{}] stdout reader exited", server_name);
-            app_logger::log_to_db("info", &format!("[{}] stdout reader exited", server_name));
+            log::info!("[{}] stdout reader exited (child process terminated)", server_name);
+            app_logger::log_to_db("warn", &format!("[{}] stdout reader exited — child process terminated unexpectedly", server_name));
+            // Notify all pending requests that the process has exited
+            let _ = done_tx.send(true);
+            // Fail all pending requests
+            let mut map = pending.lock().await;
+            for (_, tx) in map.drain() {
+                let _ = tx.send(json!({"error": "child process exited unexpectedly"}));
+            }
         });
 
         *self.stdin.lock().await = Some(stdin);
         self.child = Some(child);
 
         // MCP initialize handshake
-        let handshake_elapsed = connect_start.elapsed();
-        let handshake_msg = format!("[{}] Starting MCP initialize handshake (spawn took {:.1}s)...", self.server_name, handshake_elapsed.as_secs_f64());
+        let init_start = std::time::Instant::now();
+        let spawn_elapsed = connect_start.elapsed();
+        let handshake_msg = format!("[{}] uvx startup completed in {:.1}s, starting MCP handshake...", self.server_name, spawn_elapsed.as_secs_f64());
         log::info!("{}", handshake_msg);
         app_logger::log_to_db("info", &handshake_msg);
 
@@ -345,7 +389,7 @@ impl McpTransport for StdioTransport {
         )
         .await
         .map_err(|e| {
-            let elapsed = connect_start.elapsed();
+            let elapsed = init_start.elapsed();
             let err_msg = format!("[{}] MCP initialize handshake failed after {:.1}s: {}", self.server_name, elapsed.as_secs_f64(), e);
             log::error!("{}", err_msg);
             app_logger::log_to_db("error", &err_msg);
@@ -354,7 +398,14 @@ impl McpTransport for StdioTransport {
 
         self.connected = true;
         let total_elapsed = connect_start.elapsed();
-        let connected_msg = format!("[{}] MCP stdio transport connected successfully (total {:.1}s)", self.server_name, total_elapsed.as_secs_f64());
+        let init_elapsed = init_start.elapsed();
+        let connected_msg = format!(
+            "[{}] Connected | total={:.1}s, mcp_handshake={:.1}s, uvx_startup={:.1}s",
+            self.server_name,
+            total_elapsed.as_secs_f64(),
+            init_elapsed.as_secs_f64(),
+            (total_elapsed - init_elapsed).as_secs_f64()
+        );
         log::info!("{}", connected_msg);
         app_logger::log_to_db("info", &connected_msg);
         Ok(())
