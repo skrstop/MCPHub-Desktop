@@ -155,6 +155,8 @@ impl StdioTransport {
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn connect(&mut self) -> Result<()> {
+        let connect_start = std::time::Instant::now();
+
         // Resolve command to bundled binary if available (node, npx, uv, uvx, python…)
         let (resolved_cmd, resolved_args) =
             runtime_env::resolve_command(&self.command, &self.args);
@@ -232,6 +234,14 @@ impl McpTransport for StdioTransport {
         log::info!("{}", spawn_msg);
         app_logger::log_to_db("info", &spawn_msg);
 
+        // Hint for first-time downloads
+        if self.command == "npx" || self.command == "uvx" {
+            app_logger::log_to_db("info", &format!(
+                "[{}] First run may take longer while {} downloads packages...",
+                self.server_name, self.command
+            ));
+        }
+
         let mut cmd = Command::new(&final_cmd);
         cmd.args(&resolved_args)
             .envs(&merged_env)
@@ -261,17 +271,19 @@ impl McpTransport for StdioTransport {
 
         let mut child = cmd.spawn()
             .map_err(|e| {
+                let elapsed = connect_start.elapsed();
                 let cmd_exists = std::path::Path::new(&resolved_cmd).exists();
                 let err_msg = format!(
-                    "[{}] Failed to spawn process: {}\n  command: {}\n  args: {:?}\n  cmd_exists: {}",
-                    self.server_name, e, resolved_cmd, resolved_args, cmd_exists
+                    "[{}] Failed to spawn process after {:.1}s: {}\n  command: {}\n  args: {:?}\n  cmd_exists: {}",
+                    self.server_name, elapsed.as_secs_f64(), e, resolved_cmd, resolved_args, cmd_exists
                 );
                 log::error!("{}", err_msg);
                 app_logger::log_to_db("error", &err_msg);
                 e
             })?;
         let pid = child.id().unwrap_or(0);
-        let spawn_ok_msg = format!("[{}] Process spawned (pid={})", self.server_name, pid);
+        let spawn_elapsed = connect_start.elapsed();
+        let spawn_ok_msg = format!("[{}] Process spawned (pid={}) in {:.1}s", self.server_name, pid, spawn_elapsed.as_secs_f64());
         log::info!("{}", spawn_ok_msg);
         app_logger::log_to_db("info", &spawn_ok_msg);
 
@@ -286,8 +298,8 @@ impl McpTransport for StdioTransport {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                log::debug!("[{}] stderr: {}", stderr_name, line);
-                app_logger::log_to_db("debug", &format!("[{}] {}", stderr_name, line));
+                log::info!("[{}] stderr: {}", stderr_name, line);
+                app_logger::log_to_db("info", &format!("[stderr] {}", line));
             }
             log::info!("[{}] stderr reader exited", stderr_name);
         });
@@ -318,7 +330,8 @@ impl McpTransport for StdioTransport {
         self.child = Some(child);
 
         // MCP initialize handshake
-        let handshake_msg = format!("[{}] Starting MCP initialize handshake...", self.server_name);
+        let handshake_elapsed = connect_start.elapsed();
+        let handshake_msg = format!("[{}] Starting MCP initialize handshake (spawn took {:.1}s)...", self.server_name, handshake_elapsed.as_secs_f64());
         log::info!("{}", handshake_msg);
         app_logger::log_to_db("info", &handshake_msg);
 
@@ -332,14 +345,16 @@ impl McpTransport for StdioTransport {
         )
         .await
         .map_err(|e| {
-            let err_msg = format!("[{}] MCP initialize handshake failed: {}", self.server_name, e);
+            let elapsed = connect_start.elapsed();
+            let err_msg = format!("[{}] MCP initialize handshake failed after {:.1}s: {}", self.server_name, elapsed.as_secs_f64(), e);
             log::error!("{}", err_msg);
             app_logger::log_to_db("error", &err_msg);
             e
         })?;
 
         self.connected = true;
-        let connected_msg = format!("[{}] MCP stdio transport connected successfully", self.server_name);
+        let total_elapsed = connect_start.elapsed();
+        let connected_msg = format!("[{}] MCP stdio transport connected successfully (total {:.1}s)", self.server_name, total_elapsed.as_secs_f64());
         log::info!("{}", connected_msg);
         app_logger::log_to_db("info", &connected_msg);
         Ok(())
