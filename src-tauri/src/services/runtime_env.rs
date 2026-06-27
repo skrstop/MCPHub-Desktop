@@ -490,22 +490,31 @@ pub fn env_overrides(original_command: &str) -> Vec<(String, String)> {
     // Point npm cache to app-local directory to avoid permission issues
     if matches!(original_command, "node" | "npx" | "npm") {
         if let Some(cache) = app_local_dir("npm-cache") {
+            log::info!("[runtime_env] npm_config_cache: {}", cache);
             env.push(("npm_config_cache".to_string(), cache));
         }
     }
 
     // Point uv to our Python install dir (writable user data) and use app-local cache/tool dirs
     if matches!(original_command, "uv" | "uvx" | "python" | "python3") {
+        // Strategy: try version check first with short timeout, fall back to cache on failure.
+        // uv behavior: check version (network) → success: use latest → timeout/fail: use cached
+        env.push(("UV_HTTP_TIMEOUT".to_string(), "60".to_string()));
+        env.push(("UV_CONNECT_TIMEOUT".to_string(), "10".to_string()));
+        log::info!("[runtime_env] uv network timeouts: connect=10s, http=60s (version check with cache fallback)");
         if let Some(python_dir) = uv_python_install_dir() {
+            log::info!("[runtime_env] UV_PYTHON_INSTALL_DIR: {:?}", python_dir);
             env.push((
                 "UV_PYTHON_INSTALL_DIR".to_string(),
                 normalize_path(&python_dir),
             ));
         }
         if let Some(cache) = app_local_dir("uv-cache") {
+            log::info!("[runtime_env] UV_CACHE_DIR: {}", cache);
             env.push(("UV_CACHE_DIR".to_string(), cache));
         }
         if let Some(tools) = app_local_dir("uv-tools") {
+            log::info!("[runtime_env] UV_TOOL_DIR: {}", tools);
             env.push(("UV_TOOL_DIR".to_string(), tools));
         }
         // Pin to a specific Python version if user has selected one
