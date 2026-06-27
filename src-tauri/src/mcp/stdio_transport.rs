@@ -159,6 +159,13 @@ impl McpTransport for StdioTransport {
         let (resolved_cmd, resolved_args) =
             runtime_env::resolve_command(&self.command, &self.args);
 
+        let resolve_msg = format!(
+            "[{}] Command resolved: '{}' -> '{}', args: {:?}",
+            self.server_name, self.command, resolved_cmd, resolved_args
+        );
+        log::info!("{}", resolve_msg);
+        app_logger::log_to_db("info", &resolve_msg);
+
         // Build the merged environment:
         //   1. Inherit the parent process environment (so child keeps HOME, USER, etc.)
         //   2. Apply runtime overrides (PATH prepend + cache dirs)
@@ -214,7 +221,14 @@ impl McpTransport for StdioTransport {
             }
         };
 
-        let spawn_msg = format!("[{}] spawning: {} {:?}", self.server_name, final_cmd, resolved_args);
+        let spawn_msg = format!(
+            "[{}] Spawning process: {} {} (original: {} {})",
+            self.server_name,
+            final_cmd,
+            resolved_args.join(" "),
+            self.command,
+            self.args.join(" ")
+        );
         log::info!("{}", spawn_msg);
         app_logger::log_to_db("info", &spawn_msg);
 
@@ -273,7 +287,9 @@ impl McpTransport for StdioTransport {
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 log::debug!("[{}] stderr: {}", stderr_name, line);
+                app_logger::log_to_db("debug", &format!("[{}] {}", stderr_name, line));
             }
+            log::info!("[{}] stderr reader exited", stderr_name);
         });
 
         // Spawn reader task
@@ -295,12 +311,17 @@ impl McpTransport for StdioTransport {
                 }
             }
             log::info!("[{}] stdout reader exited", server_name);
+            app_logger::log_to_db("info", &format!("[{}] stdout reader exited", server_name));
         });
 
         *self.stdin.lock().await = Some(stdin);
         self.child = Some(child);
 
         // MCP initialize handshake
+        let handshake_msg = format!("[{}] Starting MCP initialize handshake...", self.server_name);
+        log::info!("{}", handshake_msg);
+        app_logger::log_to_db("info", &handshake_msg);
+
         self.request(
             "initialize",
             json!({
@@ -309,10 +330,18 @@ impl McpTransport for StdioTransport {
                 "clientInfo": { "name": "mcphub-desktop", "version": "0.1.0" }
             }),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            let err_msg = format!("[{}] MCP initialize handshake failed: {}", self.server_name, e);
+            log::error!("{}", err_msg);
+            app_logger::log_to_db("error", &err_msg);
+            e
+        })?;
 
         self.connected = true;
-        log::info!("[{}] stdio transport connected", self.server_name);
+        let connected_msg = format!("[{}] MCP stdio transport connected successfully", self.server_name);
+        log::info!("{}", connected_msg);
+        app_logger::log_to_db("info", &connected_msg);
         Ok(())
     }
 
@@ -320,7 +349,7 @@ impl McpTransport for StdioTransport {
         self.connected = false;
         if let Some(mut child) = self.child.take() {
             let pid = child.id().unwrap_or(0);
-            let msg = format!("[{}] Killing process (pid={})...", self.server_name, pid);
+            let msg = format!("[{}] Killing process tree (pid={})...", self.server_name, pid);
             log::info!("{}", msg);
             app_logger::log_to_db("info", &msg);
 
@@ -328,12 +357,15 @@ impl McpTransport for StdioTransport {
             // by wrappers like npx/uvx are also terminated.
             if pid > 0 {
                 kill_process_tree(pid);
+                app_logger::log_to_db("info", &format!("[{}] Sent kill signal to process tree (pid={})", self.server_name, pid));
             }
             child.kill().await.ok();
 
             let done_msg = format!("[{}] Process killed (pid={})", self.server_name, pid);
             log::info!("{}", done_msg);
             app_logger::log_to_db("info", &done_msg);
+        } else {
+            app_logger::log_to_db("info", &format!("[{}] Disconnect called but no child process to kill", self.server_name));
         }
         Ok(())
     }
