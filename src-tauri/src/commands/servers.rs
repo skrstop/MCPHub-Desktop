@@ -61,24 +61,22 @@ pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
 #[tauri::command]
 pub async fn add_server(config: ServerConfig) -> Result<ServerInfo, String> {
     let saved = server_service::create(&config).await.map_err(|e| e.to_string())?;
-    let status = if saved.enabled {
-        pool::connect_server(&saved).await
-    } else {
-        ServerStatus {
-            name: saved.name.clone(),
-            connected: false,
-            starting: false,
-            tool_count: 0,
-            error: None,
-            last_connected: None,
-        }
+    if saved.enabled {
+        // Connect in background so the API returns immediately
+        let saved_clone = saved.clone();
+        tauri::async_runtime::spawn(async move {
+            pool::connect_server(&saved_clone).await;
+        });
+    }
+    let status = ServerStatus {
+        name: saved.name.clone(),
+        connected: false,
+        starting: saved.enabled,
+        tool_count: 0,
+        error: None,
+        last_connected: None,
     };
-    let tools = if status.connected {
-        pool::list_tools_for(&saved.name).await.unwrap_or_default()
-    } else {
-        vec![]
-    };
-    Ok(ServerInfo { config: saved, status, tools })
+    Ok(ServerInfo { config: saved, status, tools: vec![] })
 }
 
 #[tauri::command]

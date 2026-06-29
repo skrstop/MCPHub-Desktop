@@ -100,6 +100,7 @@ All servers will be imported in a single efficient batch operation.`;
         }
 
         if (successCount > 0) {
+          setJsonInput('');
           onSuccess();
         }
       } else {
@@ -215,7 +216,7 @@ All servers will be imported in a single efficient batch operation.`;
 
             <div className="flex justify-end space-x-4">
               <button
-                onClick={() => setPreviewServers(null)}
+                onClick={() => { setPreviewServers(null); setJsonInput(''); }}
                 disabled={isImporting}
                 className="hub-btn"
               >

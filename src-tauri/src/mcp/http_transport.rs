@@ -8,8 +8,9 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
 };
+use tokio::sync::Mutex;
 
 static HTTP_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -23,6 +24,7 @@ pub struct HttpTransport {
     client: Client,
     connected: bool,
     server_name: String,
+    session_id: Arc<Mutex<String>>,
 }
 
 impl HttpTransport {
@@ -34,12 +36,19 @@ impl HttpTransport {
         let client = Client::builder()
             .build()
             .expect("Failed to build reqwest client");
+        // mcp-session-id priority: server response > user-provided > generated UUID
+        // Start with user-provided or empty (will be set from server response)
+        let session_id = headers
+            .get("mcp-session-id")
+            .cloned()
+            .unwrap_or_default();
         Self {
             server_name: server_name.into(),
             url: url.into(),
             headers,
             client,
             connected: false,
+            session_id: Arc::new(Mutex::new(session_id)),
         }
     }
 
@@ -55,12 +64,28 @@ impl HttpTransport {
             },
         });
 
-        let mut req = self.client.post(&self.url).json(&body);
+        let sid = self.session_id.lock().await.clone();
+        let mut req = self.client.post(&self.url)
+            .header("Content-Type", "application/json");
+        if !sid.is_empty() {
+            req = req.header("mcp-session-id", &sid);
+        }
+        req = req.json(&body);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
 
         let resp = req.send().await?;
+
+        // Capture mcp-session-id from response (highest priority)
+        if let Some(sid_header) = resp.headers().get("mcp-session-id") {
+            if let Ok(sid_val) = sid_header.to_str() {
+                let mut current = self.session_id.lock().await;
+                *current = sid_val.to_string();
+                log::debug!("[{}] Captured mcp-session-id from response: {}", self.server_name, sid_val);
+            }
+        }
+
         let status = resp.status();
 
         // Retry on recoverable 4xx errors (408, 429)
@@ -70,10 +95,15 @@ impl HttpTransport {
                 self.server_name,
                 status
             );
-            // Wait a bit before retrying
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-            let mut req = self.client.post(&self.url).json(&body);
+            let sid = self.session_id.lock().await.clone();
+            let mut req = self.client.post(&self.url)
+                .header("Content-Type", "application/json");
+            if !sid.is_empty() {
+                req = req.header("mcp-session-id", &sid);
+            }
+            req = req.json(&body);
             for (k, v) in &self.headers {
                 req = req.header(k, v);
             }

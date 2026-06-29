@@ -33,6 +33,7 @@ pub struct SseTransport {
     use_background_reader: bool,
     /// Channel to signal the background reader to stop
     stop_signal: Option<tokio::sync::oneshot::Sender<()>>,
+    session_id: Arc<Mutex<String>>,
 }
 
 impl SseTransport {
@@ -44,6 +45,12 @@ impl SseTransport {
         let builder = Client::builder();
         // Apply per-transport headers via default headers would require building them here
         let client = builder.build().expect("Failed to build reqwest client");
+        // mcp-session-id priority: server response > user-provided > generated UUID
+        // Start with user-provided or empty (will be set from server response)
+        let session_id = headers
+            .get("mcp-session-id")
+            .cloned()
+            .unwrap_or_default();
         Self {
             server_name: server_name.into(),
             base_url: base_url.into(),
@@ -54,6 +61,7 @@ impl SseTransport {
             connected: false,
             use_background_reader: true, // Will be updated during connect
             stop_signal: None,
+            session_id: Arc::new(Mutex::new(session_id)),
         }
     }
 
@@ -81,15 +89,29 @@ impl SseTransport {
                 map.insert(id, tx);
             }
 
+            let sid = self.session_id.lock().await.clone();
             let mut req = self.client.post(endpoint)
-                .header("Content-Type", "application/json")
-                .json(&body);
+                .header("Content-Type", "application/json");
+            if !sid.is_empty() {
+                req = req.header("mcp-session-id", &sid);
+            }
+            req = req.json(&body);
             for (k, v) in &self.headers {
                 req = req.header(k, v);
             }
 
             log::debug!("[{}] Sending POST request...", self.server_name);
             let resp = req.send().await?;
+
+            // Capture mcp-session-id from response (highest priority)
+            if let Some(sid_header) = resp.headers().get("mcp-session-id") {
+                if let Ok(sid_val) = sid_header.to_str() {
+                    let mut current = self.session_id.lock().await;
+                    *current = sid_val.to_string();
+                    log::debug!("[{}] Captured mcp-session-id from response: {}", self.server_name, sid_val);
+                }
+            }
+
             log::debug!("[{}] POST response status: {}", self.server_name, resp.status());
 
             log::debug!("[{}] Waiting for response (id={})...", self.server_name, id);
@@ -115,15 +137,28 @@ impl SseTransport {
             Ok(response["result"].clone())
         } else {
             // Streamable HTTP pattern: send POST and read response directly
+            let sid = self.session_id.lock().await.clone();
             let mut req = self.client.post(endpoint)
-                .header("Accept", "text/event-stream")
-                .header("Content-Type", "application/json")
-                .json(&body);
+                .header("Content-Type", "application/json");
+            if !sid.is_empty() {
+                req = req.header("mcp-session-id", &sid);
+            }
+            req = req.json(&body);
             for (k, v) in &self.headers {
                 req = req.header(k, v);
             }
 
             let resp = req.send().await?;
+
+            // Capture mcp-session-id from response (highest priority)
+            if let Some(sid_header) = resp.headers().get("mcp-session-id") {
+                if let Ok(sid_val) = sid_header.to_str() {
+                    let mut current = self.session_id.lock().await;
+                    *current = sid_val.to_string();
+                    log::debug!("[{}] Captured mcp-session-id from response: {}", self.server_name, sid_val);
+                }
+            }
+
             let status = resp.status();
             if !status.is_success() {
                 return Err(anyhow!("HTTP error: {}", status));
@@ -205,13 +240,27 @@ impl McpTransport for SseTransport {
         // Try GET first (traditional SSE), then POST (Streamable HTTP with SSE response)
 
         // Try GET request first
+        let sid = self.session_id.lock().await.clone();
         let mut req = self.client.get(&sse_url)
             .header("Accept", "text/event-stream");
+        if !sid.is_empty() {
+            req = req.header("mcp-session-id", &sid);
+        }
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
 
         let get_resp = req.send().await?;
+
+        // Capture mcp-session-id from response (highest priority)
+        if let Some(sid_header) = get_resp.headers().get("mcp-session-id") {
+            if let Ok(sid_val) = sid_header.to_str() {
+                let mut current = self.session_id.lock().await;
+                *current = sid_val.to_string();
+                log::debug!("[{}] Captured mcp-session-id from GET response: {}", self.server_name, sid_val);
+            }
+        }
+
         let status = get_resp.status();
         let content_type = get_resp.headers().get("content-type")
             .map(|v| v.to_str().unwrap_or("unknown").to_string())
@@ -224,15 +273,29 @@ impl McpTransport for SseTransport {
         } else {
             // GET didn't return SSE, try POST
             log::info!("[{}] GET didn't return SSE, trying POST", self.server_name);
+            let sid = self.session_id.lock().await.clone();
             let mut req = self.client.post(&sse_url)
                 .header("Accept", "text/event-stream")
-                .header("Content-Type", "application/json")
-                .body(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcphub-desktop","version":"0.1.0"}}}"#);
+                .header("Content-Type", "application/json");
+            if !sid.is_empty() {
+                req = req.header("mcp-session-id", &sid);
+            }
+            req = req.body(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcphub-desktop","version":"0.1.0"}}}"#);
             for (k, v) in &self.headers {
                 req = req.header(k, v);
             }
 
             let post_resp = req.send().await?;
+
+            // Capture mcp-session-id from response (highest priority)
+            if let Some(sid_header) = post_resp.headers().get("mcp-session-id") {
+                if let Ok(sid_val) = sid_header.to_str() {
+                    let mut current = self.session_id.lock().await;
+                    *current = sid_val.to_string();
+                    log::debug!("[{}] Captured mcp-session-id from POST response: {}", self.server_name, sid_val);
+                }
+            }
+
             let status = post_resp.status();
             let content_type = post_resp.headers().get("content-type")
                 .map(|v| v.to_str().unwrap_or("unknown").to_string())
@@ -242,6 +305,19 @@ impl McpTransport for SseTransport {
 
             if status.is_success() && content_type.contains("text/event-stream") {
                 post_resp
+            } else if status.is_success() {
+                // POST returned non-SSE (likely JSON from a Streamable HTTP server)
+                // Read the initialize response directly and set up no-background-reader mode
+                log::info!("[{}] POST returned non-SSE ({}), treating as Streamable HTTP", self.server_name, content_type);
+                let json: Value = post_resp.json().await?;
+                if let Some(err) = json.get("error") {
+                    return Err(anyhow!("MCP error: {}", err));
+                }
+                self.post_endpoint = Some(sse_url.clone());
+                self.use_background_reader = false;
+                self.connected = true;
+                log::info!("[{}] Connected via Streamable HTTP mode (no background reader)", self.server_name);
+                return Ok(());
             } else {
                 return Err(anyhow!("SSE connect failed: Neither GET nor POST returned SSE stream (url: {})", sse_url));
             }
@@ -345,15 +421,19 @@ impl McpTransport for SseTransport {
         let ep = endpoint.ok_or_else(|| anyhow!("SSE handshake: no endpoint received"))?;
         log::info!("[{}] SSE endpoint resolved to: {}", self.server_name, ep);
 
-        // If relative URL, prepend base
+        // If relative URL, prepend origin (scheme + host + port) from base URL
         self.post_endpoint = Some(if ep.starts_with("http") {
             ep
         } else {
-            format!(
-                "{}{}",
-                self.base_url.trim_end_matches('/'),
-                ep
-            )
+            // Extract origin from base URL (e.g., "http://127.0.0.1:64343/sse" -> "http://127.0.0.1:64343")
+            let origin = if let Ok(parsed) = url::Url::parse(&self.base_url) {
+                format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("localhost"))
+                    + &parsed.port().map(|p| format!(":{}", p)).unwrap_or_default()
+            } else {
+                // Fallback: use base URL as-is
+                self.base_url.trim_end_matches('/').to_string()
+            };
+            format!("{}{}", origin, ep)
         });
 
         log::info!("[{}] POST endpoint resolved to: {}", self.server_name, self.post_endpoint.as_deref().unwrap_or("none"));

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type CSSProperties, type ReactNode } from 'react';
+import { useState, useRef, useEffect, useMemo, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ChevronRight,
@@ -145,9 +145,15 @@ const ServerCard = ({
 }: ServerCardProps) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
-  const { exportMCPSettings, installConfig } = useSettingsData();
+  const { exportMCPSettings, installConfig, routingConfig } = useSettingsData();
   const { auth } = useAuth();
-  const baseUrl = installConfig?.baseUrl?.replace(/\/+$/, '') || '';
+  const baseUrl = useMemo(() => {
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (isTauri && routingConfig?.httpPort) {
+      return `http://localhost:${routingConfig.httpPort}`;
+    }
+    return installConfig?.baseUrl?.replace(/\/+$/, '') || '';
+  }, [installConfig?.baseUrl, routingConfig?.httpPort]);
 
   const [expanded, setExpanded] = useState(false);
   const [expandedTab, setExpandedTab] = useState<'tools' | 'prompts' | 'resources' | 'cost' | null>(

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Edit3, Trash2, Copy, Check, Link as LinkIcon, FileCode, ChevronDown } from 'lucide-react';
 import { Group, Server, IGroupServerConfig, GroupCost } from '@/types';
@@ -62,8 +62,14 @@ const copyText = async (value: string): Promise<boolean> => {
 const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
-  const { installConfig, nameSeparator } = useSettingsData();
-  const baseUrl = installConfig?.baseUrl?.replace(/\/+$/, '') || '';
+  const { installConfig, nameSeparator, routingConfig } = useSettingsData();
+  const baseUrl = useMemo(() => {
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (isTauri && routingConfig?.httpPort) {
+      return `http://localhost:${routingConfig.httpPort}`;
+    }
+    return installConfig?.baseUrl?.replace(/\/+$/, '') || '';
+  }, [installConfig?.baseUrl, routingConfig?.httpPort]);
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [copied, setCopied] = useState(false);
