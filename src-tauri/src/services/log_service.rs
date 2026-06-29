@@ -1,4 +1,4 @@
-use crate::{db, models::log::{ActivityEntry, ActivityPage, ActivityQuery, ActivityStats, LogEntry, LogQuery}};
+use crate::{db, models::log::{ActivityEntry, ActivityPage, ActivityQuery, ActivityStats, LogEntry, LogQuery}, services::config_service};
 use anyhow::Result;
 use chrono::Local;
 use sqlx::Row;
@@ -48,6 +48,10 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
 }
 
 /// Write a single tool-call activity record to activity_log.
+///
+/// When `activityLog.storeToolPayload` is `false` in system config,
+/// the `input` and `output` fields are stored as NULL to avoid
+/// persisting potentially sensitive tool arguments/results.
 pub async fn write_activity(
     server: &str,
     tool: &str,
@@ -58,9 +62,26 @@ pub async fn write_activity(
     error_message: Option<&str>,
     source_ip: Option<&str>,
 ) -> Result<()> {
+    // Check storeToolPayload config — default to true (store everything)
+    let store_payload = config_service::get()
+        .await
+        .ok()
+        .and_then(|c| {
+            c.get("activityLog")
+                .and_then(|al| al.get("storeToolPayload"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(true);
+
     let id = Uuid::new_v4().to_string();
-    let input_str = input.map(|v| serde_json::to_string(&v)).transpose()?;
-    let output_str = output.map(|v| serde_json::to_string(&v)).transpose()?;
+    let (input_str, output_str) = if store_payload {
+        (
+            input.map(|v| serde_json::to_string(&v)).transpose()?,
+            output.map(|v| serde_json::to_string(&v)).transpose()?,
+        )
+    } else {
+        (None, None)
+    };
     sqlx::query(
         "INSERT INTO activity_log (id, server, tool, duration_ms, status, input, output, error_message, source_ip) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -147,17 +168,32 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     Ok(ActivityPage { data, page, page_size: page_size as u32, total })
 }
 
-pub async fn get_activity_stats() -> Result<ActivityStats> {
-    let row = sqlx::query(
+pub async fn get_activity_stats(server: Option<&str>, status: Option<&str>, tool: Option<&str>) -> Result<ActivityStats> {
+    // Build optional WHERE clause from filters
+    let mut conditions: Vec<String> = Vec::new();
+    if server.is_some() { conditions.push("server = ?".into()); }
+    if status.is_some() { conditions.push("status = ?".into()); }
+    if tool.is_some() { conditions.push("tool LIKE ?".into()); }
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = format!(
         "SELECT \
            COUNT(*) as total, \
            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success, \
            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error, \
            COALESCE(AVG(duration_ms), 0) as avg_duration \
-         FROM activity_log",
-    )
-    .fetch_one(db::pool())
-    .await?;
+         FROM activity_log {}",
+        where_clause
+    );
+    let mut q = sqlx::query(&sql);
+    if let Some(s) = server { q = q.bind(s); }
+    if let Some(s) = status { q = q.bind(s); }
+    if let Some(t) = tool { q = q.bind(format!("%{}%", t)); }
+    let row = q.fetch_one(db::pool()).await?;
     Ok(ActivityStats {
         total: row.try_get("total")?,
         success: row.try_get::<Option<i64>, _>("success")?.unwrap_or(0),
@@ -177,13 +213,33 @@ pub async fn get_activity_filters() -> Result<Vec<String>> {
 }
 
 /// Delete all activity log entries and vacuum.
-pub async fn clear_activities() -> Result<()> {
-    sqlx::query("DELETE FROM activity_log")
+/// Returns the number of deleted rows.
+pub async fn clear_activities() -> Result<i64> {
+    let result = sqlx::query("DELETE FROM activity_log")
         .execute(db::pool())
         .await?;
+    let deleted = result.rows_affected() as i64;
     // Reclaim disk space after bulk delete
     let _ = sqlx::raw_sql("VACUUM").execute(db::pool()).await;
-    Ok(())
+    Ok(deleted)
+}
+
+/// Delete activity log entries older than `days_old` days and vacuum.
+/// Returns the number of deleted rows and the cutoff date string.
+pub async fn cleanup_by_days(days_old: i64) -> Result<(i64, String)> {
+    let cutoff = format!("datetime('now', 'localtime', '-{} days')", days_old);
+    let sql = format!("DELETE FROM activity_log WHERE created_at < {}", cutoff);
+    let result = sqlx::query(&sql).execute(db::pool()).await?;
+    let deleted = result.rows_affected() as i64;
+    if deleted > 0 {
+        let _ = sqlx::raw_sql("VACUUM").execute(db::pool()).await;
+    }
+    // Read back the actual cutoff datetime for the response
+    let cutoff_row = sqlx::query(&format!("SELECT {} as c", cutoff))
+        .fetch_one(db::pool())
+        .await?;
+    let cutoff_date: String = cutoff_row.try_get("c")?;
+    Ok((deleted, cutoff_date))
 }
 
 /// Delete all application log entries and vacuum.

@@ -802,6 +802,9 @@
     "nameSeparatorDescription": "Sunucu adı ile araç/istek adını ayırmak için kullanılan karakter (varsayılan: -)",
     "enableSessionRebuild": "Sunucu Oturum Yeniden Oluşturmayı Etkinleştir",
     "enableSessionRebuildDescription": "Etkinleştirildiğinde, daha iyi oturum yönetimi deneyimi için geliştirilmiş sunucu oturum yeniden oluşturma kodunu uygular",
+    "storeToolPayload": "Araç Çağrısı İçeriğini Sakla",
+    "storeToolPayloadDescription": "Etkinleştirildiğinde, her araç çağrısının tam girdisi ve çıktısı etkinlik günlüklerinde saklanır. Araç içeriği maskelenmeden olduğu gibi kaydedilir; araç argümanları hassas veri içerebiliyorsa ve saklanmaması gerekiyorsa bunu kapatın.",
+    "storeToolPayloadUpdateFailed": "Araç içeriği saklama ayarı güncellenemedi",
     "restartRequired": "Yapılandırma kaydedildi. Tüm hizmetlerin yeni ayarları doğru şekilde yüklemesini sağlamak için uygulamayı yeniden başlatmanız önerilir.",
     "exportMcpSettings": "Ayarları Dışa Aktar",
     "mcpSettingsJson": "MCP Ayarları JSON",
@@ -1135,9 +1138,9 @@
     "noData": "Kullanılabilir etkinlik verisi yok",
     "fetchError": "Etkinlik verileri yüklenemedi",
     "cleanup": "Temizle",
-    "confirmCleanup": "30 günden eski etkinlikleri silmek istediğinizden emin misiniz?",
-    "cleanupSuccess": "{{count}} eski etkinlik silindi",
-    "cleanupError": "Eski etkinlikler temizlenemedi",
+    "confirmCleanup": "Tüm etkinlik kayıtlarını silmek istediğinizden emin misiniz? Bu işlem geri alınamaz.",
+    "cleanupSuccess": "Tüm etkinlik kayıtları temizlendi",
+    "cleanupError": "Etkinlik kayıtları temizlenemedi",
     "notAvailable": "Etkinlik takibi yalnızca veritabanı modunda kullanılabilir"
   },
   "template": {

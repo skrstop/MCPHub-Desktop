@@ -243,6 +243,7 @@ pub fn run() {
             commands::logs::get_tool_activities,
             commands::logs::clear_tool_activities,
             commands::logs::cleanup_old_logs,
+            commands::logs::cleanup_activity_logs,
             // Bearer key commands
             commands::bearer_keys::list_bearer_keys,
             commands::bearer_keys::create_bearer_key,

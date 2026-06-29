@@ -126,10 +126,17 @@ export const getActivityFilterOptions = async (): Promise<ApiResponse<ActivityFi
 };
 
 /**
- * Delete old activities
+ * Delete old activities (by retention days)
  */
 export const deleteOldActivities = async (
   daysOld: number = 30,
 ): Promise<ApiResponse<{ deletedCount: number; cutoffDate: string }>> => {
   return await apiDelete(`/activities/cleanup?daysOld=${daysOld}`);
+};
+
+/**
+ * Delete ALL activities (manual clear)
+ */
+export const clearAllActivities = async (): Promise<ApiResponse> => {
+  return await apiDelete('/activities');
 };

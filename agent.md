@@ -974,55 +974,33 @@ cd src-tauri && cargo check
 
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `8ff743f` (origin/main) |
+| **当前已同步到 origin commit** | `c182265` (origin/main) |
 | **对应 origin tag**            | `v0.12.15+12`           |
-| **桌面端版本号**               | `1.0.18008`             |
-| **同步执行日期**               | 2026-06-26              |
+| **桌面端版本号**               | `1.0.20001`             |
+| **同步执行日期**               | 2026-06-29              |
 
-> 下次同步时，使用 `8ff743f` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8ff743f..HEAD`）。
+> 下次同步时，使用 `c182265` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline c182265..HEAD`）。
 
 ### 4.4 最近同步记录
 
-#### 2026-06-26：同步 `89deccd` → `8ff743f`（1 个 commit）
+#### 2026-06-29：同步 `8ff743f` → `c182265`（7 个 commit）
 
-**未同步（安全修复 — 客户端不需要 SSRF 防护）**
-
-| 来源 commit | 说明                                                            | 处理决策                                                                                           |
-| ----------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `8ff743f`   | fix: block SSRF via URL/OpenAPI servers with owner-aware egress filter | **不同步** — SSRF 是服务端防攻击机制，桌面端是客户端应用，不对外提供服务，无需此防护 |
-
-**本次桌面端独立修复（非 origin 同步）**
-
-| 修复项 | 说明 | 涉及文件 |
-|--------|------|----------|
-| Windows 启动白屏 5-10s | 将 PATH 读取从 PowerShell 改为 Registry 直读，消除冷启动延迟 | `runtime_env.rs`, `runtime.rs`, `Cargo.toml`（添加 winreg 依赖） |
-| PATH 环境变量未展开 | Registry 返回的 `%USERPROFILE%` 等变量未展开为实际路径，添加 `expand_env_vars()` | `runtime_env.rs`, `runtime.rs` |
-| stdio "program not found" | `resolve_command` 在 active="system" 时跳过内置二进制检查，Windows 找不到裸命令名 | `runtime_env.rs` |
-| npx/npm 找不到 | 下载脚本未复制 `npx.cmd`/`npm.cmd`，添加 fallback 到 `.cmd` 包装脚本 | `download-runtimes.ps1`, `runtime_env.rs` |
-| Python "内置" 标签缺失 | 目录扁平化移除了 `cpython-*` 目录名，Rust 检测逻辑依赖此命名，回滚扁平化 | `download-runtimes.ps1` |
-| activity_log 表结构错误 | migration 创建旧表结构（`user_id, action, resource`），代码使用新结构（`server, tool, duration_ms`），添加 v9 migration 重建表 | `migration.rs`, `log_service.rs` |
-| activity_log 字段名不统一 | `timestamp` vs `created_at`，统一为 `created_at`，前端通过 serde rename 保持 JSON 兼容 | `models/log.rs`, `log_service.rs`, `migration.rs`, `ActivityPage.tsx`, `types/index.ts`, `tauriClient.ts` |
-| log_cleanup 报错 | cleanup 查询用了不存在的 `timestamp` 列，改为 `created_at` | `log_service.rs` |
-| OpenAPI 复制内容错误 | OpenAPI 类型服务器点击复制应复制 schema JSON（含 URL 模式 fetch），而非 MCP 设置 | `ServerCard.tsx` |
-| 运行时版本更新 | Node 24.17.0→24.18.0, uv 0.11.23→0.11.24, Python 3.12→3.14 | `download-runtimes.sh`, `download-runtimes.ps1` |
-| 版本号更新 | 1.0.18007 → 1.0.18008 | `tauri.conf.json`, `Cargo.toml`, `package.json` |
-
-#### 2026-06-24：同步 `96c16d9` → `89deccd`（3 个 commit）
-
-**已同步到 desktop（前端 / locales / Rust 后端）**
-
+**已同步到 desktop（前端 / locales）**
 
 | 来源 commit | 说明                                                               | desktop 应用方式                                                                                          |
 | ----------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `75e497f`   | feat: introduce group server alias                                 | 前端：GroupCard.tsx, ServerToolConfig.tsx, types/index.ts 直接覆盖；locales 四语言翻译添加 alias 相关键值 |
-| `89deccd`   | fix: record system-key user in activity logs and reserve usernames | Rust 后端：user_service.rs 添加保留用户名检查（system/admin/guest/root）；修复时间使用本地时间            |
+| `212f760`   | fix: filter servers across all pages, not just the current page    | 前端：ServersPage.tsx, serverFilters.ts 直接覆盖，实现跨页面过滤功能                                      |
+| `218e0c9`   | feat: store tool call payloads verbatim, gated by a config switch  | 前端：SettingsContext.tsx, SettingsPage.tsx 手动合并；locales 四语言翻译添加 storeToolPayload 相关键值     |
 
-**未同步（后端 / 不适用）**
+**未同步（后端 — 经评估无需同步）**
 
-
-| 来源 commit | 类型                            | 处理决策               |
-| ----------- | ------------------------------- | ---------------------- |
-| `537f393`   | chore: resolve pnpm audit vulns | **不同步**（依赖更新） |
+| 来源 commit | 说明                                                               | 处理决策               | 原因分析                                                                                           |
+| ----------- | ------------------------------------------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `c182265`   | fix: smart call_tool routing                                       | **不同步** | Rust `http_server.rs` 已正确处理 `$smart`（行 482/511/569），`mcp_scope_servers` 和 `mcp_scope_server_filters` 均在 `$smart` 时返回所有已连接服务器 |
+| `1f90ab8`   | fix: skip HF tokenizer download for short queries in Smart Routing | **不同步** | Node.js 特有优化（HuggingFace tokenizer 下载），Rust 后端不使用 HF tokenizer                       |
+| `13be052`   | fix: only flag true cycles, not diamond/shared refs, in safe serialization | **不同步** | Rust 使用 `serde_json` 原生序列化，不存在 Node.js `JSON.stringify` 自定义 replacer 的循环引用误判问题 |
+| `718ebf7`   | fix: broadcast list changes after upstream data is loaded, not before | **不同步** | Rust 后端使用 Tauri IPC 而非 WebSocket 广播，`toggle_server` 中 `connect_server` 是同步等待的，不存在竞态条件 |
+| `195ffbb`   | fix: scope server toggle to target instead of re-initializing the fleet | **不同步** | Rust `mcp_manager::toggle_server`（行 106-136）已限定到目标服务器，不会重新初始化整个连接池            |
 
 ---
 

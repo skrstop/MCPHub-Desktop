@@ -9,3 +9,4 @@ build/
 .agentbridge
 .idea
 src-tauri/.codegraph
+.codemoss

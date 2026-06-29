@@ -13,6 +13,7 @@ import {
   getActivityStats,
   getActivityFilterOptions,
   deleteOldActivities,
+  clearAllActivities,
 } from '@/services/activityService';
 import Pagination from '@/components/ui/Pagination';
 
@@ -114,21 +115,22 @@ const ActivityPage: React.FC = () => {
     setShowDetailModal(true);
   };
 
-  // Handle cleanup old activities
+  // Handle clear all activities (manual button)
   const handleCleanup = async () => {
-    if (!window.confirm(t('activity.confirmCleanup'))) {
-      return;
-    }
-
     try {
-      const response = await deleteOldActivities(30);
+      const response = await clearAllActivities();
       if (response?.success) {
-        alert(t('activity.cleanupSuccess', { count: response.data?.deletedCount || 0 }));
-        fetchData();
+        // Immediately reset stats and list to zero — no waiting for refetch
+        setStats({ totalCalls: 0, successCount: 0, errorCount: 0, avgDuration: 0 });
+        setActivities([]);
+        setPagination(null);
+        setAppliedFilters({});
+        setCurrentPage(1);
+      } else {
+        console.error('Cleanup failed:', response);
       }
     } catch (err) {
       console.error('Error cleaning up activities:', err);
-      alert(t('activity.cleanupError'));
     }
   };
 
@@ -197,17 +199,17 @@ const ActivityPage: React.FC = () => {
 
   // Render stats cards
   const renderStats = () => {
-    if (!stats) return null;
+    const st = stats ?? { totalCalls: 0, successCount: 0, errorCount: 0, avgDuration: 0 };
 
     return (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         {[
-          { label: t('activity.totalCalls'), value: stats.totalCalls, tone: 'default' as const },
-          { label: t('activity.successCount'), value: stats.successCount, tone: 'ok' as const },
-          { label: t('activity.errorCount'), value: stats.errorCount, tone: 'err' as const },
+          { label: t('activity.totalCalls'), value: st.totalCalls, tone: 'default' as const },
+          { label: t('activity.successCount'), value: st.successCount, tone: 'ok' as const },
+          { label: t('activity.errorCount'), value: st.errorCount, tone: 'err' as const },
           {
             label: t('activity.avgDuration'),
-            value: formatDuration(stats.avgDuration),
+            value: formatDuration(st.avgDuration),
             tone: 'default' as const,
           },
         ].map((s) => (
@@ -845,14 +847,16 @@ const ActivityPage: React.FC = () => {
         </div>
       )}
 
+      {/* Stats always visible */}
+      {renderStats()}
+      {renderFilters()}
+
       {isLoading && activities.length === 0 ? (
         <div className="hub-card p-10 text-center" style={{ color: 'var(--hub-ink-3)' }}>
           {t('app.loading')}
         </div>
       ) : (
         <>
-          {renderStats()}
-          {renderFilters()}
           {renderActivityTable()}
 
           {/* Pagination */}

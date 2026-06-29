@@ -366,7 +366,25 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (segs[0] === 'activities') {
     if (p === 'activities/available') return { command: 'get_activity_available', args: {} };
     if (p === 'activities/filters') return { command: 'get_activity_filters', args: {} };
-    if (segs[1] === 'stats') return { command: 'get_activity_stats', args: {} };
+    if (segs[1] === 'stats') {
+      // Pass filter params through to stats query
+      const qsIdx = endpoint.indexOf('?');
+      const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
+      return {
+        command: 'get_activity_stats',
+        args: {
+          server: qs.get('server') ?? null,
+          status: qs.get('status') ?? null,
+          tool: qs.get('tool') ?? null,
+        },
+      };
+    }
+    // Cleanup old activities (by daysOld param) — must come before generic DELETE
+    if (segs[1] === 'cleanup' && m === 'DELETE') {
+      const qsIdx = endpoint.indexOf('?');
+      const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
+      return { command: 'cleanup_activity_logs', args: { daysOld: Number(qs.get('daysOld') ?? 30) } };
+    }
     if (m === 'GET') {
       const qsIdx = endpoint.indexOf('?');
       const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
@@ -575,6 +593,16 @@ export function transformTauriResponse(command: string, result: unknown): unknow
       },
     };
   }
+  if (command === 'cleanup_activity_logs') {
+    const r = result as Record<string, unknown> | null;
+    return {
+      success: true,
+      data: {
+        deletedCount: (r?.deletedCount as number) ?? 0,
+        cutoffDate: (r?.cutoffDate as string) ?? '',
+      },
+    };
+  }
   if (command === 'get_tool_activities') {
     const r = result as { data: unknown[]; page: number; pageSize: number; total: number } | null;
     if (!r) return { success: true, data: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 1, hasNextPage: false, hasPrevPage: false } };
@@ -610,7 +638,8 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     };
   }
   if (command === 'clear_tool_activities') {
-    return { success: true };
+    const r = result as Record<string, unknown> | null;
+    return { success: true, data: { deletedCount: (r?.deletedCount as number) ?? 0 } };
   }
 
   // ── call_tool: frontend reads response.content directly (not response.data.content)
