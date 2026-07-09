@@ -974,14 +974,212 @@ cd src-tauri && cargo check
 
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `c182265` (origin/main) |
-| **对应 origin tag**            | `v0.12.15+12`           |
-| **桌面端版本号**               | `1.0.20001`             |
-| **同步执行日期**               | 2026-06-29              |
+| **当前已同步到 origin commit** | `8d2ef15` (origin/main) |
+| **对应 origin tag**            | `v1.0.23`               |
+| **桌面端版本号**               | `1.0.23001`             |
+| **同步执行日期**               | 2026-07-09              |
 
-> 下次同步时，使用 `c182265` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline c182265..HEAD`）。
+> 下次同步时，使用 `8d2ef15` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8d2ef15..HEAD`）。
 
 ### 4.4 最近同步记录
+
+#### 2026-07-09：同步 `c182265` → `8d2ef15`（22 个 commit）
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明                                                               | desktop 应用方式                                                                                          |
+| ----------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `8d2ef15`   | feat: add upstream OAuth disconnect (#984)                         | 前端：ServerCard.tsx 三方合并（新增「断开 OAuth」菜单项 + 确认弹窗，保留桌面端 OpenAPI 复制/httpPort 差异）；ServersPage.tsx 直接覆盖（新增 `onOAuthDisconnect` 透传）；serverOAuthService.ts 🆕 直接新增；ServerContext.tsx 手动合并（新增 `handleServerOAuthDisconnect` handler）；types/index.ts 三方合并（`oauth.revocationEndpoint` + `Server.oauth.connected`）；locales 四语言新增 `disconnectOAuth*` 4 键 |
+| `fb58b7a`   | [codex] Fix remote keep-alive status updates (#966)                | 前端：ServerForm.tsx 三方合并（`enableKeepAlive === true` 严格判断 + 措辞改为「Connection Health」）；serverFormPayload.ts 三方合并（`keepAliveEnabled` 严格判断）；locales 四语言更新 `keepAlive*` 5 键措辞 |
+| `ceca8be`   | fix: improve layout of GroupCard component for better responsiveness (#967) | 前端：GroupCard.tsx 三方合并（`flex h-full flex-col` + 路由图 `minHeight: 180`，保留桌面端 httpPort baseUrl 差异） |
+| `d479fa6`   | fix discord link (#951)                                            | UserProfileMenu.tsx：桌面端已移除 sponsor/wechat/discord，**无需同步**                                    |
+| (i18n OAuth callback #977 / INSTALL_BASE_URL #976 等) | i18n、配置类 commit                              | 前端无对应改动，**无需同步**                                                                              |
+
+**已镜像到 desktop（Rust 后端）**
+
+| 来源 commit | 说明                                                               | desktop 应用方式                                                                                          |
+| ----------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `274d950`   | fix: allow editing OpenAPI servers with recursive schemas (#959) (#960) | origin 修复两项：① `servers[0].url` 含 `{variable}` 模板时须用 `variables.*.default` 替换后再 parse；② Node `SwaggerParser.dereference` 产生的 live circular refs 需 `createSafeJSON`。桌面端用 `rmcp-openapi` crate，② 不存在（serde 原生序列化无循环引用）；① 确为真 bug —— `extract_base_url` 直接 `Url::parse(url)`，含模板变量会解析失败报"no base URL"无法连接。已镜像 ①：`src-tauri/src/mcp/openapi_transport.rs::extract_base_url` 增加 `variables` 模板替换，新增 4 个单元测试（含模板变量 / 普通 URL / 相对 URL / Swagger 2.0 host 回退）全部通过。 |
+
+**未同步（后端 — 经评估无需 / 无法同步）**
+
+| 来源 commit | 说明                                                               | 处理决策               | 原因分析                                                                                           |
+| ----------- | ------------------------------------------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `8d2ef15`   | feat: add upstream OAuth disconnect (#984) — 后端 `oauth/disconnect` 端点 + `upstreamOAuthDisconnectService.ts` | **后端不同步** | Rust 后端无上游 OAuth token 存储 / revocation 端点实现，`toFrontendServer` 不填充 `oauth.connected`，故 UI 按钮恒不显示。前端路由 `POST /servers/:name/oauth/disconnect` 已映射到 `__stub__`（返回「desktop mode 不可用」），仅作防误触的兜底，不会命中。待 Rust 端实现上游 OAuth 后再镜像实现。 |
+| `0bbe272`   | [codex] fix automatic reconnect for remote servers (#972)          | **后端不同步** | 桌面端 Rust `ServerConfig` **无 keep-alive 字段**（`enableKeepAlive`/`keepAliveInterval` 配置被 serde 静默丢弃），无 per-server keep-alive 机制可修；仅有全局 `enableSessionRebuild` 后台重连（不同机制，见 `mcp_manager.rs:40`）。该 fix 修复的是 Node `keepAliveService` 的重连触发逻辑，架构不对应。 |
+| `349f8b7`   | fix: preserve in-flight OAuth state on full reload (#981)          | **后端不同步** | Rust 使用 Tauri IPC 同步管理连接，无 Node WebSocket 广播竞态                                          |
+| `38ffa6c`   | [codex] fix OpenAPI OAuth2 token refresh after 401 (#957)           | **后端不同步** | 桌面端 `OpenApiOAuth2` 仅 `{ token }`，无 `tokenUrl/clientId/clientSecret/expiresAt`；`call_tool` 用 `Authorization::None`（静态 token 走 headers）。无刷新能力基础，属功能新增而非 bug 镜像；待上游 OAuth 功能在 Rust 端落地时一并实现。 |
+| `5b417e7`   | [codex] support OpenAPI YAML endpoints (#950)                      | **后端不同步** | Rust OpenAPI transport 是否支持 YAML 待单独评估（功能增强，非 bug 修复）                               |
+| `a3ca516`   | feat: add INSTALL_BASE_URL support (#976)                         | **后端不同步** | 桌面端无 INSTALL_BASE_URL 部署场景（本地 Tauri 应用）                                                  |
+| `61c5cfc` / `df8844a` | 默认 admin 用户 / 移除预置 admin 凭据                  | **后端不同步** | 桌面端使用独立的首启 admin 初始化逻辑（见 `migration` / `commands::auth`），Node `User` 模型不适用       |
+| `f0128de`   | feat(activity): surface OAuth auth method in activity log (#958)   | **后端不同步** | 桌面端 Activity 字段已统一为 `createdAt`，无 Node `sseService` 的 API key 字段映射                     |
+| `6220791` / `8700cc7` / `d479fa6`(docs) | docs / Docker / README 更新                         | **不同步**   | 部署 / 文档文件不同步（见 4.1 策略 4）                                                                |
+| 依赖 bump（`d7b6cde`/`48b482a`/`a7ad03f`/`e3226d9`/`910e8bb`/`9033af2`） | pnpm-lock / package.json 依赖升级 | **不同步**   | 桌面端使用 npm（`package-lock.json`）+ Rust `Cargo.toml`，不共享 origin 的 pnpm 依赖图                  |
+
+**完整 22 个 commit 分类总表**（与 git 客户端「最近 25 个」对照用）
+
+> git 客户端默认显示 `HEAD~25..HEAD`（最近 25 个 commit），其中末尾 3 个（`c182265`/`1f90ab8`/`13be052`）属于上次基线 `c182265` 及之前，已于 2026-06-29 同步评估处理，**本次不重复**。下表是本次真正待同步的 22 个（`c182265..8d2ef15`），按时间倒序，每个 commit 显式归类，可与客户端逐条对账。
+
+| # | commit | PR | 分类 |
+| - | ------ | -- | ---- |
+| 1 | `8d2ef15` | #984 | 前端已同步（OAuth 断开 UI）+ 后端不同步（无 Rust OAuth token 存储，前端路由 stub 兜底） |
+| 2 | `349f8b7` | #981 | 后端不同步（Tauri IPC 同步管理，无 WebSocket 竞态） |
+| 3 | `9af6fb4` | #977 | 前端无对应改动 + 后端不同步（i18n OAuth callback 页，Node `oauthCallbackController`/`i18n` 中间件） |
+| 4 | `a3ca516` | #976 | 前端无对应改动 + 后端不同步（无 INSTALL_BASE_URL 部署场景） |
+| 5 | `61c5cfc` | #973 | 前端已同步（ServerCard.tsx `index.css` 微调随 #984 一并合并）+ 后端不同步（独立首启 admin 逻辑） |
+| 6 | `0bbe272` | #972 | 前端已同步（keep-alive 措辞）+ 后端不同步（Rust 无 per-server keep-alive 字段） |
+| 7 | `df8844a` | #969 | 后端不同步（同 #973，独立 admin 凭据逻辑） |
+| 8 | `6220791` | #968 | 不同步（docs / README 部署文件） |
+| 9 | `ceca8be` | #967 | 前端已同步（GroupCard 响应式布局三方合并） |
+| 10 | `fb58b7a` | #966 | 前端已同步（ServerForm/serverFormPayload keep-alive `===true` + 措辞）+ 后端不同步（Node `keepAliveService` 状态更新） |
+| 11 | `d7b6cde` | #963 | 不同步（pnpm 依赖 bump typescript） |
+| 12 | `48b482a` | #961 | 不同步（pnpm 依赖 bump openai） |
+| 13 | `a7ad03f` | #964 | 不同步（pnpm 依赖 bump i18next-browser-languagedetector） |
+| 14 | `e3226d9` | #965 | 不同步（pnpm 依赖 bump pg） |
+| 15 | `274d950` | #959/#960 | **已镜像到 Rust**（`extract_base_url` server URL `{variable}` 模板替换 + 4 单元测试） |
+| 16 | `f0128de` | #958 | 后端不同步（Activity 已统一 `createdAt`，无 API key 字段映射） |
+| 17 | `8700cc7` | #956 | 不同步（Docker image 加 Cargo） |
+| 18 | `38ffa6c` | #957 | 后端不同步（`OpenApiOAuth2` 仅 `{token}`，无 401 刷新基础） |
+| 19 | `910e8bb` | #953 | 不同步（pnpm 依赖 bump i18next-fs-backend） |
+| 20 | `9033af2` | #952 | 不同步（pnpm 依赖 bump typeorm） |
+| 21 | `5b417e7` | #950 | 后端不同步（OpenAPI YAML 支持为功能增强，待评估） |
+| 22 | `d479fa6` | #951 | 前端无需同步（桌面端已移除 discord 链）+ 不同步（docs） |
+
+**统计核对**：前端已同步 6 个（#1/#5/#6/#9/#10/#22）｜Rust 镜像 1 个（#15）｜后端不同步 7 个（#2/#3/#4/#7/#16/#18/#21）｜部署/文档不同步 3 个（#8/#17，#22 兼）｜依赖 bump 不同步 6 个（#11/#12/#13/#14/#19/#20）。跨类说明：#1/#6/#10 前端已同步、后端部分不同步；#22 前端无需同步、docs 不同步。**去重后唯一 commit 合计 22 个，全覆盖。**
+
+> 对照客户端的 25 个：末尾 3 个 `c182265`(#947)/`1f90ab8`(#936)/`13be052`(#945) 属于上次基线（2026-06-29 `8ff743f→c182265`，7 个 commit）已评估范围，其中 `c182265`/`1f90ab8`/`13be052` 在上次记录中明确标「不同步」，本次不重复处理。
+
+**同步方式说明**
+
+- 桌面端自定义文件（ServerCard / ServerForm / GroupCard / index.css / serverFormPayload / types）采用 `git merge-file --diff3` 三方合并（base=`c182265`，ours=desktop，theirs=origin HEAD），冲突仅 `index.css`（桌面端 9 列网格 vs origin 10 列响应式网格）需手动解，已保留桌面端「移除 visibility 列」的结构差异并采纳 origin 的 `.hub-server-card-status-cell` / `.hub-server-card-transport-cell` / `min-height` 响应式改进。
+- 无自定义文件（ServersPage / serverOAuthService）直接覆盖 / 新增。
+- locales 四语言仅「追加新增键 + 更新既有 keepAlive 措辞」，**未删除任何桌面端 `runtime*` 键**（同步后各文件仍含 16 个 runtime* 键）。
+
+**同步后验证**
+
+- `cd frontend && npm run build` ✓（2.22s）
+- `cd src-tauri && CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check` ✓（57.60s）
+- `cargo test --lib openapi_transport` ✓（4 passed；含 server URL 模板变量替换回归测试）
+- `npx tsc --noEmit`：净增真实类型错误为 0（`handleServerOAuthDisconnect` 已通过 ServerContext 接入消除；ServerCard `server.type/openapi` 等为预存的桌面端自定义 OpenAPI 复制代码错误，仅行号位移）
+- locales JSON 完整性 ✓，runtime* 键保留 ✓，自定义文件未被覆盖 ✓
+
+#### 4.4.1 逐 commit 同步明细（origin 改动点 -> desktop 落点）
+
+> 每条记录：origin 接口/文件改动点 → desktop 同步落点 → 修改的功能点。按时间正序（旧->新）。
+
+**`d479fa6` fix discord link (#951)** — `2026-06-29`
+- origin 改动点：`frontend/src/components/ui/UserProfileMenu.tsx`（discord URL `c8GKyzyFF`->`2BJehJZVH5`）+ 7 个 docs/README 文件
+- desktop 落点：**无需同步**。桌面端 `UserProfileMenu.tsx` 已移除 sponsor/wechat/discord 整块 UI（自定义差异），不含该 discord `<a>` 标签
+- 功能点：discord 社区链接更新 —— 桌面端无此 UI，不适用
+
+**`5b417e7` [codex] support OpenAPI YAML endpoints (#950)** — `2026-06-29`
+- origin 改动点：`src/controllers/openApiController.ts`（+46/-，YAML content-type 解析）、`src/routes/index.ts`（路由）、`package.json`（`@apidevtools/swagger-parser` 等）、`tests/controllers/openApiController.yaml.test.ts`（+119）
+- desktop 落点：**后端不同步**。Rust `openapi_transport.rs::fetch_spec` 仅处理 JSON spec；YAML 支持属功能增强
+- 功能点：OpenAPI spec 支持 YAML 端点 —— Rust 端待单独评估（非 bug 修复）
+
+**`9033af2` chore(deps): bump typeorm 0.3.28->0.3.29 (#952)** — `2026-06-30`
+- origin 改动点：`pnpm-lock.yaml`（+50/-）
+- desktop 落点：**不同步**。桌面端用 npm（`package-lock.json`）+ Rust `Cargo.toml`，不共享 origin pnpm 依赖图
+- 功能点：Node ORM 依赖升级 —— 架构不对应
+
+**`910e8bb` chore(deps): bump i18next-fs-backend 2.6.4->2.6.6 (#953)** — `2026-06-30`
+- origin 改动点：`pnpm-lock.yaml`（+8/-）
+- desktop 落点：**不同步**。同上（pnpm 依赖图不共享）
+- 功能点：Node 后端 i18n 文件后端依赖升级 —— 桌面端前端用 `i18next`，不涉及
+
+**`38ffa6c` [codex] fix OpenAPI OAuth2 token refresh after 401 (#957)** — `2026-06-30`
+- origin 改动点：`src/clients/openapi.ts`（+50：`invalidateRefreshableOAuth2Token` / `callTool` 401 重试）、`src/utils/serialization.ts`、`src/clients/__tests__/openapi-oauth2.test.ts`（+378）
+- desktop 落点：**后端不同步**。`OpenApiOAuth2` 仅 `{ token }`，无 `tokenUrl/clientId/clientSecret/expiresAt`；`call_tool` 用 `Authorization::None`（静态 token 走 headers）。无刷新能力基础
+- 功能点：OpenAPI OAuth2 access token 过期后自动刷新重试 —— 桌面端无该机制，待上游 OAuth 功能落地时一并实现
+
+**`8700cc7` [codex] Add Cargo to Docker image (#956)** — `2026-06-30`
+- origin 改动点：`Dockerfile`（+8）、`.github/DOCKER_CLI_TEST.md`、`docs/configuration/docker-setup.mdx`（中英）
+- desktop 落点：**不同步**。部署/文档文件不同步（4.1 策略 4）
+- 功能点：Docker 镜像加 Cargo 工具链 —— 桌面端为 Tauri 桌面应用，无 Docker 部署
+
+**`f0128de` feat(activity): surface OAuth auth method in activity log API key field (#958)** — `2026-06-30`
+- origin 改动点：`src/services/sseService.ts`（+14/-，活动日志 API key 字段记录 OAuth auth method）、`tests/services/keepalive.test.ts`
+- desktop 落点：**后端不同步**。桌面端 Activity 字段已统一为 `createdAt`（自定义差异），Rust `activity_log` 模型无 Node `sseService` 的 API key 字段映射
+- 功能点：活动日志的 API key 字段区分 OAuth 授权方式 —— 桌面端活动模型结构不同
+
+**`274d950` fix: allow editing OpenAPI servers with recursive schemas (#959) (#960)** — `2026-07-01`
+- origin 改动点：`src/clients/openapi.ts`（+27/-5：① server URL `{variable}` 模板用 `variables.*.default` 替换；② `createSafeJSON` 包裹 `inputSchema` 破 Node `SwaggerParser.dereference` 产生的循环引用）、`src/controllers/serverController.ts`、新增 2 个测试文件
+- desktop 落点：**已镜像 ①**。`src-tauri/src/mcp/openapi_transport.rs::extract_base_url` 增加 `servers[0].variables` 模板替换（`{name}` -> `default`），新增 4 个单元测试；② 不存在（Rust 用 `rmcp-openapi` crate 原生 serde 序列化，无 live circular refs）
+- 功能点：① 修复含 `{variable}` 模板 server URL 的 OpenAPI 服务器无法连接（`Url::parse` 失败报"no base URL"）；② 递归 schema 编辑 —— Rust 架构无此问题
+
+**`e3226d9` chore(deps): bump pg and @types/pg (#965)** — `2026-07-02`
+- origin 改动点：`pnpm-lock.yaml`（+72/-）
+- desktop 落点：**不同步**。pnpm 依赖图不共享
+- 功能点：PostgreSQL 驱动依赖升级 —— 桌面端用 SQLite（`sqlx`）
+
+**`a7ad03f` chore(deps-dev): bump i18next-browser-languagedetector 8.2.0->8.2.1 (#964)** — `2026-07-02`
+- origin 改动点：`pnpm-lock.yaml`（+16/-）
+- desktop 落点：**不同步**。pnpm 依赖图不共享
+- 功能点：i18n 语言检测库升级 —— 桌面端前端若需可单独评估 npm 版本
+
+**`48b482a` chore(deps): bump openai 6.7.0->6.45.0 (#961)** — `2026-07-02`
+- origin 改动点：`pnpm-lock.yaml`（+18/-）
+- desktop 落点：**不同步**。pnpm 依赖图不共享
+- 功能点：openai SDK 升级 —— 桌面端无 Smart Routing（待办），不使用
+
+**`d7b6cde` chore(deps-dev): bump typescript 5.9.2->5.9.3 (#963)** — `2026-07-02`
+- origin 改动点：`pnpm-lock.yaml`（+146/-）
+- desktop 落点：**不同步**。pnpm 依赖图不共享
+- 功能点：TypeScript 编译器升级 —— 桌面端用 npm，独立管理
+
+**`fb58b7a` [codex] Fix remote keep-alive status updates (#966)** — `2026-07-02`
+- origin 改动点：`frontend/src/components/ServerForm.tsx`（+2/-2：keepAlive `enabled` 严格判断 `=== true`）、`frontend/src/utils/serverFormPayload.ts`（+10/-10：`keepAliveEnabled` 严格判断）、`src/services/keepAliveService.ts`（+70）、`src/utils/serialization.ts`、`src/utils/serverConfigPersistence.ts`
+- desktop 落点：**前端已同步**。`ServerForm.tsx` 三方合并（`enableKeepAlive === true`）、`serverFormPayload.ts` 三方合并（`keepAliveEnabled` 严格判断）；后端 `keepAliveService.ts` 不同步（Node 服务）
+- 功能点：keep-alive 启用状态严格布尔判断（修复 falsy 误判）+ 远端状态更新 —— 前端表单逻辑同步，措辞改「Connection Health」
+
+**`ceca8be` fix: improve layout of GroupCard component for better responsiveness (#967)** — `2026-07-03`
+- origin 改动点：`frontend/src/components/GroupCard.tsx`（+6/-3：卡片 `flex h-full flex-col` + 路由图 `minHeight: 180`）
+- desktop 落点：**前端已同步**。`GroupCard.tsx` 三方合并，保留桌面端 httpPort baseUrl 差异
+- 功能点：GroupCard 组件响应式布局改进（等高卡片 + 路由图最小高度）
+
+**`6220791` docs: update README files with Docker image variants (#968)** — `2026-07-04`
+- origin 改动点：`README.md`/`README.fr.md`/`README.zh.md`、`AGENTS.md`、`CLAUDE.md`（+/-）
+- desktop 落点：**不同步**。文档文件不同步（4.1 策略 4）
+- 功能点：README 补充 Docker 镜像变体说明 —— 桌面端无 Docker 部署
+
+**`df8844a` fix: remove pre-seeded admin credentials from shipped mcp_settings.json (#969)** — `2026-07-04`
+- origin 改动点：`mcp_settings.json`（-8，移除预置 admin 凭据）、`tests/models/user-default-password.test.ts`
+- desktop 落点：**后端不同步**。桌面端用独立首启 admin 初始化逻辑（`migration` / `commands::auth`），无 `mcp_settings.json` 预置凭据机制
+- 功能点：移除 shipped 配置的预置 admin 密码（安全） —— 桌面端首启流程不同
+
+**`0bbe272` [codex] fix automatic reconnect for remote servers (#972)** — `2026-07-05`
+- origin 改动点：`frontend/src/components/ServerForm.tsx`（+10/-10：keep-alive 措辞）、`frontend/src/types/index.ts`（+4/-4：keepAlive 字段注释）、`locales/*.json`（4 语言，keepAlive 措辞）、`src/services/keepAliveService.ts`（+45：`reconnectServer` 回调 + 断线重连触发）、`src/services/mcpService.ts`（+27）、`src/types/index.ts`、多处 mcpService 测试
+- desktop 落点：**前端已同步**（ServerForm 措辞 + types 注释 + locales keepAlive 5 键措辞）；**后端不同步**（`keepAliveService.ts`/`mcpService.ts` reconnect —— Rust `ServerConfig` 无 keep-alive 字段，配置被 serde 丢弃，仅有全局 `enableSessionRebuild` 后台重连，机制不同）
+- 功能点：远端（SSE/Streamable HTTP）服务器断线后自动重连 + keep-alive 措辞改为「健康检查与自动重连」—— 前端 UI/文案同步，后端重连逻辑架构不对应
+
+**`61c5cfc` feat: add default admin user for local development (#973)** — `2026-07-05`
+- origin 改动点：`frontend/src/components/ServerCard.tsx`（+4/-4）、`frontend/src/index.css`（+32/-8：`.hub-server-card-row` 网格 + status/transport cell 类）、`src/models/User.ts`（+30：默认 admin）、`src/utils/path.ts`、`mcp_settings.json`、`scripts/dev-backend.js`（+105）、docs
+- desktop 落点：**前端已同步**（ServerCard 的 index.css 网格改动随 #984 一并三方合并，status/transport cell 类已采纳）；**后端不同步**（`User` 模型默认 admin / `dev-backend.js` —— 桌面端独立首启 admin 逻辑）
+- 功能点：本地开发默认 admin 用户 + ServerCard 网格响应式 —— 前端样式同步，后端用户初始化不同
+
+**`a3ca516` feat: add INSTALL_BASE_URL support for dynamic configuration (#976)** — `2026-07-07`
+- origin 改动点：`src/utils/installBaseUrl.ts`（+42，新增）、`src/betterAuth.ts`、`src/controllers/oauthServerController.ts`/`oauthDynamicRegistrationController.ts`/`serverController.ts`、`src/services/betterAuthConfig.ts`/`mcpOAuthProvider.ts`/`oauthClientRegistration.ts`/`openApiGeneratorService.ts`、4 个测试文件
+- desktop 落点：**前端无对应改动 + 后端不同步**。桌面端无 INSTALL_BASE_URL 部署场景（本地 Tauri 应用，baseUrl 固定 `http://localhost:{httpPort}`）
+- 功能点：动态 INSTALL_BASE_URL 配置（反向代理/自定义域名部署）—— 桌面端不适用
+
+**`9af6fb4` fix: i18n OAuth callback page and per-request language resolution (#977)** — `2026-07-07`
+- origin 改动点：`src/controllers/oauthCallbackController.ts`（+72/-，OAuth 回调页 i18n）、`src/middlewares/i18n.ts`（+24/-，按请求解析语言）、`src/utils/i18n.ts`（+64/-）
+- desktop 落点：**前端无对应改动 + 后端不同步**。桌面端无 OAuth 回调页（Rust 后端 `oauth_protected_resource` 端点不涉及回调页渲染），i18n 由前端 `i18next` 处理
+- 功能点：OAuth 授权回调页多语言 + 按请求语言解析 —— 桌面端无该页面
+
+**`349f8b7` fix: preserve in-flight OAuth state on full reload (#981)** — `2026-07-08`
+- origin 改动点：`src/services/mcpService.ts`（+21/-，全量重载时保留进行中的 OAuth 状态）、`tests/services/mcpService-toggle.test.ts`（+72）
+- desktop 落点：**后端不同步**。Rust 用 Tauri IPC 同步管理连接，`toggle_server`/`reload_server` 中 `connect_server` 同步等待，无 Node WebSocket 广播竞态，不存在进行中 OAuth 状态丢失问题
+- 功能点：全量重载时保留进行中 OAuth 授权状态 —— 桌面端连接管理架构不同，无此竞态
+
+**`8d2ef15` feat: add upstream OAuth disconnect (#984)** — `2026-07-08`
+- origin 改动点：`frontend/src/components/ServerCard.tsx`（+53：LogOut 图标 + onOAuthDisconnect prop + supportsOAuthDisconnect + handleOAuthDisconnect + 菜单项 + ConfirmDialog）、`frontend/src/contexts/ServerContext.tsx`（+25：handleServerOAuthDisconnect handler）、`frontend/src/pages/ServersPage.tsx`（+2：透传 onOAuthDisconnect）、`frontend/src/services/serverOAuthService.ts`（+11，🆕 disconnectServerOAuth）、`frontend/src/types/index.ts`（+2：`oauth.connected`）、`locales/*.json`（4 语言 `disconnectOAuth*` 4 键）、后端 `src/controllers/serverController.ts`/`src/services/upstreamOAuthDisconnectService.ts`（+217）/`mcpService.ts`/`routes/index.ts` 等
+- desktop 落点：**前端已同步** —— ServerCard 三方合并（保留 OpenAPI 复制/httpPort 差异）、ServersPage 直接覆盖、serverOAuthService 🆕 新增、ServerContext 手动合并 handler、types 三方合并、locales 4 语言加键、`tauriClient.ts` 映射 `POST /servers/:name/oauth/disconnect` 到 `__stub__`（防误触兜底）；**后端不同步** —— Rust 无上游 OAuth token 存储/revocation 端点，`toFrontendServer` 不填充 `oauth.connected`，UI 按钮恒不显示
+- 功能点：上游 MCP 服务器 OAuth 授权的断开（撤销 token / 重新授权）—— 前端 UI 同步（dormant），后端待 Rust 实现上游 OAuth 后镜像
+
+---
+
+### 4.5 历史同步记录
 
 #### 2026-06-29：同步 `8ff743f` → `c182265`（7 个 commit）
 

@@ -95,6 +95,14 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: 'reload_server', args: { name: decodeURIComponent(segs[1]) } };
   if (segs[0] === 'servers' && segs[2] === 'reinstall' && m === 'POST')
     return { command: 'reinstall_server', args: { name: decodeURIComponent(segs[1]) } };
+  // Upstream OAuth disconnect (#984) — desktop has no upstream-OAuth token storage,
+  // so this is a no-op stub. The UI button stays hidden (oauth.connected is never
+  // populated by the Rust backend); the stub only guards against an unmapped-route error.
+  if (segs[0] === 'servers' && segs[2] === 'oauth' && segs[3] === 'disconnect' && m === 'POST')
+    return {
+      command: '__stub__',
+      args: { __response: { success: false, message: 'OAuth disconnect is not available in desktop mode' } },
+    };
 
   // Per-server tool/prompt/resource toggle & description overrides.
   if (

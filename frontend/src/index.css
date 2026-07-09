@@ -295,9 +295,18 @@
   justify-self: start;
 }
 
+.hub-server-card-status-cell,
+.hub-server-card-transport-cell {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  justify-self: start;
+}
+
 .hub-status.hub-server-card-status {
   gap: 5px;
   font-size: 11.5px;
+  min-height: 24px;
 }
 
 .hub-status.hub-server-card-status .hub-dot {
@@ -325,6 +334,8 @@
   letter-spacing: 0.02em;
   overflow: visible;
   white-space: nowrap;
+  justify-content: center;
+  min-width: max-content;
 }
 
 .hub-server-card-select,

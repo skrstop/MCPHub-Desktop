@@ -149,12 +149,27 @@ impl OpenapiTransport {
             if let Some(first) = servers.first() {
                 if let Some(url) = first.get("url").and_then(|v| v.as_str()) {
                     if !url.is_empty() {
-                        // Handle relative URLs (e.g. "/api/v1")
-                        if url.starts_with('/') {
-                            return Url::parse("http://localhost").ok()
-                                .and_then(|mut u| { u.set_path(url); Some(u) });
+                        // OpenAPI server URLs may contain {variable} templates that must be
+                        // substituted with the variable's `default` before use (e.g. a spec
+                        // declares `url: '{server}/api/v1'` with `variables.server.default`).
+                        // Without substitution the literal '{server}/api/v1' is misclassified
+                        // as a relative path and glued onto the spec source host, 404-ing
+                        // every tool call. Mirrors upstream fix (#959/#960).
+                        let mut resolved_url = url.to_string();
+                        if let Some(variables) = first.get("variables").and_then(|v| v.as_object()) {
+                            for (name, variable) in variables {
+                                if let Some(default) = variable.get("default").and_then(|v| v.as_str()) {
+                                    resolved_url = resolved_url.replace(&format!("{{{}}}", name), default);
+                                }
+                            }
                         }
-                        if let Ok(parsed) = Url::parse(url) {
+
+                        // Handle relative URLs (e.g. "/api/v1")
+                        if resolved_url.starts_with('/') {
+                            return Url::parse("http://localhost").ok()
+                                .and_then(|mut u| { u.set_path(&resolved_url); Some(u) });
+                        }
+                        if let Ok(parsed) = Url::parse(&resolved_url) {
                             return Some(parsed);
                         }
                     }
@@ -356,5 +371,56 @@ impl McpTransport for OpenapiTransport {
         }
 
         Ok(ToolCallResult { content, is_error })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_base_url_substitutes_server_variables() {
+        // Mirrors upstream #959: a server URL with a {variable} template must be
+        // resolved against the variable's `default` before parsing.
+        let spec = json!({
+            "servers": [{
+                "url": "{server}/api/v1",
+                "variables": {
+                    "server": { "default": "https://api.example.com" }
+                }
+            }]
+        });
+        let url = OpenapiTransport::extract_base_url(&spec).expect("should resolve");
+        assert_eq!(url.as_str(), "https://api.example.com/api/v1");
+    }
+
+    #[test]
+    fn extract_base_url_handles_plain_server_url() {
+        let spec = json!({
+            "servers": [{ "url": "https://api.example.com/v2" }]
+        });
+        let url = OpenapiTransport::extract_base_url(&spec).expect("should resolve");
+        assert_eq!(url.as_str(), "https://api.example.com/v2");
+    }
+
+    #[test]
+    fn extract_base_url_handles_relative_server_url() {
+        let spec = json!({
+            "servers": [{ "url": "/api/v1" }]
+        });
+        let url = OpenapiTransport::extract_base_url(&spec).expect("should resolve");
+        assert_eq!(url.path(), "/api/v1");
+    }
+
+    #[test]
+    fn extract_base_url_falls_back_to_swagger_2_host() {
+        let spec = json!({
+            "host": "api.example.com",
+            "basePath": "/v3",
+            "schemes": ["https"]
+        });
+        let url = OpenapiTransport::extract_base_url(&spec).expect("should resolve");
+        assert_eq!(url.as_str(), "https://api.example.com/v3");
     }
 }

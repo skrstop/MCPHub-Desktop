@@ -141,7 +141,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
   const totalVisibleTools = groupServers.reduce((acc, s) => acc + tally(s).visibleTools, 0);
 
   return (
-    <div className="hub-card overflow-visible">
+    <div className="hub-card flex h-full flex-col overflow-visible">
       {/* Header */}
       <div
         className="flex items-start gap-3 px-4 py-3"
@@ -245,8 +245,8 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
 
       {/* Routing diagram */}
       <div
-        className="grid items-center gap-3 px-4 py-3"
-        style={{ gridTemplateColumns: '1fr 80px 1fr' }}
+        className="grid flex-1 items-center gap-3 px-4 py-3"
+        style={{ gridTemplateColumns: '1fr 80px 1fr', minHeight: 180 }}
       >
         {/* Servers */}
         <div className="flex flex-col gap-1.5">

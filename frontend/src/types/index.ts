@@ -205,8 +205,8 @@ export interface ServerConfig {
   enabled?: boolean;
   // Per-server visibility for non-admin users. See issue #817. 'group' reserved.
   visibility?: 'private' | 'group' | 'public';
-  enableKeepAlive?: boolean; // Enable keep-alive for this server (requires global enable as well)
-  keepAliveInterval?: number; // Keep-alive ping interval in milliseconds (default: 60000ms)
+  enableKeepAlive?: boolean; // Enable remote health checks and automatic reconnect attempts
+  keepAliveInterval?: number; // Health check and reconnect interval in milliseconds (default: 60000ms)
   tools?: Record<string, { enabled: boolean; description?: string }>; // Tool-specific configurations with enable/disable state and custom descriptions
   prompts?: Record<string, { enabled: boolean; description?: string }>; // Prompt-specific configurations with enable/disable state and custom descriptions
   options?: {
@@ -246,6 +246,7 @@ export interface ServerConfig {
     resource?: string; // OAuth resource parameter (RFC8707)
     authorizationEndpoint?: string; // Authorization endpoint (authorization code flow)
     tokenEndpoint?: string; // Token endpoint for exchanging authorization codes for tokens
+    revocationEndpoint?: string; // Token revocation endpoint (RFC 7009)
     pendingAuthorization?: {
       authorizationUrl?: string;
       state?: string;
@@ -311,6 +312,7 @@ export interface Server {
   oauth?: {
     authorizationUrl?: string;
     state?: string;
+    connected?: boolean;
   };
 }
 

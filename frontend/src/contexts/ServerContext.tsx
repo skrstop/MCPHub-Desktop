@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Server, ApiResponse } from '@/types';
+import { disconnectServerOAuth as disconnectServerOAuthRequest } from '@/services/serverOAuthService';
 import { apiGet, apiPost, apiDelete } from '../utils/fetchInterceptor';
 import { useAuth } from './AuthContext';
 
@@ -66,6 +67,7 @@ interface ServerContextType {
   handleServerToggle: (server: Server, enabled: boolean) => Promise<boolean>;
   handleServerReload: (server: Server) => Promise<boolean>;
   handleServerReinstall: (server: Server) => Promise<boolean>;
+  handleServerOAuthDisconnect: (server: Server) => Promise<boolean>;
 }
 
 // Create Context
@@ -499,6 +501,28 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     [t, triggerRefresh],
   );
 
+  const handleServerOAuthDisconnect = useCallback(
+    async (server: Server) => {
+      try {
+        const result = await disconnectServerOAuthRequest(server.name);
+
+        if (!result || !result.success) {
+          console.error('Failed to disconnect server OAuth', { serverName: server.name, result });
+          setError(result?.message || t('server.disconnectOAuthError', { serverName: server.name }));
+          return false;
+        }
+
+        triggerRefresh();
+        return true;
+      } catch (err) {
+        console.error('Error disconnecting server OAuth', { serverName: server.name, err });
+        setError(err instanceof Error ? err.message : String(err));
+        return false;
+      }
+    },
+    [t, triggerRefresh],
+  );
+
   // Handle page change
   const handlePageChange = useCallback((page: number) => {
     setCurrentPage(page);
@@ -536,6 +560,7 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     handleServerToggle,
     handleServerReload,
     handleServerReinstall,
+    handleServerOAuthDisconnect,
   };
 
   return <ServerContext.Provider value={value}>{children}</ServerContext.Provider>;
