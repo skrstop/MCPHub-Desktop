@@ -174,6 +174,9 @@ export const buildServerPayload = ({
     config.env = env;
   }
 
+  // Per-session client isolation applies to any server type.
+  config.perSessionClient = formData.perSessionClient === true ? true : undefined;
+
   return {
     name: formData.name.trim(),
     config,

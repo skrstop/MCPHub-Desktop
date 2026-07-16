@@ -27,7 +27,7 @@ fn encode_server_type(t: &ServerType) -> &'static str {
 
 pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled
          FROM servers WHERE enabled = 1",
     )
     .fetch_all(db::pool())
@@ -37,7 +37,7 @@ pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
 
 pub async fn list_all() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled
          FROM servers ORDER BY name",
     )
     .fetch_all(db::pool())
@@ -47,7 +47,7 @@ pub async fn list_all() -> Result<Vec<ServerConfig>> {
 
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled
          FROM servers WHERE name = ?",
     )
     .bind(name)
@@ -65,10 +65,11 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     let openapi = cfg.openapi.as_ref().map(|o| serde_json::to_string(o)).transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
+    let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
 
     sqlx::query(
-        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&cfg.name)
@@ -81,6 +82,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&headers)
     .bind(&options)
     .bind(&openapi)
+    .bind(per_session_client)
     .bind(enabled)
     .execute(db::pool())
     .await
@@ -104,10 +106,11 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let openapi = cfg.openapi.as_ref().map(|o| serde_json::to_string(o)).transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
+    let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
 
     sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
-         headers=?, options=?, openapi=?, enabled=?, updated_at=datetime('now') WHERE name=?",
+         headers=?, options=?, openapi=?, per_session_client=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
     .bind(&cfg.name)
     .bind(server_type)
@@ -119,6 +122,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&headers)
     .bind(&options)
     .bind(&openapi)
+    .bind(per_session_client)
     .bind(enabled)
     .bind(name)
     .execute(db::pool())
@@ -188,6 +192,7 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         headers,
         options,
         openapi,
+        per_session_client: Some(r.try_get::<i64, _>("per_session_client")? != 0),
         enabled: r.try_get::<i64, _>("enabled")? != 0,
     })
 }

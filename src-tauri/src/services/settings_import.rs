@@ -110,6 +110,7 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 headers: raw.headers,
                 options: None,
                 openapi: None,
+                per_session_client: None,
                 enabled: !raw.disabled.unwrap_or(false),
             };
 

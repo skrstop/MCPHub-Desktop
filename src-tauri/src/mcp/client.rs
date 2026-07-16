@@ -12,6 +12,12 @@ pub trait McpTransport: Send + Sync {
     async fn disconnect(&mut self) -> Result<()>;
     /// Returns true if the transport is connected and healthy
     fn is_connected(&self) -> bool;
+    /// The server version reported by the MCP `initialize` handshake
+    /// (`serverInfo.version`), if any. Used for best-effort "update available"
+    /// checks. Defaults to `None`.
+    fn server_version(&self) -> Option<String> {
+        None
+    }
     /// Retrieve the list of tools from the remote server
     async fn list_tools(&self) -> Result<Vec<Tool>>;
     /// Invoke a tool by name with the given arguments
@@ -42,6 +48,10 @@ impl McpClient {
 
     pub fn is_connected(&self) -> bool {
         self.transport.is_connected()
+    }
+
+    pub fn server_version(&self) -> Option<String> {
+        self.transport.server_version()
     }
 
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {

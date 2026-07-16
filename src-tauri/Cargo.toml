@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.23001"
+version = "1.0.24001"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"

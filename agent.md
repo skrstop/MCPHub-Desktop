@@ -881,6 +881,161 @@ let child = c.spawn()?;
 捆绑的 Python 版本已更新为 `3.14`（最新稳定版），Node.js 更新为 `24.18.0`，uv 更新为 `0.11.24`。
 详见 `scripts/download-runtimes.sh` 和 `scripts/download-runtimes.ps1` 中的默认版本配置。
 
+### 3.6 stdio 包下载进度 / 更新检测 / 非阻塞连接（桌面端独有）
+
+> ⚠️ **基线同步注意**：本节涉及的全部文件都带桌面端自定义，同步 origin 时**禁止批量覆盖**，必须手动合并保留以下差异。origin（Node.js）无对应实现。
+
+#### 3.6.1 非阻塞保存/连接（保存类命令不再被连接阻塞）
+
+**背景**：`pool::connect_server` 对 npx/uvx 会触发包下载、对不可达 sse/http 会重试 3×120s，若在保存命令里 `await` 它，前端保存按钮会卡死数分钟。
+
+**文件**：`src-tauri/src/commands/servers.rs`
+- `add_server`：原本就是后台 spawn 连接（参考范式）。
+- `update_server`：**持久化后改为 `tauri::async_runtime::spawn` 后台连接**，立即返回 `starting` 状态（不再 `await connect_server`）。保存响应不再被连接阻塞。
+- `reinstall_server`：清缓存后后台 spawn 重连，立即返回 `{success, cleared}`。
+- `reload_server` 命令：`mcp_manager::reload_server` 非阻塞后，`get_status` 用 `starting` 兜底（防占位插入竞态）。
+
+**文件**：`src-tauri/src/services/mcp_manager.rs`
+- `reload_server`：后台 spawn 连接（不再 await）。
+- `toggle_server`：enable 分支后台 spawn 连接；disable 分支保持原 `is_starting` 竞态保护。
+- `start_all`：原本就 staggered spawn；其 `app: &AppHandle` 参数现用于注入全局事件句柄。
+
+#### 3.6.2 stdio 下载进度事件（`server://install-progress`）
+
+**文件**：`src-tauri/src/mcp/progress.rs`（新文件）
+- 全局 `AppHandle`（`OnceLock`）：`set_app_handle` / `app_handle`，在 `lib.rs` setup 早期注入，避免给 `connect_server` 等所有调用方加参数。
+- `ServerInstallProgress { server, phase, progress: Option<u8>, message }`，`phase` ∈ `downloading | done | error`。
+- `emit_install_progress(payload)` 发 `server://install-progress`。
+- `is_package_manager(command)`：判断 npx/uvx。
+
+**文件**：`src-tauri/src/mcp/stdio_transport.rs`
+- **不**在启动时无条件发 `downloading`（包已缓存时无下载，避免每次启动误报"下载中"）。
+- stderr drain 仅在行匹配 `looks_like_download_progress()`（含 `download`/`downloading`/`added...package`/`installed...package` 或带百分比/`X/Y`）时才发 `downloading`，节流 300ms。服务自身输出到 stderr 的信息日志不算下载进度。
+- `parse_progress_pct(line)`：从 stderr 行解析 `NN%` 或 `X/Y` 百分比。
+- 握手 `initialize` 返回后捕获 `serverInfo.version` 存入 `self.server_version`。
+
+**文件**：`src-tauri/src/mcp/client.rs`
+- `McpTransport` trait 新增 `fn server_version(&self) -> Option<String> { None }`（默认实现）；`McpClient` 透传。
+
+**文件**：`src-tauri/src/mcp/pool.rs`（`connect_server`）
+- 成功分支：若 npx/uvx，发 `done`（progress=100），并 `spawn_update_check`。
+- 失败/超时/build_client 错误分支：若 npx/uvx，发 `error`。
+
+#### 3.6.3 包更新检测（仅在启动/连接时检查，非定时巡检）
+
+**文件**：`src-tauri/src/mcp/progress.rs`
+- `ServerUpdateInfo { server, hasUpdate, current, latest }`，发 `server://update-available`。⚠️ **必须带 `#[serde(rename_all = "camelCase")]`**，否则 `has_update` 序列化成蛇形、前端读 `hasUpdate` 永远 `undefined`（曾踩坑）。
+- `spawn_update_check(server, command, args, running_version)`：连接成功后后台 spawn。
+  - **不**用 `serverInfo.version`（`running_version`）做对比——服务自报版本与包版本常不同号（如 mcp-server-tapd 自报 `1.28.1`、PyPI 包 `8.0.79`），无可比性，仅用于日志。
+  - 改为对比**持久化的"已安装包版本"**：`get_recorded_version` / `set_recorded_version`（存于 `system_config.config_json` 的 `packageVersions` map，`config_service::update` 深合并）。
+  - 规则：无记录→记录当前最新、`hasUpdate=false`；`is_newer(latest, recorded)`→`hasUpdate=true`；否则 `hasUpdate=false`。
+  - `mark_reinstalled(server)` / `take_reinstalled(server)`：内存 `Mutex<HashSet>` 标记"刚重装"。`reinstall_server` 调 `mark_reinstalled`，下次检查直接把最新版记为已安装、`hasUpdate=false`——**更新后不再重复提示，重启后也不会**（已持久化）。
+  - `extract_package_name(command, args)`：npx 取首个非 flag 参数并剥 `@version`；uvx 取 `--from` 或首个位置参数。
+  - `fetch_latest_version(command, pkg)`：npx→`registry.npmjs.org/<pkg>/latest`；uvx→`pypi.org/pypi/<pkg>/json`。带 8s 超时。
+  - `is_newer(latest, current)`：自研轻量 semver 比较（解析 `major.minor.patch`，任一解析失败返回 false，不误报）。
+- 所有结果都 `app_logger::log_to_db`（日志页可见）：`开始检查` / `检测到新版本：已安装 X，最新 Y` / `已是最新版本` / `首次记录包版本` / `更新完成，已记录已安装版本` / `更新检查失败`。
+
+**文件**：`src-tauri/src/commands/servers.rs`
+- `reinstall_server`：重连前调 `crate::mcp::progress::mark_reinstalled(&cfg.name)`。
+
+**检查时机**：仅在 `connect_server` 成功后、对 npx/uvx 跑一次。触发点：启动 `start_all`、`add_server`、`update_server`、`toggle_server`、`reload_server`、`reinstall_server`、`enableSessionRebuild` 的 30s 重连。**不是定时巡检**。
+
+#### 3.6.4 前端联动
+
+**文件**：`frontend/src/contexts/ServerInstallProgressContext.tsx`（新文件）
+- 监听 `server://install-progress` 与 `server://update-available`（`isTauri()` 时）。
+- `progress`（按 server 存，`done/error` 1.5s 后清）、`updates`（按 server 存最新检查结果，含 `hasUpdate`/`current`/`latest`）。
+- 暴露 `getProgress` / `getUpdate` / `isInstalling` / `dismissUpdate`。
+- **已移除 `dismissed` 集合**：后端 `mark_reinstalled` 已能正确清角标，dismissed 会误杀真更新（如已记录版本被回退后同版本本应再提示）。
+
+**文件**：`frontend/src/App.tsx`
+- 在 `ServerProvider` 内包 `ServerInstallProgressProvider`。
+
+**文件**：`frontend/src/components/ServerCard.tsx`
+- 状态格：下载中显示紧凑进度条（`下载中 NN%` 或 indeterminate），不再与 transport 格重叠。
+- "..." 按钮：有更新时右上角红色圆点角标。
+- 菜单：有更新时新增「更新到 vX.Y.Z」项（强调色），点击走 reinstall 确认弹窗。
+- 服务名后：npx/uvx 显示小字版本，优先用 `updateInfo.current`（已记录包版本），回退 `server.version`（`serverInfo.version`）。
+
+**文件**：`frontend/src/types/index.ts`
+- `Server` 增加 `version?: string`。
+
+**文件**：`frontend/src/utils/tauriClient.ts`
+- `toFrontendServer` 把 `status.serverVersion` 映射到 `version`。
+
+**文件**：`src-tauri/src/models/server.rs`
+- `ServerStatus` 新增 `server_version: Option<String>`（`#[serde(default, skip_serializing_if = "Option::is_none")]`，序列化为 `serverVersion`）。`pool.rs` 连接成功时填入握手版本，其余构造点填 `None`。
+
+**文件**：`locales/zh.json`、`locales/en.json`
+- 新增 `server.downloading`、`server.updateAvailable`、`server.updateTo`、`server.reinstallStarted`。
+
+#### 3.6.5 模拟更新检测（调试用）
+
+已记录版本存于 `~/Library/Application Support/app.mcphub.desktop/mcphub.db` 的 `system_config.config_json` → `packageVersions` map（key=服务名，value=包版本）。直接改 DB 即可模拟"有更新"：
+
+```bash
+DB="$HOME/Library/Application Support/app.mcphub.desktop/mcphub.db"
+python3 - "$DB" <<'PY'
+import sqlite3, json, sys
+con = sqlite3.connect(sys.argv[1])
+cfg = json.loads(con.execute("SELECT config_json FROM system_config WHERE id=1").fetchone()[0] or "{}")
+cfg.setdefault("packageVersions", {})["chrome-devtools"] = "1.2.0"  # 改成低于最新的版本
+con.execute("UPDATE system_config SET config_json=?, updated_at=datetime('now') WHERE id=1", (json.dumps(cfg, ensure_ascii=False),))
+con.commit(); con.close()
+PY
+```
+
+改后需**重连该服务**（启用/重载/重启）才会触发检查（"刷新"按钮只轮询、不重连，不触发检查）。
+
+### 3.7 Per-session upstream client isolation（perSessionClient，origin #985 镜像）
+
+> 镜像 origin `d74d1be`（PR #985）。当 server 配置 `perSessionClient: true` 时，HTTP MCP 路径下每个下游 session（`mcp-session-id`）获得**独立的上游 client/连接/进程**，而不是共享 pool 的单 client。适用于 Playwright 等有状态服务。前端 UI 在 `8d2ef15→9dd75bc` 基线同步时已镜像为 dormant（checkbox + config 字段），本节为 Rust 后端真正读取并生效的实现。
+
+#### 3.7.1 作用域（与 origin 一致）
+- **仅 HTTP MCP JSON-RPC 路径**（`dispatch_mcp` 的 `tools/call`，http_server.rs）有 session，才做隔离。
+- REST 端点（`/rest/:server/call`、`/rest/group/:group/call`）无 session，保持共享 pool。
+- Tauri UI 的 `call_tool` 命令（前端直调）无 session，保持共享 pool（本地单用户）。
+- `tools/list` 用共享 pool 的缓存工具列表（同服务同工具，无需隔离）。
+
+#### 3.7.2 Model + DB（持久化 per_session_client）
+- `models/server.rs`：`ServerConfig` 加 `#[serde(default)] pub per_session_client: Option<bool>`（camelCase → JSON `perSessionClient`，前端已发）。
+- `db/migration.rs`：`migrate_v10`（`ALTER TABLE servers ADD COLUMN per_session_client INTEGER NOT NULL DEFAULT 0`，`.ok()` 容错已存在）；`TARGET_VERSION` 9 → 10；`apply_migration` match 加 `10 => migrate_v10`。配套 `migrations/0008_per_session_client.sql`（供 `sqlx::migrate!` 兼容）。
+- `services/server_service.rs`：3 个 SELECT 列清单加 `per_session_client`；`create`/`update` 的 INSERT/UPDATE 加列与 bind（`cfg.per_session_client.unwrap_or(false) as i64`）；`map_row` 读 `per_session_client` → `Some(r.try_get::<i64,_>("per_session_client")? != 0)`。
+- `services/settings_import.rs`：导入旧 `mcp_settings.json` 时 `ServerConfig` 字面量补 `per_session_client: None`（共享 pool 兜底）。
+
+#### 3.7.3 Pool 缓存标志 + 暴露 build_client
+- `mcp/pool.rs`：
+  - `PoolEntry` 加 `per_session_client: bool`（`connect_server` 开头从 `cfg.per_session_client.unwrap_or(false)` 设置；所有占位/失败分支也带 `per_session_client`）。
+  - `fn build_client(cfg)` 改 `pub(crate)` 供 `session_pool` 复用（共用 stdio/sse/http/openapi 的 transport 构造逻辑，保证隔离 client 与共享 client 行为一致）。
+  - 新增 `pub async fn is_per_session_client(name: &str) -> bool`：读 pool 缓存标志，**无 DB 查询**（连接热路径不读 DB）；不在 pool 的服务返回 false（它们 `tools/call` 不可达，隔离路由无意义）。
+
+#### 3.7.4 新增 `mcp/session_pool.rs`（per-session 隔离 client 存储）
+- `static SESSION_CLIENTS: OnceLock<RwLock<HashMap<(String,String), Arc<Mutex<McpClient>>>>>`，key = `(session_id, server_name)`。client 包 `Arc<Mutex<McpClient>>`——`disconnect` 是 `&mut self`，cleanup 时需可变借用；同一 session 的调用串行化对有状态服务本就更安全。
+- `static CREATE_LOCKS: OnceLock<Mutex<HashMap<SessionKey, Arc<Mutex<()>>>>>`：per-(session,server) 创建锁，仿 origin `isolatedClientCreationLocks`，防并发首调重复创建。
+- `pub async fn call_tool_isolated(session_id, server_name, tool, arguments) -> Result<ToolCallResult>`：
+  1. 快速路径：读 map 命中 → clone Arc → `run_call`（锁外执行，不阻塞其他 session）。
+  2. 未命中：取/建 per-key 创建锁 → `_guard.lock()` 串行 → 双重检查（另一持有者可能刚建好）。
+  3. 新建：`server_service::get_by_name` 取 cfg（**仅新建时一次 DB 读**），`pool::build_client(&cfg)?`，`timeout(120s, client.connect())`，缓存 `Arc<Mutex<McpClient>>`，日志「Created isolated client for session X -> Y」。
+  4. `run_call` 失败（连接类错误）：从 map 移除、日志「evicted」，下次重建（**基础重连**，不做 origin 的 40x/SSE 细粒度重试）。
+- `pub async fn cleanup_session(session_id)`：遍历该 session 所有 client，`disconnect`（stdio 走 `kill_process_tree`，已在 `StdioTransport::disconnect` 内），移除；并清该 session 的 creation locks。disconnect I/O 在写锁释放后做，不阻塞其他 session。
+- `mcp/mod.rs`：`pub mod session_pool;`。
+
+#### 3.7.5 HTTP server 路由
+- `services/http_server.rs`：
+  - `dispatch_mcp`：开头提取 `let session_id = headers.get("mcp-session-id")...`（trimmed、非空）。
+  - `tools/call` 站点：`if let Some(ref sid) = session_id { if pool::is_per_session_client(&sn).await { session_pool::call_tool_isolated(sid, &sn, &orig_name, args.clone()).await } else { pool::call_tool(...) } } else { pool::call_tool(...) }`——有 session 且服务标记 per_session → 走隔离；否则共享（行为不变）。
+  - DELETE handlers `mcp_root_delete`/`mcp_scope_delete`：签名加 `headers: HeaderMap`，提取 `mcp-session-id`（`extract_session_id` helper），`session_pool::cleanup_session(&sid).await`（有则清理，无则 no-op）。返回 `StatusCode::OK` 不变。
+
+#### 3.7.6 资源/边界
+- stdio 隔离 = 每 session 一个独立子进程（成本高，但正是 stateful 服务所需）。`cleanup_session` 时 `StdioTransport::disconnect` 走 `kill_process_tree` 杀整树（含 npx/uvx wrapper 子进程）。
+- 不影响既有 pool 的连接/状态/进度事件逻辑（`connect_server` 仅新增 `per_session_client` 字段透传）。
+- activity_log 不加 perSessionClient 字段（origin 加了，属次要，跳过保持简单）。
+- 编译验证：`cargo check` 通过（rustc 1.96.0）。
+
+#### 3.7.7 手动验证（计划）
+- 开 expose_http；配一个 stdio server 勾选「会话级客户端隔离」；用两个外部 MCP 客户端连 `/mcp` 各自 initialize（得不同 session-id）并 call 同一工具 → 应各起独立子进程（`ps` 可见两个进程）。DELETE session 后子进程被清理。
+- 回归：不勾选 perSessionClient 的服务，HTTP call_tool 仍走共享 pool，行为不变。
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录
@@ -912,7 +1067,7 @@ let child = c.spawn()?;
 
 | 文件                                             | 自定义内容                                                |
 | ------------------------------------------------ | --------------------------------------------------------- |
-| `frontend/src/components/ServerCard.tsx`         | 移除 sponsor/wechat/discord、样式调整                     |
+| `frontend/src/components/ServerCard.tsx`         | 移除 sponsor/wechat/discord、样式调整；下载进度条 / 更新角标+「更新到」菜单项 / 名字后版本号（见 3.6） |
 | `frontend/src/components/ServerForm.tsx`         | hub-* 样式、隐藏 visibility、保留 OAuth2                  |
 | `frontend/src/components/LogViewer.tsx`          | source 类型改为 string[]、source filter UI 移除、滚动方向 |
 | `frontend/src/components/layout/Header.tsx`      | GitHub 链接、移除文档按钮                                 |
@@ -921,17 +1076,21 @@ let child = c.spawn()?;
 | `frontend/src/components/ui/AboutDialog.tsx`     | MCPHub Desktop 标识、canAutoUpdate 逻辑                   |
 | `frontend/src/contexts/AuthContext.tsx`          | skipAuth/guest 模式                                       |
 | `frontend/src/contexts/SettingsContext.tsx`      | httpPort/exposeHttp 字段                                  |
+| `frontend/src/contexts/ServerInstallProgressContext.tsx` | 桌面端新增（见 3.6）：监听 install-progress / update-available 事件 |
+| `frontend/src/App.tsx`                           | 包入 ServerInstallProgressProvider（见 3.6）              |
+| `frontend/src/types/index.ts`                    | `Server.version` 字段（见 3.6）                           |
 | `frontend/src/services/configService.ts`         | getPublicConfig 使用 apiGet                               |
 | `frontend/src/services/changelogService.ts`      | Tauri 中禁用                                              |
 | `frontend/src/pages/SettingsPage.tsx`            | 隐藏未实现模块、RuntimeVersionManager、HTTP 端口          |
 | `frontend/src/pages/LoginPage.tsx`               | admin 默认填充、密码提示、Logo 图标                       |
 | `frontend/src/pages/Dashboard.tsx`               | 隐藏 SMART/Docs                                           |
 | `frontend/src/pages/ActivityPage.tsx`            | 隐藏用户列、createdAt UTC 转换、字段名统一为 createdAt     |
-| `frontend/src/utils/tauriClient.ts`              | 桌面端新增                                                |
+| `frontend/src/utils/tauriClient.ts`              | 桌面端新增；`toFrontendServer` 映射 `serverVersion`（见 3.6） |
+| `frontend/src/utils/serverFormPayload.ts`        | config 按 serverType 分支构建、无 visibility；`perSessionClient` 加在 return 前 |
 | `frontend/src/utils/fetchInterceptor.ts`         | isTauri() 拦截                                            |
 | `frontend/src/utils/runtime.ts`                  | 运行时配置                                                |
 | `frontend/index.html`                            | Splash 加载画面（内嵌 CSS 动画 + 内联 i18n 脚本）         |
-| `locales/*.json`                                 | runtime* 翻译键（~18 个）                                 |
+| `locales/*.json`                                 | runtime* 翻译键（~18 个）；`server.downloading`/`updateAvailable`/`updateTo`/`reinstallStarted`（见 3.6） |
 
 #### 同步后验证清单
 
@@ -971,17 +1130,40 @@ cd src-tauri && cargo check
 
 ### 4.3 最近同步基线
 
-
+每次基线同步后，必须同步原项目的版本号，即：/Users/jphoebe/opt/code/IdeaProjects/github/mcphub-desktop/mcphub-origin/locales/zh.json文件中{{version}}
+桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `8d2ef15` (origin/main) |
-| **对应 origin tag**            | `v1.0.23`               |
-| **桌面端版本号**               | `1.0.23001`             |
-| **同步执行日期**               | 2026-07-09              |
+| **当前已同步到 origin commit** | `9dd75bc` (origin/main) |
+| **对应 origin tag**            | `v1.0.24`               |
+| **桌面端版本号**               | `1.0.24001`             |
+| **同步执行日期**               | 2026-07-16              |
 
-> 下次同步时，使用 `8d2ef15` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8d2ef15..HEAD`）。
+> 下次同步时，使用 `9dd75bc` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 9dd75bc..HEAD`）。
 
 ### 4.4 最近同步记录
+
+#### 2026-07-16：同步 `8d2ef15` → `9dd75bc`（3 个 commit）
+
+origin 版本 `v1.0.23` → `v1.0.24`；桌面端版本 `1.0.23001` → `1.0.24001`。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `d74d1be` | feat: per-session upstream client isolation for stateful MCP servers (#985) | 前端：`types/index.ts` 三方合并（`ServerConfig.perSessionClient` + `ServerFormData.perSessionClient`，保留桌面端 `version` 字段）；`serverFormPayload.ts` 合并（config 末尾追加 `perSessionClient`，桌面端 config 按 serverType 分支构建、无 visibility，故加在 return 前）；`ServerForm.tsx` 三方合并（formData 初始化 + 「会话级客户端隔离」checkbox UI，保留 hub 样式差异）；locales 四语言（en/fr/tr/zh）新增 `perSessionClient` + `perSessionClientDescription` 2 键，保留桌面端 runtime*/server.* 自定义键 |
+| `ac2cbd0` | fix: update Chinese translation rules for release notes sections (#986) | **无需同步**：仅改 `.claude/skills/release-notes/SKILL.md`，与 app 无关 |
+| `9dd75bc` | fix(security): sanitize proxychains4 command args to prevent RCE (#987) | **不同步**：Node `mcpService.ts` 专属；桌面端 Rust 后端无 proxychains4 实现（`ProxychainsConfig` 仅存于前端 type、Rust `ServerConfig` 无 proxy 字段、不 spawn proxychains4），无 RCE 面 |
+
+**已镜像到 desktop（Rust 后端）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `d74d1be` | feat: per-session upstream client isolation for stateful MCP servers (#985) | **已镜像 Rust 后端**（详见 §3.7）。原 PR 为 Node `mcpService.ts` 大改（+270，`sessionIsolatedClients` map + `isolatedClientCreationLocks` + `callToolWithReconnect` 隔离分支 + `closeIsolatedClient`/`cleanupIsolatedSession` + activity_log 字段），桌面端 Rust `pool.rs` 架构不同（每服务单 client 共享）故重新实现而非移植：① `ServerConfig.per_session_client: Option<bool>` + `migrate_v10`（servers 表加列，`TARGET_VERSION`→10）+ `server_service`/`settings_import` 读写；② `pool.rs` 缓存标志（`PoolEntry.per_session_client`）+ `is_per_session_client(name)`（读缓存不读 DB）+ `build_client` 改 `pub(crate)`；③ 新增 `mcp/session_pool.rs`（`SESSION_CLIENTS` map + `CREATE_LOCKS` 创建锁 + `call_tool_isolated` get-or-create/双重检查/120s 连接超时/失败驱逐 + `cleanup_session` 杀子进程树）；④ `http_server.rs` `dispatch_mcp` 提取 `mcp-session-id`、`tools/call` 按标志路由、DELETE handlers `cleanup_session`。**简化项**：不做 origin 的 HTTP 40x/SSE 细粒度重连重试（仅失败驱逐、下次重建）；不写 activity_log 的 perSessionClient 字段（次要）。前端 UI 此前已同步为 dormant，本次让 Rust 真正读取并生效。`9dd75bc` 安全修复不适用（见上）。 |
+
+**验证**：`cd frontend && npm run build` 通过（`✓ built`）；`cd src-tauri && cargo check` 通过（rustc 1.96.0）。
+
+---
 
 #### 2026-07-09：同步 `c182265` → `8d2ef15`（22 个 commit）
 
@@ -1303,6 +1485,7 @@ npm run build
 - [X]  系统日志面板（app_logger 写入 DB + 轮询刷新）
 - [X]  启动 Splash 加载画面（index.html 内嵌动画 + 内联 i18n + main.tsx 移除）
 - [X]  首页统计面板空状态修复（hasLoaded 逻辑简化）
+- [X]  stdio 包下载进度 / 更新检测 / 非阻塞连接（保存类命令后台连接、`server://install-progress` 下载进度、`server://update-available` 启动时检查、持久化 packageVersions + mark_reinstalled；详见 3.6）
 
 ### 待办
 

@@ -1,6 +1,7 @@
 /// stdio transport — spawns a child process and communicates via stdin/stdout
 /// using the MCP JSON-RPC protocol framing.
 use super::client::McpTransport;
+use super::progress::{self, ServerInstallProgress};
 use crate::models::server::{Tool, ToolCallResult};
 use crate::services::{app_logger, runtime_env};
 use anyhow::{anyhow, Result};
@@ -89,6 +90,70 @@ fn next_id() -> u64 {
     REQUEST_ID.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Best-effort extraction of a download percentage from an npx/uvx stderr line.
+///
+/// Recognizes `42%`-style and `12/34`-style progress. Returns `None` for lines
+/// without parseable progress (the caller shows an indeterminate bar + the raw
+/// line as the message).
+fn parse_progress_pct(line: &str) -> Option<u8> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            // try to read a number here
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let num_str = &line[start..i];
+            let num: u64 = num_str.parse().ok()?;
+            // skip spaces
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'%' {
+                return Some((num.min(100)) as u8);
+            }
+            if j < bytes.len() && bytes[j] == b'/' {
+                // fraction done/total
+                let mut k = j + 1;
+                while k < bytes.len() && bytes[k] == b' ' {
+                    k += 1;
+                }
+                let tstart = k;
+                while k < bytes.len() && bytes[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > tstart {
+                    if let Ok(total) = line[tstart..k].parse::<u64>() {
+                        if total > 0 {
+                            return Some(((num * 100) / total).min(100) as u8);
+                        }
+                    }
+                }
+            }
+            // continue scanning after this number
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Heuristically decide whether an npx/uvx stderr line represents package
+/// download/install progress (vs. ordinary server log output). Only lines
+/// that look like progress trigger a "downloading" event, so a cached
+/// package that starts instantly - or a server that prints info to stderr -
+/// does not falsely show a "下载中" indicator.
+fn looks_like_download_progress(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("download")
+        || lower.contains("downloading")
+        || ((lower.contains("added") || lower.contains("installed")) && lower.contains("package"))
+        || parse_progress_pct(line).is_some()
+}
+
 pub struct StdioTransport {
     command: String,
     args: Vec<String>,
@@ -102,6 +167,8 @@ pub struct StdioTransport {
     intentional_disconnect: Arc<AtomicBool>,
     connected: bool,
     server_name: String,
+    /// Server version reported by the MCP `initialize` handshake (`serverInfo.version`).
+    server_version: Option<String>,
 }
 
 impl StdioTransport {
@@ -122,6 +189,7 @@ impl StdioTransport {
             intentional_disconnect: Arc::new(AtomicBool::new(false)),
             connected: false,
             server_name: server_name.into(),
+            server_version: None,
         }
     }
 
@@ -270,7 +338,11 @@ impl McpTransport for StdioTransport {
         log::info!("{}", spawn_msg);
         app_logger::log_to_db("info", &spawn_msg);
 
-        // Hint for first-time downloads
+        // npx/uvx may need to download packages on first run. We do NOT emit a
+        // "downloading" event here unconditionally - if the package is already
+        // cached there is no download, and a false "下载中" would flash on every
+        // startup. Instead the stderr drain below emits "downloading" only when
+        // it sees actual download-progress output from npx/uvx.
         if self.command == "npx" || self.command == "uvx" {
             app_logger::log_to_db("info", &format!(
                 "[{}] First run may take longer while {} downloads packages...",
@@ -330,12 +402,41 @@ impl McpTransport for StdioTransport {
         // Spawn stderr drain task — without this, the child process blocks
         // when the ~4KB pipe buffer fills up (npx/uvx write progress to stderr).
         let stderr_name = self.server_name.clone();
+        let is_pkg_mgr = self.command == "npx" || self.command == "uvx";
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
+            // Throttle progress emissions: at most once per 300ms, and only
+            // when the parsed percentage changes (or, for indeterminate lines,
+            // when the message differs). Avoids flooding the frontend with the
+            // spinner ticks that npm/uv emit on every animation frame.
+            let mut last_emit: Option<std::time::Instant> = None;
+            let mut last_pct: Option<u8> = None;
+            let mut last_msg: String = String::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 log::info!("[{}] stderr: {}", stderr_name, line);
                 app_logger::log_to_db("info", &format!("[stderr] {}", line));
+
+                if is_pkg_mgr && looks_like_download_progress(&line) {
+                    let pct = parse_progress_pct(&line);
+                    let now = std::time::Instant::now();
+                    let time_ok = last_emit
+                        .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(300))
+                        .unwrap_or(true);
+                    let pct_changed = pct != last_pct;
+                    let msg_changed = line != last_msg;
+                    if pct_changed || (pct.is_none() && time_ok && msg_changed) {
+                        last_emit = Some(now);
+                        last_pct = pct;
+                        last_msg = line.clone();
+                        progress::emit_install_progress(&ServerInstallProgress {
+                            server: stderr_name.clone(),
+                            phase: "downloading".to_string(),
+                            progress: pct,
+                            message: Some(line.clone()),
+                        });
+                    }
+                }
             }
             log::info!("[{}] stderr reader exited", stderr_name);
         });
@@ -385,22 +486,33 @@ impl McpTransport for StdioTransport {
         log::info!("{}", handshake_msg);
         app_logger::log_to_db("info", &handshake_msg);
 
-        self.request(
-            "initialize",
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "mcphub-desktop", "version": "0.1.0" }
-            }),
-        )
-        .await
-        .map_err(|e| {
-            let elapsed = init_start.elapsed();
-            let err_msg = format!("[{}] MCP initialize handshake failed after {:.1}s: {}", self.server_name, elapsed.as_secs_f64(), e);
-            log::error!("{}", err_msg);
-            app_logger::log_to_db("error", &err_msg);
-            e
-        })?;
+        let init_result = self
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "mcphub-desktop", "version": "0.1.0" }
+                }),
+            )
+            .await
+            .map_err(|e| {
+                let elapsed = init_start.elapsed();
+                let err_msg = format!("[{}] MCP initialize handshake failed after {:.1}s: {}", self.server_name, elapsed.as_secs_f64(), e);
+                log::error!("{}", err_msg);
+                app_logger::log_to_db("error", &err_msg);
+                e
+            })?;
+
+        // Capture the server-reported version (serverInfo.version) for a
+        // best-effort "update available" check after connect succeeds.
+        if let Some(ver) = init_result
+            .get("serverInfo")
+            .and_then(|s| s.get("version"))
+            .and_then(|v| v.as_str())
+        {
+            self.server_version = Some(ver.to_string());
+        }
 
         self.connected = true;
         let total_elapsed = connect_start.elapsed();
@@ -450,6 +562,10 @@ impl McpTransport for StdioTransport {
 
     fn is_connected(&self) -> bool {
         self.connected
+    }
+
+    fn server_version(&self) -> Option<String> {
+        self.server_version.clone()
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {

@@ -11,7 +11,7 @@
 ///   GET  /mcp/{server}/tools        — list tools for a server
 ///   POST /mcp/call                  — smart call: route to best server
 use crate::{
-    mcp::pool,
+    mcp::{pool, session_pool},
     models::{bearer_key::BearerKey, server::Tool},
     services::{app_logger, bearer_key_service, config_service, group_service, log_service, server_tool_config_service},
 };
@@ -554,7 +554,15 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
         .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
         .or(fallback_ip)
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    log::debug!("[HTTP] MCP request: method={}, scope={}, client={}", method, scope, client_ip);
+    // Downstream session id (set by our `initialize` response). Present for all
+    // per-session requests on the HTTP MCP path; used to route `tools/call` to a
+    // dedicated upstream client when the target server has `perSessionClient`.
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    log::debug!("[HTTP] MCP request: method={}, scope={}, client={}, session={}", method, scope, client_ip, session_id.as_deref().unwrap_or("none"));
 
     let bearer_key = match check_bearer_auth(&headers).await {
         Ok(k) => k,
@@ -739,7 +747,31 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
 
                     log::debug!("[HTTP] Calling tool '{}' on server '{}'", orig_name, sn);
                     let start = std::time::Instant::now();
-                    match pool::call_tool(&sn, &orig_name, args.clone()).await {
+                    // Per-session upstream client isolation (origin #985): when
+                    // the target server has `perSessionClient` and a downstream
+                    // session id is present, route the call through a dedicated
+                    // per-session client instead of the shared pool. Otherwise
+                    // (no session, or shared server) use the shared pool as before.
+                    let is_isolated = session_id.as_ref().is_some()
+                        && pool::is_per_session_client(&sn).await;
+                    let call_result = if is_isolated {
+                        let sid = session_id.as_ref().unwrap();
+                        log::info!(
+                            "[HTTP] Routing tool '{}' on server '{}' through isolated session client ({})",
+                            orig_name, sn, sid
+                        );
+                        app_logger::log_to_db(
+                            "info",
+                            &format!(
+                                "[HTTP] Per-session isolated call: tool '{}' on server '{}' (session {})",
+                                orig_name, sn, sid
+                            ),
+                        );
+                        session_pool::call_tool_isolated(sid, &sn, &orig_name, args.clone()).await
+                    } else {
+                        pool::call_tool(&sn, &orig_name, args.clone()).await
+                    };
+                    match call_result {
                         Ok(r) => {
                             let duration_ms = start.elapsed().as_millis() as i64;
                             let status = if r.is_error { "error" } else { "success" };
@@ -842,12 +874,45 @@ async fn mcp_scope_get(headers: HeaderMap, Path(_): Path<String>) -> Response {
     mcp_root_get(headers).await
 }
 
-async fn mcp_root_delete() -> StatusCode {
+async fn mcp_root_delete(headers: HeaderMap) -> StatusCode {
+    if let Some(sid) = extract_session_id(&headers) {
+        log::info!("[HTTP] DELETE /mcp — cleaning up session {}", sid);
+        app_logger::log_to_db(
+            "info",
+            &format!("[HTTP] Session end (DELETE /mcp), cleaning up isolated clients: {}", sid),
+        );
+        // Tear down any per-session isolated upstream clients for this session.
+        session_pool::cleanup_session(&sid).await;
+    } else {
+        log::debug!("[HTTP] DELETE /mcp — no mcp-session-id header, nothing to clean");
+    }
     StatusCode::OK
 }
 
-async fn mcp_scope_delete(Path(_): Path<String>) -> StatusCode {
+async fn mcp_scope_delete(headers: HeaderMap, Path(path): Path<String>) -> StatusCode {
+    if let Some(sid) = extract_session_id(&headers) {
+        log::info!("[HTTP] DELETE /mcp/{} — cleaning up session {}", path, sid);
+        app_logger::log_to_db(
+            "info",
+            &format!(
+                "[HTTP] Session end (DELETE /mcp/{}), cleaning up isolated clients: {}",
+                path, sid
+            ),
+        );
+        session_pool::cleanup_session(&sid).await;
+    } else {
+        log::debug!("[HTTP] DELETE /mcp/{} — no mcp-session-id header, nothing to clean", path);
+    }
     StatusCode::OK
+}
+
+/// Extract the `mcp-session-id` header (trimmed, non-empty) if present.
+fn extract_session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 async fn oauth_protected_resource(headers: HeaderMap) -> Response {

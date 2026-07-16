@@ -4,6 +4,7 @@ import { AuthProvider } from './contexts/AuthContext';
 import { ToastProvider } from './contexts/ToastContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { ServerProvider } from './contexts/ServerContext';
+import { ServerInstallProgressProvider } from './contexts/ServerInstallProgressContext';
 import { SettingsProvider } from './contexts/SettingsContext';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -70,6 +71,7 @@ function App() {
     <ThemeProvider>
       <AuthProvider>
         <ServerProvider>
+          <ServerInstallProgressProvider>
           <ToastProvider>
             <SettingsProvider>
               <Router basename={basename}>
@@ -111,6 +113,7 @@ function App() {
               </Router>
             </SettingsProvider>
           </ToastProvider>
+          </ServerInstallProgressProvider>
         </ServerProvider>
       </AuthProvider>
     </ThemeProvider>

@@ -93,10 +93,13 @@ pub async fn reload_server(server_name: &str) -> Result<()> {
     // Disconnect if connected
     pool::disconnect_server(server_name).await.ok();
 
-    // Re-fetch config and reconnect
+    // Re-fetch config and reconnect in the background so the caller returns
+    // immediately; the npx/uvx download / handshake may take a while.
     if let Some(cfg) = server_service::get_by_name(server_name).await? {
         if cfg.enabled {
-            pool::connect_server(&cfg).await;
+            tokio::spawn(async move {
+                pool::connect_server(&cfg).await;
+            });
         }
     }
     Ok(())
@@ -115,7 +118,11 @@ pub async fn toggle_server(server_name: &str) -> Result<bool> {
         if let Err(e) = pool::disconnect_server(server_name).await {
             log::warn!("[{}] Pre-enable disconnect failed (may be already disconnected): {}", server_name, e);
         }
-        pool::connect_server(&cfg).await;
+        // Connect in the background so the toggle returns immediately.
+        let cfg_clone = cfg.clone();
+        tokio::spawn(async move {
+            pool::connect_server(&cfg_clone).await;
+        });
     } else {
         // Check if server is still in "starting" state — if so, let the connect finish
         // rather than killing the just-spawned process (race condition from rapid clicks)

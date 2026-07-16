@@ -207,6 +207,7 @@ export interface ServerConfig {
   visibility?: 'private' | 'group' | 'public';
   enableKeepAlive?: boolean; // Enable remote health checks and automatic reconnect attempts
   keepAliveInterval?: number; // Health check and reconnect interval in milliseconds (default: 60000ms)
+  perSessionClient?: boolean; // Create a dedicated upstream client per downstream session instead of sharing one connection (for stateful servers like Playwright)
   tools?: Record<string, { enabled: boolean; description?: string }>; // Tool-specific configurations with enable/disable state and custom descriptions
   prompts?: Record<string, { enabled: boolean; description?: string }>; // Prompt-specific configurations with enable/disable state and custom descriptions
   options?: {
@@ -304,6 +305,8 @@ export interface Server {
   visibility?: 'private' | 'group' | 'public';
   status: ServerStatus;
   error?: string;
+  /** Running version reported by the MCP handshake (stdio servers). */
+  version?: string;
   tools?: Tool[];
   prompts?: Prompt[];
   resources?: Resource[];
@@ -362,6 +365,8 @@ export interface ServerFormData {
     enabled?: boolean;
     interval?: number;
   };
+  // Create a dedicated upstream client per downstream session (stateful servers)
+  perSessionClient?: boolean;
   oauth?: {
     clientId?: string;
     clientSecret?: string;

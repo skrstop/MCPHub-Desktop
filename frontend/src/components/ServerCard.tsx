@@ -27,6 +27,7 @@ import DeleteDialog from '@/components/ui/DeleteDialog';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { Switch } from '@/components/ui/ToggleGroup';
 import { useToast } from '@/contexts/ToastContext';
+import { useServerInstallProgress } from '@/contexts/ServerInstallProgressContext';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useAuth } from '@/contexts/AuthContext';
 import { canManageServer } from '@/utils/serverPermissions';
@@ -148,6 +149,7 @@ const ServerCard = ({
 }: ServerCardProps) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
+  const { isInstalling, getProgress, getUpdate, dismissUpdate } = useServerInstallProgress();
   const { exportMCPSettings, installConfig, routingConfig } = useSettingsData();
   const { auth } = useAuth();
   const baseUrl = useMemo(() => {
@@ -199,6 +201,15 @@ const ServerCard = ({
   const supportsReinstall =
     server.config?.command === 'npx' || server.config?.command === 'uvx';
   const supportsOAuthDisconnect = Boolean(server.oauth?.connected && onOAuthDisconnect);
+  // Live install/download progress + update-available info (event-driven).
+  const installProgress = getProgress(server.name);
+  const isDownloading = isInstalling(server.name);
+  const updateInfo = getUpdate(server.name);
+  const hasUpdate = !!(updateInfo && updateInfo.hasUpdate && canManage);
+  // Version to show next to the name: prefer the recorded package version
+  // (from the registry, consistent with the update check); fall back to the
+  // server's self-reported version before the first check completes.
+  const displayVersion = updateInfo?.current ?? server.version;
 
   const handleToggle = async (nextEnabled: boolean) => {
     if (!canManage || isToggling || !onToggle) return;
@@ -234,7 +245,12 @@ const ServerCard = ({
     try {
       const success = await onReinstall(server);
       if (success) {
-        showToast(t('server.reinstallSuccess') || 'Server reinstall initiated', 'success');
+        // Reinstall now reconnects in the background; the package re-download
+        // progress is shown via the install-progress event. Dismiss the update
+        // badge and suppress the same version from re-prompting after the
+        // reconnect triggers a fresh update check.
+        dismissUpdate(server.name);
+        showToast(t('server.reinstallStarted') || 'Package update started...', 'success');
       } else {
         showToast(
           t('server.reinstallError', { serverName: server.name }) || 'Failed to reinstall',
@@ -555,6 +571,15 @@ const ServerCard = ({
                 >
                   {server.name}
                 </span>
+                {supportsReinstall && displayVersion ? (
+                  <span
+                    className="flex-shrink-0 text-[10px] tabular-nums"
+                    style={{ color: 'var(--hub-ink-3)' }}
+                    title={`v${displayVersion}`}
+                  >
+                    v{displayVersion}
+                  </span>
+                ) : null}
                 {isMcpApp && (
                   <span className="hub-tag accent flex-shrink-0" title={t('server.mcpApp')}>
                     App
@@ -643,12 +668,46 @@ const ServerCard = ({
 
           {/* Status */}
           <div className="hub-server-card-status-cell min-w-0">
-            <ServerStatusDot
-              status={server.status}
-              enabled={server.enabled}
-              onAuthClick={handleOAuth}
-              className="hub-server-card-status"
-            />
+            {isDownloading ? (
+              <div
+                className="flex flex-col gap-0.5 w-full"
+                title={installProgress?.message ?? ''}
+              >
+                <span
+                  className="text-[10.5px] font-medium tabular-nums leading-none truncate"
+                  style={{ color: 'var(--hub-ink-2)' }}
+                >
+                  {t('server.downloading') || 'Downloading'}
+                  {installProgress?.progress != null ? ` ${installProgress.progress}%` : ''}
+                </span>
+                <div
+                  className="h-1 w-full rounded overflow-hidden"
+                  style={{ background: 'var(--hub-bg-2)' }}
+                >
+                  {installProgress?.progress != null ? (
+                    <div
+                      className="h-full transition-all duration-150"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, installProgress.progress))}%`,
+                        background: 'var(--hub-accent, #3b82f6)',
+                      }}
+                    />
+                  ) : (
+                    <div
+                      className="h-full w-1/3 animate-pulse"
+                      style={{ background: 'var(--hub-accent, #3b82f6)' }}
+                    />
+                  )}
+                </div>
+              </div>
+            ) : (
+              <ServerStatusDot
+                status={server.status}
+                enabled={server.enabled}
+                onAuthClick={handleOAuth}
+                className="hub-server-card-status"
+              />
+            )}
           </div>
 
           {/* Transport */}
@@ -725,7 +784,7 @@ const ServerCard = ({
           <div className="relative" ref={menuRef} style={{ overflow: 'visible' }}>
             {canManage && (
               <button
-                className="hub-icon-btn"
+                className="hub-icon-btn relative"
                 onClick={(e) => {
                   e.stopPropagation();
                   setShowMenu((v) => !v);
@@ -733,6 +792,15 @@ const ServerCard = ({
                 aria-label="More"
               >
                 <MoreHorizontal size={14} />
+                {hasUpdate && (
+                  <span
+                    className="absolute top-0 right-0 block h-[7px] w-[7px] rounded-full pointer-events-none"
+                    style={{
+                      background: 'var(--hub-err, #ef4444)',
+                      boxShadow: '0 0 0 1.5px var(--hub-bg)',
+                    }}
+                  />
+                )}
               </button>
             )}
             {canManage && showMenu && (
@@ -767,6 +835,27 @@ const ServerCard = ({
                     style={{ color: 'var(--hub-ink)' }}
                   >
                     <RefreshCw size={13} /> {t('server.reload')}
+                  </button>
+                )}
+                {hasUpdate && updateInfo && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowMenu(false);
+                      if (!canManage || isReinstalling || !enabled) return;
+                      setShowReinstallDialog(true);
+                    }}
+                    disabled={isReinstalling || isToggling || !enabled}
+                    className="flex items-center gap-2 w-full px-2.5 py-1.5 text-[13px] rounded-md hover:bg-[var(--hub-surface-hover)] text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ color: 'var(--hub-accent, #3b82f6)' }}
+                    title={
+                      t('server.updateAvailable', { version: updateInfo.latest }) ||
+                      `Update available: ${updateInfo.latest}`
+                    }
+                  >
+                    <DownloadCloud size={13} />{' '}
+                    {t('server.updateTo', { version: updateInfo.latest }) ||
+                      `Update to ${updateInfo.latest}`}
                   </button>
                 )}
                 {onReinstall && supportsReinstall && (

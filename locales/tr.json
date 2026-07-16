@@ -173,6 +173,8 @@
     "keepAliveDescription": "Düzenli sağlık denetimleri çalıştırır ve bu uzak sunucu bağlantısı kesildiğinde otomatik olarak yeniden bağlanır.",
     "keepAliveInterval": "Denetim aralığı (ms)",
     "keepAliveIntervalDescription": "Sağlık denetimleri ve otomatik yeniden bağlanma denemeleri arasındaki süre (varsayılan: 60000ms = 1 dakika)",
+    "perSessionClient": "Oturum Başına İstemci Yalıtımı",
+    "perSessionClientDescription": "Tüm oturumlar arasında tek bir bağlantı paylaşmak yerine her oturum için ayrı bir yukarı akış bağlantısı oluşturun. Playwright gibi durum bilgili sunucular için etkinleştirin. Eşzamanlı oturumlarla birlikte yukarı akış bağlantı sayısını artırır.",
     "remove": "Kaldır",
     "toggleError": "{{serverName}} sunucusu açılamadı/kapatılamadı",
     "alreadyExists": "{{serverName}} sunucusu zaten mevcut",

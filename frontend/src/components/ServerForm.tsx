@@ -105,6 +105,8 @@ const ServerForm = ({
       enabled: initialData?.config?.enableKeepAlive === true,
       interval: initialData?.config?.keepAliveInterval || 60000,
     },
+    // Per-session client isolation initialization
+    perSessionClient: initialData?.config?.perSessionClient === true,
     // OpenAPI configuration initialization
     openapi:
       initialData && initialData.config && initialData.config.openapi
@@ -1355,6 +1357,35 @@ const ServerForm = ({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Per-session client isolation - applies to any server type */}
+        {serverType !== 'openapi' && (
+          <div className="mb-4">
+            <div className="flex items-center mb-1">
+              <input
+                type="checkbox"
+                id="perSessionClient"
+                checked={formData.perSessionClient || false}
+                onChange={(e) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    perSessionClient: e.target.checked,
+                  }))
+                }
+                className="mr-2"
+              />
+              <label htmlFor="perSessionClient" className="text-gray-700 dark:text-gray-300 text-sm font-medium">
+                {t('server.perSessionClient', 'Per-Session Client Isolation')}
+              </label>
+            </div>
+            <p className="text-xs text-gray-500 ml-6">
+              {t(
+                'server.perSessionClientDescription',
+                'Create a dedicated upstream connection per session instead of sharing one across all sessions. Enable for stateful servers like Playwright. Increases upstream connections with concurrent sessions.',
+              )}
+            </p>
           </div>
         )}
 

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 9;
+pub const TARGET_VERSION: i64 = 10;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -113,6 +113,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         7 => migrate_v7(pool).await,
         8 => migrate_v8(pool).await,
         9 => migrate_v9(pool).await,
+        10 => migrate_v10(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -472,5 +473,20 @@ async fn migrate_v9(pool: &SqlitePool) -> Result<()> {
     .await?;
 
     log::info!("[db] migration v9: recreated activity_log with correct schema");
+    Ok(())
+}
+
+/// v9 → v10: Add per_session_client column to servers table
+///
+/// Mirrors origin `d74d1be` (#985): a server config flag that gives each
+/// downstream HTTP MCP session its own dedicated upstream client/connection
+/// instead of sharing the pool's single client (for stateful servers like
+/// Playwright). Stored as INTEGER (0/1); default 0 (shared pool, original
+/// behavior).
+async fn migrate_v10(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("ALTER TABLE servers ADD COLUMN per_session_client INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await
+        .ok(); // ignore if column already exists
     Ok(())
 }

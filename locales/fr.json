@@ -173,6 +173,8 @@
     "keepAliveDescription": "Exécute des vérifications de santé périodiques et reconnecte automatiquement ce serveur distant lorsqu'il est déconnecté.",
     "keepAliveInterval": "Intervalle de vérification (ms)",
     "keepAliveIntervalDescription": "Temps entre les vérifications de santé et les tentatives de reconnexion automatique en millisecondes (par défaut : 60000ms = 1 minute)",
+    "perSessionClient": "Isolation du client par session",
+    "perSessionClientDescription": "Créer une connexion amont dédiée par session au lieu d'en partager une seule entre toutes les sessions. À activer pour les serveurs à état comme Playwright. Augmente le nombre de connexions amont avec les sessions simultanées.",
     "remove": "Retirer",
     "toggleError": "Échec du basculement du serveur {{serverName}}",
     "alreadyExists": "Le serveur {{serverName}} existe déjà",

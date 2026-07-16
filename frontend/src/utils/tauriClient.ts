@@ -560,6 +560,7 @@ export function transformTauriResponse(command: string, result: unknown): unknow
       name: cfg?.name ?? st?.name ?? '',
       status: st?.starting ? 'connecting' : st?.connected ? 'connected' : 'disconnected',
       error: st?.error ?? null,
+      version: (st?.serverVersion as string | undefined) ?? undefined,
       tools: si.tools ?? [],
       config: cfg,
       enabled: cfg?.enabled ?? true,

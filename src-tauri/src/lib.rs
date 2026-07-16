@@ -81,6 +81,11 @@ pub fn run() {
                 services::runtime_env::init(runtimes);
             }
 
+            // Stash the AppHandle so transports/pool can emit server progress
+            // events (download progress, update-available) without threading it
+            // through every call site. Must be set before any server connects.
+            mcp::progress::set_app_handle(app.handle().clone());
+
             // Initialize the database: spawn async task, block current thread via channel
             let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
             let app_handle = app.handle().clone();
@@ -161,6 +166,16 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
+                        // Disconnect all MCP upstream clients (shared pool +
+                        // per-session isolated) before quitting so child
+                        // processes are reaped via kill_process_tree rather
+                        // than orphaned at process exit. Runs synchronously on
+                        // the runtime so the teardown completes before exit.
+                        let app_handle = app.clone();
+                        tauri::async_runtime::block_on(async move {
+                            crate::mcp::pool::disconnect_all().await;
+                            let _ = app_handle;
+                        });
                         app.exit(0);
                     }
                     "show" => {

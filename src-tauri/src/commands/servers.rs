@@ -18,6 +18,7 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
                 tool_count: 0,
                 error: None,
                 last_connected: None,
+                server_version: None,
             },
             vec![],
         ));
@@ -45,6 +46,7 @@ pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
                 tool_count: 0,
                 error: None,
                 last_connected: None,
+                server_version: None,
             },
             vec![],
         ));
@@ -75,6 +77,7 @@ pub async fn add_server(config: ServerConfig) -> Result<ServerInfo, String> {
         tool_count: 0,
         error: None,
         last_connected: None,
+        server_version: None,
     };
     Ok(ServerInfo { config: saved, status, tools: vec![] })
 }
@@ -83,27 +86,30 @@ pub async fn add_server(config: ServerConfig) -> Result<ServerInfo, String> {
 pub async fn update_server(name: String, config: ServerConfig) -> Result<ServerInfo, String> {
     // Disconnect current connection before update
     pool::disconnect_server(&name).await.ok();
+    // Persist first - this must not be blocked by the connect attempt.
     let saved = server_service::update(&name, &config)
         .await
         .map_err(|e| e.to_string())?;
-    let status = if saved.enabled {
-        pool::connect_server(&saved).await
-    } else {
-        ServerStatus {
-            name: saved.name.clone(),
-            connected: false,
-            starting: false,
-            tool_count: 0,
-            error: None,
-            last_connected: None,
-        }
+    if saved.enabled {
+        // Connect in background so the save returns immediately.
+        // The DB write above already persists the config; connecting is a
+        // best-effort side effect that may take minutes (npx/uvx downloads,
+        // unreachable remotes) and must not hold the save response hostage.
+        let saved_clone = saved.clone();
+        tauri::async_runtime::spawn(async move {
+            pool::connect_server(&saved_clone).await;
+        });
+    }
+    let status = ServerStatus {
+        name: saved.name.clone(),
+        connected: false,
+        starting: saved.enabled,
+        tool_count: 0,
+        error: None,
+        last_connected: None,
+        server_version: None,
     };
-    let tools = if status.connected {
-        pool::list_tools_for(&saved.name).await.unwrap_or_default()
-    } else {
-        vec![]
-    };
-    Ok(ServerInfo { config: saved, status, tools })
+    Ok(ServerInfo { config: saved, status, tools: vec![] })
 }
 
 #[tauri::command]
@@ -124,13 +130,18 @@ pub async fn reload_server(name: String) -> Result<ServerStatus, String> {
     mcp_manager::reload_server(&name)
         .await
         .map_err(|e| e.to_string())?;
+    // reload_server now connects in the background; the "starting" placeholder
+    // is inserted early inside connect_server, but to avoid a rare race where
+    // get_status runs before the spawned task inserts it, fall back to a
+    // synthesized starting status.
     let status = pool::get_status(&name).await.unwrap_or(ServerStatus {
         name: name.clone(),
         connected: false,
-        starting: false,
+        starting: true,
         tool_count: 0,
-        error: Some("Not connected".to_string()),
+        error: None,
         last_connected: None,
+        server_version: None,
     });
     Ok(status)
 }
@@ -169,9 +180,18 @@ pub async fn reinstall_server(name: String) -> Result<serde_json::Value, String>
         }
     }
 
-    // Reconnect the server
+    // Reconnect the server in the background - the npx/uvx re-download may
+    // take a while and progress is reported via the `server://install-progress`
+    // event, so we must not block the command response here.
     if cfg.enabled {
-        pool::connect_server(&cfg).await;
+        // Mark as "just reinstalled" so the post-connect update check records
+        // the freshly-downloaded version as installed (and clears the badge)
+        // instead of re-notifying about the same version.
+        crate::mcp::progress::mark_reinstalled(&cfg.name);
+        let cfg_clone = cfg.clone();
+        tauri::async_runtime::spawn(async move {
+            pool::connect_server(&cfg_clone).await;
+        });
     }
 
     Ok(serde_json::json!({

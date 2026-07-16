@@ -115,6 +115,13 @@ pub struct ServerConfig {
     pub options: Option<ServerOptions>,
     // openapi fields
     pub openapi: Option<OpenApiConfig>,
+    /// When true, each downstream HTTP MCP session (`mcp-session-id`) gets its
+    /// own dedicated upstream client/connection/process instead of sharing the
+    /// pool's single client. Intended for stateful servers (e.g. Playwright).
+    /// Frontend sends camelCase `perSessionClient`. Only honored on the HTTP
+    /// MCP JSON-RPC path; REST/Tauri direct calls keep the shared pool.
+    #[serde(default)]
+    pub per_session_client: Option<bool>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -133,6 +140,12 @@ pub struct ServerStatus {
     pub tool_count: usize,
     pub error: Option<String>,
     pub last_connected: Option<String>,
+    /// Server version reported by the MCP `initialize` handshake
+    /// (`serverInfo.version`). Currently only populated for stdio servers.
+    /// Used to display the running version next to the server name and to
+    /// check for package updates (npx/uvx).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
 }
 
 /// A single MCP tool exposed by a server
