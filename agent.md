@@ -242,12 +242,18 @@ services/ (业务逻辑 = 原 services/)
 - 移除了微信按钮（WeChatIcon）
 - 移除了 Discord 按钮（DiscordIcon）
 - 保留了：设置、关于、退出登录
+- **更新检查职责上移到根级**（见 3.4.7）：本组件不再做启动检查、不再渲染 `AboutDialog`，改为消费 `useUpdateCheck()`：红点徽标用 `showUpdateBadge`（头像 + 「关于」按钮两处），点「关于」调 `openAbout()`（由根级 `UpdateCheckProvider` 控制全局唯一 `AboutDialog`）。`version` prop 保留以兼容 `Sidebar` 调用，对话框实际版本由 provider 用 `PACKAGE_VERSION` 提供。
 
 #### 3.2.4 AboutDialog（关于对话框）
 
 **文件**：`frontend/src/components/ui/AboutDialog.tsx`
 
 - 添加了 "MCPHub Desktop" 标识文字
+- **release notes 按 Markdown 渲染**：新增 `Markdown` 组件（见 3.4.7），`latestEntry.summary`（即 `latest.json` 的 `notes`）渲染为 markdown 而非纯文本
+- **布局**：卡片 `max-h-[85vh] flex flex-col`，标题+关闭按钮固定（`shrink-0`），中间内容区（新版本说明+历史列表）`flex-1 overflow-y-auto` 滚动，底部按钮行 `shrink-0 border-t` 固定——长说明不再顶跑标题与按钮
+- 「最近更新」多版本卡片在 tauri-fallback 路径隐藏（`source !== 'tauri-fallback'`），因桌面端单条 entry 与上方「新版本可用」重复
+- 安装中状态：「安装更新」按钮图标用 `Loader2` spinner（`isInstalling`），未安装态与「下载更新」链接用 `Download`
+- **移除「忽略此版本」按钮**（见 3.4.7）：更新与否由用户决定，应用只提示
 
 #### 3.2.5 Dashboard（仪表盘）
 
@@ -557,6 +563,69 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 - 解决：确保所有 6 个平台（macOS ARM64/x64、Linux x64/ARM64、Windows x64/ARM64）都未被注释
 
 **详细文档**：参见 `doc/SIGNING_SETUP.md`
+
+#### 3.4.7 启动更新检查 / 自动提示 / 更新日志（桌面端自定义）
+
+**背景**：origin 的更新检查只在用户手动打开「关于」时触发（`AboutDialog` 的 `useEffect([isOpen])`）。桌面端要求应用一启动即检查并提示新版本，且**不依赖登录态**（登录页也要能提示）；同时去掉 origin 的「忽略此版本」功能——更新与否由用户决定，应用只提示。
+
+**文件**：`frontend/src/contexts/UpdateCheckContext.tsx`（⚠️ 新增）
+
+- `UpdateCheckProvider` 挂载在 `App` 根级（`AuthProvider` 内、`Router` 外，与 `EmbeddingSyncAlertListener` 同级），见 `App.tsx`。
+- 挂载即调用 `checkForAppUpdate('startup')`，不依赖登录/路由。
+- 桌面端（`isTauri()`）走 Tauri updater；结果经 `buildChangelogFromTauriUpdate()` 转成 `ChangelogUpdateInfo` 存入 `updateInfo`。web 端走 changelog API。
+- **检测到新版本即自动弹出「关于」对话框**（`setShowAbout(true)`）；`autoOpenedRef` 守卫保证每会话最多自动弹一次。
+- provider 内部渲染**全局唯一的 `AboutDialog`**（根级，不再由 `UserProfileMenu` 渲染）。
+- 暴露 `useUpdateCheck()`：`updateInfo`、`showUpdateBadge`、`openAbout()`。
+- **⚠️ StrictMode 注意**：effect 故意**不加** `startedRef`/run-once 守卫。dev 下 `<React.StrictMode>` 双调用 effect（setup→cleanup(`cancelled=true`)→setup），若用 run-once 守卫会让第二次 setup 直接 return，导致第一次（已被 cancelled）的检查虽跑了（有 `checking`/`new version available` 日志）但在 `if (cancelled || !update) return` 处跳过 `setUpdateInfo`/`setShowAbout`，造成 dev 下「检查跑了但无红点、不弹框」。去掉守卫让存活的那次 setup 真正执行。prod 无 StrictMode 不受影响。
+
+**文件**：`frontend/src/services/changelogService.ts`（⚠️ 修改）
+
+- **移除「忽略此版本」功能**：删除 `dismissUpdateVersion`、`isUpdateDismissed`、`DISMISSED_UPDATE_KEY`。
+- `shouldShowUpdateBadge(info)` 简化为 `Boolean(info?.hasUpdate && info.latestVersion)`——检测到新版本即亮红点，无「被忽略则不亮」逻辑。
+- 新增 `buildChangelogFromTauriUpdate(update: UpdateInfo): ChangelogUpdateInfo`：桌面端 changelog API 被桩（`tauriClient.ts` 返回空），由 Tauri updater 结果构造 `ChangelogUpdateInfo`（`hasUpdate:true`、`source:'tauri-fallback'`、单条 entry 的 `summary` 即 `notes`）。`AboutDialog` 与启动检查共用此 helper，避免逻辑漂移。
+
+**文件**：`frontend/src/utils/version.ts`（⚠️ 修改）
+
+- `checkForAppUpdate(source: 'startup' | 'about' | 'manual' = 'about')`：新增 `source` 参数用于日志归因。`AboutDialog` 自动检查传 `'about'`、点按钮传 `'manual'`、启动检查传 `'startup'`。
+- 全流程写 `[update]` 日志：开始检查、检测到新版本（含 `当前 -> 目标 (autoUpdate=...)`）、已是最新、检查失败（warn）、安装开始/完成/失败（error）。
+- 导出 `logUpdateEvent(level, message)` 供 `UpdateCheckContext` 复用。
+
+**更新检查日志（写入应用日志，日志页可见）**
+
+**文件**：`src-tauri/src/commands/logs.rs`（⚠️ 修改）+ `src-tauri/src/lib.rs`（⚠️ 修改）
+
+- 新增 Tauri command `log_event(level: String, message: String)`，内部调用 `app_logger::log_to_db()`，把前端日志写进 `app_log` 表（与 `get_logs` 同源，日志页可见）。
+- 在 `lib.rs` 的 `invoke_handler` 注册 `commands::logs::log_event`。
+- 前端 `logUpdateEvent`（`version.ts`）`invoke('log_event', ...)`，**fire-and-forget**（失败只 `console.warn`，绝不阻断检查）；非 Tauri 环境 no-op。
+- 日志消息统一 `[update]` 前缀（沿用 `[startup]` 惯例）。`app_logger::extract_server_name` 会把 `[update]` 解析为 `serverName='update'`，故日志页可按来源 `update` 过滤。
+- 示例日志：
+  ```
+  [update] checking for updates (source=startup)
+  [update] new version available: 1.0.24001 -> 1.0.24099 (autoUpdate=true)
+  [update] startup result: new version 1.0.24099, autoOpened=true
+  [update] installing update: 1.0.24001 -> 1.0.24099
+  [update] update installed, relaunching (-> 1.0.24099)
+  ```
+
+**release notes 按 Markdown 渲染**
+
+**文件**：`frontend/src/components/ui/Markdown.tsx`（⚠️ 新增）+ `AboutDialog.tsx`
+
+- 新增依赖 `react-markdown@^10` + `remark-gfm@^4`。⚠️ dev 模式下新增依赖后须清 `frontend/node_modules/.vite` 缓存再重启 `tauri dev`，否则 HMR 无法热替换、webview 跑陈旧中间态模块。
+- `Markdown` 组件渲染 `latestEntry.summary`（即 `latest.json` 的 `notes`，本就是 `doc/upgrade/{version}.md` 全文）。GFM 启用（表格/删除线/任务列表/自动链接）。用 hub 设计 token 着色，链接强制 `target=_blank rel=noopener noreferrer`。
+- `react-markdown` 渲染成 React 节点、不注入原始 HTML，对远端 `latest.json` 内容天然防 XSS，无需 DOMPurify。
+- `inline` 模式（`<p>` 拍平为 `<span>`）用于 `entry.highlights` 列表项内联渲染。
+
+**版本号同步**
+
+四个版本源须保持一致（当前 `1.0.24002`）：
+
+- `src-tauri/tauri.conf.json`（应用版本，也是 `import.meta.env.PACKAGE_VERSION` 的来源——`vite.config.ts` 从此注入）
+- `src-tauri/Cargo.toml`
+- `package.json`（根）
+- `frontend/package.json`
+
+`doc/upgrade/{version}.md` 存在对应版本时，CI 会将其全文作为 `latest.json` 的 `notes` 发布（见 3.4.3/3.4.4）。
 
 ### 3.5 Rust 后端差异
 
