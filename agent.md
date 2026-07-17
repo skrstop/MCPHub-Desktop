@@ -1141,15 +1141,18 @@ PY
 | `frontend/src/components/LogViewer.tsx`          | source 类型改为 string[]、source filter UI 移除、滚动方向 |
 | `frontend/src/components/layout/Header.tsx`      | GitHub 链接、移除文档按钮                                 |
 | `frontend/src/components/layout/Sidebar.tsx`     | Logo 使用应用图标                                         |
-| `frontend/src/components/ui/UserProfileMenu.tsx` | 移除 sponsor/wechat/discord 按钮                          |
-| `frontend/src/components/ui/AboutDialog.tsx`     | MCPHub Desktop 标识、canAutoUpdate 逻辑                   |
+| `frontend/src/components/ui/UserProfileMenu.tsx` | 移除 sponsor/wechat/discord 按钮；更新检查上移到根级 provider，改为消费 `useUpdateCheck()`（红点 + openAbout），不再自带检查/对话框（见 3.4.7） |
+| `frontend/src/components/ui/AboutDialog.tsx`     | MCPHub Desktop 标识、canAutoUpdate 逻辑、Markdown 渲染 notes、flex 滚动布局、Loader2 安装图标、移除「忽略此版本」（见 3.2.4 / 3.4.7） |
+| `frontend/src/components/ui/Markdown.tsx`        | 桌面端新增（见 3.4.7）：react-markdown+remark-gfm 渲染 release notes，`inline` 模式供 highlights |
 | `frontend/src/contexts/AuthContext.tsx`          | skipAuth/guest 模式                                       |
 | `frontend/src/contexts/SettingsContext.tsx`      | httpPort/exposeHttp 字段                                  |
+| `frontend/src/contexts/UpdateCheckContext.tsx`   | 桌面端新增（见 3.4.7）：根级启动更新检查 + 全局 AboutDialog，自动弹框/红点，无「忽略」 |
 | `frontend/src/contexts/ServerInstallProgressContext.tsx` | 桌面端新增（见 3.6）：监听 install-progress / update-available 事件 |
-| `frontend/src/App.tsx`                           | 包入 ServerInstallProgressProvider（见 3.6）              |
+| `frontend/src/App.tsx`                           | 包入 ServerInstallProgressProvider（见 3.6）+ UpdateCheckProvider（见 3.4.7） |
 | `frontend/src/types/index.ts`                    | `Server.version` 字段（见 3.6）                           |
 | `frontend/src/services/configService.ts`         | getPublicConfig 使用 apiGet                               |
-| `frontend/src/services/changelogService.ts`      | Tauri 中禁用                                              |
+| `frontend/src/services/changelogService.ts`      | Tauri 中 changelog API 禁用；新增 `buildChangelogFromTauriUpdate`、移除「忽略此版本」（见 3.4.7） |
+| `frontend/src/utils/version.ts`                 | 本地修改（见 3.4.7）：`checkForAppUpdate(source)` + `logUpdateEvent` 全流程写 `[update]` 日志 |
 | `frontend/src/pages/SettingsPage.tsx`            | 隐藏未实现模块、RuntimeVersionManager、HTTP 端口          |
 | `frontend/src/pages/LoginPage.tsx`               | admin 默认填充、密码提示、Logo 图标                       |
 | `frontend/src/pages/Dashboard.tsx`               | 隐藏 SMART/Docs                                           |
@@ -1555,6 +1558,10 @@ npm run build
 - [X]  启动 Splash 加载画面（index.html 内嵌动画 + 内联 i18n + main.tsx 移除）
 - [X]  首页统计面板空状态修复（hasLoaded 逻辑简化）
 - [X]  stdio 包下载进度 / 更新检测 / 非阻塞连接（保存类命令后台连接、`server://install-progress` 下载进度、`server://update-available` 启动时检查、持久化 packageVersions + mark_reinstalled；详见 3.6）
+- [X]  启动更新检查（根级 `UpdateCheckProvider`：应用启动即检查、不依赖登录态；检测到新版本自动弹「关于」+ 侧边栏红点；移除「忽略此版本」；详见 3.4.7）
+- [X]  更新检查日志（`log_event` Tauri command 写入 `app_log`，前端 `[update]` 全流程日志：检查/新版本/已最新/失败/安装；日志页按来源 `update` 可过滤；详见 3.4.7）
+- [X]  release notes Markdown 渲染（`Markdown` 组件 react-markdown+remark-gfm；notes 即 `doc/upgrade/{version}.md` 全文；详见 3.4.7）
+- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.24002；详见 3.4.7）
 
 ### 待办
 
