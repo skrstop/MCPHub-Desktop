@@ -8,6 +8,7 @@ import { ServerInstallProgressProvider } from './contexts/ServerInstallProgressC
 import { SettingsProvider } from './contexts/SettingsContext';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
+import { UpdateCheckProvider } from './contexts/UpdateCheckContext';
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -70,6 +71,7 @@ function App() {
     <AppErrorBoundary>
     <ThemeProvider>
       <AuthProvider>
+        <UpdateCheckProvider>
         <ServerProvider>
           <ServerInstallProgressProvider>
           <ToastProvider>
@@ -115,6 +117,7 @@ function App() {
           </ToastProvider>
           </ServerInstallProgressProvider>
         </ServerProvider>
+        </UpdateCheckProvider>
       </AuthProvider>
     </ThemeProvider>
     </AppErrorBoundary>

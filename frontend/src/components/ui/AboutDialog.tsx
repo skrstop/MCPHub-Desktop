@@ -1,14 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, CheckCircle2, Download, RefreshCw, X } from 'lucide-react';
+import { ArrowUpRight, CheckCircle2, Download, Loader2, RefreshCw, X } from 'lucide-react';
 import { ChangelogUpdateInfo } from '@/types';
 import {
-  dismissUpdateVersion,
+  buildChangelogFromTauriUpdate,
   fetchChangelogUpdateInfo,
-  isUpdateDismissed,
 } from '@/services/changelogService';
 import { checkForAppUpdate, installAppUpdate, type UpdateInfo } from '@/utils/version';
 import { isTauri } from '@/utils/tauriClient';
+import Markdown from './Markdown';
 
 interface AboutDialogProps {
   isOpen: boolean;
@@ -16,7 +16,6 @@ interface AboutDialogProps {
   version: string;
   initialUpdateInfo?: ChangelogUpdateInfo | null;
   onUpdateInfoChange?: (info: ChangelogUpdateInfo | null) => void;
-  onDismissUpdate?: (version: string) => void;
 }
 
 const AboutDialog: React.FC<AboutDialogProps> = ({
@@ -25,14 +24,12 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
   version,
   initialUpdateInfo,
   onUpdateInfoChange,
-  onDismissUpdate,
 }) => {
   const { t, i18n } = useTranslation();
   const [updateInfo, setUpdateInfo] = useState<ChangelogUpdateInfo | null>(
     initialUpdateInfo ?? null,
   );
   const [isChecking, setIsChecking] = useState(false);
-  const [localDismissed, setLocalDismissed] = useState(false);
   const [tauriUpdate, setTauriUpdate] = useState<UpdateInfo | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
 
@@ -40,11 +37,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
     setUpdateInfo(initialUpdateInfo ?? null);
   }, [initialUpdateInfo]);
 
-  useEffect(() => {
-    setLocalDismissed(false);
-  }, [updateInfo?.latestVersion]);
-
-  const checkForUpdates = async (force = false) => {
+  const checkForUpdates = async (force = false, source: 'about' | 'manual' = force ? 'manual' : 'about') => {
     setIsChecking(true);
     // 立即设置 updateInfo 为"检查更新中"状态
     setUpdateInfo({
@@ -57,7 +50,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
     try {
       // 在 Tauri 环境下使用原生 updater 插件
       if (isTauri()) {
-        const update = await checkForAppUpdate();
+        const update = await checkForAppUpdate(source);
         setTauriUpdate(update);
         // 同时获取 changelog 信息用于显示
         const info = await fetchChangelogUpdateInfo({
@@ -69,15 +62,11 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
         // update info from Tauri updater (including fallback), construct a minimal
         // ChangelogUpdateInfo so the UI can show "new version available"
         if (update && (!info || !info.hasUpdate)) {
-          setUpdateInfo({
-            hasUpdate: true,
-            latestVersion: update.version,
-            entries: update.notes
-              ? [{ version: update.version, title: update.version, summary: update.notes, highlights: [], changelogUrl: `https://github.com/skrstop/MCPHub-Desktop/releases/tag/v${update.version}`, url: `https://github.com/skrstop/MCPHub-Desktop/releases/tag/v${update.version}` }]
-              : [],
-            totalUpdateCount: 1,
-            source: 'tauri-fallback',
-          });
+          const tauriInfo = buildChangelogFromTauriUpdate(update);
+          setUpdateInfo(tauriInfo);
+          // Sync the new-version result back to the root provider so the sidebar
+          // badge lights up after a manual check that finds a new version.
+          onUpdateInfoChange?.(tauriInfo);
         } else {
           // 确保在正常完成时也设置 updateInfo，避免一直显示"检查更新中..."
           if (info) {
@@ -153,28 +142,17 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
 
   const latestEntry = updateInfo?.entries[0] ?? null;
   const hasNewVersion = Boolean(updateInfo?.hasUpdate && updateInfo.latestVersion);
-  const dismissed = useMemo(
-    () => localDismissed || isUpdateDismissed(updateInfo?.latestVersion),
-    [localDismissed, updateInfo?.latestVersion],
-  );
   const extraReleaseCount = Math.max(
     0,
     (updateInfo?.totalUpdateCount ?? 0) - (updateInfo?.entries.length ?? 0),
   );
 
-  const handleDismiss = () => {
-    if (!updateInfo?.latestVersion) return;
-    dismissUpdateVersion(updateInfo.latestVersion);
-    setLocalDismissed(true);
-    onDismissUpdate?.(updateInfo.latestVersion);
-  };
-
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="hub-card w-full max-w-[520px] shadow-xl">
-        <div className="p-5 relative">
+      <div className="hub-card w-full max-w-[520px] max-h-[85vh] flex flex-col shadow-xl">
+        <div className="p-5 pb-3 relative shrink-0">
           <button
             onClick={onClose}
             className="hub-icon-btn sm absolute top-4 right-4"
@@ -188,8 +166,9 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
             <p className="hub-sub">{t('about.versionInfo', { version })}</p>
             <p className="text-xs mt-1" style={{ color: 'var(--hub-ink-3)' }}>MCPHub Desktop</p>
           </div>
+        </div>
 
-          <div className="mt-5 space-y-4">
+        <div className="px-5 pb-5 space-y-4 overflow-y-auto min-h-0 flex-1">
             {isChecking || updateInfo?.source === 'checking' ? (
               <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
                 <RefreshCw className="h-4 w-4 animate-spin" style={{ color: 'var(--hub-accent)' }} />
@@ -218,19 +197,12 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                       {t('about.newVersionAvailable', { version: updateInfo?.latestVersion })}
                     </div>
                   </div>
-                  {dismissed ? (
-                    <span className="hub-tag muted">{t('about.dismissed')}</span>
-                  ) : (
-                    <button className="hub-btn ghost sm" onClick={handleDismiss}>
-                      {t('about.dismissUpdate')}
-                    </button>
-                  )}
                 </div>
 
                 {latestEntry?.summary ? (
-                  <p className="mt-3 text-[13px] leading-relaxed" style={{ color: 'var(--hub-ink-2)' }}>
-                    {latestEntry.summary}
-                  </p>
+                  <div className="mt-3">
+                    <Markdown>{latestEntry.summary}</Markdown>
+                  </div>
                 ) : updateInfo?.source === 'npm-fallback' ? (
                   <p className="mt-3 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
                     {t('about.releaseNotesUnavailable')}
@@ -244,7 +216,11 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
               </div>
             )}
 
-            {updateInfo?.entries.length ? (
+            {/* Multi-version changelog list (web / changelog-API path). On desktop the
+                updater falls back to a single entry whose content duplicates the
+                "new version available" block above, so we hide it there to avoid a
+                redundant card. */}
+            {updateInfo?.entries.length && updateInfo.source !== 'tauri-fallback' ? (
               <div className="hub-card overflow-hidden">
                 <div className="px-4 py-3 hub-border-b">
                   <h4 className="hub-card-title">{t('about.latestChanges')}</h4>
@@ -273,9 +249,10 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                       </div>
                       {entry.highlights.length > 0 && (
                         <ul className="mt-2 space-y-1 list-none p-0">
-                          {entry.highlights.slice(0, 3).map((item) => (
-                            <li key={item} className="text-[12.5px]" style={{ color: 'var(--hub-ink-2)' }}>
-                              <span style={{ color: 'var(--hub-accent)' }}>•</span> {item}
+                          {entry.highlights.slice(0, 3).map((item, idx) => (
+                            <li key={idx} className="text-[12.5px]" style={{ color: 'var(--hub-ink-2)' }}>
+                              <span style={{ color: 'var(--hub-accent)' }}>•</span>{' '}
+                              <Markdown inline>{item}</Markdown>
                             </li>
                           ))}
                         </ul>
@@ -290,8 +267,9 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                 )}
               </div>
             ) : null}
+          </div>
 
-            <div className="flex flex-wrap items-center gap-2 pt-1">
+          <div className="flex flex-wrap items-center gap-2 pt-3 px-5 pb-5 shrink-0 border-t" style={{ borderColor: 'var(--hub-line)' }}>
               <button
                 onClick={() => checkForUpdates(true)}
                 disabled={isChecking || isInstalling}
@@ -306,7 +284,11 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                   disabled={isInstalling}
                   className={`hub-btn primary ${isInstalling ? 'opacity-60 cursor-not-allowed' : ''}`}
                 >
-                  <Download className={`h-4 w-4 ${isInstalling ? 'animate-spin' : ''}`} />
+                  {isInstalling ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
                   {isInstalling ? t('about.installing') : t('about.installUpdate')}
                 </button>
               )}
@@ -341,8 +323,6 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                 </a>
               )}
             </div>
-          </div>
-        </div>
       </div>
     </div>
   );

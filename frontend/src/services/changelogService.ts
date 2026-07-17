@@ -1,7 +1,39 @@
 import { ApiResponse, apiGet } from '@/utils/fetchInterceptor';
 import { ChangelogUpdateInfo } from '@/types';
+import type { UpdateInfo } from '@/utils/version';
 
-const DISMISSED_UPDATE_KEY = 'mcphub.dismissedUpdateVersion';
+const RELEASE_BASE = 'https://github.com/skrstop/MCPHub-Desktop/releases';
+
+/**
+ * Build a `ChangelogUpdateInfo` from a Tauri updater result.
+ *
+ * On desktop the `/changelog/update-info` endpoint is stubbed (returns no
+ * update), so the About dialog and the startup update check both derive the
+ * "new version available" payload from the Tauri updater here. Keeping this in
+ * one place ensures the About dialog and the startup badge/auto-open stay in
+ * sync.
+ */
+export function buildChangelogFromTauriUpdate(update: UpdateInfo): ChangelogUpdateInfo {
+  const releaseUrl = `${RELEASE_BASE}/tag/v${update.version}`;
+  return {
+    latestVersion: update.version,
+    hasUpdate: true,
+    entries: update.notes
+      ? [{
+          version: update.version,
+          title: update.version,
+          summary: update.notes,
+          highlights: [],
+          changelogUrl: releaseUrl,
+          url: releaseUrl,
+        }]
+      : [],
+    totalUpdateCount: 1,
+    changelogUrl: `${RELEASE_BASE}/latest`,
+    allChangelogUrl: RELEASE_BASE,
+    source: 'tauri-fallback' as ChangelogUpdateInfo['source'],
+  };
+}
 
 export async function fetchChangelogUpdateInfo(input: {
   currentVersion: string;
@@ -20,17 +52,9 @@ export async function fetchChangelogUpdateInfo(input: {
   return response.data;
 }
 
-export function dismissUpdateVersion(version: string): void {
-  localStorage.setItem(DISMISSED_UPDATE_KEY, version);
-}
-
-export function isUpdateDismissed(version: string | null | undefined): boolean {
-  if (!version) return false;
-  return localStorage.getItem(DISMISSED_UPDATE_KEY) === version;
-}
-
 export function shouldShowUpdateBadge(info: ChangelogUpdateInfo | null): boolean {
-  return Boolean(info?.hasUpdate && info.latestVersion && !isUpdateDismissed(info.latestVersion));
+  // There is no "dismiss" action — any detected new version lights the badge.
+  return Boolean(info?.hasUpdate && info.latestVersion);
 }
 
 function normalizeLocale(value?: string): 'en' | 'zh' {

@@ -15,6 +15,18 @@ pub async fn clear_logs() -> Result<(), String> {
     log_service::clear_logs().await.map_err(|e| e.to_string())
 }
 
+/// Write an app-level log entry from the frontend.
+///
+/// Routed through `app_logger::log_to_db` so it lands in the same `app_log`
+/// table the Logs page reads (via `get_logs`). Used to record update-check
+/// lifecycle events (check started, new version available, up-to-date, error).
+/// `level` is one of: info | warn | error | debug.
+#[tauri::command]
+pub async fn log_event(level: String, message: String) -> Result<(), String> {
+    crate::services::app_logger::log_to_db(&level, &message);
+    Ok(())
+}
+
 /// Returns { available: true } — activity logging is always on in the desktop app.
 #[tauri::command]
 pub async fn get_activity_available() -> Result<serde_json::Value, String> {

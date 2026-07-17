@@ -2,46 +2,23 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
+import { useUpdateCheck } from '@/contexts/UpdateCheckContext';
 import { User, Settings, LogOut, Info } from 'lucide-react';
-import AboutDialog from './AboutDialog';
-import { ChangelogUpdateInfo } from '@/types';
-import {
-  fetchChangelogUpdateInfo,
-  shouldShowUpdateBadge,
-} from '@/services/changelogService';
 
 interface UserProfileMenuProps {
   collapsed: boolean;
+  /** Kept for API compatibility; the version shown in the About dialog now comes
+   *  from the root-level UpdateCheckProvider (uses the Tauri app version). */
   version: string;
 }
 
-const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version }) => {
-  const { t, i18n } = useTranslation();
+const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed }) => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { auth, logout } = useAuth();
+  const { showUpdateBadge, openAbout } = useUpdateCheck();
   const [isOpen, setIsOpen] = useState(false);
-  const [showNewVersionInfo, setShowNewVersionInfo] = useState(false);
-  const [showAboutDialog, setShowAboutDialog] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<ChangelogUpdateInfo | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  // Check for new version on login and component mount.
-  useEffect(() => {
-    const checkForNewVersion = async () => {
-      try {
-        const info = await fetchChangelogUpdateInfo({
-          currentVersion: version,
-          locale: i18n.language,
-        });
-        setUpdateInfo(info);
-        setShowNewVersionInfo(shouldShowUpdateBadge(info));
-      } catch (error) {
-        console.error('Error checking for new version:', error);
-      }
-    };
-
-    checkForNewVersion();
-  }, [version, i18n.language]);
 
   // Close the menu when clicking outside
   useEffect(() => {
@@ -68,7 +45,7 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
   };
 
   const handleAboutClick = () => {
-    setShowAboutDialog(true);
+    openAbout();
     setIsOpen(false);
   };
 
@@ -83,7 +60,7 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
           <div className="w-5 h-5 flex items-center justify-center rounded-full border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700">
             <User className="h-4 w-4 text-gray-700 dark:text-gray-300" />
           </div>
-          {showNewVersionInfo && (
+          {showUpdateBadge && (
             <span className="absolute -top-1 -right-1 block w-2 h-2 bg-red-500 rounded-full"></span>
           )}
         </div>
@@ -111,7 +88,7 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
           >
             <Info className="h-4 w-4 mr-2" />
             {t('about.title')}
-            {showNewVersionInfo && (
+            {showUpdateBadge && (
               <span className="absolute top-2 right-4 block w-2 h-2 bg-red-500 rounded-full"></span>
             )}
           </button>
@@ -127,21 +104,6 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed, version })
           </button>
         </div>
       )}
-
-      {/* About dialog */}
-      <AboutDialog
-        isOpen={showAboutDialog}
-        onClose={() => setShowAboutDialog(false)}
-        version={version}
-        initialUpdateInfo={updateInfo}
-        onUpdateInfoChange={(info) => {
-          setUpdateInfo(info);
-          setShowNewVersionInfo(shouldShowUpdateBadge(info));
-        }}
-        onDismissUpdate={() => {
-          setShowNewVersionInfo(false);
-        }}
-      />
     </div>
   );
 };

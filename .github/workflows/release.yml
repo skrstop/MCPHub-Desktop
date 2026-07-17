@@ -974,7 +974,7 @@ jobs:
                   notes = f.read().strip()
               print(f'✅ Loaded release notes from {notes_file}')
           else:
-              notes = f'MCPHub Desktop {version}'
+              notes = f'## 修复\n- 保存时同步尝试连接导致页面阻塞'
               print(f'⚠️  No release notes found at {notes_file}, using default')
 
           data = {

@@ -1,5 +1,6 @@
 import { check, type Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { invoke } from '@tauri-apps/api/core';
 import { isTauri } from '@/utils/tauriClient';
 
 export interface UpdateInfo {
@@ -13,10 +14,38 @@ export interface UpdateInfo {
   downloadUrl?: string;
 }
 
+/** Where an update check was triggered from, for log attribution. */
+export type UpdateCheckSource = 'startup' | 'about' | 'manual';
+
 // GitHub Release latest.json URL for fallback version check (Linux)
 const LATEST_JSON_URL = 'https://github.com/skrstop/MCPHub-Desktop/releases/latest/download/latest.json';
 
 let cachedUpdate: Update | null = null;
+
+/**
+ * Append an update-check event to the application log (the same log the Logs
+ * page reads). Fire-and-forget: a logging failure must never break the update
+ * check itself, so errors are swallowed. No-op outside the Tauri runtime.
+ */
+export const logUpdateEvent = (level: 'info' | 'warn' | 'error' | 'debug', message: string): void => {
+  if (!isTauri()) return;
+  invoke('log_event', { level, message }).catch((e) => {
+    console.warn('[update] failed to write log event:', e);
+  });
+};
+
+/** Current app version, lazily fetched and cached for log messages. */
+let cachedCurrentVersion: string | null = null;
+const getCurrentVersion = async (): Promise<string> => {
+  if (cachedCurrentVersion) return cachedCurrentVersion;
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app');
+    cachedCurrentVersion = await getVersion();
+  } catch {
+    cachedCurrentVersion = 'unknown';
+  }
+  return cachedCurrentVersion;
+};
 
 /**
  * Check whether a new application version is available via the Tauri updater plugin.
@@ -24,12 +53,23 @@ let cachedUpdate: Update | null = null;
  * falls back to checking GitHub latest.json for version info.
  * Returns the update metadata when available, or `null` if the app is up-to-date
  * or running outside the Tauri runtime.
+ *
+ * `source` attributes the check in the application log
+ * (startup | about | manual); defaults to 'about'.
  */
-export const checkForAppUpdate = async (): Promise<UpdateInfo | null> => {
+export const checkForAppUpdate = async (
+  source: UpdateCheckSource = 'about',
+): Promise<UpdateInfo | null> => {
+  logUpdateEvent('info', `[update] checking for updates (source=${source})`);
+  const currentVersion = await getCurrentVersion();
   try {
     const update = await check();
     cachedUpdate = update;
     if (update) {
+      logUpdateEvent(
+        'info',
+        `[update] new version available: ${currentVersion} -> ${update.version} (autoUpdate=true)`,
+      );
       return {
         version: update.version,
         notes: update.body,
@@ -40,9 +80,16 @@ export const checkForAppUpdate = async (): Promise<UpdateInfo | null> => {
     // Tauri updater returned null — either up-to-date or platform not supported.
     // On Linux (deb/rpm), Tauri updater doesn't work, so we fall back to
     // checking GitHub latest.json to at least notify the user.
-    return await checkFallbackUpdate();
+    const fallback = await checkFallbackUpdate();
+    if (!fallback) {
+      logUpdateEvent('info', `[update] already up to date (current=${currentVersion})`);
+    }
+    return fallback;
   } catch (error) {
-    console.error('Failed to check for application update via Tauri updater:', error);
+    logUpdateEvent(
+      'warn',
+      `[update] Tauri updater check failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     // Tauri updater failed, try fallback
     return await checkFallbackUpdate();
   }
@@ -76,6 +123,10 @@ const checkFallbackUpdate = async (): Promise<UpdateInfo | null> => {
       // New version available — always link to GitHub Releases page for manual download
       const downloadUrl = 'https://github.com/skrstop/MCPHub-Desktop/releases/latest';
 
+      logUpdateEvent(
+        'info',
+        `[update] new version available: ${currentVersion} -> ${latestVersion} (autoUpdate=false, fallback)`,
+      );
       return {
         version: latestVersion,
         notes: data.notes as string | undefined,
@@ -84,8 +135,13 @@ const checkFallbackUpdate = async (): Promise<UpdateInfo | null> => {
         downloadUrl,
       };
     }
+    logUpdateEvent('info', `[update] already up to date (current=${currentVersion}, fallback)`);
     return null;
   } catch (error) {
+    logUpdateEvent(
+      'warn',
+      `[update] fallback update check failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     console.warn('Fallback update check failed:', error);
     return null;
   }
@@ -101,10 +157,22 @@ export const installAppUpdate = async (
 ): Promise<void> => {
   const update = cachedUpdate ?? (await check());
   if (!update) {
+    logUpdateEvent('warn', '[update] install requested but no update is available');
     throw new Error('No update available');
   }
-  await update.downloadAndInstall(onEvent);
-  await relaunch();
+  const currentVersion = await getCurrentVersion();
+  logUpdateEvent('info', `[update] installing update: ${currentVersion} -> ${update.version}`);
+  try {
+    await update.downloadAndInstall(onEvent);
+    logUpdateEvent('info', `[update] update installed, relaunching (-> ${update.version})`);
+    await relaunch();
+  } catch (error) {
+    logUpdateEvent(
+      'error',
+      `[update] install failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw error;
+  }
 };
 
 /**

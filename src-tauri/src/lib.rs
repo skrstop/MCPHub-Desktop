@@ -252,6 +252,7 @@ pub fn run() {
             // Log commands
             commands::logs::get_logs,
             commands::logs::clear_logs,
+            commands::logs::log_event,
             commands::logs::get_activity_available,
             commands::logs::get_activity_filters,
             commands::logs::get_activity_stats,
