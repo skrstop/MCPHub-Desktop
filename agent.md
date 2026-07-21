@@ -1206,14 +1206,39 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `9dd75bc` (origin/main) |
-| **对应 origin tag**            | `v1.0.24`               |
-| **桌面端版本号**               | `1.0.24001`             |
-| **同步执行日期**               | 2026-07-16              |
+| **当前已同步到 origin commit** | `14a832b` (origin/main) |
+| **对应 origin tag**            | `v1.0.24`（无新 tag；`14a832b` 为 v1.0.24 之后的未发布提交） |
+| **桌面端版本号**               | `1.0.24002`             |
+| **同步执行日期**               | 2026-07-21              |
 
-> 下次同步时，使用 `9dd75bc` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 9dd75bc..HEAD`）。
+> 下次同步时，使用 `14a832b` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 14a832b..HEAD`）。
 
 ### 4.4 最近同步记录
+
+#### 2026-07-21：同步 `9dd75bc` → `14a832b`（2 个 commit）
+
+origin 仍为 `v1.0.24`（无新 tag；两 commit 均为 v1.0.24 之后的未发布提交）；桌面端版本号不变（`1.0.24002`，本次无任何 desktop 文件改动，不递增）。
+
+`cd mcphub-origin && git --no-pager log --oneline 9dd75bc..HEAD` 仅 2 个 commit，`git diff --stat 9dd75bc..HEAD -- frontend/ locales/` 为空（无前端/locales 改动）。
+
+**已同步到 desktop（前端 / locales）**
+
+无。本次两 commit 均不触及 `frontend/` 或 `locales/`。
+
+**已镜像到 desktop（Rust 后端）**
+
+无。
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `13cbae2` | chore(deps): bump adm-zip 0.5.16→0.6.0 (#990) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；桌面端用 npm（`package-lock.json`）+ Rust `Cargo.toml`，不共享 origin pnpm 依赖图（4.1 策略 4）。adm-zip 为 Node 后端依赖，桌面端 Rust 无对应。 |
+| `14a832b` | fix: recover stale PostgreSQL connections (#991) | **后端不同步** | 纯 Node TypeORM `DataSource` 的 PostgreSQL 连接池健康检查 + 自动重连（`src/db/connection.ts` + `reconnectionPromise` + `checkDatabaseHealth` 重连分支 + `SystemConfigRepository`/`dbRetry`）。桌面端 Rust 用 **SQLite**（`SqlitePool`，本地文件，无网络连接可失活、无 stale 恢复场景），架构不对应；无 frontend/locales 改动。 |
+
+**同步后验证**：本次无任何源码文件改动（仅更新本节文档与基线 SHA），`frontend && npm run build` / `src-tauri && cargo check` 状态与同步前一致，无需重跑。
+
+---
 
 #### 2026-07-16：同步 `8d2ef15` → `9dd75bc`（3 个 commit）
 
