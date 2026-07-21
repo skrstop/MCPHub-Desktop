@@ -3179,7 +3179,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcphub"
-version = "1.0.24002"
+version = "1.0.24003"
 dependencies = [
  "anyhow",
  "async-trait",

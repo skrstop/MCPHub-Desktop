@@ -2,7 +2,8 @@ use crate::{
     auth as auth_util,
     services::{bearer_key_service, config_service, http_server, settings_import},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use crate::commands::auth::SessionState;
 
 /// Get public configuration (skipAuth setting) without authentication
@@ -29,7 +30,12 @@ pub async fn get_public_config() -> Result<serde_json::Value, String> {
 }
 
 /// Helper to verify that the current session belongs to an admin user.
+/// In no-login (skipAuth) mode the dashboard treats the user as an admin,
+/// so admin-gated read operations are allowed without a session token.
 async fn require_admin(session: &SessionState) -> Result<(), String> {
+    if crate::commands::auth::is_skip_auth_enabled().await {
+        return Ok(());
+    }
     let token_str = {
         let guard = session.0.lock().await;
         guard.as_ref().ok_or("Not authenticated")?.token.clone()
@@ -177,4 +183,32 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
     });
 
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
+}
+
+/// Show a native "Save As" dialog and write the given JSON text to the chosen
+/// file. The Tauri webview cannot perform programmatic blob-URL downloads the
+/// way a browser can, so the export "Download JSON" button routes here instead.
+/// Returns the saved file path, or an error message (e.g. dialog cancelled).
+#[tauri::command]
+pub async fn save_settings_json(
+    app: AppHandle,
+    content: String,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    let default_name = file_name.unwrap_or_else(|| "mcp_settings.json".to_string());
+    let file_path = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(default_name)
+        .blocking_save_file();
+
+    let Some(file_path) = file_path else {
+        // User cancelled the save dialog — surface as a non-fatal "no file" result.
+        return Err("cancelled".to_string());
+    };
+
+    let path = file_path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }

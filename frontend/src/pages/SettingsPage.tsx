@@ -11,6 +11,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { PermissionChecker } from '@/components/PermissionChecker';
 import { PERMISSIONS } from '@/constants/permissions';
 import { isTauri } from '@/utils/tauriClient';
+import { invoke } from '@tauri-apps/api/core';
 import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText } from 'lucide-react';
 import { EndpointCopy } from '@/components/ui/EndpointCopy';
 import type { BearerKey, User } from '@/types';
@@ -1318,7 +1319,10 @@ const SettingsPage: React.FC = () => {
     try {
       const result = await exportMCPSettings();
       console.log('Fetched MCP settings:', result);
-      const configJson = JSON.stringify(result.data, null, 2);
+      // Rust returns export_settings as a pretty-printed JSON string, so use it
+      // as-is when it is already a string; otherwise stringify the object.
+      const configJson =
+        typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
       setMcpSettingsJson(configJson);
     } catch (error) {
       console.error('Error fetching MCP settings:', error);
@@ -1367,8 +1371,29 @@ const SettingsPage: React.FC = () => {
     }
   };
 
-  const handleDownloadConfig = () => {
+  const handleDownloadConfig = async () => {
     if (!mcpSettingsJson) return;
+
+    // The Tauri webview cannot perform programmatic blob-URL downloads the way
+    // a browser can, so on desktop we hand the file to a native "Save As" dialog
+    // implemented in Rust (save_settings_json). On web we fall back to a Blob.
+    if (isTauri()) {
+      try {
+        await invoke<string>('save_settings_json', {
+          content: mcpSettingsJson,
+          fileName: 'mcp_settings.json',
+        });
+        showToast(t('settings.exportSuccess') || 'Settings exported successfully', 'success');
+      } catch (e) {
+        // The Rust command returns Err("cancelled") when the user dismisses the
+        // save dialog — treat that as a silent no-op rather than an error.
+        if (String(e) !== 'cancelled') {
+          showToast(t('settings.exportError') || 'Failed to export settings', 'error');
+          console.error('Error saving settings file:', e);
+        }
+      }
+      return;
+    }
 
     const blob = new Blob([mcpSettingsJson], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -3597,7 +3622,8 @@ const SettingsPage: React.FC = () => {
         </div>
       </PermissionChecker>
 
-      {/* Change Password */}
+      {/* Change Password - Hidden in no-login (skipAuth) mode */}
+      {!auth.skipAuth && (
       <div className="hub-card mb-6 overflow-hidden" data-section="password">
         <div
           className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
@@ -3617,6 +3643,7 @@ const SettingsPage: React.FC = () => {
           </div>
         )}
       </div>
+      )}
 
       {/* Export MCP Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_EXPORT_CONFIG}>

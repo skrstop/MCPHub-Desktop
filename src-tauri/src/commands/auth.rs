@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 pub struct SessionState(pub Mutex<Option<AuthToken>>);
 
 /// Check if skipAuth is enabled in config
-async fn is_skip_auth_enabled() -> bool {
+pub(crate) async fn is_skip_auth_enabled() -> bool {
     config_service::get()
         .await
         .ok()

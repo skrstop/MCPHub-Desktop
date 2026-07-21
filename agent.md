@@ -198,8 +198,12 @@ services/ (业务逻辑 = 原 services/)
 **文件**：`frontend/src/contexts/AuthContext.tsx`
 
 - 支持 `skipAuth` 模式（免登录模式）
-- 当 `skipAuth=true` 时，自动创建 guest 用户（`username: '免登陆模式'`, `isAdmin: true`）
+- 当 `skipAuth=true` 时，自动创建 guest 用户（`username: '免登陆模式'`, `isAdmin: true`），并在 `AuthState.skipAuth` 字段标记 `true`
 - 默认启用免登录模式（桌面端不需要登录）
+
+**文件**：`frontend/src/types/index.ts`
+
+- 🆕 `AuthState` 接口新增可选 `skipAuth?: boolean` 字段（见 3.5.12）：供 SettingsPage 等组件判断是否处于免登录模式
 
 #### 3.1.4 配置服务
 
@@ -304,6 +308,9 @@ services/ (业务逻辑 = 原 services/)
 - **默认 baseUrl 从 `http://localhost:3000` 改为 `http://localhost:23333`**（与 HTTP 服务器默认端口一致）
 - 更新了所有语言的 `baseUrlPlaceholder` 翻译
 - 添加了 `exposeHttp`、`httpPort` 相关的国际化翻译
+- 🆕 **「修改密码」区块在免登录模式下隐藏**（见 3.5.12）：用 `{!auth.skipAuth && (...)}` 包裹「Change Password」卡片
+- 🆕 **导出配置 JSON 格式化修复**（见 3.5.12）：`fetchMcpSettings` 中 `result.data` 已是 Rust 返回的 pretty-printed 字符串时直接使用，不再二次 `JSON.stringify`（否则会转义成带反斜杠的扁平字符串）
+- 🆕 **「下载 JSON」走原生保存对话框**（见 3.5.12）：`handleDownloadConfig` 在 `isTauri()` 下 `invoke('save_settings_json', ...)`，web 端保留 Blob 兜底；引入 `invoke` from `@tauri-apps/api/core`
 
 #### 3.2.7.1 SettingsContext（设置上下文）
 
@@ -635,10 +642,13 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 
 - 新增 `get_public_config` 命令：返回 `skipAuth` 和 `permissions` 配置
 - 默认 `skipAuth: true`（桌面端默认免登录）
+- 🆕 **`require_admin` 在 skipAuth 模式下直接放行**（见 3.5.12）：免登录时 `AuthContext` 只设假用户、不调用 `get_current_user`，Rust 侧 `SessionState` 始终为 `None`，`export_settings` 等读操作会因 "Not authenticated" 失败；现于 `require_admin` 起始处检查 `is_skip_auth_enabled()`，为真即 `Ok(())` 返回，使免登录下导出配置可用
+- 🆕 新增 `save_settings_json` 命令（见 3.5.12）：原生「另存为」对话框 + 写盘
 
 **文件**：`src-tauri/src/lib.rs`
 
 - 注册了 `get_public_config` 命令
+- 🆕 注册了 `save_settings_json` 命令
 
 **文件**：`src-tauri/migrations/0005_default_skip_auth.sql`
 
@@ -654,6 +664,7 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 
 - `login` 命令处理 `UserRole::Guest` 匹配
 - `get_current_user` 命令在无 token 且 skipAuth 启用时返回 guest 用户
+- 🆕 `is_skip_auth_enabled()` 由私有 `async fn` 改为 `pub(crate)`，供 `commands::config::require_admin` 复用（见 3.5.12）
 
 **文件**：`src-tauri/src/auth/mod.rs`
 
@@ -950,6 +961,86 @@ let child = c.spawn()?;
 捆绑的 Python 版本已更新为 `3.14`（最新稳定版），Node.js 更新为 `24.18.0`，uv 更新为 `0.11.24`。
 详见 `scripts/download-runtimes.sh` 和 `scripts/download-runtimes.ps1` 中的默认版本配置。
 
+#### 3.5.12 免登录模式下的设置页可用性（导出配置 + 修改密码）
+
+> ⚠️ **基线同步注意**：本节涉及的全部文件都带桌面端自定义，同步 origin 时**禁止批量覆盖**，必须手动合并保留以下差异。origin（Node.js）用 `requireAdmin` 中间件 + guest admin 用户实现免登录授权，路径不同；桌面端在 Rust 命令层放行，不可直接套用 origin 实现。
+
+**背景**：免登录（skipAuth）模式下，「导出配置」的「复制到剪切板 / 下载 JSON」按钮始终禁用、「下载 JSON」点击无效。根因有两处：
+
+1. **导出数据拿不到**：桌面端 `export_settings` 调 `require_admin(&session)` 要求 `role=="admin"` 的 token，但免登录时 `AuthContext.loadUser` 只设假用户、**从不调用 `get_current_user`**，Rust 侧 `SessionState` 一直为 `None` → 报 "Not authenticated"；即便走 guest 分支，guest token 的 `role` 是 `"guest"`，仍会被 `require_admin` 拒绝。
+2. **下载无效果**：Tauri webview（WKWebView/WebView2）**不支持程序化的 blob-URL 下载**，浏览器里 `link.click()` 能触发下载是因为浏览器内核支持，Tauri webview 拦不到「保存文件」动作，导致 `handleDownloadConfig` 静默失败、只剩 toast 提示。
+
+##### 改动一：`require_admin` 在 skipAuth 下放行
+
+**文件**：`src-tauri/src/commands/config.rs`
+
+`require_admin` 起始处新增短路：skipAuth 为真即直接 `Ok(())`，与前端把免登录用户视为 admin 一致。受影响命令：`export_settings`、`get_server_config_for_copy` 等。
+
+```rust
+async fn require_admin(session: &SessionState) -> Result<(), String> {
+    if crate::commands::auth::is_skip_auth_enabled().await {
+        return Ok(());
+    }
+    // ... 原 token 校验逻辑
+}
+```
+
+> 注：`commands::bearer_keys::require_admin` 是**独立副本**（另定义于 `bearer_keys.rs`），同样会因免登录而失效。本次仅按报告的导出按钮定点修复 `config.rs`；若需要免登录下也能管理 Bearer Keys，需用同样方式放开 `bearer_keys.rs` 的 `require_admin`。
+
+##### 改动二：`is_skip_auth_enabled` 提为 `pub(crate)`
+
+**文件**：`src-tauri/src/commands/auth.rs`
+
+原私有 `async fn is_skip_auth_enabled()` 改为 `pub(crate) async fn`，供 `commands::config::require_admin` 复用，避免逻辑重复。
+
+##### 改动三：新增 `save_settings_json` 命令（原生保存对话框）
+
+**文件**：`src-tauri/src/commands/config.rs`、`src-tauri/src/lib.rs`
+
+新增 `save_settings_json(app, content, file_name)` Tauri 命令：用 `tauri-plugin-dialog`（`DialogExt`）弹原生「另存为」对话框（JSON 过滤器 + 默认文件名 `mcp_settings.json`），取到路径后 `std::fs::write` 写盘。用户取消对话框时返回 `Err("cancelled")`，前端据此静默不报错。依赖的 `tauri-plugin-dialog` / `tauri-plugin-fs` 已在 `lib.rs` `tauri::Builder` 注册、`capabilities/default.json` 已授权（`dialog:*`、`fs:allow-write-text-file` 等）；前端无 `@tauri-apps/plugin-dialog` JS 绑定，故走自定义命令而非插件 JS API。
+
+```rust
+#[tauri::command]
+pub async fn save_settings_json(
+    app: AppHandle,
+    content: String,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    let default_name = file_name.unwrap_or_else(|| "mcp_settings.json".to_string());
+    let file_path = app.dialog().file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(default_name)
+        .blocking_save_file();
+    let Some(file_path) = file_path else {
+        return Err("cancelled".to_string());
+    };
+    let path = file_path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+```
+
+并在 `generate_handler!` 中注册 `commands::config::save_settings_json`。
+
+##### 改动四：`AuthState` 类型新增 `skipAuth` 字段
+
+**文件**：`frontend/src/types/index.ts`
+
+`AuthState` 接口新增可选 `skipAuth?: boolean`。`AuthContext` 在免登录分支已设置该字段，但类型未声明，补齐以便组件判断。
+
+##### 改动五：SettingsPage 三处前端改动
+
+**文件**：`frontend/src/pages/SettingsPage.tsx`
+
+1. **「修改密码」隐藏**：用 `{!auth.skipAuth && (...)}` 包裹「Change Password」卡片，免登录模式下不显示。
+2. **导出 JSON 格式化修复**：`fetchMcpSettings` 中 `result.data` 已是字符串（Rust `export_settings` 返回 pretty-printed 字符串）时直接使用，**不再二次 `JSON.stringify`**（否则会把内部的 `"` 转义成 `\"`、换行变 `\n`，`<pre>` 里显示成带反斜杠的扁平字符串）：
+   ```ts
+   const configJson =
+     typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
+   ```
+   > 注：按服务器导出（带 `serverName`）走 `get_server_config_for_copy`，Rust 返回 `serde_json::Value`（对象）而非字符串，`ServerCard.tsx` 原有的 `JSON.stringify(result.data, null, 2)` 正好需要保留 —— `typeof` 判断对对象分支行为不变。
+3. **「下载 JSON」走原生对话框**：`handleDownloadConfig` 改为 `async`，桌面端 `invoke('save_settings_json', { content, fileName })`，取消时 `String(e) === 'cancelled'` 静默；web 端保留原 Blob 下载兜底。新增 `import { invoke } from '@tauri-apps/api/core'`。
+
 ### 3.6 stdio 包下载进度 / 更新检测 / 非阻塞连接（桌面端独有）
 
 > ⚠️ **基线同步注意**：本节涉及的全部文件都带桌面端自定义，同步 origin 时**禁止批量覆盖**，必须手动合并保留以下差异。origin（Node.js）无对应实现。
@@ -1149,11 +1240,11 @@ PY
 | `frontend/src/contexts/UpdateCheckContext.tsx`   | 桌面端新增（见 3.4.7）：根级启动更新检查 + 全局 AboutDialog，自动弹框/红点，无「忽略」 |
 | `frontend/src/contexts/ServerInstallProgressContext.tsx` | 桌面端新增（见 3.6）：监听 install-progress / update-available 事件 |
 | `frontend/src/App.tsx`                           | 包入 ServerInstallProgressProvider（见 3.6）+ UpdateCheckProvider（见 3.4.7） |
-| `frontend/src/types/index.ts`                    | `Server.version` 字段（见 3.6）                           |
+| `frontend/src/types/index.ts`                    | `Server.version` 字段（见 3.6）；`AuthState.skipAuth` 字段（见 3.5.12） |
 | `frontend/src/services/configService.ts`         | getPublicConfig 使用 apiGet                               |
 | `frontend/src/services/changelogService.ts`      | Tauri 中 changelog API 禁用；新增 `buildChangelogFromTauriUpdate`、移除「忽略此版本」（见 3.4.7） |
 | `frontend/src/utils/version.ts`                 | 本地修改（见 3.4.7）：`checkForAppUpdate(source)` + `logUpdateEvent` 全流程写 `[update]` 日志 |
-| `frontend/src/pages/SettingsPage.tsx`            | 隐藏未实现模块、RuntimeVersionManager、HTTP 端口          |
+| `frontend/src/pages/SettingsPage.tsx`            | 隐藏未实现模块、RuntimeVersionManager、HTTP 端口；免登录隐藏「修改密码」、导出 JSON 格式化修复、「下载 JSON」走原生保存对话框（见 3.5.12） |
 | `frontend/src/pages/LoginPage.tsx`               | admin 默认填充、密码提示、Logo 图标                       |
 | `frontend/src/pages/Dashboard.tsx`               | 隐藏 SMART/Docs                                           |
 | `frontend/src/pages/ActivityPage.tsx`            | 隐藏用户列、createdAt UTC 转换、字段名统一为 createdAt     |
