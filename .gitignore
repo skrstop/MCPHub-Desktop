@@ -10,3 +10,4 @@ build/
 .idea
 src-tauri/.codegraph
 .codemoss
+**/.playwright-mcp
