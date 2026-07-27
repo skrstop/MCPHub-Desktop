@@ -140,6 +140,12 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
 
   const totalVisibleTools = groupServers.reduce((acc, s) => acc + tally(s).visibleTools, 0);
 
+  // Builtin prompt/resource selection counts for the footer summary.
+  const builtinPromptCount =
+    group.builtinPrompts === 'all' ? 0 : Array.isArray(group.builtinPrompts) ? group.builtinPrompts.length : 0;
+  const builtinResourceCount =
+    group.builtinResources === 'all' ? 0 : Array.isArray(group.builtinResources) ? group.builtinResources.length : 0;
+
   return (
     <div className="hub-card flex h-full flex-col overflow-visible">
       {/* Header */}
@@ -246,10 +252,10 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
       {/* Routing diagram */}
       <div
         className="grid flex-1 items-center gap-3 px-4 py-3"
-        style={{ gridTemplateColumns: '1fr 80px 1fr', minHeight: 180 }}
+        style={{ gridTemplateColumns: '1.8fr 48px 1fr', minHeight: 180 }}
       >
         {/* Servers */}
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5 max-h-[160px] overflow-y-auto pr-1">
           {groupServers.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>{t('groups.noServers')}</div>
           ) : (
@@ -294,7 +300,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
         </div>
 
         {/* Flow */}
-        <svg width="80" height="80" viewBox="0 0 80 80" className="self-center">
+        <svg width="48" height="80" viewBox="0 0 80 80" className="self-center">
           {groupServers.length === 0 ? (
             <path
               d="M0,40 C30,40 50,40 80,40"
@@ -366,6 +372,20 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
             {t('nav.servers').toLowerCase()} ·{' '}
             <span style={{ color: 'var(--hub-ink-2)' }}>{totalVisibleTools}</span>{' '}
             {t('server.tools').toLowerCase()}
+            {builtinPromptCount > 0 && (
+              <>
+                {' '}·{' '}
+                <span style={{ color: 'var(--hub-ink-2)' }}>{builtinPromptCount}</span>{' '}
+                {t('nav.prompts').toLowerCase()}
+              </>
+            )}
+            {builtinResourceCount > 0 && (
+              <>
+                {' '}·{' '}
+                <span style={{ color: 'var(--hub-ink-2)' }}>{builtinResourceCount}</span>{' '}
+                {t('nav.resources').toLowerCase()}
+              </>
+            )}
           </div>
           {cost && (
             <div className="hub-mono mt-1" style={{ fontSize: 11.5, color: 'var(--hub-ink-3)' }}>

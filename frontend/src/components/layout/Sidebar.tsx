@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useServerContext } from '@/contexts/ServerContext';
+import { useBuiltinData } from '@/contexts/BuiltinDataContext';
 import { useGroupData } from '@/hooks/useGroupData';
 import { canViewSystemLogs } from '@/utils/navigationPermissions';
 import { usePermissionCheck } from '../PermissionChecker';
@@ -38,6 +39,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const { auth } = useAuth();
   const { allServers } = useServerContext();
   const { groups } = useGroupData();
+  const { prompts, resources } = useBuiltinData();
   const [activityAvailable, setActivityAvailable] = useState(false);
 
   const appVersion = import.meta.env.PACKAGE_VERSION as string;
@@ -64,8 +66,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       icon: <RouteIcon className="h-4 w-4" />,
       badge: groups.length || undefined,
     },
-    { path: '/prompts', label: t('nav.prompts'), icon: <MessageSquare className="h-4 w-4" /> },
-    { path: '/resources', label: t('nav.resources'), icon: <FileText className="h-4 w-4" /> },
+    { path: '/prompts', label: t('nav.prompts'), icon: <MessageSquare className="h-4 w-4" />, badge: prompts.length || undefined },
+    { path: '/resources', label: t('nav.resources'), icon: <FileText className="h-4 w-4" />, badge: resources.length || undefined },
     { path: '/market', label: t('nav.market'), icon: <Store className="h-4 w-4" /> },
   ];
 

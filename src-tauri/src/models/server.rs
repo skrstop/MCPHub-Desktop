@@ -159,6 +159,15 @@ pub struct Tool {
     /// Whether this tool is enabled (default: true). Set from server_tool_config.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// MCP 2025-03-26 tool annotations (readOnlyHint / destructiveHint /
+    /// idempotentHint / openWorldHint). Passed through from the upstream
+    /// server unchanged; None when the upstream omits them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
+    /// MCP 2025-03-26 output schema. Passed through unchanged; meaningful only
+    /// when the tool also returns `structuredContent` on call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Result of a tool invocation
@@ -167,6 +176,10 @@ pub struct Tool {
 pub struct ToolCallResult {
     pub content: Vec<serde_json::Value>,
     pub is_error: bool,
+    /// MCP 2025-03-26 structured content. Passed through unchanged; present
+    /// only when the tool declared an outputSchema and returned structured data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<serde_json::Value>,
 }
 
 /// Combined server info returned to the dashboard

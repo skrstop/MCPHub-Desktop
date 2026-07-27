@@ -24,6 +24,8 @@ const AddGroupForm = ({ onAdd, onCancel }: AddGroupFormProps) => {
     name: '',
     description: '',
     servers: [] as IGroupServerConfig[],
+    builtinPrompts: [],
+    builtinResources: [],
   });
 
   useEffect(() => {
@@ -51,7 +53,13 @@ const AddGroupForm = ({ onAdd, onCancel }: AddGroupFormProps) => {
         return;
       }
 
-      const result = await createGroup(formData.name, formData.description, formData.servers);
+      const result = await createGroup(
+        formData.name,
+        formData.description,
+        formData.servers,
+        formData.builtinPrompts,
+        formData.builtinResources,
+      );
       if (!result || !result.success) {
         setError(result?.message || t('groups.createError'));
         setIsSubmitting(false);
@@ -107,6 +115,10 @@ const AddGroupForm = ({ onAdd, onCancel }: AddGroupFormProps) => {
                   onChange={(servers) => setFormData((prev) => ({ ...prev, servers }))}
                   className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-gray-50 dark:bg-gray-800"
                   serverCosts={serverCosts}
+                  builtinPrompts={formData.builtinPrompts}
+                  builtinResources={formData.builtinResources}
+                  onBuiltinPromptsChange={(v) => setFormData((prev) => ({ ...prev, builtinPrompts: v }))}
+                  onBuiltinResourcesChange={(v) => setFormData((prev) => ({ ...prev, builtinResources: v }))}
                 />
               </div>
             </div>

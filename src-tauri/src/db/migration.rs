@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 10;
+pub const TARGET_VERSION: i64 = 12;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -114,6 +114,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         8 => migrate_v8(pool).await,
         9 => migrate_v9(pool).await,
         10 => migrate_v10(pool).await,
+        11 => migrate_v11(pool).await,
+        12 => migrate_v12(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -488,5 +490,44 @@ async fn migrate_v10(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await
         .ok(); // ignore if column already exists
+    Ok(())
+}
+
+/// v10 → v11: Drop dead `server_name` NOT NULL column from builtin_prompts / builtin_resources.
+///
+/// v1 created both with `server_name TEXT NOT NULL` for a speculative per-server
+/// design that was never wired up — the app treats prompts/resources as global
+/// (matches the origin entity, which has no server_name). The INSERTs in
+/// prompt_service / resource_service never bind server_name, so every create
+/// failed with `NOT NULL constraint failed: builtin_prompts.server_name`.
+/// Drop the column; ensure title/template (prompts) and content (resources)
+/// exist for DBs that pre-date their ADD COLUMN.
+async fn migrate_v11(pool: &SqlitePool) -> Result<()> {
+    for table in &["builtin_prompts", "builtin_resources"] {
+        let sql = format!("ALTER TABLE {} DROP COLUMN server_name", table);
+        sqlx::query(&sql).execute(pool).await.ok(); // ignore if column already absent
+    }
+    sqlx::query("ALTER TABLE builtin_prompts ADD COLUMN title TEXT")
+        .execute(pool).await.ok();
+    sqlx::query("ALTER TABLE builtin_prompts ADD COLUMN template TEXT NOT NULL DEFAULT ''")
+        .execute(pool).await.ok();
+    sqlx::query("ALTER TABLE builtin_resources ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+        .execute(pool).await.ok();
+    Ok(())
+}
+
+/// v11 → v12: Add per-group builtin prompt/resource selection columns.
+///
+/// Built-in prompts/resources are global (no server_name). Until now they were
+/// exposed in full to every group's `/mcp/{group}` route. v12 lets a group
+/// record which builtin prompts/resources it exposes: NULL = expose all
+/// (back-compat), `[]` = none, `["x","y"]` = only those. Stored as JSON text
+/// arrays (prompt names / resource URIs). Columns are nullable with no default
+/// so existing rows stay NULL = all.
+async fn migrate_v12(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("ALTER TABLE groups ADD COLUMN builtin_prompts TEXT")
+        .execute(pool).await.ok(); // ignore if column already exists
+    sqlx::query("ALTER TABLE groups ADD COLUMN builtin_resources TEXT")
+        .execute(pool).await.ok();
     Ok(())
 }

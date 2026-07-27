@@ -13,13 +13,17 @@
 use crate::{
     mcp::{pool, session_pool},
     models::{bearer_key::BearerKey, server::Tool},
-    services::{app_logger, bearer_key_service, config_service, group_service, log_service, server_tool_config_service},
+    services::{
+        app_logger, bearer_key_service, config_service, group_service, log_service,
+        mcp_tasks, mcp_version::{self, MethodCtx, MethodOutcome, TransportMode, VersionStrategy},
+        prompt_service, resource_service, server_tool_config_service,
+    },
 };
 use axum::response::IntoResponse;
 use axum::{
-    body::Body,
-    extract::Path,
-    http::{header, HeaderMap, StatusCode},
+    body::{to_bytes, Body},
+    extract::{Path, Query},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         Json, Response,
@@ -32,16 +36,78 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{Arc, OnceLock},
 };
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{net::TcpListener, sync::{mpsc, Mutex, RwLock}};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 
 fn new_session_id() -> String {
     let id: u128 = rand::thread_rng().gen();
     format!("{:032x}", id)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-session state
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Two session-keyed stores (both follow the OnceLock<Arc<RwLock<HashMap>>>
+// pattern from mcp/session_pool.rs):
+//
+//  • SESSION_STRATEGY — the protocol-version strategy negotiated at
+//    `initialize`, looked up by `mcp-session-id` on later requests so each
+//    request is shaped by the revision the client speaks.
+//
+//  • SSE_CHANNELS — for legacy 2024-11-05 SSE-only clients, the sender half of
+//    the channel the GET /mcp SSE stream drains. A POST /mcp/message pushes
+//    the JSON-RPC response down this channel as an SSE `message` event
+//    (instead of returning it as the POST body). Streamable-HTTP (2025+)
+//    sessions never register a channel here.
+
+type StrategyMap = HashMap<String, &'static dyn VersionStrategy>;
+
+static SESSION_STRATEGY: OnceLock<Arc<RwLock<StrategyMap>>> = OnceLock::new();
+
+fn session_strategies() -> &'static Arc<RwLock<StrategyMap>> {
+    SESSION_STRATEGY.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+}
+
+async fn strategy_for_session(sid: &str) -> Option<&'static dyn VersionStrategy> {
+    session_strategies().read().await.get(sid).copied()
+}
+
+async fn remember_strategy(sid: String, strategy: &'static dyn VersionStrategy) {
+    session_strategies().write().await.insert(sid, strategy);
+}
+
+async fn forget_strategy(sid: &str) {
+    session_strategies().write().await.remove(sid);
+}
+
+type ChannelMap = HashMap<String, mpsc::UnboundedSender<String>>;
+
+static SSE_CHANNELS: OnceLock<Arc<RwLock<ChannelMap>>> = OnceLock::new();
+
+fn sse_channels() -> &'static Arc<RwLock<ChannelMap>> {
+    SSE_CHANNELS.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+}
+
+async fn register_sse_channel(sid: String, tx: mpsc::UnboundedSender<String>) {
+    sse_channels().write().await.insert(sid, tx);
+}
+
+async fn sse_channel_for(sid: &str) -> Option<mpsc::UnboundedSender<String>> {
+    sse_channels().read().await.get(sid).cloned()
+}
+
+/// Best-effort channel teardown. Called when a push fails (client gone) and on
+/// session DELETE. ponytail: leaked entries are bounded by session count; a
+/// periodic sweeper could be added if the map grows.
+async fn drop_sse_channel(sid: &str) {
+    sse_channels().write().await.remove(sid);
+    forget_strategy(sid).await;
 }
 
 fn build_resource_metadata_url(headers: &HeaderMap) -> Option<String> {
@@ -545,6 +611,32 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
     vec![]
 }
 
+/// Resolve a (non-global) scope to its group's builtin prompt/resource selection.
+/// Returns None for global / single-server / unknown scopes (→ expose all builtins).
+/// For a group scope: an unconfigured group exposes NONE by default (the group
+/// must explicitly opt in to builtins), so None selection becomes an empty list,
+/// not "all". This is the divergence from the per-server "all" default.
+async fn scope_builtin_selection(scope_clean: &str) -> Option<(Option<Vec<String>>, Option<Vec<String>>)> {
+    if scope_clean.is_empty() || scope_clean == "$smart" {
+        return None;
+    }
+    let name = scope_clean.strip_prefix("$smart/").unwrap_or(scope_clean);
+    match group_service::find_by_name_or_id(name).await {
+        // Group exists: unconfigured (None) → expose nothing (empty list).
+        Ok(Some(g)) => Some((g.builtin_prompts.or(Some(vec![])), g.builtin_resources.or(Some(vec![])))),
+        // Not a group (single-server/unknown scope) → expose all builtins.
+        _ => None,
+    }
+}
+
+/// None = allow all (global/unknown scope); Some(allowed) = allow only if key is in the list.
+fn builtin_allowed(selection: &Option<Vec<String>>, key: &str) -> bool {
+    match selection {
+        None => true,
+        Some(allowed) => allowed.iter().any(|s| s == key),
+    }
+}
+
 /// Core MCP JSON-RPC dispatcher.
 async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_ip: Option<String>) -> Response {
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("unknown");
@@ -612,6 +704,33 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
     let id = body.get("id").cloned();
     let params = body.get("params").cloned().unwrap_or(Value::Null);
 
+    // Resolve this session's negotiated protocol strategy (recorded at
+    // initialize). For initialize itself there is no session header yet, so
+    // this defaults to 2025-03-26 and is re-negotiated inside the arm. No
+    // per-version if/else here — the strategy owns all version variance.
+    let strategy = match session_id.as_deref() {
+        Some(sid) => strategy_for_session(sid).await.unwrap_or_else(mcp_version::default_strategy),
+        None => mcp_version::default_strategy(),
+    };
+
+    // 2025-06+ spec: subsequent requests SHOULD carry `MCP-Protocol-Version`
+    // with the negotiated version. If the strategy requires it and the header
+    // is present but names a version we don't support, respond 400 (spec). A
+    // missing header is allowed for backward compat (spec says assume
+    // 2025-03-26) so existing clients like Cherry Studio, which don't send
+    // it, keep working.
+    if strategy.requires_version_header() && method != "initialize" {
+        if let Some(req_pv) = headers
+            .get("mcp-protocol-version")
+            .and_then(|v| v.to_str().ok())
+        {
+            if !req_pv.is_empty() && !mcp_version::is_supported(req_pv) {
+                let msg = format!("Unsupported MCP-Protocol-Version: {}", req_pv);
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+            }
+        }
+    }
+
     // Notifications have no "id" — respond with 202 Accepted, no body.
     if id.is_none() && (method.starts_with("notifications/") || method == "ping") {
         return axum::http::Response::builder()
@@ -622,18 +741,61 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
 
     match method {
         "initialize" => {
-            let session_id = new_session_id();
+            // Protocol negotiation (spec): pick the strategy for the client's
+            // requested version (falls back to 2025-03-26 when unknown), record
+            // it for the session, and respond with that version + its
+            // capabilities.
+            let client_pv = params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("");
+            let strategy = mcp_version::strategy_for(client_pv);
+            // Reuse an existing session id (a legacy SSE GET established one,
+            // surfaced here via the mcp-session-id header) or mint a fresh one
+            // for Streamable HTTP.
+            let sid = session_id.clone().unwrap_or_else(new_session_id);
+            remember_strategy(sid.clone(), strategy).await;
+
+            // Record the client connection in the log panel (app_log): the
+            // downstream client's identity, requested vs negotiated protocol,
+            // and transport — the first thing to look at when something breaks.
+            let client_name = params
+                .get("clientInfo").and_then(|c| c.get("name"))
+                .and_then(|n| n.as_str()).unwrap_or("unknown");
+            let client_ver = params
+                .get("clientInfo").and_then(|c| c.get("version"))
+                .and_then(|v| v.as_str()).unwrap_or("unknown");
+            // Transport reflects how the client connects at the MCP protocol
+            // layer — not which radio button the user picked in their client
+            // UI (Cherry Studio's "SSE" and "Streamable HTTP" send identical
+            // POST requests with `Accept: application/json, text/event-stream`,
+            // so the server cannot distinguish them and does not try).
+            //   • POST /mcp (any Accept)  → streamable-http (2025 Streamable HTTP)
+            //   • GET /mcp with stream accept and no session → legacy-sse
+            //     (genuinely 2024-11-05 SSE-only client; see mcp_root_get)
+            let transport = match strategy.transport() {
+                TransportMode::LegacySse => "legacy-sse",
+                TransportMode::StreamableHttp => "streamable-http",
+            };
+            let accept_hdr = headers
+                .get("accept").and_then(|v| v.to_str().ok()).unwrap_or("(none)");
+            let conn_msg = format!(
+                "[MCP] Client connected: session={} ip={} client={}/{} proto={}→{} transport={} accept={}",
+                sid, client_ip, client_name, client_ver,
+                if client_pv.is_empty() { "(none)" } else { client_pv },
+                strategy.version(), transport, accept_hdr
+            );
+            log::info!("{}", conn_msg);
+            app_logger::log_to_db("info", &conn_msg);
+
             let mut resp = jsonrpc_response(
                 id,
                 json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "MCPHub Desktop", "version": "0.12.12"}
+                    "protocolVersion": strategy.version(),
+                    "capabilities": strategy.capabilities(),
+                    "serverInfo": {"name": "MCPHub Desktop", "version": env!("CARGO_PKG_VERSION")}
                 }),
             );
             resp.headers_mut().insert(
                 "mcp-session-id",
-                session_id.parse().expect("valid header value"),
+                sid.parse().expect("valid header value"),
             );
             resp
         }
@@ -668,11 +830,21 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                         } else {
                             t.name.clone()
                         };
-                        tools.push(json!({
+                        let mut entry = json!({
                             "name": exposed_name,
                             "description": t.description.as_deref().unwrap_or(""),
                             "inputSchema": t.input_schema,
-                        }));
+                        });
+                        // 2025 passthrough: forward upstream annotations /
+                        // outputSchema only when present. The strategy then
+                        // shapes the entry (e.g. 2024 strips these).
+                        if let Some(a) = &t.annotations {
+                            entry["annotations"] = a.clone();
+                        }
+                        if let Some(s) = &t.output_schema {
+                            entry["outputSchema"] = s.clone();
+                        }
+                        tools.push(strategy.shape_tool(entry));
                     }
                 }
             }
@@ -754,6 +926,31 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                     // (no session, or shared server) use the shared pool as before.
                     let is_isolated = session_id.as_ref().is_some()
                         && pool::is_per_session_client(&sn).await;
+
+                    // 2025-11-25 task augmentation: when the client sends a
+                    // `task` field in params, wrap the call as an async task
+                    // and return a CreateTaskResult immediately (status:
+                    // working). The client polls via tasks/get|result. The
+                    // negotiated strategy must have advertised the tasks
+                    // capability (V2025_11_25 does); other versions ignore it.
+                    if params.get("task").is_some() && strategy.requires_version_header() {
+                        let ttl = params.get("task")
+                            .and_then(|t| t.get("ttl"))
+                            .and_then(|v| v.as_u64());
+                        let task = mcp_tasks::create_tool_task(
+                            sn.clone(), orig_name.clone(), args.clone(),
+                            session_id.clone(), is_isolated, client_ip.clone(),
+                            strategy, ttl,
+                        ).await;
+                        log::info!("[HTTP] Task-augmented tools/call: tool '{}' on '{}' → taskId {}",
+                            orig_name, sn, task["taskId"]);
+                        app_logger::log_to_db("info", &format!(
+                            "[HTTP] Task created: tool '{}' on server '{}' task={}",
+                            orig_name, sn, task["taskId"]
+                        ));
+                        return jsonrpc_response(id, json!({"task": task}));
+                    }
+
                     let call_result = if is_isolated {
                         let sid = session_id.as_ref().unwrap();
                         log::info!(
@@ -790,7 +987,14 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                                 Some(&client_ip),
                             ).await;
 
-                            jsonrpc_response(id, json!({"content": r.content, "isError": r.is_error}))
+                            // 2025 passthrough: forward upstream
+                            // structuredContent only when present; the
+                            // strategy then shapes the result (e.g. 2024 strips it).
+                            let mut call_resp = json!({"content": r.content, "isError": r.is_error});
+                            if let Some(sc) = &r.structured_content {
+                                call_resp["structuredContent"] = sc.clone();
+                            }
+                            jsonrpc_response(id, strategy.shape_tool_call_result(call_resp))
                         }
                         Err(e) => {
                             let duration_ms = start.elapsed().as_millis() as i64;
@@ -815,7 +1019,131 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                 }
             }
         }
-        _ => jsonrpc_error(id, -32601, "Method not found"),
+        "prompts/list" => {
+            // ponytail: loads all prompts then filters; fine for desktop-scale counts.
+            // Add find_by_name/find_by_uri on the service if the set grows large.
+            let prompts = prompt_service::list_all().await.unwrap_or_default();
+            // Group scope: filter builtins to the group's selection (None = all).
+            let prompt_sel = scope_builtin_selection(scope_clean).await.and_then(|(p, _)| p);
+            let list: Vec<Value> = prompts.into_iter().filter(|p| {
+                p.enabled && builtin_allowed(&prompt_sel, &p.name)
+            }).map(|p| {
+                let args: Vec<Value> = p.arguments.into_iter().map(|a| json!({
+                    "name": a.name,
+                    "description": a.description.unwrap_or_default(),
+                    "required": a.required,
+                })).collect();
+                json!({
+                    "name": p.name,
+                    "title": p.title,
+                    "description": p.description.unwrap_or_default(),
+                    "arguments": args,
+                })
+            }).collect();
+            jsonrpc_response(id, json!({"prompts": list}))
+        }
+        "prompts/get" => {
+            let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let prompt_sel = scope_builtin_selection(scope_clean).await.and_then(|(p, _)| p);
+            let prompt = match prompt_service::list_all().await {
+                Ok(ps) => ps.into_iter().find(|p| p.enabled && p.name == name
+                    && builtin_allowed(&prompt_sel, &p.name)),
+                Err(_) => None,
+            };
+            match prompt {
+                Some(p) => {
+                    let text = prompt_service::render_template(&p.template, &args);
+                    jsonrpc_response(id, json!({
+                        "title": p.title,
+                        "description": p.description.unwrap_or_default(),
+                        "messages": [{
+                            "role": "user",
+                            "content": {"type": "text", "text": text}
+                        }]
+                    }))
+                }
+                None => jsonrpc_error(id, -32602, format!("Prompt '{}' not found", name)),
+            }
+        }
+        "resources/list" => {
+            let resources = resource_service::list_all().await.unwrap_or_default();
+            let resource_sel = scope_builtin_selection(scope_clean).await.and_then(|(_, r)| r);
+            let list: Vec<Value> = resources.into_iter().filter(|r| {
+                r.enabled && builtin_allowed(&resource_sel, &r.uri)
+            }).map(|r| json!({
+                "uri": r.uri,
+                "name": r.name.unwrap_or_default(),
+                "description": r.description.unwrap_or_default(),
+                "mimeType": r.mime_type,
+            })).collect();
+            jsonrpc_response(id, json!({"resources": list}))
+        }
+        "resources/read" => {
+            let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+            let resource_sel = scope_builtin_selection(scope_clean).await.and_then(|(_, r)| r);
+            let resource = match resource_service::list_all().await {
+                Ok(rs) => rs.into_iter().find(|r| r.enabled && r.uri == uri
+                    && builtin_allowed(&resource_sel, &r.uri)),
+                Err(_) => None,
+            };
+            match resource {
+                Some(r) => jsonrpc_response(id, json!({
+                    "contents": [{
+                        "uri": r.uri,
+                        "mimeType": r.mime_type,
+                        "text": r.content,
+                    }]
+                })),
+                None => jsonrpc_error(id, -32602, format!("Resource '{}' not found", uri)),
+            }
+        }
+        "tasks/get" => {
+            // 2025-11-25: return the current Task snapshot (client polls).
+            let task_id = params.get("taskId").and_then(|t| t.as_str()).unwrap_or("");
+            match mcp_tasks::get(task_id).await {
+                Some(t) => jsonrpc_response(id, json!({"task": t})),
+                None => jsonrpc_error(id, -32602, format!("Task '{}' not found", task_id)),
+            }
+        }
+        "tasks/result" => {
+            // 2025-11-25: the stored CallToolResult (with _meta.related-task)
+            // when terminal, else the task snapshot for continued polling.
+            let task_id = params.get("taskId").and_then(|t| t.as_str()).unwrap_or("");
+            match mcp_tasks::result(task_id).await {
+                Ok(r) => jsonrpc_response(id, r),
+                Err((code, msg)) => jsonrpc_error(id, code, msg),
+            }
+        }
+        "tasks/list" => {
+            // 2025-11-25: list all tasks (no pagination; desktop-scale).
+            let list = mcp_tasks::list_all().await;
+            jsonrpc_response(id, list)
+        }
+        "tasks/cancel" => {
+            // 2025-11-25: mark the task cancelled (terminal).
+            let task_id = params.get("taskId").and_then(|t| t.as_str()).unwrap_or("");
+            match mcp_tasks::cancel(task_id).await {
+                Ok(t) => jsonrpc_response(id, json!({"task": t})),
+                Err((code, msg)) => jsonrpc_error(id, code, msg),
+            }
+        }
+        _ => {
+            // Hand version-specific methods (e.g. 2025-11 tasks/*) to the
+            // strategy; fall through to -32601 when it does not claim it.
+            let ctx = MethodCtx {
+                scope: scope.clone(),
+                session_id: session_id.clone(),
+                params: params.clone(),
+                name_sep: name_sep.clone(),
+                client_ip: client_ip.clone(),
+            };
+            match strategy.handle_extra_method(method, &ctx) {
+                Some(MethodOutcome::Result(v)) => jsonrpc_response(id, v),
+                Some(MethodOutcome::Error(code, msg)) => jsonrpc_error(id, code, msg),
+                None => jsonrpc_error(id, -32601, "Method not found"),
+            }
+        }
     }
 }
 
@@ -824,6 +1152,7 @@ async fn mcp_root_post(headers: HeaderMap, Json(body): Json<Value>) -> Response 
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.split(':').next())
         .map(|s| s.to_string());
+    log_mcp_request("POST", "/mcp", &headers);
     dispatch_mcp(headers, String::new(), body, socket_ip).await
 }
 
@@ -836,10 +1165,80 @@ async fn mcp_scope_post(
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.split(':').next())
         .map(|s| s.to_string());
+    log_mcp_request("POST", &format!("/mcp/{}", path), &headers);
     dispatch_mcp(headers, path, body, socket_ip).await
 }
 
+/// Query params for the legacy 2024-11-05 SSE message endpoint.
+/// The session id is in the `endpoint` event URI the server sent on the GET
+/// SSE stream (2024 transport has no mcp-session-id header).
+#[derive(Deserialize)]
+struct MessageQuery {
+    #[serde(rename = "sessionId", default)]
+    session_id: Option<String>,
+}
+
+/// Debug helper: log every inbound MCP HTTP request (method, path, accept,
+/// session) to the log panel so a client's real transport can be identified
+/// without guessing from the initialize message alone.
+fn log_mcp_request(method: &str, path: &str, headers: &HeaderMap) {
+    let accept = headers
+        .get("accept").and_then(|v| v.to_str().ok()).unwrap_or("(none)");
+    let sid = headers
+        .get("mcp-session-id").and_then(|v| v.to_str().ok()).unwrap_or("(none)");
+    let msg = format!(
+        "[MCP] Request: {} {} accept={} session={}", method, path, accept, sid
+    );
+    log::info!("{}", msg);
+    app_logger::log_to_db("debug", &msg);
+}
+
+/// Legacy 2024-11-05 SSE transport: POST endpoint the client sends requests
+/// to. The JSON-RPC response does NOT come back on this POST — it is pushed
+/// down the session's SSE stream as a `message` event. The POST itself
+/// returns 202 Accepted.
+async fn mcp_message_post(
+    headers: HeaderMap,
+    Query(q): Query<MessageQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    let socket_ip = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.split(':').next())
+        .map(|s| s.to_string());
+    // Surface the query session id as the mcp-session-id header so
+    // dispatch_mcp resolves this legacy session's negotiated strategy
+    // (V2024) and per-session routing works.
+    let mut headers = headers;
+    if let Some(ref sid) = q.session_id {
+        if let Ok(v) = HeaderValue::from_str(sid) {
+            headers.insert("mcp-session-id", v);
+        }
+    }
+    let resp = dispatch_mcp(headers, String::new(), body, socket_ip).await;
+    // Collect the JSON-RPC body dispatch produced and push it onto the SSE
+    // channel; empty body (notifications → 202) is skipped.
+    let bytes = match to_bytes(resp.into_body(), 16 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::ACCEPTED, Body::empty()).into_response(),
+    };
+    if let Some(ref sid) = q.session_id {
+        if !bytes.is_empty() {
+            let msg = String::from_utf8_lossy(&bytes).to_string();
+            if let Some(tx) = sse_channel_for(sid).await {
+                if tx.send(msg).is_err() {
+                    // SSE stream already gone — drop this session's channel.
+                    drop_sse_channel(sid).await;
+                }
+            }
+        }
+    }
+    (StatusCode::ACCEPTED, Body::empty()).into_response()
+}
+
 async fn mcp_root_get(headers: HeaderMap) -> Response {
+    log_mcp_request("GET", "/mcp", &headers);
     if let Err(r) = check_bearer_auth(&headers).await {
         return r;
     }
@@ -851,20 +1250,62 @@ async fn mcp_root_get(headers: HeaderMap) -> Response {
     if !accept.contains("text/event-stream") {
         return Json(json!({
             "service": "MCPHub Desktop",
-            "version": "0.12.12",
+            "version": env!("CARGO_PKG_VERSION"),
             "transport": "MCP Streamable HTTP",
             "usage": {
-                "initialize": "POST /mcp  body: {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"1.0\"}}}",
+                "initialize": "POST /mcp  body: {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"client\",\"version\":\"1.0\"}}}",
                 "tools_list": "POST /mcp  body: {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
                 "sse_stream": "GET /mcp  Accept: text/event-stream"
             }
         })).into_response();
     }
-    // SSE stream for server-initiated messages (MCP Streamable HTTP spec)
-    let stream = tokio_stream::wrappers::IntervalStream::new(
-        tokio::time::interval(std::time::Duration::from_secs(25)),
-    )
-    .map(|_| Ok::<Event, std::convert::Infallible>(Event::default().comment("keep-alive")));
+
+    // An existing session (mcp-session-id header) doing a GET means a 2025
+    // Streamable HTTP client opening the server-push stream — keep-alive only.
+    if extract_session_id(&headers).is_some() {
+        let stream = tokio_stream::wrappers::IntervalStream::new(
+            tokio::time::interval(std::time::Duration::from_secs(25)),
+        )
+        .map(|_| Ok::<Event, std::convert::Infallible>(Event::default().comment("keep-alive")));
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
+
+    // No session header + SSE accept → legacy 2024-11-05 HTTP+SSE transport.
+    // Establish a session bound to the V2024 strategy + an SSE channel, send
+    // the `endpoint` event telling the client where to POST, then stream
+    // `message` events carrying the JSON-RPC responses that /mcp/message
+    // pushes for this session.
+    let sid = new_session_id();
+    let strategy = mcp_version::strategy_for("2024-11-05");
+    remember_strategy(sid.clone(), strategy).await;
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    register_sse_channel(sid.clone(), tx).await;
+
+    // Record the legacy SSE connection in the log panel. Only a genuine
+    // 2024-11-05 SSE-only client reaches here (no session header, stream
+    // accept on GET). Note: clients that ALSO POST initialize (like Cherry
+    // Studio) will produce a second "Client connected" line via the POST path
+    // — that's expected; this line reflects the legacy GET stream itself.
+    let conn_msg = format!(
+        "[MCP] Client connected: session={} ip={} client=(legacy-sse-stream) proto=2024-11-05→{} transport=legacy-sse",
+        sid,
+        headers.get("x-forwarded-for").or_else(|| headers.get("x-real-ip"))
+            .and_then(|v| v.to_str().ok()).and_then(|s| Some(s.split(',').next().unwrap_or(s).trim().to_string()))
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        strategy.version()
+    );
+    log::info!("{}", conn_msg);
+    app_logger::log_to_db("info", &conn_msg);
+
+    let endpoint_uri = format!("/mcp/message?sessionId={}", sid);
+    let endpoint_ev: Result<Event, std::convert::Infallible> =
+        Ok(Event::default().event("endpoint").data(endpoint_uri));
+    let message_stream = UnboundedReceiverStream::new(rx).map(|s| {
+        Ok::<Event, std::convert::Infallible>(Event::default().event("message").data(s))
+    });
+    let stream = futures_util::stream::iter([endpoint_ev]).chain(message_stream);
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
@@ -883,6 +1324,8 @@ async fn mcp_root_delete(headers: HeaderMap) -> StatusCode {
         );
         // Tear down any per-session isolated upstream clients for this session.
         session_pool::cleanup_session(&sid).await;
+        // Drop this session's SSE channel (legacy transport) + negotiated strategy.
+        drop_sse_channel(&sid).await;
     } else {
         log::debug!("[HTTP] DELETE /mcp — no mcp-session-id header, nothing to clean");
     }
@@ -900,6 +1343,7 @@ async fn mcp_scope_delete(headers: HeaderMap, Path(path): Path<String>) -> Statu
             ),
         );
         session_pool::cleanup_session(&sid).await;
+        drop_sse_channel(&sid).await;
     } else {
         log::debug!("[HTTP] DELETE /mcp/{} — no mcp-session-id header, nothing to clean", path);
     }
@@ -943,6 +1387,9 @@ fn build_router(body_limit_bytes: usize) -> Router {
         .route("/rest/group/:group/call", post(call_group_tool))
         // MCP Streamable HTTP protocol (JSON-RPC 2.0)
         .route("/mcp", get(mcp_root_get).post(mcp_root_post).delete(mcp_root_delete))
+        // Legacy 2024-11-05 SSE transport: POST target named in the `endpoint`
+        // event. Static route wins over the /mcp/*path wildcard below.
+        .route("/mcp/message", post(mcp_message_post))
         .route("/mcp/*path", get(mcp_scope_get).post(mcp_scope_post).delete(mcp_scope_delete))
         .layer(axum::extract::DefaultBodyLimit::max(body_limit_bytes))
         .layer(CorsLayer::permissive())
@@ -969,6 +1416,9 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     }
 
     let app = build_router(body_limit_bytes);
+
+    // Start the tasks TTL sweeper (drops expired 2025-11-25 tasks).
+    mcp_tasks::spawn_ttl_sweeper();
 
     // Check TRUST_PROXY environment variable
     let trust_proxy = std::env::var("TRUST_PROXY").unwrap_or_default().to_lowercase();

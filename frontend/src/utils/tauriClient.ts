@@ -174,7 +174,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (p === 'groups' && m === 'GET') return { command: 'list_groups', args: {} };
   if (p === 'groups' && m === 'POST') {
     // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
-    const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
+    const b = body as { name?: string; description?: string; servers?: Array<unknown>; builtinPrompts?: string[] | 'all'; builtinResources?: string[] | 'all' } | null;
     return {
       command: 'add_group',
       args: {
@@ -182,6 +182,9 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
           name: b?.name ?? '',
           description: b?.description,
           servers: b?.servers ?? [],
+          // Default [] = expose no builtins until the user explicitly selects.
+          builtinPrompts: b?.builtinPrompts ?? [],
+          builtinResources: b?.builtinResources ?? [],
         },
       },
     };
@@ -193,7 +196,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   }
   if (segs[0] === 'groups' && segs.length === 2 && m === 'PUT') {
     // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
-    const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
+    const b = body as { name?: string; description?: string; servers?: Array<unknown>; builtinPrompts?: string[] | 'all'; builtinResources?: string[] | 'all' } | null;
     return {
       command: 'update_group',
       args: {
@@ -202,6 +205,8 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
           name: b?.name ?? '',
           description: b?.description,
           servers: b?.servers ?? [],
+          builtinPrompts: b?.builtinPrompts ?? [],
+          builtinResources: b?.builtinResources ?? [],
         },
       },
     };

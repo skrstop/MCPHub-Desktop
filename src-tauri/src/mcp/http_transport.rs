@@ -66,7 +66,11 @@ impl HttpTransport {
 
         let sid = self.session_id.lock().await.clone();
         let mut req = self.client.post(&self.url)
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            // 2025-03-26 Streamable HTTP: client must accept both
+            // application/json and text/event-stream. Some servers (e.g. the
+            // IntelliJ IDEA MCP server) return 406 otherwise.
+            .header("Accept", "application/json, text/event-stream");
         if !sid.is_empty() {
             req = req.header("mcp-session-id", &sid);
         }
@@ -99,7 +103,8 @@ impl HttpTransport {
 
             let sid = self.session_id.lock().await.clone();
             let mut req = self.client.post(&self.url)
-                .header("Content-Type", "application/json");
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream");
             if !sid.is_empty() {
                 req = req.header("mcp-session-id", &sid);
             }
@@ -128,6 +133,38 @@ impl HttpTransport {
         }
         Ok(json["result"].clone())
     }
+
+    /// Send a JSON-RPC notification (no `id`, server responds 202 with no body).
+    /// Used for `notifications/initialized` after the initialize handshake —
+    /// required by the 2025-03-26 spec and strictly enforced by some servers
+    /// (e.g. IntelliJ IDEA MCP server rejects calls with 404 until it arrives).
+    async fn post_notification(&self, method: &str, params: Value) -> Result<()> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let sid = self.session_id.lock().await.clone();
+        let mut req = self.client.post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        if !sid.is_empty() {
+            req = req.header("mcp-session-id", &sid);
+        }
+        req = req.json(&body);
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        let resp = req.send().await?;
+        // Notifications get 202 Accepted; treat 2xx as success, ignore the body.
+        if !resp.status().is_success() {
+            log::warn!(
+                "[{}] notification '{}' got HTTP {}",
+                self.server_name, method, resp.status()
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -140,12 +177,16 @@ impl McpTransport for HttpTransport {
         self.post(
             "initialize",
             json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-03-26",
                 "capabilities": {},
-                "clientInfo": { "name": "mcphub-desktop", "version": "0.1.0" }
+                "clientInfo": { "name": "mcphub-desktop", "version": env!("CARGO_PKG_VERSION") }
             }),
         )
         .await?;
+        // 2025-03-26 spec: client must send `notifications/initialized`
+        // after initialize. The IntelliJ IDEA MCP server rejects subsequent
+        // calls with 404 until it receives this notification.
+        self.post_notification("notifications/initialized", json!({})).await?;
         self.connected = true;
 
         let ok_msg = format!("[{}] HTTP transport connected", self.server_name);
@@ -179,6 +220,8 @@ impl McpTransport for HttpTransport {
                 input_schema: t["inputSchema"].clone(),
                 server_name: self.server_name.clone(),
                 enabled: true,
+                annotations: t.get("annotations").cloned().filter(|v| !v.is_null()),
+                output_schema: t.get("outputSchema").cloned().filter(|v| !v.is_null()),
             })
             .collect();
         Ok(tools)
@@ -190,6 +233,7 @@ impl McpTransport for HttpTransport {
             .await?;
         let content = result["content"].as_array().cloned().unwrap_or_default();
         let is_error = result["isError"].as_bool().unwrap_or(false);
-        Ok(ToolCallResult { content, is_error })
+        let structured_content = result.get("structuredContent").cloned().filter(|v| !v.is_null());
+        Ok(ToolCallResult { content, is_error, structured_content })
     }
 }

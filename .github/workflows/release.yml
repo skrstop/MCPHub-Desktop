@@ -989,8 +989,15 @@ jobs:
           with open(out_path, 'w', encoding='utf-8') as f:
               json.dump(data, f, indent=2, ensure_ascii=False)
 
+          # 同时把 notes 单独写入文件，供 Create GitHub Release 步骤作为 body 使用
+          # 保证 Release 描述与 latest.json 中的 notes 文案完全一致
+          notes_path = 'release-meta/release-notes.md'
+          with open(notes_path, 'w', encoding='utf-8') as f:
+              f.write(notes)
+
           print(f'\n📄 Generated latest.json ({len(json.dumps(data, ensure_ascii=False))} bytes):')
           print(json.dumps(data, indent=2, ensure_ascii=False))
+          print(f'\n📝 Wrote release notes to {notes_path} ({len(notes)} chars)')
           PYEOF
 
       # 验证生成结果
@@ -1028,6 +1035,7 @@ jobs:
           echo "========================================="
 
       # 创建 draft Release，上传全部产物 + latest.json
+      # Release body 使用与 latest.json 中 notes 一致的文案（来自 doc/upgrade/{version}.md）
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -1035,7 +1043,7 @@ jobs:
           name: MCPHub Desktop ${{ steps.version.outputs.tag }}
           draft: true
           prerelease: false
-          generate_release_notes: true
+          body_path: release-meta/release-notes.md
           files: |
             all-artifacts/**/*
             release-meta/latest.json

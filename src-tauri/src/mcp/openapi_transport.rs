@@ -310,6 +310,10 @@ impl McpTransport for OpenapiTransport {
                     input_schema,
                     server_name: self.server_name.clone(),
                     enabled: true,
+                    // OpenAPI tools are synthesized, not from a real tools/list,
+                    // so they carry no MCP annotations / outputSchema.
+                    annotations: None,
+                    output_schema: None,
                 }
             })
             .collect();
@@ -370,7 +374,7 @@ impl McpTransport for OpenapiTransport {
             log::info!("{}", ok_msg);
         }
 
-        Ok(ToolCallResult { content, is_error })
+        Ok(ToolCallResult { content, is_error, structured_content: None })
     }
 }
 

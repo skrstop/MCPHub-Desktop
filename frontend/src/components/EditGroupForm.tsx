@@ -25,7 +25,10 @@ const EditGroupForm = ({ group, onEdit, onCancel }: EditGroupFormProps) => {
     name: group.name,
     description: group.description || '',
     servers: group.servers || [],
+    builtinPrompts: group.builtinPrompts ?? [],
+    builtinResources: group.builtinResources ?? [],
   });
+  console.log('[EditGroupForm] mount group.builtinPrompts=', group.builtinPrompts, 'builtinResources=', group.builtinResources);
 
   useEffect(() => {
     // Filter available servers (enabled only)
@@ -56,6 +59,8 @@ const EditGroupForm = ({ group, onEdit, onCancel }: EditGroupFormProps) => {
         name: formData.name,
         description: formData.description,
         servers: formData.servers,
+        builtinPrompts: formData.builtinPrompts,
+        builtinResources: formData.builtinResources,
       });
 
       if (!result || !result.success) {
@@ -113,6 +118,10 @@ const EditGroupForm = ({ group, onEdit, onCancel }: EditGroupFormProps) => {
                   onChange={(servers) => setFormData((prev) => ({ ...prev, servers }))}
                   className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-gray-50 dark:bg-gray-800"
                   serverCosts={serverCosts}
+                  builtinPrompts={(() => { console.log('[EditGroupForm] passing builtinPrompts=', formData.builtinPrompts); return formData.builtinPrompts; })()}
+                  builtinResources={formData.builtinResources}
+                  onBuiltinPromptsChange={(v) => { console.log('[EditGroupForm] onBuiltinPromptsChange=', v); setFormData((prev) => ({ ...prev, builtinPrompts: v })); }}
+                  onBuiltinResourcesChange={(v) => setFormData((prev) => ({ ...prev, builtinResources: v }))}
                 />
               </div>
             </div>

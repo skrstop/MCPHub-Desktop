@@ -12,4 +12,6 @@ pub mod prompt_service;
 pub mod resource_service;
 pub mod market_service;
 pub mod server_tool_config_service;
+pub mod mcp_version;
+pub mod mcp_tasks;
 pub mod http_server;

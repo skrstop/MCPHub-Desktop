@@ -334,6 +334,10 @@ export interface Group {
   name: string;
   description?: string;
   servers: string[] | IGroupServerConfig[]; // Supports both old and new format
+  // Group-level builtin prompt selection (prompt names). Empty/undefined = expose NONE;
+  // a group must explicitly opt in. 'all' (legacy) is treated as "expose all".
+  builtinPrompts?: string[] | 'all';
+  builtinResources?: string[] | 'all';
 }
 
 // Environment variable types
@@ -411,6 +415,8 @@ export interface GroupFormData {
   name: string;
   description: string;
   servers: string[] | IGroupServerConfig[]; // Updated to support new format
+  builtinPrompts?: string[] | 'all';
+  builtinResources?: string[] | 'all';
 }
 
 // API response types

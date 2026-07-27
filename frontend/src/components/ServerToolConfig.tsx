@@ -4,6 +4,7 @@ import { IGroupServerConfig, Prompt, Resource, Server, ServerCost, Tool } from '
 import { Wrench, MessageSquare, FileText } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { useSettingsData } from '@/hooks/useSettingsData';
+import { useBuiltinData } from '@/contexts/BuiltinDataContext';
 import { formatTokens } from '@/utils/contextCost';
 import { getToolDescriptionInfo } from '@/utils/toolDescription';
 
@@ -27,6 +28,12 @@ interface ServerToolConfigProps {
   onChange: (value: IGroupServerConfig[]) => void;
   className?: string;
   serverCosts?: ServerCost[];
+  /** Group-level builtin prompt selection (prompt names). 'all' = expose all. */
+  builtinPrompts?: string[] | 'all';
+  /** Group-level builtin resource selection (resource URIs). 'all' = expose all. */
+  builtinResources?: string[] | 'all';
+  onBuiltinPromptsChange?: (value: string[] | 'all') => void;
+  onBuiltinResourcesChange?: (value: string[] | 'all') => void;
 }
 
 interface CapabilityItem {
@@ -37,16 +44,193 @@ interface CapabilityItem {
   hasDescriptionOverride?: boolean;
 }
 
+interface BuiltinItem {
+  key: string;
+  value: string;
+  description?: string;
+  title?: string;
+  name?: string;
+}
+
+const isBuiltinItemSelected = (
+  selection: string[] | 'all',
+  itemValue: string,
+): boolean => (selection === 'all' ? true : selection.includes(itemValue));
+
+const toggleBuiltinItem = (
+  selection: string[] | 'all',
+  allValues: string[],
+  itemValue: string,
+): string[] => {
+  // Normalize 'all' (legacy/full) to the concrete array so we always emit an
+  // explicit list — the backend treats 'all' as "expose none", so we never
+  // send the 'all' sentinel when toggling.
+  const current = selection === 'all' ? allValues : selection;
+  if (current.includes(itemValue)) {
+    return current.filter((v) => v !== itemValue);
+  }
+  return [...current, itemValue];
+};
+
+interface PaginatedItemsProps<T> {
+  items: T[];
+  pageSize?: number;
+  listClassName?: string;
+  children: (item: T, index: number) => React.ReactNode;
+}
+
+/** Paginated list of capability/builtin items with prev/next controls.
+ *  Keeps the expanded card compact instead of scrolling a tall list. */
+function PaginatedItems<T>({ items, pageSize = 5, listClassName = 'grid grid-cols-1 gap-2', children }: PaginatedItemsProps<T>) {
+  const { t } = useTranslation();
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  // Clamp page when items shrink (filter/selection changes).
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * pageSize;
+  const visible = items.slice(start, start + pageSize);
+
+  React.useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [totalPages, page]);
+
+  return (
+    <div>
+      <div className={listClassName}>
+        {visible.map((item, i) => (
+          <React.Fragment key={(item as { key?: string })?.key ?? i}>
+            {children(item, i)}
+          </React.Fragment>
+        ))}
+      </div>
+      {items.length > pageSize && (
+        <div className="flex items-center justify-center gap-3 mt-2 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+          <button
+            type="button"
+            onClick={() => setPage(Math.max(1, safePage - 1))}
+            disabled={safePage <= 1}
+            className="hub-icon-btn sm"
+            style={{ opacity: safePage <= 1 ? 0.4 : 1 }}
+          >
+            ‹
+          </button>
+          <span className="hub-mono">{safePage}/{totalPages}</span>
+          <button
+            type="button"
+            onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+            disabled={safePage >= totalPages}
+            className="hub-icon-btn sm"
+            style={{ opacity: safePage >= totalPages ? 0.4 : 1 }}
+          >
+            ›
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface BuiltinSelectionCardProps {
+  title: string;
+  allLabel: string;
+  selectedLabel: string;
+  items: BuiltinItem[];
+  selection: string[] | 'all';
+  onChange: (value: string[] | 'all') => void;
+}
+
+const BuiltinSelectionCard: React.FC<BuiltinSelectionCardProps> = ({
+  title,
+  allLabel,
+  selectedLabel,
+  items,
+  selection,
+  onChange,
+}) => {
+  const { t } = useTranslation();
+  const allValues = items.map((i) => i.value);
+  const allSelected = selection === 'all' || selection.length === allValues.length;
+  const selectedCount = selection === 'all' ? items.length : selection.length;
+
+  return (
+    <div className="border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-sm font-medium text-gray-700">{title}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-green-600">
+            {allSelected
+              ? `(${allLabel} ${items.length}/${items.length})`
+              : `(${selectedLabel} ${selectedCount}/${items.length})`}
+          </span>
+          <button
+            type="button"
+            onClick={() => onChange(allSelected ? [] : allValues)}
+            className="text-sm text-blue-600 hover:text-blue-800 transition-colors"
+          >
+            {allSelected ? t('groups.selectNone') : t('groups.selectAll')}
+          </button>
+        </div>
+      </div>
+      <PaginatedItems items={items} pageSize={5}>
+        {(item) => {
+          const isChecked = isBuiltinItemSelected(selection, item.value);
+          const label = item.title || item.name || item.value;
+          return (
+            <label key={item.key} className="flex min-w-0 items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={isChecked}
+                onChange={() => {
+                  const next = toggleBuiltinItem(selection, allValues, item.value);
+                  onChange(next);
+                }}
+                className="hub-checkbox sm"
+              />
+              <span className="text-gray-700 break-all whitespace-nowrap flex-shrink-0">{label}</span>
+              {label !== item.value && (
+                <span className="hub-mono truncate text-gray-400 text-xs">{item.value}</span>
+              )}
+              {item.description && (
+                <span className="min-w-0 truncate text-gray-400 text-xs" title={item.description}>
+                  {item.description}
+                </span>
+              )}
+            </label>
+          );
+        }}
+      </PaginatedItems>
+    </div>
+  );
+};
+
 export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
   servers,
   value,
   onChange,
   className,
   serverCosts = [],
+  builtinPrompts = [],
+  builtinResources = [],
+  onBuiltinPromptsChange,
+  onBuiltinResourcesChange,
 }) => {
   const { t } = useTranslation();
   const { nameSeparator } = useSettingsData();
+  const { prompts: builtinPromptsData, resources: builtinResourcesData } = useBuiltinData();
+  const [activeTab, setActiveTab] = useState<CapabilityKey>('tools');
   const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
+
+  const toggleServerExpanded = (serverName: string) => {
+    setExpandedServers((prev) => {
+      const next = new Set(prev);
+      if (next.has(serverName)) {
+        next.delete(serverName);
+      } else {
+        next.add(serverName);
+      }
+      return next;
+    });
+  };
 
   // Normalize current value to IGroupServerConfig[] format
   const normalizedValue: IGroupServerConfig[] = React.useMemo(() => {
@@ -69,24 +253,6 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     [servers],
   );
 
-  // Clean up expanded servers when servers are removed from configuration
-  // But keep servers that were explicitly expanded even if they have no configuration
-  React.useEffect(() => {
-    const configuredServerNames = new Set(normalizedValue.map((config) => config.name));
-    const availableServerNames = new Set(availableServers.map((server) => server.name));
-
-    setExpandedServers((prev) => {
-      const newSet = new Set<string>();
-      prev.forEach((serverName) => {
-        // Keep expanded if server is configured OR if server exists and user manually expanded it
-        if (configuredServerNames.has(serverName) || availableServerNames.has(serverName)) {
-          newSet.add(serverName);
-        }
-      });
-      return newSet;
-    });
-  }, [normalizedValue, availableServers]);
-
   const toggleServer = (serverName: string) => {
     const existingIndex = normalizedValue.findIndex((config) => config.name === serverName);
 
@@ -101,18 +267,6 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     }
   };
 
-  const toggleServerExpanded = (serverName: string) => {
-    setExpandedServers((prev) => {
-      const newSet = new Set(prev);
-      if (newSet.has(serverName)) {
-        newSet.delete(serverName);
-      } else {
-        newSet.add(serverName);
-      }
-      return newSet;
-    });
-  };
-
   const hasAnyCapabilitySelection = (config: IGroupServerConfig) => {
     return (['tools', 'prompts', 'resources'] as CapabilityKey[]).some((capability) => {
       const selection = config[capability];
@@ -124,7 +278,6 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     serverName: string,
     capability: CapabilityKey,
     selection: string[] | 'all',
-    keepExpanded = false,
   ) => {
     const existingServer = normalizedValue.find((config) => config.name === serverName);
     const baseConfig: IGroupServerConfig = existingServer
@@ -138,13 +291,6 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     if (!hasAnyCapabilitySelection(nextConfig)) {
       const newValue = normalizedValue.filter((config) => config.name !== serverName);
       onChange(newValue);
-      if (!keepExpanded) {
-        setExpandedServers((prev) => {
-          const newSet = new Set(prev);
-          newSet.delete(serverName);
-          return newSet;
-        });
-      }
       return;
     }
 
@@ -327,26 +473,58 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     titleKey: string;
     countKey: string;
     allKey: string;
+    tabKey: string;
+    icon: React.ReactNode;
   }> = [
     {
       key: 'tools',
       titleKey: 'groups.toolSelection',
       countKey: 'groups.toolsSelected',
       allKey: 'groups.allTools',
+      tabKey: 'groups.tabTools',
+      icon: <Wrench size={13} />,
     },
     {
       key: 'prompts',
       titleKey: 'groups.promptSelection',
       countKey: 'groups.promptsSelected',
       allKey: 'groups.allPrompts',
+      tabKey: 'groups.tabPrompts',
+      icon: <MessageSquare size={13} />,
     },
     {
       key: 'resources',
       titleKey: 'groups.resourceSelection',
       countKey: 'groups.resourcesSelected',
       allKey: 'groups.allResources',
+      tabKey: 'groups.tabResources',
+      icon: <FileText size={13} />,
     },
   ];
+
+  // Servers that expose the active capability tab; the tab filters which
+  // servers are shown, and each shown server's active-capability items render
+  // inline (no manual expand needed) so switching tabs updates content.
+  const tabServers = React.useMemo(
+    () => availableServers.filter((s) => getCapabilityItems(s, activeTab).length > 0),
+    [availableServers, activeTab],
+  );
+
+  // Enabled builtin entries available for group-level selection.
+  const builtinPromptItems = React.useMemo(
+    () =>
+      builtinPromptsData
+        .filter((p) => p.enabled !== false)
+        .map((p) => ({ key: p.name, value: p.name, description: p.description, title: p.title })),
+    [builtinPromptsData],
+  );
+  const builtinResourceItems = React.useMemo(
+    () =>
+      builtinResourcesData
+        .filter((r) => r.enabled !== false)
+        .map((r) => ({ key: r.uri, value: r.uri, description: r.description, name: r.name })),
+    [builtinResourcesData],
+  );
 
   const getServerSummaryBadges = (server: Server) => {
     return capabilityConfigs
@@ -355,18 +533,85 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
   };
 
   return (
-    <div className={cn('space-y-4', className)}>
-      <div className="space-y-3">
-        {availableServers.map((server) => {
+    <div className={cn('flex flex-col', className)}>
+      {/* Capability tab bar: part of the same card as the content below */}
+      <div
+        className="flex items-center gap-1 flex-wrap -mx-4 -mt-4 mb-4 px-4 pb-3"
+        style={{ borderBottom: '1px solid var(--hub-line-2)' }}
+      >
+        {capabilityConfigs.map((cfg) => {
+          // Total selectable items under this tab = per-server capability items
+          // across all servers + builtin entries (prompts/resources tabs only).
+          const perServerTotal = availableServers.reduce(
+            (sum, s) => sum + getCapabilityItems(s, cfg.key).length,
+            0,
+          );
+          const builtinItemsCount =
+            cfg.key === 'prompts'
+              ? onBuiltinPromptsChange
+                ? builtinPromptItems.length
+                : 0
+              : cfg.key === 'resources'
+                ? onBuiltinResourcesChange
+                  ? builtinResourceItems.length
+                  : 0
+                : 0;
+          const total = perServerTotal + builtinItemsCount;
+
+          // Selected count = selected per-server items + selected builtins.
+          const perServerSelected = availableServers.reduce(
+            (sum, s) => sum + getSelectedCapabilityCount(s, cfg.key),
+            0,
+          );
+          const builtinSelectedCount =
+            cfg.key === 'prompts'
+              ? builtinPrompts === 'all'
+                ? builtinPromptItems.length
+                : Array.isArray(builtinPrompts)
+                  ? builtinPrompts.filter((v) => builtinPromptItems.some((i) => i.value === v)).length
+                  : 0
+              : cfg.key === 'resources'
+                ? builtinResources === 'all'
+                  ? builtinResourceItems.length
+                  : Array.isArray(builtinResources)
+                    ? builtinResources.filter((v) => builtinResourceItems.some((i) => i.value === v)).length
+                    : 0
+                : 0;
+          const selected = perServerSelected + builtinSelectedCount;
+
+          const isActive = activeTab === cfg.key;
+          return (
+            <button
+              key={cfg.key}
+              type="button"
+              onClick={() => setActiveTab(cfg.key)}
+              className="inline-flex items-center gap-1.5 px-3 text-[12px]"
+              style={{
+                height: 24,
+                borderRadius: 5,
+                background: isActive ? 'var(--hub-bg-2)' : 'transparent',
+                color: isActive ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
+                border: '1px solid ' + (isActive ? 'var(--hub-line)' : 'transparent'),
+              }}
+            >
+              {cfg.icon}
+              {t(cfg.tabKey)}
+              <span className="hub-mono" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}>
+                {selected}/{total}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <PaginatedItems items={tabServers} pageSize={5} listClassName="space-y-3">
+        {(server) => {
           const isSelected = isServerSelected(server.name);
           const isPartiallySelected = isServerPartiallySelected(server.name);
-          const isExpanded = expandedServers.has(server.name);
           const serverConfig = normalizedValue.find((config) => config.name === server.name);
           const summaryBadges = getServerSummaryBadges(server);
-          const serverCapabilities = capabilityConfigs.filter(
-            ({ key }) => getCapabilityItems(server, key).length > 0,
-          );
           const costMap = costMapForServer(server.name);
+          const isExpanded = expandedServers.has(server.name);
 
           return (
             <div
@@ -374,7 +619,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
               className="border border-gray-200 dark:border-gray-700 rounded-lg hover:border-gray-300 hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 transition-colors"
             >
               <div
-                className="flex items-center justify-between p-3 cursor-pointer rounded-lg transition-colors"
+                className="flex items-center justify-between p-3 rounded-lg transition-colors cursor-pointer"
                 onClick={() => toggleServerExpanded(server.name)}
               >
                 <div
@@ -388,7 +633,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                     type="checkbox"
                     checked={isSelected || isPartiallySelected}
                     onChange={() => toggleServer(server.name)}
-                    className="w-4 h-4 text-blue-600 bg-gray-100 dark:bg-gray-800 border-gray-300 rounded focus:ring-blue-500"
+                    className="hub-checkbox"
                   />
                   <span className="font-medium text-gray-900 cursor-pointer select-none">
                     {server.name}
@@ -413,49 +658,52 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                       {count}
                     </span>
                   ))}
-
-                  {serverCapabilities.length > 0 && (
-                    <button
-                      type="button"
-                      className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
-                    >
-                      <svg
-                        className={cn('w-5 h-5 transition-transform', isExpanded && 'rotate-180')}
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M19 9l-7 7-7-7"
-                        />
-                      </svg>
-                    </button>
-                  )}
+                  <svg
+                    className={cn('w-5 h-5 text-gray-400 transition-transform', isExpanded && 'rotate-180')}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 9l-7 7-7-7"
+                    />
+                  </svg>
                 </div>
               </div>
 
-              {isExpanded && serverCapabilities.length > 0 && (
+              {isExpanded && (
                 <div className="border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-3">
                   <div className="space-y-4">
                     {serverConfig && (
-                      <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
-                        <label className="block text-xs font-medium text-gray-600">
-                          {t('groups.alias')}
-                        </label>
-                        <input
-                          type="text"
-                          value={serverConfig.alias || ''}
-                          placeholder={server.name}
-                          onChange={(event) => updateServerAlias(server.name, event.target.value)}
-                          className="w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm text-gray-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-                        />
-                      </div>
-                    )}
-                    {serverCapabilities.map(({ key, titleKey, countKey, allKey }) => {
+                    <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
+                      <label className="block text-xs font-medium text-gray-600">
+                        {t('groups.alias')}
+                      </label>
+                      <input
+                        type="text"
+                        value={serverConfig.alias || ''}
+                        placeholder={server.name}
+                        onChange={(event) => updateServerAlias(server.name, event.target.value)}
+                        className="w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm text-gray-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                      />
+                    </div>
+                  )}
+                  {(() => {
+                      const activeCap = capabilityConfigs.find((c) => c.key === activeTab);
+                      if (!activeCap) return null;
+                      const { key, titleKey, countKey, allKey } = activeCap;
                       const items = getCapabilityItems(server, key);
+
+                      // No items for this server under the active tab → show nothing
+                      // (the per-tab empty state below handles the "no prompts/resources
+                      // anywhere" case).
+                      if (items.length === 0) {
+                        return null;
+                      }
+
                       const selectedCount = getSelectedCapabilityCount(server, key);
                       const allSelected =
                         serverConfig?.[key] === 'all' || selectedCount === items.length;
@@ -487,7 +735,6 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                     server.name,
                                     key,
                                     allSelected ? [] : 'all',
-                                    true,
                                   );
                                 }}
                                 className="text-sm text-blue-600 hover:text-blue-800 transition-colors"
@@ -497,8 +744,8 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                             </div>
                           </div>
 
-                          <div className="grid grid-cols-1 gap-2 max-h-32 overflow-y-auto">
-                            {items.map((item) => {
+                          <PaginatedItems items={items} pageSize={5}>
+                            {(item) => {
                               const isChecked = isCapabilityItemSelected(
                                 server.name,
                                 key,
@@ -532,7 +779,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                     onChange={() =>
                                       toggleCapabilityItem(server.name, key, item.value)
                                     }
-                                    className="w-3 h-3 text-blue-600 bg-gray-100 dark:bg-gray-800 border-gray-300 rounded focus:ring-blue-500"
+                                    className="hub-checkbox sm"
                                   />
                                   <span className="text-gray-700 break-all whitespace-nowrap flex-shrink-0">
                                     {item.value}
@@ -568,22 +815,60 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                   )}
                                 </label>
                               );
-                            })}
-                          </div>
+                            }}
+                          </PaginatedItems>
                         </div>
                       );
-                    })}
+                    })()}
                   </div>
                 </div>
               )}
             </div>
           );
-        })}
-      </div>
+        }}
+      </PaginatedItems>
+
+      {/* Group-level builtin selection (prompts/resources tabs only) */}
+      {activeTab === 'prompts' && onBuiltinPromptsChange && builtinPromptItems.length > 0 && (
+        <BuiltinSelectionCard
+          title={t('groups.builtinPrompts')}
+          allLabel={t('groups.allBuiltinPrompts')}
+          selectedLabel={t('groups.builtinPromptsSelected')}
+          items={builtinPromptItems}
+          selection={builtinPrompts}
+          onChange={onBuiltinPromptsChange}
+        />
+      )}
+      {activeTab === 'resources' && onBuiltinResourcesChange && builtinResourceItems.length > 0 && (
+        <BuiltinSelectionCard
+          title={t('groups.builtinResources')}
+          allLabel={t('groups.allBuiltinResources')}
+          selectedLabel={t('groups.builtinResourcesSelected')}
+          items={builtinResourceItems}
+          selection={builtinResources}
+          onChange={onBuiltinResourcesChange}
+        />
+      )}
+      {(() => {
+        console.log('[ServerToolConfig] builtin props:', { builtinPrompts, builtinResources });
+        return null;
+      })()}
 
       {availableServers.length === 0 && (
         <p className="text-gray-500 text-sm">{t('groups.noServerOptions')}</p>
       )}
+      {availableServers.length > 0 &&
+        activeTab === 'prompts' &&
+        tabServers.length === 0 &&
+        builtinPromptItems.length === 0 && (
+          <p className="text-gray-500 text-sm">{t('groups.noPrompts')}</p>
+        )}
+      {availableServers.length > 0 &&
+        activeTab === 'resources' &&
+        tabServers.length === 0 &&
+        builtinResourceItems.length === 0 && (
+          <p className="text-gray-500 text-sm">{t('groups.noResources')}</p>
+        )}
     </div>
   );
 };

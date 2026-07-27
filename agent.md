@@ -1297,14 +1297,37 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `14a832b` (origin/main) |
-| **对应 origin tag**            | `v1.0.24`（无新 tag；`14a832b` 为 v1.0.24 之后的未发布提交） |
-| **桌面端版本号**               | `1.0.24002`             |
-| **同步执行日期**               | 2026-07-21              |
+| **当前已同步到 origin commit** | `cb44e22` (origin/main) |
+| **对应 origin tag**            | `v1.0.24`（无新 tag；`cb44e22` 为 v1.0.24 之后的未发布提交） |
+| **桌面端版本号**               | `1.0.24003`             |
+| **同步执行日期**               | 2026-07-24              |
 
-> 下次同步时，使用 `14a832b` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 14a832b..HEAD`）。
+> 下次同步时，使用 `cb44e22` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline cb44e22..HEAD`）。
 
 ### 4.4 最近同步记录
+
+#### 2026-07-24：同步 `14a832b` → `cb44e22`（2 个 commit）
+
+origin 仍为 `v1.0.24`（无新 tag；两 commit 均为 v1.0.24 之后的未发布提交）；桌面端版本号不变（`1.0.24003`，本次无任何 desktop 文件改动，不递增）。
+
+`cd mcphub-origin && git --no-pager log --oneline 14a832b..HEAD` 仅 2 个 commit，`git diff --stat 14a832b..HEAD -- frontend/ locales/` 为空（无前端/locales 改动）。
+
+**已同步到 desktop（前端 / locales）**
+
+无。本次两 commit 均不触及 `frontend/` 或 `locales/`。
+
+**已镜像到 desktop（Rust 后端）**
+
+无。
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `b561101` | chore(deps): bump axios from 1.16.1 to 1.18.0 (#992) | **不同步** | 仅改 `pnpm-lock.yaml`；axios 为 Node 后端 HTTP 客户端依赖，桌面端 Rust 用 reqwest，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
+| `cb44e22` | chore(deps): bump js-yaml from 4.2.0 to 4.3.0 (#993) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；js-yaml 为 Node 后端 YAML 解析依赖（服务器配置/OpenAPI），桌面端 Rust 用 serde_yaml，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
+
+**同步后验证**：本次无任何源码文件改动（仅更新本节文档与基线 SHA），`frontend && npm run build` / `src-tauri && cargo check` 状态与同步前一致，无需重跑。
 
 #### 2026-07-21：同步 `9dd75bc` → `14a832b`（2 个 commit）
 

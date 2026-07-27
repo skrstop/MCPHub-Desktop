@@ -1395,3 +1395,41 @@ button.text-white.is-loading::after {
 @keyframes button-spinner {
   to { transform: rotate(360deg); }
 }
+
+/* Custom checkbox — reliable across WKWebView (accent-color is unreliable there).
+   appearance:none removes the native control; :checked paints a blue box + white tick. */
+.hub-checkbox {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--hub-line);
+  border-radius: 4px;
+  background: var(--hub-surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0 7px 0 0;
+}
+.hub-checkbox:hover { border-color: #2563eb; }
+.hub-checkbox:checked {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+.hub-checkbox:checked::after {
+  content: '';
+  display: block;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translateY(-1px);
+}
+.hub-checkbox.sm { width: 12px; height: 12px; border-radius: 3px; }
+.hub-checkbox.sm:checked::after { width: 3px; height: 6px; border-width: 0 1.5px 1.5px 0; }
+.hub-checkbox:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--hub-surface), 0 0 0 3px #2563eb;
+}

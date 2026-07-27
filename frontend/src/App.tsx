@@ -6,6 +6,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { ServerProvider } from './contexts/ServerContext';
 import { ServerInstallProgressProvider } from './contexts/ServerInstallProgressContext';
 import { SettingsProvider } from './contexts/SettingsContext';
+import { BuiltinDataProvider } from './contexts/BuiltinDataContext';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
 import { UpdateCheckProvider } from './contexts/UpdateCheckContext';
@@ -76,6 +77,7 @@ function App() {
           <ServerInstallProgressProvider>
           <ToastProvider>
             <SettingsProvider>
+            <BuiltinDataProvider>
               <Router basename={basename}>
                 <EmbeddingSyncAlertListener />
                 <Routes>
@@ -113,6 +115,7 @@ function App() {
                   <Route path="*" element={<Navigate to="/" />} />
                 </Routes>
               </Router>
+            </BuiltinDataProvider>
             </SettingsProvider>
           </ToastProvider>
           </ServerInstallProgressProvider>

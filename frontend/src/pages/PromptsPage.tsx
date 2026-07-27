@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BuiltinPrompt, PromptArgument } from '@/types';
 import { useBuiltinPromptData } from '@/hooks/useBuiltinPromptData';
 import { useAuth } from '@/contexts/AuthContext';
-import { Edit, Trash, Plus, MessageSquare, X, ChevronDown } from 'lucide-react';
+import { Edit, Trash, Plus, MessageSquare, X, ChevronDown, Search } from 'lucide-react';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { StatusDot } from '@/components/ui/StatusDot';
+import Pagination from '@/components/ui/Pagination';
+import { selectItemPage, getItemFilterCounts, type ItemFilter } from '@/utils/listFilters';
 
 // Form dialog for creating/editing a built-in prompt
 interface PromptFormDialogProps {
@@ -259,7 +261,32 @@ const PromptsPage: React.FC = () => {
   const [promptToDelete, setPromptToDelete] = useState<BuiltinPrompt | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
+  const [filter, setFilter] = useState<ItemFilter>('all');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
   const isAdmin = auth.user?.isAdmin;
+
+  const counts = useMemo(() => getItemFilterCounts(prompts, (p) => p.enabled !== false), [prompts]);
+
+  // Filter against the full list and paginate the filtered result client-side,
+  // mirroring ServersPage so filters reach prompts on other pagination pages.
+  const { items: visiblePrompts, pagination } = useMemo(
+    () =>
+      selectItemPage(prompts, filter, search, page, pageSize, {
+        haystack: (p) => p.name + ' ' + (p.title || '') + ' ' + (p.description || ''),
+        isEnabled: (p) => p.enabled !== false,
+      }),
+    [prompts, filter, search, page, pageSize],
+  );
+
+  // Sync page when client-side pagination clamps it (filter/search narrows results).
+  useEffect(() => {
+    if (pagination.page !== page) {
+      setPage(pagination.page);
+    }
+  }, [pagination.page, page]);
 
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
@@ -330,6 +357,65 @@ const PromptsPage: React.FC = () => {
         </div>
       )}
 
+      {/* Toolbar */}
+      {!loading && prompts.length > 0 && (
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          <div
+            className="hub-card flex items-center"
+            style={{ padding: 2, borderRadius: 7, background: 'var(--hub-surface)' }}
+          >
+            {(
+              [
+                ['all', t('common.all'), counts.all],
+                ['active', t('common.started'), counts.active],
+                ['inactive', t('common.notStarted'), counts.inactive],
+              ] as [ItemFilter, string, number][]
+            ).map(([k, l, n]) => (
+              <button
+                key={k}
+                onClick={() => setFilter(k)}
+                className="inline-flex items-center gap-1.5 px-3 text-[12px]"
+                style={{
+                  height: 24,
+                  borderRadius: 5,
+                  background: filter === k ? 'var(--hub-bg-2)' : 'transparent',
+                  color: filter === k ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
+                  border: '1px solid ' + (filter === k ? 'var(--hub-line)' : 'transparent'),
+                }}
+              >
+                {l}
+                <span className="hub-mono" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}>
+                  {n}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div
+            className="hub-card flex items-center gap-2 px-2.5 flex-1"
+            style={{ height: 30, background: 'var(--hub-surface)', maxWidth: 360 }}
+          >
+            <Search size={13} style={{ color: 'var(--hub-ink-3)' }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="flex-1 bg-transparent outline-none text-[13px]"
+              style={{ color: 'var(--hub-ink)' }}
+              placeholder={t('common.searchPlaceholder') || 'Search…'}
+            />
+            {search && (
+              <button onClick={() => setSearch('')} className="hub-icon-btn sm">
+                <X size={11} />
+              </button>
+            )}
+          </div>
+
+          <div className="ml-auto hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+            {pagination.total}/{prompts.length}
+          </div>
+        </div>
+      )}
+
       {loading ? (
         <div className="hub-card p-10 text-center" style={{ color: 'var(--hub-ink-3)' }}>
           {t('app.loading')}
@@ -364,15 +450,21 @@ const PromptsPage: React.FC = () => {
           </div>
         </div>
       ) : (
-        <div className="hub-card overflow-hidden">
-          {prompts.map((prompt, idx) => {
-            const isExpanded = expandedIds.has(prompt.id);
-            const enabled = prompt.enabled !== false;
-            return (
-              <div
-                key={prompt.id}
-                style={{ borderTop: idx === 0 ? 0 : '1px solid var(--hub-line-2)' }}
-              >
+        <>
+          {visiblePrompts.length === 0 ? (
+            <div className="hub-card p-10 text-center" style={{ color: 'var(--hub-ink-3)' }}>
+              {t('market.noServers') || t('common.all')}
+            </div>
+          ) : (
+            <div className="hub-card overflow-hidden">
+              {visiblePrompts.map((prompt, idx) => {
+                const isExpanded = expandedIds.has(prompt.id);
+                const enabled = prompt.enabled !== false;
+                return (
+                  <div
+                    key={prompt.id}
+                    style={{ borderTop: idx === 0 ? 0 : '1px solid var(--hub-line-2)' }}
+                  >
                 <div
                   className="flex items-center justify-between cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)]"
                   style={{ padding: '12px 16px' }}
@@ -508,7 +600,49 @@ const PromptsPage: React.FC = () => {
               </div>
             );
           })}
-        </div>
+            </div>
+          )}
+
+          {/* Pagination footer */}
+          <div className="flex items-center mt-4 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+            <div className="flex-[2]">
+              {t('common.showing', {
+                start: (pagination.page - 1) * pagination.limit + 1,
+                end: Math.min(pagination.page * pagination.limit, pagination.total),
+                total: pagination.total,
+              })}
+            </div>
+            <div className="flex-[4] flex justify-center">
+              {pagination.totalPages > 1 && (
+                <Pagination
+                  currentPage={pagination.page}
+                  totalPages={pagination.totalPages}
+                  onPageChange={setPage}
+                  disabled={loading}
+                />
+              )}
+            </div>
+            <div className="flex-[2] flex items-center justify-end gap-2">
+              <label htmlFor="perPage">{t('common.itemsPerPage')}:</label>
+              <select
+                id="perPage"
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setPage(1);
+                }}
+                disabled={loading}
+                className="hub-input"
+                style={{ height: 26, width: 70, padding: '0 6px', fontSize: 12 }}
+              >
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+            </div>
+          </div>
+        </>
       )}
 
       {/* Add form dialog */}

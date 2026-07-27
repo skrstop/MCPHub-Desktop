@@ -490,9 +490,9 @@ impl McpTransport for StdioTransport {
             .request(
                 "initialize",
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-03-26",
                     "capabilities": {},
-                    "clientInfo": { "name": "mcphub-desktop", "version": "0.1.0" }
+                    "clientInfo": { "name": "mcphub-desktop", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )
             .await
@@ -583,6 +583,8 @@ impl McpTransport for StdioTransport {
                 input_schema: t["inputSchema"].clone(),
                 server_name: self.server_name.clone(),
                 enabled: true,
+                annotations: t.get("annotations").cloned().filter(|v| !v.is_null()),
+                output_schema: t.get("outputSchema").cloned().filter(|v| !v.is_null()),
             })
             .collect();
 
@@ -596,6 +598,7 @@ impl McpTransport for StdioTransport {
 
         let content = result["content"].as_array().cloned().unwrap_or_default();
         let is_error = result["isError"].as_bool().unwrap_or(false);
-        Ok(ToolCallResult { content, is_error })
+        let structured_content = result.get("structuredContent").cloned().filter(|v| !v.is_null());
+        Ok(ToolCallResult { content, is_error, structured_content })
     }
 }
