@@ -81,7 +81,7 @@ mcphub-desktop/
                        #            版权归原作者所有，仅供参考，禁止修改
 ```
 
-> ⚠️ **重要约束**：`mcphub-origin/` **不是本项目的代码**，而是第三方上游项目的只读快照，**禁止以本项目名义修改、提交或重新发布其内容**。所有改动请只在标注 **【本项目】** 的目录下进行，详情见 [`agent.md`](./agent.md)。
+> ⚠️ **重要约束**：`mcphub-origin/` **不是本项目的代码**，而是第三方上游项目的只读快照，**禁止以本项目名义修改、提交或重新发布其内容**。所有改动请只在标注 **【本项目】** 的目录下进行，详情见 [`AGENTS.md`](AGENTS.md)。
 
 ## 快速开始
 
@@ -143,7 +143,7 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 
 ## 文档
 
-- [`agent.md`](./agent.md)：迁移背景、目录约定、模块划分、待办事项等完整开发参考。
+- [`AGENTS.md`](AGENTS.md)：迁移背景、目录约定、模块划分、待办事项等完整开发参考。
 - [`mcphub-origin/README.md`](./mcphub-origin/README.md)：**第三方上游项目** 的 README（英文）。
 - [`mcphub-origin/README.zh.md`](./mcphub-origin/README.zh.md)：**第三方上游项目** 的 README（中文）。
 

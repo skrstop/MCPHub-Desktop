@@ -107,7 +107,7 @@
 ### 项目根目录
 
 - [README.md](../README.md) - 项目主文档
-- [agent.md](../agent.md) - 开发参考文档
+- [agent.md](../AGENTS.md) - 开发参考文档
 
 ### 源码目录
 

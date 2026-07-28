@@ -57,7 +57,7 @@ mcphub-desktop/
 ### 📖 参考文档
 
 - [README.md](../README.md) - 项目主文档
-- [agent.md](../agent.md) - 开发参考文档
+- [agent.md](../AGENTS.md) - 开发参考文档
 - [src-tauri/updater/README.md](../src-tauri/updater/README.md) - 自动更新配置指南
 
 ## 🎯 文档用途
@@ -120,7 +120,7 @@ mcphub-desktop/
 ### 项目根目录
 
 - [README.md](../README.md) - 项目主文档
-- [agent.md](../agent.md) - 开发参考文档
+- [agent.md](../AGENTS.md) - 开发参考文档
 
 ### 源码目录
 

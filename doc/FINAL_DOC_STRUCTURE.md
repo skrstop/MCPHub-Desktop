@@ -12,7 +12,7 @@
 
 **根目录文档（保留）**：
 - `README.md` - 项目主文档
-- `agent.md` - 开发参考文档
+- `../AGENTS.md` - 开发参考文档
 - `DOC_STRUCTURE.md` - 文档结构说明
 
 **doc 目录文档（移动）**：
@@ -95,7 +95,7 @@ mcphub-desktop/
 ### 📖 参考文档
 
 - [README.md](../README.md) - 项目主文档
-- [agent.md](../agent.md) - 开发参考文档
+- [agent.md](../AGENTS.md) - 开发参考文档
 - [src-tauri/updater/README.md](../src-tauri/updater/README.md) - 自动更新配置指南
 
 ## 🎯 文档用途
