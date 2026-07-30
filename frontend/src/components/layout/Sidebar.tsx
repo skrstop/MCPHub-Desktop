@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Activity,
   ScrollText,
+  Wrench,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useServerContext } from '@/contexts/ServerContext';
@@ -68,6 +69,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     },
     { path: '/prompts', label: t('nav.prompts'), icon: <MessageSquare className="h-4 w-4" />, badge: prompts.length || undefined },
     { path: '/resources', label: t('nav.resources'), icon: <FileText className="h-4 w-4" />, badge: resources.length || undefined },
+    { path: '/skills', label: t('nav.skills'), icon: <Wrench className="h-4 w-4" /> },
     { path: '/market', label: t('nav.market'), icon: <Store className="h-4 w-4" /> },
   ];
 

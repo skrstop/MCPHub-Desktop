@@ -500,6 +500,99 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: '__stub__', args: { __response: { success: true, data: { hasUpdate: false, entries: [] } } } };
   }
 
+  // ── Skills (技能) — Phase 1: mock data via __stub__.
+  //    Phase 2 will replace these with real Tauri commands
+  //    (list_skill_agents, scan_skills_for_import, list_skills, get_skill,
+  //     import_skills, export_skills_to_agents, delete_skill, save_skill_agents).
+  if (segs[0] === 'skills') {
+    // GET /skills/agents — list configured agents (Phase 2.2: real command)
+    if (segs[1] === 'agents' && m === 'GET')
+      return { command: 'list_skill_agents', args: {} };
+    // PUT /skills/agents — save agents (Phase 2.2: real command)
+    if (segs[1] === 'agents' && m === 'PUT')
+      return { command: 'save_skill_agents', args: { agents: body } };
+
+    // GET /skills/scan — scan all agents for importable skills (Phase 2.3: real command)
+    if (segs[1] === 'scan' && m === 'GET')
+      return { command: 'scan_skills_for_import', args: {} };
+
+    // GET /skills/:id — single skill with exports (Phase 2.3: real command)
+    if (m === 'GET' && segs.length === 2)
+      return { command: 'get_skill', args: { id: decodeURIComponent(segs[1]) } };
+
+    // GET /skills — list library skills (Phase 2.3: real command)
+    if (m === 'GET' && segs.length === 1)
+      return { command: 'list_skills', args: {} };
+
+    // POST /skills/import — import selected skills (Phase 2.3: real command)
+    if (segs[1] === 'import' && m === 'POST') {
+      const b = body as { items?: unknown[] } | null;
+      return { command: 'import_skills', args: { items: b?.items ?? [] } };
+    }
+
+    // POST /skills/scan-folder — scan a manually-selected folder for skills
+    // (2-layer SKILL.md detection). Returns skills with agent_id="__manual__".
+    if (segs[1] === 'scan-folder' && m === 'POST') {
+      const b = body as { path?: string } | null;
+      return { command: 'scan_folder_for_skills', args: { path: b?.path ?? '' } };
+    }
+
+    // POST /skills/export — export skills to agents (Phase 2.4: real command)
+    if (segs[1] === 'export' && m === 'POST') {
+      const b = body as { skillIds?: string[]; agentIds?: string[]; method?: string } | null;
+      return {
+        command: 'export_skills_to_agents',
+        args: {
+          skillIds: b?.skillIds ?? [],
+          agentIds: b?.agentIds ?? [],
+          method: b?.method ?? 'symlink',
+        },
+      };
+    }
+
+    // POST /skills/open-path — reveal an agent's skills path in the OS file
+    // manager (Phase 2.6: real command; expands ~).
+    if (segs[1] === 'open-path' && m === 'POST') {
+      const b = body as { path?: string } | null;
+      return { command: 'open_path_in_explorer', args: { path: b?.path ?? '' } };
+    }
+
+    // POST /skills/pick-directory — open the OS folder picker and return the
+    // chosen path (Phase 2.6: real command; returns null when cancelled).
+    if (segs[1] === 'pick-directory' && m === 'POST')
+      return { command: 'pick_directory', args: {} };
+
+    // POST /skills/open-library — open a skill's library folder in the OS
+    // file manager (the managed copy under $APPDATA/skills).
+    if (segs[1] === 'open-library' && m === 'POST') {
+      const b = body as { id?: string } | null;
+      return { command: 'open_skill_library_dir', args: { id: b?.id ?? '' } };
+    }
+
+    // POST /skills/delete — delete a skill from the library, optionally also
+    // removing exported copies/symlinks at the given agent paths. Symlink
+    // exports are always removed (mandatory); copy exports are optional
+    // (caller passes the chosen agentIds in cleanupAgentIds). (Phase 2.5: real)
+    if (segs[1] === 'delete' && m === 'POST') {
+      const b = body as { id?: string; cleanupAgentIds?: string[] } | null;
+      return { command: 'delete_skill', args: { id: b?.id ?? '', cleanupAgentIds: b?.cleanupAgentIds ?? [] } };
+    }
+
+    // POST /skills/uninstall — remove a single (skill, agent) install: deletes
+    // the symlink/file copy at the agent's path and the skill_exports row.
+    // (Phase 2.5: real)
+    if (segs[1] === 'uninstall' && m === 'POST') {
+      const b = body as { skillId?: string; agentId?: string } | null;
+      return { command: 'uninstall_skill', args: { skillId: b?.skillId ?? '', agentId: b?.agentId ?? '' } };
+    }
+
+    // DELETE /skills/:id — plain library delete (kept for compatibility)
+    if (m === 'DELETE' && segs.length === 2)
+      return { command: '__stub__', args: { __response: { success: true } } };
+
+    return { command: '__stub__', args: { __response: { success: false, message: 'Not found' } } };
+  }
+
   throw new Error(`[tauriClient] Unmapped route: ${m} /${p}`);
 }
 

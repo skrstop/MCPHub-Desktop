@@ -15,3 +15,4 @@ pub mod server_tool_config_service;
 pub mod mcp_version;
 pub mod mcp_tasks;
 pub mod http_server;
+pub mod skill_service;

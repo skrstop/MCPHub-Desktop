@@ -181,6 +181,58 @@ export interface BuiltinResource {
   enabled?: boolean;
 }
 
+// --- Skills (技能) ---
+// An AI coding agent (e.g. Claude Code, Cursor) with a directory where it
+// stores its skills. Configured in Settings → "Agent 安装路径管理" and
+// persisted to system_config.config_json.skills.agents.
+export interface SkillAgent {
+  id: string;
+  name: string;
+  skillsPath: string;
+}
+
+// A skill directory discovered under an agent's skillsPath during import
+// scanning. name/description come from the skill's SKILL.md frontmatter.
+export interface ScannedSkill {
+  agentId: string;
+  agentName: string;
+  dirName: string;
+  name: string;
+  description: string;
+  path: string;
+  isSymlink: boolean;
+  alreadyImported: boolean;
+}
+
+// A single export of a library skill to an agent, with the method used.
+export interface SkillExport {
+  agentId: string;
+  agentName: string;
+  method: 'symlink' | 'copy';
+  createdAt?: string;
+}
+
+// A skill stored in the app's managed skills library (under $APPDATA/skills).
+// exports lists which agents this skill has been exported to (for the View dialog).
+export interface Skill {
+  id: string;
+  dirName: string;
+  name: string;
+  description: string;
+  sourceAgent?: string;
+  sourcePath?: string;
+  createdAt?: string;
+  exports: SkillExport[];
+}
+
+// Per (skill, agent) result of an export operation.
+export interface ExportResultItem {
+  skillId: string;
+  agentId: string;
+  success: boolean;
+  message?: string;
+}
+
 // Proxychains4 configuration for STDIO servers (Linux/macOS only)
 export interface ProxychainsConfig {
   enabled?: boolean; // Enable/disable proxychains4 proxy routing

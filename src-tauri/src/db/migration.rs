@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 12;
+pub const TARGET_VERSION: i64 = 14;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -116,6 +116,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         10 => migrate_v10(pool).await,
         11 => migrate_v11(pool).await,
         12 => migrate_v12(pool).await,
+        13 => migrate_v13(pool).await,
+        14 => migrate_v14(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -529,5 +531,154 @@ async fn migrate_v12(pool: &SqlitePool) -> Result<()> {
         .execute(pool).await.ok(); // ignore if column already exists
     sqlx::query("ALTER TABLE groups ADD COLUMN builtin_resources TEXT")
         .execute(pool).await.ok();
+    Ok(())
+}
+
+/// v12 → v13: Skills tables.
+///
+/// `skills`: app-managed skill library (one row per imported skill dir).
+/// `skill_exports`: per (skill, agent) install record with method + status.
+/// Both carry a `status` column ('pending'|'ok') so a crash mid-import/export
+/// leaves `pending` — only `ok` is treated as successful; `reconcile_pending`
+/// (startup) cleans partial dirs + pending rows.
+/// Also seeds `config_json.skills.agents` with known defaults if absent.
+async fn migrate_v13(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS skills (
+            id           TEXT PRIMARY KEY,
+            dir_name     TEXT NOT NULL UNIQUE,
+            name         TEXT,
+            description  TEXT,
+            source_agent TEXT,
+            source_path  TEXT,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS skill_exports (
+            id         TEXT PRIMARY KEY,
+            skill_id   TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            agent_id   TEXT NOT NULL,
+            method     TEXT NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(skill_id, agent_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Seed default known agents into config_json.skills.agents if the key is
+    // absent. Paths use ~ (resolved at scan/export time by resolve_agent_path).
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    let needs_seed = match row.as_ref().and_then(|r| {
+        let s: Option<String> = r.try_get("config_json").ok()?;
+        s.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+    }) {
+        Some(v) => !v.get("skills").and_then(|s| s.get("agents")).is_some(),
+        None => true,
+    };
+    if needs_seed {
+        let mut config: serde_json::Value = row
+            .as_ref()
+            .and_then(|r| {
+                let s: Option<String> = r.try_get("config_json").ok()?;
+                s.and_then(|v| serde_json::from_str(&v).ok())
+            })
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+        if config.get("skills").is_none() {
+            config["skills"] = serde_json::json!({});
+        }
+        // Single source of truth: skill_service::default_agents() (12 known).
+        config["skills"]["agents"] = serde_json::to_value(crate::services::skill_service::default_agents())?;
+        let json_str = serde_json::to_string(&config)?;
+        sqlx::query(
+            "UPDATE system_config SET config_json=?, updated_at=datetime('now','localtime') WHERE id=1",
+        )
+        .bind(&json_str)
+        .execute(pool)
+        .await?;
+    }
+
+    log::info!("[db] migration v13: created skills/skill_exports tables, seeded default agents");
+    Ok(())
+}
+
+/// v13 → v14: Switch the known-agents source to the bundled `install.json`
+/// catalog (56 agents) — replaces the old hardcoded 4-agent v13 seed.
+///
+/// Behavior:
+/// - No `skills.agents` at all → seed the full catalog.
+/// - Current agent ids are EXACTLY the legacy v13 set {claude-code, cursor,
+///   windsurf, cline} (untouched defaults) → REPLACE with the full catalog
+///   (so the user moves from 4 → 56 cleanly).
+/// - Otherwise (user has added/edited agents) → backfill missing catalog ids,
+///   leaving user additions/edits intact.
+async fn migrate_v14(pool: &SqlitePool) -> Result<()> {
+    /// The ids v13 originally seeded — used to detect an untouched config.
+    const LEGACY_V13_IDS: &[&str] = &["claude-code", "cursor", "windsurf", "cline"];
+    let legacy: std::collections::HashSet<String> =
+        LEGACY_V13_IDS.iter().map(|s| s.to_string()).collect();
+
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(()); };
+    let s: Option<String> = row.try_get("config_json")?;
+    let mut config: serde_json::Value = match s.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
+        Some(v) if v.is_object() => v,
+        _ => serde_json::json!({}),
+    };
+
+    if config.get("skills").is_none() {
+        config["skills"] = serde_json::json!({});
+    }
+
+    let defaults = crate::services::skill_service::default_agents();
+    let arr = config["skills"].get("agents").and_then(|a| a.as_array()).cloned();
+    match arr {
+        None => {
+            config["skills"]["agents"] = serde_json::to_value(&defaults)?;
+        }
+        Some(agents) if agents.is_empty() => {
+            config["skills"]["agents"] = serde_json::to_value(&defaults)?;
+        }
+        Some(agents) => {
+            // Owned ids so `agents` can move into `merged` below.
+            let current: std::collections::HashSet<String> = agents
+                .iter()
+                .filter_map(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+                .collect();
+            if current == legacy {
+                // Untouched v13 defaults → replace with the full catalog.
+                config["skills"]["agents"] = serde_json::to_value(&defaults)?;
+            } else {
+                // User has customized → only backfill missing catalog ids.
+                let mut merged = agents;
+                for def in &defaults {
+                    if !current.contains(def.id.as_str()) {
+                        merged.push(serde_json::to_value(def)?);
+                    }
+                }
+                config["skills"]["agents"] = serde_json::Value::Array(merged);
+            }
+        }
+    }
+
+    let json_str = serde_json::to_string(&config)?;
+    sqlx::query("UPDATE system_config SET config_json=?, updated_at=datetime('now','localtime') WHERE id=1")
+        .bind(&json_str)
+        .execute(pool)
+        .await?;
+    log::info!("[db] migration v14: known-agents catalog applied ({} agents)", defaults.len());
     Ok(())
 }

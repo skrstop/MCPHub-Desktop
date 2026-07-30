@@ -17,6 +17,18 @@ use tauri::{
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows symlink-helper mode: when relaunched with --symlink-helper, create
+    // the symlinks from the manifest and exit — never start Tauri UI. Used by
+    // skill_service::create_symlinks_elevated for on-demand elevation (one UAC
+    // per batch). See doc/agent_20260724.md §3.8.5.
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--symlink-helper") {
+            services::skill_service::run_helper_mode();
+        }
+    }
+
     // On macOS dev mode, set the process display name so the Dock shows "MCPHub Desktop"
     #[cfg(target_os = "macos")]
     unsafe {
@@ -134,6 +146,11 @@ pub fn run() {
                     {
                         services::runtime_env::set_active_python(py_ver.to_string());
                     }
+                }
+                // Reconcile skills: clean up any pending imports/exports left by
+                // a crash so the next start doesn't treat them as installed.
+                if let Err(e) = services::skill_service::reconcile_pending(&app_handle2).await {
+                    log::warn!("[skills] reconcile_pending failed: {}", e);
                 }
                 if let Err(e) = services::mcp_manager::start_all(&app_handle2).await {
                     log::error!("Failed to start MCP servers: {}", e);
@@ -313,6 +330,20 @@ pub fn run() {
             // Context footprint / cost calculation
             commands::cost::get_server_costs,
             commands::cost::get_group_costs,
+            // Skills (技能) — 2.2 agent config; 2.3 scan/list/get/import; 2.4 export; 2.5 uninstall/delete; 2.6 open/pick
+            commands::skills::list_skill_agents,
+            commands::skills::save_skill_agents,
+            commands::skills::scan_skills_for_import,
+            commands::skills::list_skills,
+            commands::skills::get_skill,
+            commands::skills::import_skills,
+            commands::skills::scan_folder_for_skills,
+            commands::skills::export_skills_to_agents,
+            commands::skills::uninstall_skill,
+            commands::skills::delete_skill,
+            commands::skills::open_path_in_explorer,
+            commands::skills::pick_directory,
+            commands::skills::open_skill_library_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCPHub application");
