@@ -625,7 +625,7 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 
 **版本号同步**
 
-四个版本源须保持一致（当前 `1.0.24002`）：
+四个版本源须保持一致（当前 `1.0.26001`）：
 
 - `src-tauri/tauri.conf.json`（应用版本，也是 `import.meta.env.PACKAGE_VERSION` 的来源——`vite.config.ts` 从此注入）
 - `src-tauri/Cargo.toml`
@@ -1297,14 +1297,45 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `cb44e22` (origin/main) |
-| **对应 origin tag**            | `v1.0.24`（无新 tag；`cb44e22` 为 v1.0.24 之后的未发布提交） |
-| **桌面端版本号**               | `1.0.24003`             |
-| **同步执行日期**               | 2026-07-24              |
+| **当前已同步到 origin commit** | `29c0704` (origin/main) |
+| **对应 origin tag**            | `v1.0.26`（`29c0704` 为 v1.0.26 之后的未发布提交） |
+| **桌面端版本号**               | `1.0.26001`             |
+| **同步执行日期**               | 2026-07-30              |
 
-> 下次同步时，使用 `cb44e22` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline cb44e22..HEAD`）。
+> 下次同步时，使用 `29c0704` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 29c0704..HEAD`）。
+>
+> ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-07-30：同步 `a99c382` → `29c0704`（5 个 commit）
+
+origin 版本 `v1.0.25` → `v1.0.26`；桌面端版本 `1.0.25001` → `1.0.26001`。
+
+> 基线说明：`a99c382` = `v1.0.25` tag，为 desktop HEAD 实际记录的子模块指针（2026-07-27 `f417a12` 同步前进至此，当时未登记 §4.3/§4.4）。本次以 `a99c382` 为起点同步到 origin/main `29c0704`（v1.0.26 之后 1 个未发布提交）。
+
+`cd mcphub-origin && git --no-pager log --oneline a99c382..29c0704` 共 5 个 commit；`git diff --stat a99c382..29c0704 -- frontend/ locales/` 仅 1 处改动（`frontend/src/components/ServerForm.tsx`，-1 行）。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `e88f664` | fix: allow stdio servers without arguments (#1006) | 前端：`ServerForm.tsx` 手动删除 args 输入框（placeholder `e.g.: -y time-mcp`）的 `required={serverType === 'stdio'}`（⚠️ 自定义文件手动合并，保留 hub 样式/隐藏 visibility/OAuth2 差异；command 输入框的 `required` 保留，与 origin 一致）。locales 无改动。 |
+
+**已镜像到 desktop（Rust 后端）**
+
+无。`e88f664` 的 Rust 后端镜像**不需要**：`mcp/pool.rs` Stdio 分支已用 `cfg.args.clone().unwrap_or_default()`（空 args 默认空 vec）、仅校验 `command` 存在；`stdio_transport.rs` 的 `cmd.args(&resolved_args)` 对空 vec 正常；`server_service.rs` create/update 无 args 必填校验。桌面端 Rust 后端早已容忍 stdio 无 args，与 origin #1006 修复后行为一致。
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `ca37a89` | Add MCP Toplist rank badge (#1001) | **不同步** | 仅改 `README.md`（+2），属文档文件（4.1 策略 4）；无 frontend/locales 改动。 |
+| `446aed8` | fix: fail loudly on invalid vector embedding writes (#1007) | **不同步** | 纯 Node `VectorEmbeddingRepository.ts` 向量嵌入写入校验；桌面端 Rust 后端无 vector embedding 功能（Smart Routing 在 §7 待办，未实现），架构不对应；无 frontend/locales 改动。 |
+| `bb72a8c` | chore(deps): bump better-auth 1.6.19→1.6.22 (#1005) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；better-auth 为 Node 后端依赖，桌面端 Rust 用 Better-Auth 的对应 Rust 实现（未集成，待办），不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。注：`bb72a8c` = `v1.0.26` tag。 |
+| `29c0704` | chore(deps-dev): bump postcss 8.5.12→8.5.18 (#1008) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；postcss 为前端构建 devDependency，桌面端前端用 npm（`package-lock.json`）独立管理，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
+
+**同步后验证**：`cd frontend && npm run build` 通过；`cd src-tauri && CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check` 通过。locales runtime* 键未受影响（本次无 locales 改动）；桌面端自定义文件仅 `ServerForm.tsx` 一处定点修改，未被覆盖。
 
 #### 2026-07-24：同步 `14a832b` → `cb44e22`（2 个 commit）
 
@@ -1700,7 +1731,7 @@ npm run build
 - [X]  启动更新检查（根级 `UpdateCheckProvider`：应用启动即检查、不依赖登录态；检测到新版本自动弹「关于」+ 侧边栏红点；移除「忽略此版本」；详见 3.4.7）
 - [X]  更新检查日志（`log_event` Tauri command 写入 `app_log`，前端 `[update]` 全流程日志：检查/新版本/已最新/失败/安装；日志页按来源 `update` 可过滤；详见 3.4.7）
 - [X]  release notes Markdown 渲染（`Markdown` 组件 react-markdown+remark-gfm；notes 即 `doc/upgrade/{version}.md` 全文；详见 3.4.7）
-- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.24002；详见 3.4.7）
+- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.26001；详见 3.4.7）
 
 ### 待办
 
