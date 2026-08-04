@@ -27,6 +27,12 @@ struct PoolEntry {
     /// the HTTP MCP path routes `tools/call` to a per-session isolated client
     /// (see `session_pool`) instead of this shared client.
     per_session_client: bool,
+    /// Cached `start_on_demand` flag (stdio only). When true the server skips
+    /// startup connect and is lazily spawned by `on_demand::call_tool_on_demand`
+    /// on the first tool call. The live client lives in the on-demand store,
+    /// not here (`client` stays `None`); this entry is a "shadow" carrying
+    /// status + cached tools + the flag.
+    start_on_demand: bool,
 }
 
 type Pool = Arc<RwLock<HashMap<String, PoolEntry>>>;
@@ -166,7 +172,40 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     // Also tears down any per-session isolated clients for this server via the
     // shared `disconnect_server` path — important on reconnect so a stale
     // perSessionClient child tree is reaped before spawning a fresh shared one.
+    // `disconnect_server` also reaps any live on-demand client (so reloading an
+    // awake on-demand server kills the old process before re-inserting the
+    // sleeping placeholder below).
     disconnect_server(&name).await.ok();
+
+    // 1a. On-demand stdio servers skip startup connect: insert a "sleeping"
+    // placeholder (client None, connected false, start_on_demand true) and
+    // return. The process is spawned lazily on the first tool call by
+    // `on_demand::call_tool_on_demand`.
+    let start_on_demand = cfg.start_on_demand.unwrap_or(false) && cfg.server_type == ServerType::Stdio;
+    if start_on_demand {
+        let sleep_msg = format!("[{}] Skipping startup connect for on-demand server (sleeping)", name);
+        log::info!("{}", sleep_msg);
+        app_logger::log_to_db("info", &sleep_msg);
+        let status = ServerStatus {
+            name: name.clone(),
+            connected: false,
+            starting: false,
+            start_on_demand: true,
+            tool_count: 0,
+            error: None,
+            last_connected: None,
+            server_version: None,
+        };
+        let mut map = pool().write().await;
+        map.insert(name.clone(), PoolEntry {
+            client: None,
+            status: status.clone(),
+            tools: vec![],
+            per_session_client,
+            start_on_demand: true,
+        });
+        return status;
+    }
 
     // 1. Insert "starting" placeholder immediately
     let start_msg = format!("[{}] Starting connection (type={:?})...", name, cfg.server_type);
@@ -180,6 +219,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                 name: name.clone(),
                 connected: false,
                 starting: true,
+                start_on_demand: false,
                 tool_count: 0,
                 error: None,
                 last_connected: None,
@@ -187,6 +227,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
             },
             tools: vec![],
             per_session_client,
+            start_on_demand: false,
         });
     }
 
@@ -212,13 +253,14 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     name: name.clone(),
                     connected: false,
                     starting: false,
+                    start_on_demand: false,
                     tool_count: 0,
                     error: Some(e.to_string()),
                     last_connected: None,
                     server_version: None,
                 };
                 let mut map = pool().write().await;
-                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client });
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
                 return status;
             }
         };
@@ -241,6 +283,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     name: name.clone(),
                     connected: true,
                     starting: false,
+                    start_on_demand: false,
                     tool_count,
                     error: None,
                     last_connected,
@@ -252,6 +295,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     status: status.clone(),
                     tools,
                     per_session_client,
+                    start_on_demand: false,
                 });
                 let conn_msg = if attempt > 1 {
                     format!("[{}] Connected ({} tools) after {} attempts", name, tool_count, attempt)
@@ -308,13 +352,14 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     name: name.clone(),
                     connected: false,
                     starting: false,
+                    start_on_demand: false,
                     tool_count: 0,
                     error: Some(last_error.clone()),
                     last_connected: None,
                     server_version: None,
                 };
                 let mut map = pool().write().await;
-                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client });
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
                 return status;
             }
             Err(_elapsed) => {
@@ -335,13 +380,14 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     name: name.clone(),
                     connected: false,
                     starting: false,
+                    start_on_demand: false,
                     tool_count: 0,
                     error: Some(last_error.clone()),
                     last_connected: None,
                     server_version: None,
                 };
                 let mut map = pool().write().await;
-                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client });
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
                 return status;
             }
         }
@@ -363,13 +409,14 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         name: name.clone(),
         connected: false,
         starting: false,
+        start_on_demand: false,
         tool_count: 0,
         error: Some(last_error),
         last_connected: None,
         server_version: None,
     };
     let mut map = pool().write().await;
-    map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client });
+    map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
     status
 }
 
@@ -385,6 +432,10 @@ pub async fn disconnect_server(name: &str) -> Result<()> {
     // they'd leak on delete/disable/reload/update/reinstall). No-op for
     // shared-pool servers (read-lock fast path inside).
     super::session_pool::cleanup_server(name).await;
+    // Tear down any live on-demand client (awake stdio server) so its child
+    // process is reaped on disable/reload/delete/update. No-op when the server
+    // is sleeping or not on-demand.
+    super::on_demand::shutdown_on_demand_lifecycle(name).await;
     let entry = {
         let mut map = pool().write().await;
         map.remove(name)
@@ -417,6 +468,10 @@ pub async fn disconnect_all() {
     // servers; clearing them avoids killing the shared client out from under an
     // in-flight isolated call (though at shutdown that's moot anyway).
     super::session_pool::cleanup_all().await;
+    // On-demand clients live in a separate store; reap them too so their child
+    // processes are killed via kill_process_tree rather than relying on
+    // kill_on_drop at process exit.
+    super::on_demand::cleanup_all_on_demand().await;
 
     let entries: Vec<(String, PoolEntry)> = {
         let mut map = pool().write().await;
@@ -463,7 +518,7 @@ pub async fn is_per_session_client(name: &str) -> bool {
 pub async fn list_all_tools() -> Vec<Tool> {
     let map = pool().read().await;
     map.values()
-        .filter(|e| e.status.connected)
+        .filter(|e| e.status.connected || (e.start_on_demand && !e.tools.is_empty()))
         .flat_map(|e| e.tools.clone())
         .collect()
 }
@@ -483,6 +538,17 @@ pub async fn get_entry_info(name: &str) -> Option<(ServerStatus, Vec<Tool>)> {
 
 /// Call a tool — automatically routes to the correct server
 pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> Result<ToolCallResult> {
+    // On-demand stdio servers keep their live client in the on-demand store
+    // (the pool entry is a sleeping shadow). Route there so the call lazily
+    // spawns the process on first use.
+    let on_demand = {
+        let map = pool().read().await;
+        map.get(server_name).map(|e| e.start_on_demand).unwrap_or(false)
+    };
+    if on_demand {
+        return super::on_demand::call_tool_on_demand(server_name, tool_name, arguments).await;
+    }
+
     let map = pool().read().await;
     let entry = map
         .get(server_name)
@@ -502,4 +568,61 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
         }
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// On-demand spawning: pool-placeholder status mutators.
+//
+// On-demand stdio servers keep their live client in `on_demand::ON_DEMAND_CLIENTS`;
+// the pool entry is a "shadow" (client always None) carrying status + cached
+// tools + the `start_on_demand` flag. These helpers let the on-demand module
+// update the shadow's status as it wakes/sleeps/errors without exposing the
+// pool's internal lock.
+// ---------------------------------------------------------------------------
+
+/// Mark an on-demand server's shadow entry as awake (just spawned). Updates
+/// status to connected + caches the tool list + server version. Keeps the
+/// `start_on_demand` flag set. No-op if the entry was removed (server
+/// disabled/deleted while spawning).
+pub(crate) async fn mark_on_demand_awake(name: &str, tools: Vec<Tool>, server_version: Option<String>) {
+    let tool_count = tools.len();
+    let last_connected = Some(chrono::Utc::now().to_rfc3339());
+    let mut map = pool().write().await;
+    if let Some(entry) = map.get_mut(name) {
+        entry.tools = tools;
+        entry.status.connected = true;
+        entry.status.starting = false;
+        entry.status.start_on_demand = true;
+        entry.status.tool_count = tool_count;
+        entry.status.error = None;
+        entry.status.last_connected = last_connected;
+        entry.status.server_version = server_version;
+    }
+}
+
+/// Mark an on-demand server's shadow entry as sleeping (idle timeout or stale
+/// connection). Sets connected false but KEEPS the cached tools so the server
+/// stays discoverable. Clears any prior error.
+pub(crate) async fn mark_on_demand_sleeping(name: &str) {
+    let mut map = pool().write().await;
+    if let Some(entry) = map.get_mut(name) {
+        entry.status.connected = false;
+        entry.status.starting = false;
+        entry.status.start_on_demand = true;
+        entry.status.error = None;
+        // tools intentionally preserved
+    }
+}
+
+/// Mark an on-demand server's shadow entry with a spawn failure error. The
+/// server stays sleeping (connected false) but the error is surfaced so the
+/// frontend can show why a cold-start failed rather than rendering "Sleeping".
+pub(crate) async fn mark_on_demand_error(name: &str, error: String) {
+    let mut map = pool().write().await;
+    if let Some(entry) = map.get_mut(name) {
+        entry.status.connected = false;
+        entry.status.starting = false;
+        entry.status.start_on_demand = true;
+        entry.status.error = Some(error);
+    }
 }

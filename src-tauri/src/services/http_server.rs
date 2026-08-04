@@ -607,11 +607,14 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
     };
     if scope.is_empty() || scope == "$smart" {
         // No filters for global scope - all connected pool servers + the RAG
-        // builtin server (when RAG is on).
+        // builtin server (when RAG is on). On-demand stdio servers that are
+        // currently sleeping (connected=false, start_on_demand=true) are
+        // included so their cached tools stay discoverable and a `tools/call`
+        // can cold-start them.
         let mut filters: Vec<ServerFilter> = pool::get_all_statuses()
             .await
             .into_iter()
-            .filter(|s| s.connected)
+            .filter(|s| s.connected || s.start_on_demand)
             .map(|s| ServerFilter {
                 name: s.name.clone(),
                 tools: None,
@@ -637,11 +640,12 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
             return vec![rf];
         }
     }
-    // Try as server name (no filters)
+    // Try as server name (no filters). Include sleeping on-demand servers so a
+    // single-server scope can still cold-start them via tools/call.
     if pool::get_all_statuses()
         .await
         .iter()
-        .any(|s| s.connected && s.name == name)
+        .any(|s| (s.connected || s.start_on_demand) && s.name == name)
     {
         return vec![ServerFilter {
             name: name.to_string(),

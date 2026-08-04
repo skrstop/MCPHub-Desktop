@@ -128,6 +128,17 @@ pub struct ServerConfig {
     /// MCP JSON-RPC path; REST/Tauri direct calls keep the shared pool.
     #[serde(default)]
     pub per_session_client: Option<bool>,
+    /// On-demand spawning (stdio only): skip startup connect, spawn the
+    /// process lazily on the first tool call, and shut it down automatically
+    /// after the idle timeout. Reduces persistent memory usage for rarely-used
+    /// servers. Frontend sends camelCase `startOnDemand`.
+    #[serde(default)]
+    pub start_on_demand: Option<bool>,
+    /// Milliseconds of inactivity before shutting down an on-demand stdio
+    /// server's process (default: 300000 = 5 min). Frontend sends camelCase
+    /// `idleTimeoutMs`.
+    #[serde(default)]
+    pub idle_timeout_ms: Option<u64>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -143,6 +154,11 @@ pub struct ServerStatus {
     /// True while the server is in the process of starting up (before connect completes).
     #[serde(default)]
     pub starting: bool,
+    /// Whether this server is configured for on-demand spawning (sleeping when
+    /// disconnected). Cached from the server config so HTTP routing and the
+    /// frontend can distinguish "sleeping" from "offline".
+    #[serde(default)]
+    pub start_on_demand: bool,
     pub tool_count: usize,
     pub error: Option<String>,
     pub last_connected: Option<String>,

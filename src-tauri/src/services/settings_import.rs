@@ -111,6 +111,8 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 options: None,
                 openapi: None,
                 per_session_client: None,
+                start_on_demand: None,
+                idle_timeout_ms: None,
                 enabled: !raw.disabled.unwrap_or(false),
             };
 

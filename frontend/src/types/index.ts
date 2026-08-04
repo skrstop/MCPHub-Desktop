@@ -366,6 +366,11 @@ export interface ServerConfig {
   enableKeepAlive?: boolean; // Enable remote health checks and automatic reconnect attempts
   keepAliveInterval?: number; // Health check and reconnect interval in milliseconds (default: 60000ms)
   perSessionClient?: boolean; // Create a dedicated upstream client per downstream session instead of sharing one connection (for stateful servers like Playwright)
+  // On-demand spawning (stdio only): skip startup connect, spawn the process
+  // lazily on the first tool call, and shut it down automatically after the
+  // idle timeout. Reduces persistent memory usage for rarely-used servers.
+  startOnDemand?: boolean;
+  idleTimeoutMs?: number; // Milliseconds of inactivity before shutting down (default: 300000 = 5 min)
   tools?: Record<string, { enabled: boolean; description?: string }>; // Tool-specific configurations with enable/disable state and custom descriptions
   prompts?: Record<string, { enabled: boolean; description?: string }>; // Prompt-specific configurations with enable/disable state and custom descriptions
   options?: {
@@ -525,6 +530,9 @@ export interface ServerFormData {
   };
   // Create a dedicated upstream client per downstream session (stateful servers)
   perSessionClient?: boolean;
+  // On-demand spawning (stdio only): spawn lazily on first tool call, shut down after idle timeout
+  startOnDemand?: boolean;
+  idleTimeoutMs?: number;
   oauth?: {
     clientId?: string;
     clientSecret?: string;

@@ -28,6 +28,10 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
                 let msg = format!("Server '{}' connected ({} tools)", name, status.tool_count);
                 log::info!("{}", msg);
                 app_logger::log_to_db("info", &msg);
+            } else if cfg.start_on_demand.unwrap_or(false) {
+                let msg = format!("Server '{}' sleeping (on-demand)", name);
+                log::info!("{}", msg);
+                app_logger::log_to_db("info", &msg);
             } else {
                 let err = status.error.as_deref().unwrap_or("unknown");
                 let msg = format!("Server '{}' failed to connect: {}", name, err);
@@ -65,6 +69,12 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
                 }
             };
             for cfg in enabled_configs {
+                // On-demand servers are intentionally sleeping; never wake them
+                // here (would defeat the feature and could kill an in-flight
+                // awake client via connect_server's cleanup).
+                if cfg.start_on_demand.unwrap_or(false) {
+                    continue;
+                }
                 if disconnected.contains(&cfg.name) {
                     let name = cfg.name.clone();
                     log::info!("[session_rebuild] Reconnecting server '{}'", name);

@@ -30,7 +30,7 @@ fn encode_server_type(t: &ServerType) -> &'static str {
 
 pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled
          FROM servers WHERE enabled = 1",
     )
     .fetch_all(db::pool())
@@ -40,7 +40,7 @@ pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
 
 pub async fn list_all() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled
          FROM servers ORDER BY name",
     )
     .fetch_all(db::pool())
@@ -50,13 +50,25 @@ pub async fn list_all() -> Result<Vec<ServerConfig>> {
 
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled
          FROM servers WHERE name = ?",
     )
     .bind(name)
     .fetch_optional(db::pool())
     .await?;
     row.map(map_row).transpose()
+}
+
+/// Per-session client isolation and on-demand spawning are mutually exclusive:
+/// the former creates a dedicated upstream client per session, the latter
+/// keeps a single shared client that sleeps. Reject the combination up front.
+fn validate_combination(cfg: &ServerConfig) -> Result<()> {
+    if cfg.per_session_client.unwrap_or(false) && cfg.start_on_demand.unwrap_or(false) {
+        return Err(anyhow!(
+            "perSessionClient and startOnDemand cannot both be enabled on the same server"
+        ));
+    }
+    Ok(())
 }
 
 pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
@@ -66,6 +78,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     if cfg.name.eq_ignore_ascii_case(crate::rag::service::BUILTIN_SERVER_NAME) {
         return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
     }
+    validate_combination(cfg)?;
     let id = Uuid::new_v4().to_string();
     let args = cfg.args.as_ref().map(|a| serde_json::to_string(a)).transpose()?;
     let env = cfg.env.as_ref().map(|e| serde_json::to_string(e)).transpose()?;
@@ -75,10 +88,12 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
+    let start_on_demand = cfg.start_on_demand.unwrap_or(false) as i64;
+    let idle_timeout_ms = cfg.idle_timeout_ms.unwrap_or(0) as i64;
 
     sqlx::query(
-        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&cfg.name)
@@ -92,6 +107,8 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&options)
     .bind(&openapi)
     .bind(per_session_client)
+    .bind(start_on_demand)
+    .bind(idle_timeout_ms)
     .bind(enabled)
     .execute(db::pool())
     .await
@@ -113,6 +130,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     if cfg.name.eq_ignore_ascii_case(crate::rag::service::BUILTIN_SERVER_NAME) {
         return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
     }
+    validate_combination(cfg)?;
     let args = cfg.args.as_ref().map(|a| serde_json::to_string(a)).transpose()?;
     let env = cfg.env.as_ref().map(|e| serde_json::to_string(e)).transpose()?;
     let headers = cfg.headers.as_ref().map(|h| serde_json::to_string(h)).transpose()?;
@@ -121,10 +139,12 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
+    let start_on_demand = cfg.start_on_demand.unwrap_or(false) as i64;
+    let idle_timeout_ms = cfg.idle_timeout_ms.unwrap_or(0) as i64;
 
     sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
-         headers=?, options=?, openapi=?, per_session_client=?, enabled=?, updated_at=datetime('now') WHERE name=?",
+         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
     .bind(&cfg.name)
     .bind(server_type)
@@ -137,6 +157,8 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&options)
     .bind(&openapi)
     .bind(per_session_client)
+    .bind(start_on_demand)
+    .bind(idle_timeout_ms)
     .bind(enabled)
     .bind(name)
     .execute(db::pool())
@@ -207,6 +229,11 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         options,
         openapi,
         per_session_client: Some(r.try_get::<i64, _>("per_session_client")? != 0),
+        start_on_demand: Some(r.try_get::<i64, _>("start_on_demand")? != 0),
+        idle_timeout_ms: {
+            let ms = r.try_get::<i64, _>("idle_timeout_ms")?;
+            if ms > 0 { Some(ms as u64) } else { None }
+        },
         enabled: r.try_get::<i64, _>("enabled")? != 0,
     })
 }

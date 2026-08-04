@@ -625,7 +625,7 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 
 **版本号同步**
 
-四个版本源须保持一致（当前 `1.0.26001`）：
+四个版本源须保持一致（当前 `1.0.27001`）：
 
 - `src-tauri/tauri.conf.json`（应用版本，也是 `import.meta.env.PACKAGE_VERSION` 的来源——`vite.config.ts` 从此注入）
 - `src-tauri/Cargo.toml`
@@ -1196,6 +1196,84 @@ PY
 - 开 expose_http；配一个 stdio server 勾选「会话级客户端隔离」；用两个外部 MCP 客户端连 `/mcp` 各自 initialize（得不同 session-id）并 call 同一工具 → 应各起独立子进程（`ps` 可见两个进程）。DELETE session 后子进程被清理。
 - 回归：不勾选 perSessionClient 的服务，HTTP call_tool 仍走共享 pool，行为不变。
 
+### 3.8 On-demand stdio 按需启动（startOnDemand，origin #1012 镜像）
+
+> 镜像 origin `976b4ac`（PR #1012）。当 stdio server 配置 `startOnDemand: true` 时，启动**不**连接该服务，而是插入「睡眠」占位（`client: None`、`connected: false`、`start_on_demand: true`），首次工具调用时才懒建 client + 连接，并在空闲超时（默认 5 分钟）后自动关闭进程；工具列表缓存保留，下次调用自动冷启动。降低低频服务的常驻内存占用。
+
+#### 3.8.1 作用域（与 origin 一致）
+- **仅 stdio server**：HTTP/SSE 无重型进程，不参与（`connect_server` 仅对 `ServerType::Stdio` 生效睡眠占位）。
+- **共享 pool 调用路径**：Tauri `call_tool` 命令 + HTTP 非隔离 `tools/call` 走 `pool::call_tool` -> 路由到 `on_demand::call_tool_on_demand`。
+- **与 perSessionClient 互斥**：`server_service::create`/`update` 校验 `perSessionClient && startOnDemand` 同时为真则报错（两者语义冲突：一个是每 session 独立进程，一个是共享懒启动）。
+- `tools/list` 用共享 pool 的缓存工具列表（睡眠 server 的工具在首次唤醒后缓存，之后即使再睡眠也保留）。
+
+#### 3.8.2 Model + DB
+- `models/server.rs`：`ServerConfig` 加 `#[serde(default)] pub start_on_demand: Option<bool>` + `pub idle_timeout_ms: Option<u64>`（camelCase -> JSON `startOnDemand`/`idleTimeoutMs`，前端已发）；`ServerStatus` 加 `pub start_on_demand: bool`（`#[serde(default)]`，序列化为 `startOnDemand`，供 HTTP 路由 + 前端 StatusDot 判断 sleeping）。
+- `db/migration.rs`：`migrate_v17`（`ALTER TABLE servers ADD COLUMN start_on_demand INTEGER NOT NULL DEFAULT 0` + `idle_timeout_ms INTEGER NOT NULL DEFAULT 0`，均 `.ok()` 容错已存在）；`TARGET_VERSION` 16 -> 17；`apply_migration` match 加 `17 => migrate_v17`。
+- `services/server_service.rs`：3 个 SELECT 列清单加 `start_on_demand, idle_timeout_ms`；`create`/`update` 的 INSERT/UPDATE 加列与 bind（`cfg.start_on_demand.unwrap_or(false) as i64` / `cfg.idle_timeout_ms.unwrap_or(0) as i64`）；`map_row` 读两列 -> `Some(r.try_get::<i64,_>("start_on_demand")? != 0)` / `if ms > 0 { Some(ms as u64) } else { None }`；`create`/`update` 起始处互斥校验。
+- `services/settings_import.rs`：导入旧 `mcp_settings.json` 时 `ServerConfig` 字面量补 `start_on_demand: None` + `idle_timeout_ms: None`。
+- `rag/service.rs`：builtin server 的 `ServerConfig` 字面量补两字段 `None`、`ServerStatus` 补 `start_on_demand: false`（builtin 永不按需启动）。
+
+#### 3.8.3 Pool 占位 + 路由
+- `mcp/pool.rs`：
+  - `PoolEntry` 加 `start_on_demand: bool`（`connect_server` 开头从 `cfg.start_on_demand.unwrap_or(false) && cfg.server_type == ServerType::Stdio` 计算；所有占位/成功/失败分支也带该字段）。
+  - `connect_server`：在 `disconnect_server` 清理后、插入「starting」占位前，若 `start_on_demand` 为真，插入「sleeping」占位（`client: None`、`connected: false`、`starting: false`、`start_on_demand: true`）并直接返回，**不**走 build_client/连接/重试逻辑。
+  - `call_tool`：开头读 pool 缓存的 `start_on_demand` 标志，为真则 `return super::on_demand::call_tool_on_demand(...)`；否则走原共享 client 路径。
+  - `list_all_tools`：过滤条件从 `e.status.connected` 放宽为 `e.status.connected || (e.start_on_demand && !e.tools.is_empty())`，睡眠 server 的缓存工具仍可被发现。
+  - `disconnect_server`：新增 `super::on_demand::shutdown_on_demand_lifecycle(name)`（在 `session_pool::cleanup_server` 之后），reap 活跃的 on-demand 子进程。
+  - `disconnect_all`：新增 `super::on_demand::cleanup_all_on_demand()`（在 `session_pool::cleanup_all` 之后）。
+  - 新增 `pub(crate) async fn mark_on_demand_awake(name, tools, server_version)` / `mark_on_demand_sleeping(name)` / `mark_on_demand_error(name, error)`：供 on-demand 模块更新 pool 占位的 status（connected/tools/error），不暴露 pool 内部锁。
+
+#### 3.8.4 新增 `mcp/on_demand.rs`（按需 client 存储）
+- 结构仿 `session_pool.rs`：`static ON_DEMAND_CLIENTS: OnceLock<RwLock<HashMap<String, OnDemandEntry>>>`，key = `server_name`。`OnDemandEntry { client: Arc<Mutex<McpClient>>, last_used: Instant, idle_ms: u64, idle_handle: Mutex<Option<JoinHandle<()>>> }`。
+- `static CREATE_LOCKS`：per-server 创建锁，防并发首调重复 spawn。
+- `pub async fn call_tool_on_demand(server_name, tool, arguments) -> Result<ToolCallResult>`：
+  1. 快速路径：读 map 命中 -> clone Arc + 读 `idle_ms` -> `run_call`（锁外执行）。
+  2. 未命中：取/建 per-server 创建锁 -> `_guard.lock()` 串行 -> 双重检查。
+  3. 新建：`server_service::get_by_name` 取 cfg（**仅新建时一次 DB 读**），`pool::build_client(&cfg)?`，`timeout(120s, client.connect())`，`list_tools()` + `server_version()`，缓存 entry，`pool::mark_on_demand_awake`。
+  4. `run_call` 失败（连接类错误）：从 map 移除 + disconnect + `pool::mark_on_demand_sleeping`，下次重建。
+  5. `run_call` 成功：更新 `last_used` + `schedule_idle`（重置空闲定时器）。
+- `schedule_idle`：abort 旧 `idle_handle`，spawn 新定时器任务（捕获 `last_used` 作为 generation）。
+- `shutdown_on_demand_idle(name, snapshot)`：定时器回调，双重检查 `last_used == snapshot`（newer call 重置过则跳过），移除 entry + disconnect + `pool::mark_on_demand_sleeping`（**保留缓存工具**）。
+- `shutdown_on_demand_lifecycle(name)`：disable/reload/delete/update 时由 `disconnect_server` 调用，移除 + disconnect + 清创建锁（不碰 pool 占位，由 `disconnect_server` 负责）。
+- `cleanup_all_on_demand()`：shutdown 时由 `disconnect_all` 调用。
+- `mcp/mod.rs`：`pub mod on_demand;`。
+
+#### 3.8.5 mcp_manager / http_server
+- `services/mcp_manager.rs`：`start_all` 连接结果日志区分 sleeping（`cfg.start_on_demand` 为真且 `!status.connected` 时记 "sleeping (on-demand)"）；自动重连循环（`enableSessionRebuild` 30s 周期）**跳过** on-demand server（`continue`，不唤醒睡眠服务）。
+- `services/http_server.rs`：`mcp_scope_server_filters` 全局/单服务器 scope 的过滤条件从 `s.connected` 放宽为 `s.connected || s.start_on_demand`，睡眠 on-demand server 仍可被 `tools/call` 冷启动、其缓存工具仍可被 `tools/list` 暴露。
+
+#### 3.8.6 前端
+- `frontend/src/types/index.ts`：`ServerConfig` 加 `startOnDemand?: boolean` + `idleTimeoutMs?: number`；`ServerFormData` 加同名字段。
+- `frontend/src/components/ui/StatusDot.tsx`：`ServerStatusDotProps` 加 `startOnDemand?: boolean`；`startOnDemand && status === 'disconnected'` 时渲染 `kind="muted"` + 💤 + `t('status.sleeping', 'Sleeping')`（origin 用内联默认值，未加 locale 键）。
+- `frontend/src/components/ServerCard.tsx`：`<ServerStatusDot>` 传 `startOnDemand={server.config?.startOnDemand === true}`。
+- `frontend/src/components/ServerForm.tsx`：stdio 专属「按需启动」checkbox + idle timeout 数字输入框（min 10000，step 1000，默认 300000）+ 初始化从 `initialData?.config?.startOnDemand` / `idleTimeoutMs`。⚠️ 自定义文件手动合并，保留 hub 样式 / 隐藏 visibility / OAuth2 / 下载进度条等差异。
+- `frontend/src/utils/serverFormPayload.ts`：`buildServerPayload` 的 config 携带 `startOnDemand` / `idleTimeoutMs`（仅 `startOnDemand === true` 时发 `idleTimeoutMs`）。
+
+#### 3.8.7 资源/边界
+- on-demand 活跃 client 存于独立 store（`ON_DEMAND_CLIENTS`），pool 占位 `client` 始终 `None`；`disconnect_server` 同时清理两处。
+- 空闲关闭保留缓存工具（`mark_on_demand_sleeping` 不清 `entry.tools`），server 仍可被发现并冷启动。
+- 不影响既有 pool 的连接/状态/进度事件逻辑（`connect_server` 仅新增睡眠占位分支 + `start_on_demand` 字段透传）。
+- 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0）；`npm run build` 通过。
+
+#### 3.8.8 手动验证（计划）
+- 配一个 stdio server 勾选「按需启动」；启动应用 -> 服务状态显示 💤 Sleeping（而非 connecting/connected）；`ps` 无该子进程。
+- 调用该服务任一工具 -> 状态变 connected、子进程出现、工具返回正常。
+- 等待 idle timeout（可配 10000ms 加速）-> 子进程消失、状态回 Sleeping、工具列表仍可见。
+- 再次调用 -> 冷启动重建。
+- 回归：不勾选 startOnDemand 的服务，启动即连接，行为不变。
+- 互斥：同时勾选 perSessionClient + startOnDemand 保存应报错。
+
+### 3.9 stdio 连接错误包含上游 stderr（origin #1015 镜像）
+
+> 镜像 origin `a4a628a`（PR #1015）。stdio server 连接失败时，把上游进程的 stderr 尾部拼进 error message，便于排查 Python traceback / 缺失依赖等问题（origin 的 `stdioDiagnostics` 等价实现）。
+
+**文件**：`src-tauri/src/mcp/stdio_transport.rs`
+- `StdioTransport` 新增 `stderr_tail: Arc<std::sync::Mutex<String>>`（~32KB 滚动缓存；用 `std::sync::Mutex` 而非 `tokio::sync::Mutex`，以便在 `map_err` 同步闭包中读取，guard 不跨 await）。
+- `new()` 初始化为空 String。
+- stderr drain task（`tokio::spawn`）：每行 `push_str` + `\n`，超 32KB 从头部 `drain`。
+- `connect()` 的 `initialize` 握手失败 `map_err` 路径：锁 `stderr_tail`，`trim_end` 后非空则返回 `anyhow!("... handshake failed: {e}\n--- upstream stderr ---\n{tail}")`，否则原样返回 `e`。
+- 该 error 经 `pool::connect_server` 的 `Ok(Err(e))` 分支存入 `ServerStatus.error`，前端 ServerCard 显示。
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录
@@ -1227,8 +1305,9 @@ PY
 
 | 文件                                             | 自定义内容                                                |
 | ------------------------------------------------ | --------------------------------------------------------- |
-| `frontend/src/components/ServerCard.tsx`         | 移除 sponsor/wechat/discord、样式调整；下载进度条 / 更新角标+「更新到」菜单项 / 名字后版本号（见 3.6） |
-| `frontend/src/components/ServerForm.tsx`         | hub-* 样式、隐藏 visibility、保留 OAuth2                  |
+| `frontend/src/components/ServerCard.tsx`         | 移除 sponsor/wechat/discord、样式调整；下载进度条 / 更新角标+「更新到」菜单项 / 名字后版本号（见 3.6）；传 `startOnDemand` prop 给 StatusDot（见 3.8） |
+| `frontend/src/components/ServerForm.tsx`         | hub-* 样式、隐藏 visibility、保留 OAuth2；stdio 专属「按需启动」checkbox + idle timeout 输入框（见 3.8） |
+| `frontend/src/components/ui/StatusDot.tsx`       | `startOnDemand` prop + 💤 Sleeping 渲染（见 3.8）            |
 | `frontend/src/components/LogViewer.tsx`          | source 类型改为 string[]、source filter UI 移除、滚动方向 |
 | `frontend/src/components/layout/Header.tsx`      | GitHub 链接、移除文档按钮                                 |
 | `frontend/src/components/layout/Sidebar.tsx`     | Logo 使用应用图标                                         |
@@ -1240,7 +1319,7 @@ PY
 | `frontend/src/contexts/UpdateCheckContext.tsx`   | 桌面端新增（见 3.4.7）：根级启动更新检查 + 全局 AboutDialog，自动弹框/红点，无「忽略」 |
 | `frontend/src/contexts/ServerInstallProgressContext.tsx` | 桌面端新增（见 3.6）：监听 install-progress / update-available 事件 |
 | `frontend/src/App.tsx`                           | 包入 ServerInstallProgressProvider（见 3.6）+ UpdateCheckProvider（见 3.4.7） |
-| `frontend/src/types/index.ts`                    | `Server.version` 字段（见 3.6）；`AuthState.skipAuth` 字段（见 3.5.12） |
+| `frontend/src/types/index.ts`                    | `Server.version` 字段（见 3.6）；`AuthState.skipAuth` 字段（见 3.5.12）；`ServerConfig.startOnDemand`/`idleTimeoutMs` + `ServerFormData` 同名字段（见 3.8） |
 | `frontend/src/services/configService.ts`         | getPublicConfig 使用 apiGet                               |
 | `frontend/src/services/changelogService.ts`      | Tauri 中 changelog API 禁用；新增 `buildChangelogFromTauriUpdate`、移除「忽略此版本」（见 3.4.7） |
 | `frontend/src/utils/version.ts`                 | 本地修改（见 3.4.7）：`checkForAppUpdate(source)` + `logUpdateEvent` 全流程写 `[update]` 日志 |
@@ -1249,7 +1328,7 @@ PY
 | `frontend/src/pages/Dashboard.tsx`               | 隐藏 SMART/Docs                                           |
 | `frontend/src/pages/ActivityPage.tsx`            | 隐藏用户列、createdAt UTC 转换、字段名统一为 createdAt     |
 | `frontend/src/utils/tauriClient.ts`              | 桌面端新增；`toFrontendServer` 映射 `serverVersion`（见 3.6） |
-| `frontend/src/utils/serverFormPayload.ts`        | config 按 serverType 分支构建、无 visibility；`perSessionClient` 加在 return 前 |
+| `frontend/src/utils/serverFormPayload.ts`        | config 按 serverType 分支构建、无 visibility；`perSessionClient` 加在 return 前；`startOnDemand`/`idleTimeoutMs` 携带（见 3.8） |
 | `frontend/src/utils/fetchInterceptor.ts`         | isTauri() 拦截                                            |
 | `frontend/src/utils/runtime.ts`                  | 运行时配置                                                |
 | `frontend/index.html`                            | Splash 加载画面（内嵌 CSS 动画 + 内联 i18n 脚本）         |
@@ -1297,16 +1376,51 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `29c0704` (origin/main) |
-| **对应 origin tag**            | `v1.0.26`（`29c0704` 为 v1.0.26 之后的未发布提交） |
-| **桌面端版本号**               | `1.0.26001`             |
-| **同步执行日期**               | 2026-07-30              |
+| **当前已同步到 origin commit** | `5894e44` (origin/main, = `v1.0.27` tag) |
+| **对应 origin tag**            | `v1.0.27`               |
+| **桌面端版本号**               | `1.0.27001`             |
+| **同步执行日期**               | 2026-08-04              |
 
-> 下次同步时，使用 `29c0704` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 29c0704..HEAD`）。
+> 下次同步时，使用 `5894e44` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 5894e44..HEAD`）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-08-04：同步 `29c0704` -> `5894e44`（11 个 commit）
+
+origin 版本 `v1.0.26` -> `v1.0.27`；桌面端版本 `1.0.26001` -> `1.0.27001`。
+
+`cd mcphub-origin && git --no-pager log --oneline 29c0704..5894e44` 共 11 个 commit；`git diff --stat 29c0704..5894e44 -- frontend/ locales/` 仅 4 个前端文件改动（全部来自 `976b4ac` #1012）。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `976b4ac` | feat: on-demand stdio server spawning to reduce memory usage (#1012) | 前端：`types/index.ts`（`ServerConfig` + `ServerFormData` 新增 `startOnDemand`/`idleTimeoutMs`）、`StatusDot.tsx`（新增 `startOnDemand` prop + Sleeping 渲染）、`ServerCard.tsx`（传 `startOnDemand` prop）、`ServerForm.tsx`（stdio 专属「按需启动」checkbox + idle timeout 输入框 + 初始化）、`serverFormPayload.ts`（payload 携带 `startOnDemand`/`idleTimeoutMs`）。全部为桌面端自定义文件，手动合并保留 hub 样式 / 隐藏 visibility / OAuth2 / 下载进度条等差异。locales 无改动（origin 用内联默认值）。 |
+
+**已镜像到 desktop（Rust 后端）**
+
+| 来源 commit | 说明 | desktop 镜像方式 |
+| ----------- | ---- | ---------------- |
+| `976b4ac` | feat: on-demand stdio server spawning (#1012) | Rust 后端完整实现（详见 §3.8）：`models/server.rs` 新增 `start_on_demand`/`idle_timeout_ms`（`ServerConfig`）+ `start_on_demand`（`ServerStatus`）；`db/migration.rs` `migrate_v17`（`TARGET_VERSION` 16->17）加两列；`server_service.rs` SELECT/INSERT/UPDATE/map_row 持久化 + `perSessionClient`/`startOnDemand` 互斥校验；新增 `mcp/on_demand.rs`（仿 `session_pool.rs`：懒建 client + 创建锁去重 + idle 定时器 + sleeping/awake 状态机）；`pool.rs` `connect_server` 对 on-demand stdio 插入睡眠占位、`call_tool` 路由到 on-demand store、`list_all_tools` 含睡眠 server 缓存工具、`disconnect_server`/`disconnect_all` 清理 on-demand client、新增 `mark_on_demand_awake/sleeping/error` 占位状态机；`mcp_manager.rs` 启动日志区分 sleeping、自动重连循环跳过 on-demand；`http_server.rs` `mcp_scope_server_filters` 含 `start_on_demand` server。 |
+| `a4a628a` | fix: include upstream stderr in connection errors (#1015) | `stdio_transport.rs` 新增 `stderr_tail`（`Arc<std::sync::Mutex<String>>`，~32KB 滚动缓存），stderr drain task 累积每行；`connect()` 的 `initialize` 握手失败路径把 stderr tail 拼进 error message（`--- upstream stderr ---` 段），便于排查 Python traceback / 缺失依赖。 |
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `be49869` | feat: support MCP Apps passthrough on multi-server groups (#1010) | **不同步** | 桌面端无 MCP Apps / MCPB / DXT 功能（`mcp_apps`/`_meta.ui`/`ui://` 资源代理等均未实现）；多服务器组透传建立在 Apps 功能之上，无对应架构。仅改 Node `mcpService.ts` + 文档；无 frontend/locales 改动。 |
+| `f9944fa` | fix(oauth): strip static Authorization header when OAuth provider is active (#1013) | **不同步** | 桌面端 MCP 传输层（SSE/HTTP）无 OAuth provider 抽象，自定义 headers 原样透传，不存在「OAuth token 被静态 Authorization 覆盖」的问题。`http_server.rs` 的 OAuth 是 hub 自身 REST API 鉴权，非上游 MCP 连接。仅改 Node `mcpService.ts`/`mcpOAuthProvider.ts`；无 frontend/locales 改动。 |
+| `5894e44` | test: add unit tests for smartRouting config resolution (#1021) | **不同步** | 纯 Node 单元测试，桌面端 Smart Routing 未实现（§7 待办）；无 frontend/locales 改动。 |
+| `5a2a7c6` | fix: remove duplicated semver@7.8.5 entries from lockfile (#1023) | **不同步** | 仅改 `pnpm-lock.yaml`；桌面端前端用 npm 独立管理，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
+| `cbc862d` | chore(deps-dev): bump @vitejs/plugin-react 5.1.3->5.2.0 (#1020) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；桌面端 npm 独立管理（4.1 策略 4）；无 frontend/locales 改动。 |
+| `3822d66` | chore(deps-dev): bump tailwind-merge 3.3.1->3.6.0 (#1019) | **不同步** | 同上，devDependency 升级，npm 独立管理；无 frontend/locales 改动。 |
+| `a205d54` | chore(deps-dev): bump @typescript-eslint/parser 8.61.1->8.65.0 (#1018) | **不同步** | 同上，lint devDependency 升级；无 frontend/locales 改动。 |
+| `dc10267` | chore(deps): bump better-sqlite3 12.6.2->12.11.1 (#1016) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；better-sqlite3 为 Node 后端依赖，桌面端 Rust 用 sqlx，不共享依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
+| `a89de63` | chore(deps-dev): bump globals 13.24.0->17.8.0 (#1017) | **不同步** | 同上，lint devDependency 升级；无 frontend/locales 改动。 |
+
+**同步后验证**：`cd src-tauri && ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0）；`cd frontend && npm run build` 通过。桌面端自定义文件均手动合并未被覆盖；locales runtime* 键未受影响（本次无 locales 改动）。
 
 #### 2026-07-30：同步 `a99c382` → `29c0704`（5 个 commit）
 
@@ -1468,7 +1582,9 @@ npm run build
 - [X]  启动更新检查（根级 `UpdateCheckProvider`：应用启动即检查、不依赖登录态；检测到新版本自动弹「关于」+ 侧边栏红点；移除「忽略此版本」；详见 3.4.7）
 - [X]  更新检查日志（`log_event` Tauri command 写入 `app_log`，前端 `[update]` 全流程日志：检查/新版本/已最新/失败/安装；日志页按来源 `update` 可过滤；详见 3.4.7）
 - [X]  release notes Markdown 渲染（`Markdown` 组件 react-markdown+remark-gfm；notes 即 `doc/upgrade/{version}.md` 全文；详见 3.4.7）
-- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.26001；详见 3.4.7）
+- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.27001；详见 3.4.7）
+- [X]  stdio 服务器按需启动（startOnDemand：跳过启动连接、首次工具调用懒建进程、空闲超时自动关闭、缓存工具保留；详见 3.8）
+- [X]  stdio 连接错误包含上游 stderr（`stderr_tail` 滚动缓存拼接进 handshake 失败 error；详见 3.9）
 
 ### 待办
 

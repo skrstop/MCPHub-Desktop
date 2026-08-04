@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 16;
+pub const TARGET_VERSION: i64 = 17;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -120,6 +120,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         14 => migrate_v14(pool).await,
         15 => migrate_v15(pool).await,
         16 => migrate_v16(pool).await,
+        17 => migrate_v17(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -490,10 +491,8 @@ async fn migrate_v9(pool: &SqlitePool) -> Result<()> {
 /// Playwright). Stored as INTEGER (0/1); default 0 (shared pool, original
 /// behavior).
 async fn migrate_v10(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("ALTER TABLE servers ADD COLUMN per_session_client INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await
-        .ok(); // ignore if column already exists
+    // 用 add_column_if_missing 幂等加列(见该 helper 的注释:不能用 .ok() 吞错误)。
+    add_column_if_missing(pool, "servers", "per_session_client", "INTEGER NOT NULL DEFAULT 0").await?;
     Ok(())
 }
 
@@ -738,5 +737,53 @@ async fn migrate_v16(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     log::info!("[db] migration v16: created rag_tag_stats table");
+    Ok(())
+}
+
+/// v16 → v17: Add `start_on_demand` / `idle_timeout_ms` columns to `servers`
+/// for on-demand stdio server spawning (origin PR #1012).
+async fn migrate_v17(pool: &SqlitePool) -> Result<()> {
+    // ⚠️ 不能用 .ok() 吞错误:若 ALTER 失败而版本号仍被推进,会导致
+    // schema_version 与实际 schema 不一致,后续启动不重跑该迁移,SELECT
+    // 永久报 "no such column"。改用 add_column_if_missing 幂等加列。
+    add_column_if_missing(pool, "servers", "start_on_demand", "INTEGER NOT NULL DEFAULT 0").await?;
+    add_column_if_missing(pool, "servers", "idle_timeout_ms", "INTEGER NOT NULL DEFAULT 0").await?;
+    log::info!("[db] migration v17: added start_on_demand / idle_timeout_ms columns to servers");
+    Ok(())
+}
+
+/// SQLite 不支持 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,用
+/// `pragma_table_info` 检查列是否存在,不存在才 ADD。
+///
+/// 关键:ADD 失败时返回 `Err`(而非 `.ok()` 吞掉),这样迁移失败会让
+/// `set_version` 不执行,下次启动会重试该迁移。若用 `.ok()` 吞错误,版本号
+/// 会被推进到 N+1 但列实际没加上,数据库进入"版本号=N+1、schema 实际=N"的
+/// 不一致状态,后续启动看到 current>=target 不再重跑,导致依赖新列的
+/// SELECT 永久失败(曾导致服务器列表读不出、用户以为数据丢失)。
+async fn add_column_if_missing(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let exists: i64 = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{}') WHERE name = '{}')",
+        table, column
+    ))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow!("check column {}.{} existence failed: {}", table, column, e))?;
+    if exists == 0 {
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table, column, definition
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow!("add column {}.{} failed: {}", table, column, e))?;
+        log::info!("[db] added column {}.{} ({})", table, column, definition);
+    } else {
+        log::debug!("[db] column {}.{} already exists, skip", table, column);
+    }
     Ok(())
 }

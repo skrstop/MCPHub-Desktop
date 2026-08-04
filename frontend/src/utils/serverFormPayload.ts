@@ -176,6 +176,11 @@ export const buildServerPayload = ({
 
   // Per-session client isolation applies to any server type.
   config.perSessionClient = formData.perSessionClient === true ? true : undefined;
+  // On-demand spawning (stdio only): only set when enabled, scoped to stdio servers
+  if (serverType === 'stdio') {
+    config.startOnDemand = formData.startOnDemand === true ? true : undefined;
+    config.idleTimeoutMs = formData.startOnDemand === true ? (formData.idleTimeoutMs ?? 300000) : undefined;
+  }
 
   return {
     name: formData.name.trim(),

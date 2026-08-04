@@ -1,5 +1,5 @@
 {
-  "platform": "CPU",
+  "platform": "AUTO",
   "default": true,
   "description": "综合平衡,内存占用：1.6GB",
   "sort": 3

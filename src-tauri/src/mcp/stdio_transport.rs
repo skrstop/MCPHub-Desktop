@@ -169,6 +169,13 @@ pub struct StdioTransport {
     server_name: String,
     /// Server version reported by the MCP `initialize` handshake (`serverInfo.version`).
     server_version: Option<String>,
+    /// Rolling tail of the child process's stderr (capped at ~32KB). Captured by
+    /// the stderr drain task and appended to connection-error messages so users
+    /// can see *why* the upstream process failed (Python tracebacks, missing
+    /// deps, etc.) instead of a generic handshake error. Mirrors origin #1015.
+    /// Uses a sync mutex so it can be read from the sync `map_err` closure; the
+    /// guard is never held across an await.
+    stderr_tail: Arc<std::sync::Mutex<String>>,
 }
 
 impl StdioTransport {
@@ -190,6 +197,7 @@ impl StdioTransport {
             connected: false,
             server_name: server_name.into(),
             server_version: None,
+            stderr_tail: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 
@@ -403,6 +411,7 @@ impl McpTransport for StdioTransport {
         // when the ~4KB pipe buffer fills up (npx/uvx write progress to stderr).
         let stderr_name = self.server_name.clone();
         let is_pkg_mgr = self.command == "npx" || self.command == "uvx";
+        let stderr_tail = self.stderr_tail.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -416,6 +425,20 @@ impl McpTransport for StdioTransport {
             while let Ok(Some(line)) = lines.next_line().await {
                 log::info!("[{}] stderr: {}", stderr_name, line);
                 app_logger::log_to_db("info", &format!("[stderr] {}", line));
+
+                // Accumulate a rolling tail (capped at ~32KB) so connection
+                // errors can include the upstream stderr. Drop from the front
+                // when over the cap.
+                {
+                    let mut tail = stderr_tail.lock().unwrap();
+                    tail.push_str(&line);
+                    tail.push('\n');
+                    const CAP: usize = 32_768;
+                    if tail.len() > CAP {
+                        let start = tail.len() - CAP;
+                        tail.drain(..start);
+                    }
+                }
 
                 if is_pkg_mgr && looks_like_download_progress(&line) {
                     let pct = parse_progress_pct(&line);
@@ -501,7 +524,16 @@ impl McpTransport for StdioTransport {
                 let err_msg = format!("[{}] MCP initialize handshake failed after {:.1}s: {}", self.server_name, elapsed.as_secs_f64(), e);
                 log::error!("{}", err_msg);
                 app_logger::log_to_db("error", &err_msg);
-                e
+                // Enrich the error with the upstream stderr tail so the caller
+                // (and ultimately the user) sees why the process failed
+                // (Python traceback, missing dep, etc.). Mirrors origin #1015.
+                let tail = self.stderr_tail.lock().unwrap();
+                let tail_str = tail.trim_end();
+                if !tail_str.is_empty() {
+                    anyhow!("[{}] MCP initialize handshake failed after {:.1}s: {}\n--- upstream stderr ---\n{}", self.server_name, elapsed.as_secs_f64(), e, tail_str)
+                } else {
+                    e
+                }
             })?;
 
         // Capture the server-reported version (serverInfo.version) for a
