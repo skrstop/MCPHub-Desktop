@@ -26,7 +26,14 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
         let tools = server_tool_config_service::apply_tool_filters(&cfg.name, tools)
             .await
             .unwrap_or_default();
-        result.push(ServerInfo { config: cfg, status, tools });
+        result.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() });
+    }
+    // Append the "mcphub-desktop" builtin server (virtual, no DB row), which
+    // bundles the RAG tools + builtin prompts + builtin resources as one
+    // server's capabilities. Always shown so groups can select its
+    // prompts/resources even when RAG is off.
+    if let Some(info) = crate::rag::service::builtin_server_info().await {
+        result.push(info);
     }
     Ok(result)
 }
@@ -54,7 +61,7 @@ pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
         let tools = server_tool_config_service::apply_tool_filters(&name, tools)
             .await
             .unwrap_or_default();
-        Ok(Some(ServerInfo { config: cfg, status, tools }))
+        Ok(Some(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() }))
     } else {
         Ok(None)
     }
@@ -79,7 +86,7 @@ pub async fn add_server(config: ServerConfig) -> Result<ServerInfo, String> {
         last_connected: None,
         server_version: None,
     };
-    Ok(ServerInfo { config: saved, status, tools: vec![] })
+    Ok(ServerInfo { config: saved, status, tools: vec![], prompts: Vec::new(), resources: Vec::new() })
 }
 
 #[tauri::command]
@@ -109,7 +116,7 @@ pub async fn update_server(name: String, config: ServerConfig) -> Result<ServerI
         last_connected: None,
         server_version: None,
     };
-    Ok(ServerInfo { config: saved, status, tools: vec![] })
+    Ok(ServerInfo { config: saved, status, tools: vec![], prompts: Vec::new(), resources: Vec::new() })
 }
 
 #[tauri::command]

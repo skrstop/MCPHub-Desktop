@@ -438,7 +438,7 @@ const SkillsAgentsCard: React.FC<{ collapsed: boolean; onToggle: () => void }> =
   const remove = (id: string) => setAgents((prev) => prev.filter((a) => a.id !== id));
   const add = () => {
     const id = `agent-${Date.now()}`;
-    setAgents((prev) => [...prev, { id, name: '', skillsPath: '' }]);
+    setAgents((prev) => [...prev, { id, name: '', skillsPath: '', custom: true }]);
   };
 
   const pickPath = async (id: string) => {

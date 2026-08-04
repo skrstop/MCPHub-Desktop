@@ -10,3 +10,4 @@ pub mod resource;
 pub mod market;
 pub mod server_tool_config;
 pub mod skill;
+pub mod rag;

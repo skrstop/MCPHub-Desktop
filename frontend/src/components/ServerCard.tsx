@@ -197,6 +197,11 @@ const ServerCard = ({
   const isMcpApp = serverExposesMcpApp(server);
   const enabled = server.enabled !== false;
   const canManage = canManageServer(server, auth.user);
+  // Builtin (virtual) servers - e.g. the RAG server. No process / no DB row,
+  // so toggle/edit/copy/reload/delete are disabled; only tool viewing (expand)
+  // is allowed. Everything else renders like a custom server.
+  const isBuiltin = server.config?.type === 'builtin';
+  const canManageServerActions = canManage && !isBuiltin;
   // Reinstall is only available for stdio servers using npx or uvx
   const supportsReinstall =
     server.config?.command === 'npx' || server.config?.command === 'uvx';
@@ -585,6 +590,11 @@ const ServerCard = ({
                     App
                   </span>
                 )}
+                {isBuiltin && (
+                  <span className="hub-tag flex-shrink-0" style={{ background: 'var(--hub-accent-soft)', color: 'var(--hub-accent)' }} title={t('server.builtinServer')}>
+                    {t('server.builtinBadge')}
+                  </span>
+                )}
                 {server.error && (
                   <div className="relative" ref={errorPopoverRef}>
                     <button
@@ -759,7 +769,8 @@ const ServerCard = ({
             </span>
           ) : null}
 
-          {/* Toggle switch */}
+          {/* Toggle switch (hidden for builtin servers - they have no on/off) */}
+          {!isBuiltin && (
           <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
             <LoadingControl
               isLoading={isToggling}
@@ -779,10 +790,11 @@ const ServerCard = ({
               />
             </LoadingControl>
           </div>
+          )}
 
-          {/* Menu */}
+          {/* Menu (hidden for builtin servers) */}
           <div className="relative" ref={menuRef} style={{ overflow: 'visible' }}>
-            {canManage && (
+            {canManageServerActions && (
               <button
                 className="hub-icon-btn relative"
                 onClick={(e) => {

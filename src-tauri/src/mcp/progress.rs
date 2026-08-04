@@ -63,6 +63,12 @@ fn app_handle() -> Option<&'static AppHandle> {
     APP_HANDLE.get()
 }
 
+/// Public access to the stashed app handle (e.g. for RAG MCP tools that need
+/// to resolve app data paths outside a Tauri command context).
+pub fn get_app_handle() -> Option<&'static AppHandle> {
+    app_handle()
+}
+
 pub fn emit_install_progress(payload: &ServerInstallProgress) {
     if let Some(app) = app_handle() {
         if let Err(e) = app.emit(INSTALL_PROGRESS_EVENT, payload) {

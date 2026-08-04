@@ -572,11 +572,43 @@ async fn mcp_scope_servers(scope: &str) -> Vec<String> {
 }
 
 /// Get server filters for a scope (used for tool filtering in groups)
+/// Look up the tools a server exposes, for `tools/list` + `tools/call`
+/// resolution. Real (custom) servers come from the MCP pool; the RAG builtin
+/// server has no pool entry, so its tools come from `rag::service` instead.
+/// Returns None for a disconnected/unknown server (or RAG when disabled).
+async fn tools_for_server(nm: &str) -> Option<Vec<crate::models::server::Tool>> {
+    if nm == crate::rag::service::BUILTIN_SERVER_NAME {
+        if crate::rag::service::is_enabled() {
+            Some(crate::rag::service::builtin_tools())
+        } else {
+            None
+        }
+    } else {
+        pool::list_tools_for(nm).await.ok()
+    }
+}
+
 async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
     let scope = scope.trim_start_matches('/').trim();
+    // The RAG builtin server filter, appended to global scope (and exposed on
+    // its own single-server scope) when RAG is enabled. Treated like any server
+    // by the tools/list aggregation.
+    let rag_filter = || -> Option<ServerFilter> {
+        if crate::rag::service::is_enabled() {
+            Some(ServerFilter {
+                name: crate::rag::service::BUILTIN_SERVER_NAME.to_string(),
+                tools: None,
+                prompts: None,
+                resources: None,
+            })
+        } else {
+            None
+        }
+    };
     if scope.is_empty() || scope == "$smart" {
-        // No filters for global scope
-        return pool::get_all_statuses()
+        // No filters for global scope - all connected pool servers + the RAG
+        // builtin server (when RAG is on).
+        let mut filters: Vec<ServerFilter> = pool::get_all_statuses()
             .await
             .into_iter()
             .filter(|s| s.connected)
@@ -587,12 +619,22 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
                 resources: None,
             })
             .collect();
+        if let Some(rf) = rag_filter() {
+            filters.push(rf);
+        }
+        return filters;
     }
     let name = scope.strip_prefix("$smart/").unwrap_or(scope);
     // Try as group (name or id)
     if let Ok(groups) = group_service::list_all().await {
         if let Some(g) = groups.iter().find(|g| g.name == name || g.id == name) {
             return extract_server_filters(&g.servers);
+        }
+    }
+    // RAG builtin server accessed directly as a single-server scope.
+    if name == crate::rag::service::BUILTIN_SERVER_NAME {
+        if let Some(rf) = rag_filter() {
+            return vec![rf];
         }
     }
     // Try as server name (no filters)
@@ -609,24 +651,6 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
         }];
     }
     vec![]
-}
-
-/// Resolve a (non-global) scope to its group's builtin prompt/resource selection.
-/// Returns None for global / single-server / unknown scopes (→ expose all builtins).
-/// For a group scope: an unconfigured group exposes NONE by default (the group
-/// must explicitly opt in to builtins), so None selection becomes an empty list,
-/// not "all". This is the divergence from the per-server "all" default.
-async fn scope_builtin_selection(scope_clean: &str) -> Option<(Option<Vec<String>>, Option<Vec<String>>)> {
-    if scope_clean.is_empty() || scope_clean == "$smart" {
-        return None;
-    }
-    let name = scope_clean.strip_prefix("$smart/").unwrap_or(scope_clean);
-    match group_service::find_by_name_or_id(name).await {
-        // Group exists: unconfigured (None) → expose nothing (empty list).
-        Ok(Some(g)) => Some((g.builtin_prompts.or(Some(vec![])), g.builtin_resources.or(Some(vec![])))),
-        // Not a group (single-server/unknown scope) → expose all builtins.
-        _ => None,
-    }
 }
 
 /// None = allow all (global/unknown scope); Some(allowed) = allow only if key is in the list.
@@ -810,42 +834,58 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
             let use_prefix = server_filters.len() > 1;
             let mut tools: Vec<Value> = Vec::new();
             for sf in &server_filters {
-                if let Ok(ts) = pool::list_tools_for(&sf.name).await {
-                    let filtered = server_tool_config_service::apply_tool_filters(&sf.name, ts)
+                // Builtin RAG server: its tools come from rag::service (no pool
+                // entry). Otherwise pull from the MCP pool as usual.
+                let is_builtin = sf.name == crate::rag::service::BUILTIN_SERVER_NAME;
+                let ts: Vec<crate::models::server::Tool> = if is_builtin {
+                    if !crate::rag::service::is_enabled() {
+                        continue;
+                    }
+                    crate::rag::service::builtin_tools()
+                } else {
+                    match pool::list_tools_for(&sf.name).await {
+                        Ok(ts) => ts,
+                        Err(_) => continue,
+                    }
+                };
+                let filtered = if is_builtin {
+                    ts
+                } else {
+                    server_tool_config_service::apply_tool_filters(&sf.name, ts)
                         .await
-                        .unwrap_or_else(|_| vec![]);
-                    for t in &filtered {
-                        // Skip disabled tools
-                        if !t.enabled {
+                        .unwrap_or_else(|_| vec![])
+                };
+                for t in &filtered {
+                    // Skip disabled tools
+                    if !t.enabled {
+                        continue;
+                    }
+                    // Apply group-level tool filter
+                    if let Some(ref allowed_tools) = sf.tools {
+                        if !allowed_tools.contains(&t.name) {
                             continue;
                         }
-                        // Apply group-level tool filter
-                        if let Some(ref allowed_tools) = sf.tools {
-                            if !allowed_tools.contains(&t.name) {
-                                continue;
-                            }
-                        }
-                        let exposed_name = if use_prefix {
-                            format!("{}{}{}", sf.name, name_sep, t.name)
-                        } else {
-                            t.name.clone()
-                        };
-                        let mut entry = json!({
-                            "name": exposed_name,
-                            "description": t.description.as_deref().unwrap_or(""),
-                            "inputSchema": t.input_schema,
-                        });
-                        // 2025 passthrough: forward upstream annotations /
-                        // outputSchema only when present. The strategy then
-                        // shapes the entry (e.g. 2024 strips these).
-                        if let Some(a) = &t.annotations {
-                            entry["annotations"] = a.clone();
-                        }
-                        if let Some(s) = &t.output_schema {
-                            entry["outputSchema"] = s.clone();
-                        }
-                        tools.push(strategy.shape_tool(entry));
                     }
+                    let exposed_name = if use_prefix {
+                        format!("{}{}{}", sf.name, name_sep, t.name)
+                    } else {
+                        t.name.clone()
+                    };
+                    let mut entry = json!({
+                        "name": exposed_name,
+                        "description": t.description.as_deref().unwrap_or(""),
+                        "inputSchema": t.input_schema,
+                    });
+                    // 2025 passthrough: forward upstream annotations /
+                    // outputSchema only when present. The strategy then
+                    // shapes the entry (e.g. 2024 strips these).
+                    if let Some(a) = &t.annotations {
+                        entry["annotations"] = a.clone();
+                    }
+                    if let Some(s) = &t.output_schema {
+                        entry["outputSchema"] = s.clone();
+                    }
+                    tools.push(strategy.shape_tool(entry));
                 }
             }
             jsonrpc_response(id, json!({"tools": tools}))
@@ -853,6 +893,7 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
         "tools/call" => {
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
             let mut server_filters = mcp_scope_server_filters(&scope).await;
             // Apply bearer key access control
             if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
@@ -860,7 +901,10 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
             }
             let use_prefix = server_filters.len() > 1;
 
-            // Resolve server + original tool name (strip nameSeparator prefix if needed)
+            // Resolve server + original tool name (strip nameSeparator prefix if needed).
+            // The RAG builtin server has no pool entry - its tools come from
+            // rag::service::builtin_tools(), so we branch on the builtin name.
+            let rag_name = crate::rag::service::BUILTIN_SERVER_NAME;
             let mut target: Option<(String, String)> = None;
             if use_prefix {
                 // Try to find a server whose prefix matches the tool_name
@@ -874,7 +918,7 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                                 continue;
                             }
                         }
-                        if let Ok(ts) = pool::list_tools_for(&sf.name).await {
+                        if let Some(ts) = tools_for_server(&sf.name).await {
                             if ts.iter().any(|t| t.name == orig_name) {
                                 target = Some((sf.name.clone(), orig_name.to_string()));
                                 break;
@@ -892,7 +936,7 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                             continue;
                         }
                     }
-                    if let Ok(ts) = pool::list_tools_for(&sf.name).await {
+                    if let Some(ts) = tools_for_server(&sf.name).await {
                         if ts.iter().any(|t| t.name == tool_name) {
                             target = Some((sf.name.clone(), tool_name.to_string()));
                             break;
@@ -906,6 +950,61 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                     jsonrpc_error(id, -32602, format!("Tool '{}' not found", tool_name))
                 }
                 Some((sn, orig_name)) => {
+                    // RAG builtin server: dispatch to the local rag service
+                    // (no MCP pool call). Only the three RAG tools are routed.
+                    if sn == rag_name {
+                        if !crate::rag::service::is_enabled() {
+                            return jsonrpc_error(id, -32603, "RAG is not enabled".to_string());
+                        }
+                        if orig_name == "rag_search" {
+                            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                            let tags: Vec<String> = args
+                                .get("tags")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+                                .unwrap_or_default();
+                            match crate::rag::service::search(query.to_string(), tags).await {
+                                Ok(results) => {
+                                    let text = serde_json::to_string_pretty(&results).unwrap_or_default();
+                                    let resp = json!({"content": [{"type":"text","text":text}], "isError": false});
+                                    return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
+                                }
+                                Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
+                            }
+                        }
+                        if orig_name == "rag_get" {
+                            let doc_id = args.get("docId").and_then(|v| v.as_str())
+                                .or_else(|| args.get("id").and_then(|v| v.as_str()))
+                                .unwrap_or("");
+                            let Some(app) = crate::mcp::progress::get_app_handle() else {
+                                return jsonrpc_error(id, -32603, "app handle unavailable".to_string());
+                            };
+                            match crate::rag::service::get_doc(app, doc_id).await {
+                                Ok(Some(doc)) => {
+                                    let resp = json!({"content": [{"type":"text","text":doc.content}], "isError": false});
+                                    return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
+                                }
+                                Ok(None) => return jsonrpc_error(id, -32602, format!("document not found: {}", doc_id)),
+                                Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
+                            }
+                        }
+                        if orig_name == "rag_tag_search" {
+                            let keys: Vec<String> = args
+                                .get("search_key")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+                                .unwrap_or_default();
+                            match crate::rag::service::list_tags(keys).await {
+                                Ok(tags) => {
+                                    let text = serde_json::to_string_pretty(&tags).unwrap_or_else(|_| "[]".to_string());
+                                    let resp = json!({"content": [{"type":"text","text":text}], "isError": false});
+                                    return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
+                                }
+                                Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
+                            }
+                        }
+                        return jsonrpc_error(id, -32602, format!("Tool '{}' not found", orig_name));
+                    }
                     // Check if tool is enabled
                     if let Ok(ts) = pool::list_tools_for(&sn).await {
                         let filtered = server_tool_config_service::apply_tool_filters(&sn, ts).await.unwrap_or_default();
@@ -1020,11 +1119,16 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
             }
         }
         "prompts/list" => {
-            // ponytail: loads all prompts then filters; fine for desktop-scale counts.
-            // Add find_by_name/find_by_uri on the service if the set grows large.
+            // Builtin prompts are carried by the "mcphub-desktop" builtin server.
+            // Its per-server `prompts` selection (None = all, Some = list) in the
+            // scope's group config governs which are exposed. If the builtin
+            // server isn't in scope, expose none.
+            let filters = mcp_scope_server_filters(&scope).await;
+            let prompt_sel = filters
+                .iter()
+                .find(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME)
+                .and_then(|f| f.prompts.clone());
             let prompts = prompt_service::list_all().await.unwrap_or_default();
-            // Group scope: filter builtins to the group's selection (None = all).
-            let prompt_sel = scope_builtin_selection(scope_clean).await.and_then(|(p, _)| p);
             let list: Vec<Value> = prompts.into_iter().filter(|p| {
                 p.enabled && builtin_allowed(&prompt_sel, &p.name)
             }).map(|p| {
@@ -1045,7 +1149,11 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
         "prompts/get" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let prompt_sel = scope_builtin_selection(scope_clean).await.and_then(|(p, _)| p);
+            let filters = mcp_scope_server_filters(&scope).await;
+            let prompt_sel = filters
+                .iter()
+                .find(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME)
+                .and_then(|f| f.prompts.clone());
             let prompt = match prompt_service::list_all().await {
                 Ok(ps) => ps.into_iter().find(|p| p.enabled && p.name == name
                     && builtin_allowed(&prompt_sel, &p.name)),
@@ -1067,8 +1175,12 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
             }
         }
         "resources/list" => {
+            let filters = mcp_scope_server_filters(&scope).await;
+            let resource_sel = filters
+                .iter()
+                .find(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME)
+                .and_then(|f| f.resources.clone());
             let resources = resource_service::list_all().await.unwrap_or_default();
-            let resource_sel = scope_builtin_selection(scope_clean).await.and_then(|(_, r)| r);
             let list: Vec<Value> = resources.into_iter().filter(|r| {
                 r.enabled && builtin_allowed(&resource_sel, &r.uri)
             }).map(|r| json!({
@@ -1081,7 +1193,11 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
         }
         "resources/read" => {
             let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
-            let resource_sel = scope_builtin_selection(scope_clean).await.and_then(|(_, r)| r);
+            let filters = mcp_scope_server_filters(&scope).await;
+            let resource_sel = filters
+                .iter()
+                .find(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME)
+                .and_then(|f| f.resources.clone());
             let resource = match resource_service::list_all().await {
                 Ok(rs) => rs.into_iter().find(|r| r.enabled && r.uri == uri
                     && builtin_allowed(&resource_sel, &r.uri)),

@@ -1,13 +1,18 @@
 use serde::{Deserialize, Serialize};
 
 /// A configured AI agent and its skills install path. Stored in
-/// `system_config.config_json.skills.agents`.
+/// `system_config.config_json.skills.agents`. `custom=false` marks agents that
+/// come from the bundled `install.json` catalog (built-in, read-only in the
+/// agent-management UI); `custom=true` marks user-added agents (creatable /
+/// deletable). `custom` is recomputed from the catalog on every `list_agents`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillAgent {
     pub id: String,
     pub name: String,
     pub skills_path: String,
+    #[serde(default)]
+    pub custom: bool,
 }
 
 /// A skill directory discovered under an agent's skillsPath during import

@@ -107,6 +107,38 @@ flate2 = "1"
 tar = "0.4"
 rmcp-openapi = "0.31"
 
+# RAG: embedding inference (ort + tokenizers) + vector DB (lancedb)
+# ort's default features pull the prebuilt binary (CPU EP + platform GPU EPs
+# as enabled per-target below). For non-quantized models the embedding
+# service registers the platform's GPU EP first (CoreML / DirectML / CUDA),
+# falling back to CPU; quantized (MatMulNBits) models are CPU-only because
+# CoreML/DirectML/CUDA don't map that contrib op.
+ort = "2.0.0-rc.13"
+# `default-features = false` avoids the esaxx C++ dependency (the macOS CLT
+# C++ headers are incomplete); BPE tokenization only needs fancy-regex.
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex", "progressbar"] }
+lancedb = "0.33"
+ndarray = "0.16"
+# RAG GGUF backend: candle (pure-Rust tensor lib by HF). Used by `GgufEmbedder`
+# for GGUF embedding models (candle's quantized QMatMul has native int4 kernels
+# on CPU/Metal - the speed win ort's MLAS couldn't deliver for Q4 ONNX). GPU is
+# engaged per-target (metal on macOS, cuda on Linux NVIDIA); Windows is CPU-only
+# (candle has no DirectML EP). Version pinned per-target below to union features.
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+# AHashMap (ahash) - used by `tokenizers`'s BPE `Vocab`; needed to build a BPE
+# tokenizer from GGUF metadata (when no tokenizer.json ships alongside).
+ahash = "0.8"
+# Encoding detection + SIMD-accelerated conversion for non-UTF-8 text uploads.
+encoding_rs = "0.8"
+chardetng = "1.0"
+# Global allocator experiment: with `override` it replaces the system malloc
+# (incl. for the C ort library) and returns freed pages to the OS more
+# aggressively. Helps verify if RAG disable can drop RSS. Revert by removing
+# this + the #[global_allocator] in main.rs.
+mimalloc = { version = "0.1", features = ["override"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -119,14 +151,69 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
 ] }
+# DirectML EP → Windows GPU (covers NVIDIA / AMD / Intel via the DirectX 12
+# layer; DirectML.dll ships with Win10+ or is downloaded by ort-sys).
+# Registered first for non-quantized models; CPU is the fallback. The
+# `ort::ep::DirectML` type only exists with this feature.
+ort = { version = "2.0.0-rc.13", features = ["directml"] }
 
 # macOS: set process display name in Dock during dev
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+# Enable ort's CoreML execution-provider binding on macOS only (Apple Silicon
+# ANE / GPU). ort-sys's `coreml` feature is an empty flag - the prebuilt
+# libonnxruntime.dylib already ships with CoreML EP compiled in; this just
+# unlocks the Rust binding. On non-macOS the `ort::ep::CoreML` type is absent,
+# so the EP registration is cfg'd out there. Big import-throughput win when
+# CoreML/ANE engages; falls back to CPU otherwise.
+ort = { version = "2.0.0-rc.13", features = ["coreml"] }
+# candle Metal (GPU) + accelerate (Apple BLAS sgemm) on macOS. The `accelerate`
+# feature makes candle's CPU f32 matmul route through Apple Accelerate (vDSP/
+# AMX) instead of the pure-Rust `gemm` crate - ~2-5x faster for the CPU path
+# (F2LLMv2-style models that set deploy.json "platform":"CPU"). GPU (Metal)
+# still uses the int4 Metal kernels; accelerate only engages on the CPU device.
+candle-core = { version = "0.11", features = ["metal", "accelerate"] }
+candle-nn = { version = "0.11", features = ["metal"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# CUDA EP → Linux NVIDIA GPU. ort-sys downloads the CUDA-augmented prebuilt
+# at build time (large; needs the build host to fetch it). At RUNTIME, if no
+# NVIDIA GPU / CUDA runtime is present, EP registration fails gracefully and
+# the model runs on CPU. Linux without NVIDIA therefore falls back to CPU
+# automatically. (AMD GPU would need `rocm` instead — not enabled by default.)
+ort = { version = "2.0.0-rc.13", features = ["cuda"] }
+candle-core = { version = "0.11", features = ["cuda"] }
+candle-nn = { version = "0.11", features = ["cuda"] }
+
+# Intel MKL BLAS for x86_64 Linux — same role as `accelerate` on macOS: makes
+# CPU f32 matmul use a highly-optimized BLAS (multi-threaded, AVX2/AVX512)
+# instead of the pure-Rust `gemm` crate. x86_64 Linux only (intel-mkl-src has
+# no aarch64 build). Features union with the cuda features above.
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+candle-core = { version = "0.11", features = ["mkl"] }
+candle-nn = { version = "0.11", features = ["mkl"] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.dev]
+# Reduce debug-symbol volume so the dev binary is smaller and links faster
+# (the dev build was ~70GB with full `debug=2` symbols; linking dominated
+# wall time even for one-line changes). `debug=1` keeps line-number info
+# (usable backtraces, breakpoints) without per-variable symbols.
+debug = 1
+# macOS: split debug info into a sibling .dSYM instead of embedding in the
+# binary - the binary itself is small so relinking on each `tauri dev` is fast.
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# Build dependencies at opt-level=1 (vs the default 0): the single recompile
+# is slightly slower but the resulting code runs faster + smaller, and the
+# cached artifacts link faster. opt-level=0 for deps produced huge unoptimized
+# blobs that slowed the final link.
+opt-level = 1
+debug = 1
 
 [profile.release]
 panic = "abort"

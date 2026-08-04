@@ -7,6 +7,8 @@ import { ServerProvider } from './contexts/ServerContext';
 import { ServerInstallProgressProvider } from './contexts/ServerInstallProgressContext';
 import { SettingsProvider } from './contexts/SettingsContext';
 import { BuiltinDataProvider } from './contexts/BuiltinDataContext';
+import { RagDataProvider } from './hooks/useRagData';
+import { SkillDataProvider } from './hooks/useSkillData';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
 import { UpdateCheckProvider } from './contexts/UpdateCheckContext';
@@ -54,6 +56,7 @@ const ActivityPage = lazy(() => import('./pages/ActivityPage'));
 const PromptsPage = lazy(() => import('./pages/PromptsPage'));
 const ResourcesPage = lazy(() => import('./pages/ResourcesPage'));
 const SkillsPage = lazy(() => import('./pages/SkillsPage'));
+const RagPage = lazy(() => import('./pages/RagPage'));
 
 // Helper component to redirect cloud server routes to market
 const CloudRedirect: React.FC = () => {
@@ -79,6 +82,8 @@ function App() {
           <ToastProvider>
             <SettingsProvider>
             <BuiltinDataProvider>
+              <SkillDataProvider>
+              <RagDataProvider>
               <Router basename={basename}>
                 <EmbeddingSyncAlertListener />
                 <Routes>
@@ -101,6 +106,7 @@ function App() {
                       <Route path="/prompts" element={<PromptsPage />} />
                       <Route path="/resources" element={<ResourcesPage />} />
                       <Route path="/skills" element={<SkillsPage />} />
+                      <Route path="/rag" element={<RagPage />} />
                       <Route path="/users" element={<UsersPage />} />
                       <Route path="/market" element={<MarketPage />} />
                       <Route path="/market/:serverName" element={<MarketPage />} />
@@ -117,6 +123,8 @@ function App() {
                   <Route path="*" element={<Navigate to="/" />} />
                 </Routes>
               </Router>
+              </RagDataProvider>
+              </SkillDataProvider>
             </BuiltinDataProvider>
             </SettingsProvider>
           </ToastProvider>

@@ -174,7 +174,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (p === 'groups' && m === 'GET') return { command: 'list_groups', args: {} };
   if (p === 'groups' && m === 'POST') {
     // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
-    const b = body as { name?: string; description?: string; servers?: Array<unknown>; builtinPrompts?: string[] | 'all'; builtinResources?: string[] | 'all' } | null;
+    const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
     return {
       command: 'add_group',
       args: {
@@ -183,8 +183,6 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
           description: b?.description,
           servers: b?.servers ?? [],
           // Default [] = expose no builtins until the user explicitly selects.
-          builtinPrompts: b?.builtinPrompts ?? [],
-          builtinResources: b?.builtinResources ?? [],
         },
       },
     };
@@ -196,7 +194,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   }
   if (segs[0] === 'groups' && segs.length === 2 && m === 'PUT') {
     // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
-    const b = body as { name?: string; description?: string; servers?: Array<unknown>; builtinPrompts?: string[] | 'all'; builtinResources?: string[] | 'all' } | null;
+    const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
     return {
       command: 'update_group',
       args: {
@@ -205,8 +203,6 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
           name: b?.name ?? '',
           description: b?.description,
           servers: b?.servers ?? [],
-          builtinPrompts: b?.builtinPrompts ?? [],
-          builtinResources: b?.builtinResources ?? [],
         },
       },
     };
@@ -512,6 +508,20 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     if (segs[1] === 'agents' && m === 'PUT')
       return { command: 'save_skill_agents', args: { agents: body } };
 
+    // POST /skills/agents/create — create a custom agent (agent-management UI)
+    if (segs[1] === 'agents' && segs[2] === 'create' && m === 'POST') {
+      const b = body as { name?: string; skillsPath?: string } | null;
+      return {
+        command: 'create_skill_agent',
+        args: { name: b?.name ?? '', skillsPath: b?.skillsPath ?? '' },
+      };
+    }
+    // POST /skills/agents/delete — delete a custom agent by id
+    if (segs[1] === 'agents' && segs[2] === 'delete' && m === 'POST') {
+      const b = body as { id?: string } | null;
+      return { command: 'delete_skill_agent', args: { id: b?.id ?? '' } };
+    }
+
     // GET /skills/scan — scan all agents for importable skills (Phase 2.3: real command)
     if (segs[1] === 'scan' && m === 'GET')
       return { command: 'scan_skills_for_import', args: {} };
@@ -593,6 +603,102 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: '__stub__', args: { __response: { success: false, message: 'Not found' } } };
   }
 
+  // RAG endpoints — (rag_toggle, rag_status, list_rag_docs, get_rag_doc,
+  // upload_rag_docs, delete_rag_doc, rag_search_command, get_rag_settings,
+  // save_rag_settings, open_rag_file_location).
+  if (segs[0] === 'rag') {
+    // GET /rag/status — runtime status (switch state)
+    if (segs[1] === 'status' && m === 'GET')
+      return { command: 'rag_status', args: {} };
+    // POST /rag/toggle — enable/disable RAG (blocks until ready on enable)
+    if (segs[1] === 'toggle' && m === 'POST') {
+      const b = body as { enabled?: boolean } | null;
+      return { command: 'rag_toggle', args: { enabled: b?.enabled ?? false } };
+    }
+    // GET /rag/settings — search weights + max results
+    if (segs[1] === 'settings' && m === 'GET')
+      return { command: 'get_rag_settings', args: {} };
+    // GET /rag/model-limits — model context window (tokens), to cap chunk_size
+    if (segs[1] === 'model-limits' && m === 'GET')
+      return { command: 'rag_model_limits', args: {} };
+    // GET /rag/tools — app-level RAG tool definitions (for the "view tools" dialog)
+    if (segs[1] === 'tools' && m === 'GET')
+      return { command: 'rag_tools', args: {} };
+    // PUT /rag/settings — persist search settings
+    if (segs[1] === 'settings' && m === 'PUT')
+      return { command: 'save_rag_settings', args: { settings: body } };
+    // POST /rag/search — similarity search (optional tag filter)
+    if (segs[1] === 'search' && m === 'POST') {
+      const b = body as { query?: string; tags?: string[] } | null;
+      return {
+        command: 'rag_search_command',
+        args: { query: b?.query ?? '', tags: b?.tags ?? [] },
+      };
+    }
+    // POST /rag/tags/search — list/search distinct tags (optional search_key)
+    if (segs[1] === 'tags' && segs[2] === 'search' && m === 'POST') {
+      const b = body as { searchKey?: string[] } | null;
+      return { command: 'rag_tag_search', args: { searchKey: b?.searchKey ?? [] } };
+    }
+    // POST /rag/docs/set-tags — set a document's tag list (re-indexes)
+    if (segs[1] === 'docs' && segs[2] === 'set-tags' && m === 'POST') {
+      const b = body as { id?: string; tags?: string[] } | null;
+      return { command: 'set_rag_tags', args: { id: b?.id ?? '', tags: b?.tags ?? [] } };
+    }
+    // POST /rag/open-location — reveal a doc's file in the OS file manager
+    if (segs[1] === 'open-location' && m === 'POST') {
+      const b = body as { id?: string } | null;
+      return { command: 'open_rag_file_location', args: { id: b?.id ?? '' } };
+    }
+    // POST /rag/reindex-all — re-embed every doc with the currently-loaded
+    // model (after a model swap recreated the vector table). Emits progress
+    // events; returns the count of docs re-embedded.
+    if (segs[1] === 'reindex-all' && m === 'POST') {
+      return { command: 'rag_reindex_all', args: {} };
+    }
+    // GET /rag/models - list available model sizes (ready / downloadable).
+    if (segs[1] === 'models' && m === 'GET')
+      return { command: 'rag_list_models', args: {} };
+    // GET /rag/model - the currently-selected model size (or null).
+    if (segs[1] === 'model' && m === 'GET')
+      return { command: 'rag_current_model', args: {} };
+    // POST /rag/select-model - persist + auto-restart RAG with the new model.
+    if (segs[1] === 'select-model' && m === 'POST') {
+      const b = body as { size?: string } | null;
+      return { command: 'rag_select_model', args: { size: b?.size ?? '' } };
+    }
+    // POST /rag/download-model - stream-download a model .zip + extract.
+    if (segs[1] === 'download-model' && m === 'POST') {
+      const b = body as { size?: string } | null;
+      return { command: 'rag_download_model', args: { size: b?.size ?? '' } };
+    }
+    // POST /rag/docs/pick — OS multi-file picker (plain-text), returns paths
+    if (segs[1] === 'docs' && segs[2] === 'pick' && m === 'POST')
+      return { command: 'pick_rag_files', args: {} };
+    // POST /rag/docs/upload — upload a single file by disk path (backend reads
+    // bytes from disk + detects encoding; no base64/JSON byte transfer).
+    if (segs[1] === 'docs' && segs[2] === 'upload' && m === 'POST') {
+      const b = body as { filePath?: string; tags?: string[] } | null;
+      return {
+        command: 'upload_rag_doc',
+        args: { filePath: b?.filePath ?? '', tags: b?.tags ?? [] },
+      };
+    }
+    // POST /rag/docs/delete — delete a doc + its vector records
+    if (segs[1] === 'docs' && segs[2] === 'delete' && m === 'POST') {
+      const b = body as { id?: string } | null;
+      return { command: 'delete_rag_doc', args: { id: b?.id ?? '' } };
+    }
+    // GET /rag/docs/:id — full document (with content)
+    if (segs[1] === 'docs' && m === 'GET' && segs.length === 3)
+      return { command: 'get_rag_doc', args: { id: decodeURIComponent(segs[2]) } };
+    // GET /rag/docs — list documents (metadata only)
+    if (segs[1] === 'docs' && m === 'GET' && segs.length === 2)
+      return { command: 'list_rag_docs', args: {} };
+
+    return { command: '__stub__', args: { __response: { success: false, message: 'Not found' } } };
+  }
+
   throw new Error(`[tauriClient] Unmapped route: ${m} /${p}`);
 }
 
@@ -660,6 +766,8 @@ export function transformTauriResponse(command: string, result: unknown): unknow
       error: st?.error ?? null,
       version: (st?.serverVersion as string | undefined) ?? undefined,
       tools: si.tools ?? [],
+      prompts: si.prompts ?? [],
+      resources: si.resources ?? [],
       config: cfg,
       enabled: cfg?.enabled ?? true,
     };

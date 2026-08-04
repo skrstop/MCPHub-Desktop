@@ -189,6 +189,8 @@ export interface SkillAgent {
   id: string;
   name: string;
   skillsPath: string;
+  /** false = built-in (from install.json catalog, read-only); true = user-added. */
+  custom: boolean;
 }
 
 // A skill directory discovered under an agent's skillsPath during import
@@ -233,6 +235,110 @@ export interface ExportResultItem {
   message?: string;
 }
 
+// A document stored in the RAG library (under $APPDATA/rag/files).
+export interface RagDoc {
+  id: string;
+  name: string;
+  size: number;
+  content: string;
+  uploadedAt?: string;
+  tags?: string[];
+  /** Number of chunks indexed (0 if indexed before this field existed). */
+  chunkCount?: number;
+  fileType?: string;
+}
+
+// Document metadata for the list view (no content).
+export interface RagDocInfo {
+  id: string;
+  name: string;
+  size: number;
+  uploadedAt: string;
+  tags: string[];
+  /** Number of chunks indexed (0 if indexed before this field existed). */
+  chunkCount: number;
+  /** Display label from file_support.json (ext→name); "" if unknown. */
+  fileType: string;
+}
+
+// RAG search settings: weights applied to hybrid search scoring.
+export interface RagSettings {
+  vectorWeight: number;
+  keywordWeight: number;
+  maxResults: number;
+  /** Minimum similarity score (0..1) for a hit to be shown. Default 0. */
+  scoreThreshold: number;
+  /** Chunk size in characters, used at upload/reindex. Default 512. */
+  chunkSize: number;
+  /** Chunk overlap in characters. Default 100. */
+  chunkOverlap: number;
+}
+
+/** Model context window (tokens), read from the model's config.json. */
+export interface RagModelLimits {
+  maxContext: number;
+}
+
+// A single search result fragment returned by a similarity search.
+export interface RagSearchResult {
+  docId: string;
+  docName: string;
+  title: string;
+  snippet: string;
+  score: number;
+}
+
+// RAG runtime status reported to the switch.
+export interface RagStatus {
+  enabled: boolean;
+  initializing: boolean;
+  /** True iff the vector table was recreated on the last enable because the
+   *  loaded model's embedding dim differs from the on-disk table (model
+   *  swapped). The frontend must trigger `reindexAll` to re-embed docs with
+   *  the new model — old embeddings are gone. */
+  needsReindex?: boolean;
+}
+
+/** One selectable model size (scanned from runtimes/rag/model/<family>/<size>/).
+ *  `status`: "ready" (selectable) | "downloadable" (has download.url, fetch
+ *  first) | "unavailable". `format`: "onnx" | "gguf" | "" (drives the backend
+ *  strategy + a dropdown badge). `fileSize`: model payload bytes (ready) or 0. */
+export interface RagModelInfo {
+  size: string;
+  label: string;
+  status: string;
+  ready: boolean;
+  downloadable: boolean;
+  format?: string;
+  fileSize?: number;
+  description?: string;
+  /** True if this size's deploy.json has "default": true (the out-of-box +
+   *  fallback model). */
+  default?: boolean;
+}
+
+// Result of an upload batch.
+export interface RagUploadResult {
+  successCount: number;
+  failureCount: number;
+}
+
+// A tag with the number of documents that carry it.
+export interface RagTagStat {
+  tag: string;
+  fileCount: number;
+}
+
+// A file picked from the OS file dialog (by path) — the backend reads bytes
+// from disk, so large files never go through JSON/base64.
+export interface RagPickedFile {
+  path: string;
+  name: string;
+}
+
+
+
+
 // Proxychains4 configuration for STDIO servers (Linux/macOS only)
 export interface ProxychainsConfig {
   enabled?: boolean; // Enable/disable proxychains4 proxy routing
@@ -246,7 +352,7 @@ export interface ProxychainsConfig {
 
 // Server config types
 export interface ServerConfig {
-  type?: 'stdio' | 'sse' | 'streamable-http' | 'openapi';
+  type?: 'stdio' | 'sse' | 'streamable-http' | 'openapi' | 'builtin';
   description?: string;
   url?: string;
   command?: string;
@@ -386,10 +492,6 @@ export interface Group {
   name: string;
   description?: string;
   servers: string[] | IGroupServerConfig[]; // Supports both old and new format
-  // Group-level builtin prompt selection (prompt names). Empty/undefined = expose NONE;
-  // a group must explicitly opt in. 'all' (legacy) is treated as "expose all".
-  builtinPrompts?: string[] | 'all';
-  builtinResources?: string[] | 'all';
 }
 
 // Environment variable types
@@ -467,8 +569,6 @@ export interface GroupFormData {
   name: string;
   description: string;
   servers: string[] | IGroupServerConfig[]; // Updated to support new format
-  builtinPrompts?: string[] | 'all';
-  builtinResources?: string[] | 'all';
 }
 
 // API response types

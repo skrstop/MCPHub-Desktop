@@ -6,7 +6,7 @@
 //! - 2.4–2.5 (export/uninstall/delete) added later; see `doc/agent_20260724.md` §3.8.
 
 use crate::{db, models::skill::*, services::config_service};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 // serde is only used by the Windows elevation manifest structs below.
 #[cfg(windows)]
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 /// The known-agents catalog bundled into the binary at compile time. Map of
 /// agent display name → skills path relative to the user's home (e.g.
-/// "Claude Code" → ".claude/skills"). Source: `runtimes/skills/install.json`.
-const KNOWN_AGENTS_JSON: &str = include_str!("../../runtimes/skills/install.json");
+/// "Claude Code" → ".claude/skills"). Source: `runtimes/skill/install.json`.
+const KNOWN_AGENTS_JSON: &str = include_str!("../../runtimes/skill/install.json");
 
 /// Slugify a display name into a stable id: lowercase, non-alphanumeric runs
 /// collapse to a single hyphen, no leading/trailing hyphens.
@@ -71,27 +71,134 @@ pub(crate) fn default_agents() -> Vec<SkillAgent> {
         };
         let rel = rel.trim_start_matches('/');
         let skills_path = format!("~/{}", rel);
-        out.push(SkillAgent { id, name, skills_path });
+        out.push(SkillAgent { id, name, skills_path, custom: false });
     }
     out
 }
 
+/// Whether an agent id belongs to the bundled catalog (built-in / read-only).
+pub fn is_builtin_id(id: &str) -> bool {
+    default_agents().iter().any(|a| a.id == id)
+}
+
 pub async fn list_agents() -> Result<Vec<SkillAgent>> {
     let cfg = config_service::get().await?;
-    if let Some(arr) = cfg.get("skills").and_then(|s| s.get("agents")).and_then(|a| a.as_array()) {
-        let agents: Vec<SkillAgent> = arr
-            .iter()
+    let agents: Vec<SkillAgent> = if let Some(arr) = cfg.get("skills").and_then(|s| s.get("agents")).and_then(|a| a.as_array()) {
+        arr.iter()
             .filter_map(|a| serde_json::from_value::<SkillAgent>(a.clone()).ok())
-            .collect();
-        Ok(agents)
+            .collect()
     } else {
-        Ok(default_agents())
-    }
+        default_agents()
+    };
+    // Recompute `custom` from the catalog: built-in ids → false, user-added → true.
+    let builtin: std::collections::HashSet<String> =
+        default_agents().into_iter().map(|a| a.id).collect();
+    Ok(agents
+        .into_iter()
+        .map(|mut a| {
+            a.custom = !builtin.contains(&a.id);
+            a
+        })
+        .collect())
 }
 
 pub async fn save_agents(agents: Vec<SkillAgent>) -> Result<()> {
     let patch = json!({ "skills": { "agents": agents } });
     config_service::update(&patch).await?;
+    Ok(())
+}
+
+/// Create a new custom agent (user-added). Refuses to overwrite a built-in id.
+/// `skillsPath` may start with `~` (expanded at scan/export time). Validates:
+///   - name non-empty, not a built-in name
+///   - no existing agent with the same name (case-insensitive) or same path
+///   - `skillsPath` resolves to an existing directory (after `~` expansion)
+pub async fn create_custom_agent(name: &str, skills_path: &str) -> Result<SkillAgent> {
+    let name = name.trim();
+    let skills_path = skills_path.trim();
+    if name.is_empty() {
+        return Err(anyhow!("agent name is required"));
+    }
+    if skills_path.is_empty() {
+        return Err(anyhow!("agent skills path is required"));
+    }
+    let base = slugify(name);
+    if base.is_empty() {
+        return Err(anyhow!("agent name must contain alphanumeric chars"));
+    }
+    if is_builtin_id(&base) {
+        return Err(anyhow!("'{}' is a built-in agent name", name));
+    }
+
+    let mut agents = list_agents().await.unwrap_or_default();
+
+    // Duplicate name check (case-insensitive).
+    if agents
+        .iter()
+        .any(|a| a.name.eq_ignore_ascii_case(name))
+    {
+        return Err(anyhow!("an agent named '{}' already exists", name));
+    }
+
+    // Path must resolve to an existing directory.
+    let resolved = resolve_agent_path(skills_path).ok_or_else(|| {
+        anyhow!("skills path could not be resolved (failed to expand '~'): {}", skills_path)
+    })?;
+    match std::fs::metadata(&resolved) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(anyhow!("skills path is not a directory: {}", resolved.display())),
+        Err(_) => {
+            return Err(anyhow!(
+                "skills path does not exist: {} (resolved to {})",
+                skills_path,
+                resolved.display()
+            ))
+        }
+    }
+    // Duplicate path check (compare resolved paths).
+    for a in &agents {
+        if let Some(r) = resolve_agent_path(&a.skills_path) {
+            if r == resolved {
+                return Err(anyhow!(
+                    "skills path already used by agent '{}'",
+                    a.name
+                ));
+            }
+        }
+    }
+    // De-dup against existing custom ids with the same base (-2, -3, ...).
+    let mut n = 1;
+    let mut id = base.clone();
+    loop {
+        if !agents.iter().any(|a| a.id == id) {
+            break;
+        }
+        n += 1;
+        id = format!("{}-{}", base, n);
+    }
+    let agent = SkillAgent {
+        id,
+        name: name.to_string(),
+        skills_path: skills_path.to_string(),
+        custom: true,
+    };
+    agents.push(agent.clone());
+    save_agents(agents).await?;
+    Ok(agent)
+}
+
+/// Delete a custom agent by id. Refuses to delete built-in agents.
+pub async fn delete_custom_agent(id: &str) -> Result<()> {
+    if is_builtin_id(id) {
+        return Err(anyhow!("built-in agents cannot be deleted"));
+    }
+    let mut agents = list_agents().await?;
+    let before = agents.len();
+    agents.retain(|a| a.id != id);
+    if agents.len() == before {
+        return Err(anyhow!("agent not found: {}", id));
+    }
+    save_agents(agents).await?;
     Ok(())
 }
 
@@ -272,10 +379,17 @@ fn collect_indented_block<'a, I: Iterator<Item = &'a str>>(lines: &mut std::iter
     out
 }
 
+/// Read `<dir>/SKILL.md` (case-insensitive) as text. Reads raw bytes and
+/// decodes to UTF-8 (BOM/UTF-8 fast path → chardetng + encoding_rs) so a
+/// non-UTF-8 frontmatter still parses. Only this parse step decodes; the
+/// actual file copy (`copy_dir_recursive`) uses byte-level `fs::copy` and
+/// preserves the original bytes unchanged.
 fn read_skill_md(dir: &Path) -> Option<String> {
     for name in ["SKILL.md", "skill.md"] {
-        if let Ok(c) = fs::read_to_string(dir.join(name)) {
-            return Some(c);
+        let path = dir.join(name);
+        if let Ok(bytes) = fs::read(&path) {
+            let label = path.to_string_lossy().to_string();
+            return Some(crate::rag::service::decode_text(&bytes, &label).0);
         }
     }
     None

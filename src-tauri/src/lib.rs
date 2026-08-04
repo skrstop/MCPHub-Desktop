@@ -6,6 +6,7 @@ pub mod commands;
 pub mod db;
 pub mod mcp;
 pub mod models;
+pub mod rag;
 pub mod services;
 
 use std::path::PathBuf;
@@ -156,6 +157,19 @@ pub fn run() {
                     log::error!("Failed to start MCP servers: {}", e);
                 }
                 services::http_server::maybe_start().await;
+
+                // Auto-restore RAG if it was enabled before restart. Reads the
+                // persisted `rag.enabled` intent; if true, load the embedding
+                // model + open the vector DB so /mcp rag_search/rag_get work
+                // immediately. The frontend syncs the switch via rag_status.
+                if rag::service::config_enabled().await {
+                    let app_for_rag = app_handle2.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = rag::service::start(&app_for_rag).await {
+                            log::error!("[RAG] auto-start on boot failed: {:#}", e);
+                        }
+                    });
+                }
 
                 // Periodic log cleanup: run every 6 hours, first run after 5 minutes
                 tokio::spawn(async {
@@ -333,6 +347,8 @@ pub fn run() {
             // Skills (技能) — 2.2 agent config; 2.3 scan/list/get/import; 2.4 export; 2.5 uninstall/delete; 2.6 open/pick
             commands::skills::list_skill_agents,
             commands::skills::save_skill_agents,
+            commands::skills::create_skill_agent,
+            commands::skills::delete_skill_agent,
             commands::skills::scan_skills_for_import,
             commands::skills::list_skills,
             commands::skills::get_skill,
@@ -344,6 +360,27 @@ pub fn run() {
             commands::skills::open_path_in_explorer,
             commands::skills::pick_directory,
             commands::skills::open_skill_library_dir,
+            // RAG — toggle/status/list/get/pick+upload/delete/search/tags/settings/open-location
+            commands::rag::rag_toggle,
+            commands::rag::rag_status,
+            commands::rag::list_rag_docs,
+            commands::rag::get_rag_doc,
+            commands::rag::pick_rag_files,
+            commands::rag::upload_rag_doc,
+            commands::rag::delete_rag_doc,
+            commands::rag::rag_search_command,
+            commands::rag::rag_tag_search,
+            commands::rag::get_rag_settings,
+            commands::rag::save_rag_settings,
+            commands::rag::rag_model_limits,
+            commands::rag::rag_tools,
+            commands::rag::set_rag_tags,
+            commands::rag::open_rag_file_location,
+            commands::rag::rag_reindex_all,
+            commands::rag::rag_list_models,
+            commands::rag::rag_current_model,
+            commands::rag::rag_select_model,
+            commands::rag::rag_download_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCPHub application");

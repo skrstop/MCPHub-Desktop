@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 14;
+pub const TARGET_VERSION: i64 = 16;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -118,6 +118,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         12 => migrate_v12(pool).await,
         13 => migrate_v13(pool).await,
         14 => migrate_v14(pool).await,
+        15 => migrate_v15(pool).await,
+        16 => migrate_v16(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -680,5 +682,61 @@ async fn migrate_v14(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await?;
     log::info!("[db] migration v14: known-agents catalog applied ({} agents)", defaults.len());
+    Ok(())
+}
+
+/// v14 → v15: Seed RAG defaults into `config_json.rag` if absent.
+///
+/// RAG config lives in the same `config_json` blob as skills (vector DB files
+/// are separate, under app_data_dir/rag/lancedb). Defaults:
+///   { enabled: false, vectorWeight: 0.5, keywordWeight: 0.5, maxResults: 20 }
+/// Only seeds when the `rag` key is missing — never overwrites user edits.
+async fn migrate_v15(pool: &SqlitePool) -> Result<()> {
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(()); };
+    let s: Option<String> = row.try_get("config_json")?;
+    let mut config: serde_json::Value = match s.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
+        Some(v) if v.is_object() => v,
+        _ => serde_json::json!({}),
+    };
+
+    if config.get("rag").is_none() {
+        config["rag"] = serde_json::json!({
+            "enabled": false,
+            "vectorWeight": 0.5,
+            "keywordWeight": 0.5,
+            "maxResults": 20
+        });
+        let json_str = serde_json::to_string(&config)?;
+        sqlx::query("UPDATE system_config SET config_json=?, updated_at=datetime('now','localtime') WHERE id=1")
+            .bind(&json_str)
+            .execute(pool)
+            .await?;
+        log::info!("[db] migration v15: seeded rag config defaults");
+    } else {
+        log::info!("[db] migration v15: rag config already present, skipped");
+    }
+    Ok(())
+}
+
+/// v15 → v16: RAG tag statistics table.
+///
+/// `rag_tag_stats` keeps one row per distinct tag with the count of documents
+/// that carry it. Recomputed by the rag service on every tag-changing op
+/// (upload / set_doc_tags / delete / batch). A tag whose count drops to 0 is
+/// simply not (re)inserted — i.e. dropped — which is the desired "delete when
+/// fileCount=0" behavior.
+async fn migrate_v16(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rag_tag_stats (
+            tag         TEXT PRIMARY KEY,
+            file_count INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    log::info!("[db] migration v16: created rag_tag_stats table");
     Ok(())
 }

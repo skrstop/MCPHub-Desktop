@@ -22,6 +22,9 @@ fn encode_server_type(t: &ServerType) -> &'static str {
         ServerType::Sse => "sse",
         ServerType::StreamableHttp => "streamable-http",
         ServerType::Openapi => "openapi",
+        // Builtin servers are virtual (never persisted), so this is never
+        // written to the DB - but the match must be exhaustive.
+        ServerType::Builtin => "builtin",
     }
 }
 
@@ -57,6 +60,12 @@ pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
 }
 
 pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
+    // The name "RAG" is reserved for the builtin RAG server (see
+    // rag::service::BUILTIN_SERVER_NAME). Reject custom servers using it so a
+    // group referencing "RAG" always means the builtin, never a custom server.
+    if cfg.name.eq_ignore_ascii_case(crate::rag::service::BUILTIN_SERVER_NAME) {
+        return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
+    }
     let id = Uuid::new_v4().to_string();
     let args = cfg.args.as_ref().map(|a| serde_json::to_string(a)).transpose()?;
     let env = cfg.env.as_ref().map(|e| serde_json::to_string(e)).transpose()?;
@@ -99,6 +108,11 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
 }
 
 pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
+    // Reject renaming TO the reserved builtin name (renaming FROM it is moot -
+    // the builtin has no DB row to update).
+    if cfg.name.eq_ignore_ascii_case(crate::rag::service::BUILTIN_SERVER_NAME) {
+        return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
+    }
     let args = cfg.args.as_ref().map(|a| serde_json::to_string(a)).transpose()?;
     let env = cfg.env.as_ref().map(|e| serde_json::to_string(e)).transpose()?;
     let headers = cfg.headers.as_ref().map(|h| serde_json::to_string(h)).transpose()?;

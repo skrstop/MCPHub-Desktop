@@ -22,11 +22,11 @@ const ServerForm = ({
   const { t } = useTranslation();
 
   // Determine the initial server type from the initialData
-  const getInitialServerType = () => {
+  const getInitialServerType = (): 'stdio' | 'sse' | 'streamable-http' | 'openapi' => {
     if (!initialData || !initialData.config) return 'stdio';
 
-    if (initialData.config.type) {
-      return initialData.config.type; // Use explicit type if available
+    if (initialData.config.type && initialData.config.type !== 'builtin') {
+      return initialData.config.type; // Use explicit type if available (never 'builtin' - ServerForm is for custom servers only)
     } else if (initialData.config.url) {
       return 'sse'; // Fallback to SSE if URL exists
     } else {

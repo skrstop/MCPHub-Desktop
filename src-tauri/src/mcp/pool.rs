@@ -136,6 +136,10 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
             let transport = OpenapiTransport::new(&name, transport_config);
             Ok(McpClient::new(name, Box::new(transport)))
         }
+        // Builtin servers (RAG) are virtual - they have no transport and are
+        // never connected to the pool. Their tools come from rag::service and
+        // are aggregated separately. Reaching here is a logic error.
+        ServerType::Builtin => Err(anyhow!("builtin server '{}' has no transport", name)),
     }
 }
 

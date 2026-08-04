@@ -33,7 +33,7 @@
 
 上游 [mcphub](https://github.com/samanhappy/mcphub)（仓库内副本位于 [`mcphub-origin/`](./mcphub-origin)，**版权归原作者所有，并非本项目自有代码**）是一个面向服务端部署的 MCP 聚合管理 Web 服务，定位是"被多客户端共享访问的中心化 Hub"。
 
-而本项目想解决的是另一个问题：**个人开发者/普通用户在自己电脑上同时使用 Claude Desktop、Cursor、Cherry Studio、各类 IDE 插件等多种 MCP Client 时，本地散落着大量 MCP Server 配置，缺乏一个统一的本地管理入口。** 具体诉求包括：
+而本项目想解决的是另一个问题：**个人开发者/普通用户在自己电脑上同时使用 Claude Desktop、Cursor、Cherry Studio、各类 IDE 插件等多种 MCP Client 时，本地散落着大量 MCP Server / SKILL / RAG 配置，缺乏一个统一的本地管理入口。** 具体诉求包括：
 
 1. **本地统一管理**：把分散在不同 MCP Client 配置文件里的 Server，集中到一个本地客户端中查看、启停、调试、分组。
 2. **本地优先（Local-first）**：所有 MCP Server 进程、配置、密钥都运行/保存在用户自己的机器上，不依赖任何远端服务，也无需暴露监听端口。

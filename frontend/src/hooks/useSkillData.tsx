@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Skill, ExportResultItem } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
@@ -11,11 +11,14 @@ import {
 } from '@/services/skillService';
 
 /**
- * Self-managed store for the Skills library page. Kept independent of
- * BuiltinDataContext on purpose — skills are a separate concern and the
- * sidebar badge is left empty.
+ * Skills library store, shared app-wide via context so the sidebar badge and
+ * the Skills page stay in sync (e.g. import/delete updates both). Mounted
+ * once at the app root (see SkillDataProvider in App.tsx).
  */
-export const useSkillData = () => {
+type SkillDataValue = ReturnType<typeof useSkillDataState>;
+const SkillDataContext = createContext<SkillDataValue | undefined>(undefined);
+
+const useSkillDataState = () => {
   const { t } = useTranslation();
   const { auth } = useAuth();
 
@@ -124,4 +127,17 @@ export const useSkillData = () => {
     removeSkill,
     uninstallSkill,
   };
+};
+
+/** Provider that mounts the shared skills store once at the app root. */
+export const SkillDataProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const value = useSkillDataState();
+  return <SkillDataContext.Provider value={value}>{children}</SkillDataContext.Provider>;
+};
+
+/** Consume the shared skills store. Must be used inside <SkillDataProvider>. */
+export const useSkillData = () => {
+  const ctx = useContext(SkillDataContext);
+  if (!ctx) throw new Error('useSkillData must be used within a SkillDataProvider');
+  return ctx;
 };

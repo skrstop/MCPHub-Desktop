@@ -16,3 +16,4 @@ pub mod server_tool_config;
 pub mod http_server;
 pub mod cost;
 pub mod skills;
+pub mod rag;

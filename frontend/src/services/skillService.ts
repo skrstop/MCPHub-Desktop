@@ -31,6 +31,26 @@ export const saveSkillAgents = async (agents: SkillAgent[]): Promise<void> => {
 /** Alias used by the settings card's per-section save helper. */
 export const updateSkillsAgents = saveSkillAgents;
 
+/** Create a new custom (user-added) agent. Refuses built-in names. */
+export const createSkillAgent = async (
+  name: string,
+  skillsPath: string,
+): Promise<SkillAgent> => {
+  const response: ApiResponse<SkillAgent> = await apiPost('/skills/agents/create', { name, skillsPath });
+  if (!response.success) {
+    throw new Error(response.message || 'Failed to create agent');
+  }
+  return response.data!;
+};
+
+/** Delete a custom agent by id. Refuses to delete built-in agents. */
+export const deleteSkillAgent = async (id: string): Promise<void> => {
+  const response: ApiResponse = await apiPost('/skills/agents/delete', { id });
+  if (!response.success) {
+    throw new Error(response.message || 'Failed to delete agent');
+  }
+};
+
 /**
  * Scan all configured agent skills paths for importable skills.
  * Symlinks/shortcuts are skipped server-side.

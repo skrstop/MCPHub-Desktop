@@ -293,7 +293,7 @@ DELETE /skills/:id           -> delete_skill {id}                   # 兼容保�
 
 | 项 | 改动 | 文件 |
 |---|---|---|
-| 已知 agent 数据源 | `runtimes/skills/install.json`(56 agent)经 `include_str!` 编译进二进制;`default_agents()`(pub(crate))解析;`migrate_v14`(TARGET=14)未改动配置整列替换、已自定义 backfill | `skill_service.rs`、`migration.rs`、`runtimes/skills/install.json` |
+| 已知 agent 数据源 | `runtimes/skill/install.json`(56 agent)经 `include_str!` 编译进二进制;`default_agents()`(pub(crate))解析;`migrate_v14`(TARGET=14)未改动配置整列替换、已自定义 backfill | `skill_service.rs`、`migration.rs`、`runtimes/skill/install.json` |
 | 扫描符号链接 | 只跳过指向库目录的符号链接;其余符号链接收录 `is_symlink=true` 展示禁用 + 🔗徽标;真实目录可选 | `skill_service.scan_for_import`、`models/skill.rs`(ScannedSkill.is_symlink)、`SkillsPage.tsx`(ImportDialog) |
 | SKILL.md 解析 | 支持折叠 `>`/字面 `\|` 块标量 + chomp/indent 指示;`is_block_indicator` + `collect_indented_block` | `skill_service.parse_skill_md` |
 | 导入来源记录 | 导入成功后 `INSERT OR IGNORE skill_exports (来源agent,'copy','ok')` | `skill_service.import_skills` |

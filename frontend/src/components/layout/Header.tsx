@@ -25,6 +25,8 @@ const useCrumbs = (): string[] => {
     if (path.startsWith('/prompts')) return [root, t('nav.prompts')];
     if (path.startsWith('/resources')) return [root, t('nav.resources')];
     if (path.startsWith('/users')) return [root, t('nav.users')];
+    if (path.startsWith('/skills')) return [root, t('nav.skills')];
+    if (path.startsWith('/rag')) return [root, t('nav.rag')];
     if (path.startsWith('/market')) {
       const serverName = (params as { serverName?: string }).serverName;
       const crumbs = [root, t('nav.market')];

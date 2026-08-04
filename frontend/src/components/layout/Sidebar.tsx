@@ -13,11 +13,14 @@ import {
   Activity,
   ScrollText,
   Wrench,
+  Library,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useServerContext } from '@/contexts/ServerContext';
 import { useBuiltinData } from '@/contexts/BuiltinDataContext';
 import { useGroupData } from '@/hooks/useGroupData';
+import { useSkillData } from '@/hooks/useSkillData';
+import { useRagData } from '@/hooks/useRagData';
 import { canViewSystemLogs } from '@/utils/navigationPermissions';
 import { usePermissionCheck } from '../PermissionChecker';
 import UserProfileMenu from '@/components/ui/UserProfileMenu';
@@ -40,6 +43,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const { auth } = useAuth();
   const { allServers } = useServerContext();
   const { groups } = useGroupData();
+  const { skills } = useSkillData();
+  const { ragDocs } = useRagData();
   const { prompts, resources } = useBuiltinData();
   const [activityAvailable, setActivityAvailable] = useState(false);
 
@@ -69,7 +74,8 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     },
     { path: '/prompts', label: t('nav.prompts'), icon: <MessageSquare className="h-4 w-4" />, badge: prompts.length || undefined },
     { path: '/resources', label: t('nav.resources'), icon: <FileText className="h-4 w-4" />, badge: resources.length || undefined },
-    { path: '/skills', label: t('nav.skills'), icon: <Wrench className="h-4 w-4" /> },
+    { path: '/skills', label: t('nav.skills'), icon: <Wrench className="h-4 w-4" />, badge: skills.length || undefined },
+    { path: '/rag', label: t('nav.rag'), icon: <Library className="h-4 w-4" />, badge: ragDocs.length || undefined },
     { path: '/market', label: t('nav.market'), icon: <Store className="h-4 w-4" /> },
   ];
 

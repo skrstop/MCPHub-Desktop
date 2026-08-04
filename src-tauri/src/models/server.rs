@@ -11,6 +11,12 @@ pub enum ServerType {
     #[serde(rename = "streamable-http")]
     StreamableHttp,
     Openapi,
+    /// A virtual app-level server (no process / no DB row). Currently the RAG
+    /// server, which exposes rag_search/rag_get/rag_tag_search. Builtin
+    /// servers are injected into `list_servers` when their feature is enabled
+    /// and are otherwise treated like any server by the group aggregation.
+    #[serde(rename = "builtin")]
+    Builtin,
 }
 
 impl Default for ServerType {
@@ -189,4 +195,13 @@ pub struct ServerInfo {
     pub config: ServerConfig,
     pub status: ServerStatus,
     pub tools: Vec<Tool>,
+    /// Builtin prompts exposed by this server. Populated only for the builtin
+    /// "mcphub-desktop" server (which bundles the builtin prompt library); empty
+    /// for real MCP servers (their prompts are fetched lazily elsewhere).
+    #[serde(default)]
+    pub prompts: Vec<crate::models::prompt::BuiltinPrompt>,
+    /// Builtin resources exposed by this server. Same as `prompts` - populated
+    /// only for the builtin "mcphub-desktop" server.
+    #[serde(default)]
+    pub resources: Vec<crate::models::resource::BuiltinResource>,
 }

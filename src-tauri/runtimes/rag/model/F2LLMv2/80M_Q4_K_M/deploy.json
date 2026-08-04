@@ -1,0 +1,6 @@
+{
+  "platform": "CPU",
+  "default": false,
+  "description": "最小模型, 内存占用：450MB",
+  "sort": 1
+}

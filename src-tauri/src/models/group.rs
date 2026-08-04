@@ -27,13 +27,6 @@ pub struct Group {
     pub name: String,
     pub description: Option<String>,
     pub servers: Vec<JsonValue>,  // Can be string[] or GroupServerConfig[]
-    /// Builtin prompt names this group exposes. None = all (back-compat),
-    /// Some([]) = none, Some([...]) = only those. Stored in groups.builtin_prompts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_prompts: Option<Vec<String>>,
-    /// Builtin resource URIs this group exposes. Same semantics as builtin_prompts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_resources: Option<Vec<String>>,
     pub created_at: String,
 }
 
@@ -43,10 +36,4 @@ pub struct GroupPayload {
     pub name: String,
     pub description: Option<String>,
     pub servers: Vec<JsonValue>,  // Can be string[] or GroupServerConfig[]
-    /// Builtin prompt selection: "all"/null = expose all, array = expose those (empty = none).
-    #[serde(default)]
-    pub builtin_prompts: Option<JsonValue>,
-    /// Builtin resource selection: "all"/null = expose all, array = expose those (empty = none).
-    #[serde(default)]
-    pub builtin_resources: Option<JsonValue>,
 }

@@ -42,16 +42,12 @@ export const useGroupData = () => {
     name: string,
     description?: string,
     servers: string[] | IGroupServerConfig[] = [],
-    builtinPrompts: string[] | 'all' = [],
-    builtinResources: string[] | 'all' = [],
   ) => {
     try {
       const result: ApiResponse<Group> = await apiPost('/groups', {
         name,
         description,
         servers,
-        builtinPrompts,
-        builtinResources,
       });
       console.log('Group created successfully:', result);
 
@@ -75,8 +71,6 @@ export const useGroupData = () => {
       name?: string;
       description?: string;
       servers?: string[] | IGroupServerConfig[];
-      builtinPrompts?: string[] | 'all';
-      builtinResources?: string[] | 'all';
     },
   ) => {
     try {

@@ -21,6 +21,20 @@ pub async fn save_skill_agents(agents: Vec<SkillAgent>) -> Result<(), String> {
     skill_service::save_agents(agents).await.map_err(|e| e.to_string())
 }
 
+/// Create a new custom (user-added) agent. Refuses built-in names.
+#[tauri::command]
+pub async fn create_skill_agent(name: String, skills_path: String) -> Result<SkillAgent, String> {
+    skill_service::create_custom_agent(&name, &skills_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a custom agent by id. Refuses to delete built-in agents.
+#[tauri::command]
+pub async fn delete_skill_agent(id: String) -> Result<(), String> {
+    skill_service::delete_custom_agent(&id).await.map_err(|e| e.to_string())
+}
+
 /// Scan all configured agents' skills paths for importable skills
 /// (symlinks/shortcuts skipped; SKILL.md frontmatter parsed for name/desc).
 #[tauri::command]

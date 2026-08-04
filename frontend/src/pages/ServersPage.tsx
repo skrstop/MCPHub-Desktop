@@ -50,14 +50,24 @@ const ServersPage: React.FC = () => {
   const [showJsonImport, setShowJsonImport] = useState(false);
   const [filter, setFilter] = useState<ServerFilter>('all');
   const [search, setSearch] = useState('');
+  // Server-type filter: 'custom' (default) hides builtin servers, 'builtin'
+  // shows only them, 'all' shows both. Builtin servers (RAG) are virtual.
+  const [typeFilter, setTypeFilter] = useState<'custom' | 'builtin' | 'all'>('custom');
 
-  const counts = useMemo(() => getServerFilterCounts(allServers), [allServers]);
+  const typeFilteredServers = useMemo(() => {
+    if (typeFilter === 'all') return allServers;
+    return allServers.filter((s) =>
+      typeFilter === 'builtin' ? s.config?.type === 'builtin' : s.config?.type !== 'builtin',
+    );
+  }, [allServers, typeFilter]);
+
+  const counts = useMemo(() => getServerFilterCounts(typeFilteredServers), [typeFilteredServers]);
 
   // Filter against the full list and paginate the filtered result client-side,
   // so status filters reach servers that live on other pagination pages.
   const { servers: visibleServers, pagination: clientPagination } = useMemo(
-    () => selectServerPage(allServers, filter, search, currentPage, serversPerPage),
-    [allServers, filter, search, currentPage, serversPerPage],
+    () => selectServerPage(typeFilteredServers, filter, search, currentPage, serversPerPage),
+    [typeFilteredServers, filter, search, currentPage, serversPerPage],
   );
 
   // Sync currentPage when client-side pagination clamps it (filter/search narrows results).
@@ -144,6 +154,35 @@ const ServersPage: React.FC = () => {
 
       {/* Toolbar */}
       <div className="flex items-center gap-2 mb-4 flex-wrap">
+        {/* Server-type filter (default: custom - hides builtin servers) */}
+        <div
+          className="hub-card flex items-center"
+          style={{ padding: 2, borderRadius: 7, background: 'var(--hub-surface)' }}
+        >
+          {(
+            [
+              ['custom', t('server.typeCustom')],
+              ['builtin', t('server.typeBuiltin')],
+              ['all', t('common.all') || 'All'],
+            ] as ['custom' | 'builtin' | 'all', string][]
+          ).map(([k, l]) => (
+            <button
+              key={k}
+              onClick={() => setTypeFilter(k)}
+              className="inline-flex items-center gap-1.5 px-3 text-[12px]"
+              style={{
+                height: 24,
+                borderRadius: 5,
+                background: typeFilter === k ? 'var(--hub-bg-2)' : 'transparent',
+                color: typeFilter === k ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
+                border: '1px solid ' + (typeFilter === k ? 'var(--hub-line)' : 'transparent'),
+              }}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+
         <div
           className="hub-card flex items-center"
           style={{ padding: 2, borderRadius: 7, background: 'var(--hub-surface)' }}

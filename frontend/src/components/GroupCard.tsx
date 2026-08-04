@@ -140,12 +140,6 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
 
   const totalVisibleTools = groupServers.reduce((acc, s) => acc + tally(s).visibleTools, 0);
 
-  // Builtin prompt/resource selection counts for the footer summary.
-  const builtinPromptCount =
-    group.builtinPrompts === 'all' ? 0 : Array.isArray(group.builtinPrompts) ? group.builtinPrompts.length : 0;
-  const builtinResourceCount =
-    group.builtinResources === 'all' ? 0 : Array.isArray(group.builtinResources) ? group.builtinResources.length : 0;
-
   return (
     <div className="hub-card flex h-full flex-col overflow-visible">
       {/* Header */}
@@ -372,20 +366,6 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
             {t('nav.servers').toLowerCase()} ·{' '}
             <span style={{ color: 'var(--hub-ink-2)' }}>{totalVisibleTools}</span>{' '}
             {t('server.tools').toLowerCase()}
-            {builtinPromptCount > 0 && (
-              <>
-                {' '}·{' '}
-                <span style={{ color: 'var(--hub-ink-2)' }}>{builtinPromptCount}</span>{' '}
-                {t('nav.prompts').toLowerCase()}
-              </>
-            )}
-            {builtinResourceCount > 0 && (
-              <>
-                {' '}·{' '}
-                <span style={{ color: 'var(--hub-ink-2)' }}>{builtinResourceCount}</span>{' '}
-                {t('nav.resources').toLowerCase()}
-              </>
-            )}
           </div>
           {cost && (
             <div className="hub-mono mt-1" style={{ fontSize: 11.5, color: 'var(--hub-ink-3)' }}>

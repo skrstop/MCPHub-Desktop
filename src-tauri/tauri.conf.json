@@ -34,7 +34,9 @@
     "targets": ["deb", "appimage", "rpm", "nsis", "msi", "dmg"],
     "resources": [
       "runtimes/node",
-      "runtimes/uv"
+      "runtimes/uv",
+      "runtimes/skill",
+      "runtimes/rag"
     ],
     "icon": [
       "icons/32x32.png",

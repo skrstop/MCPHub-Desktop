@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Skill, ScannedSkill, SkillAgent, ExportResultItem } from '@/types';
 import { useSkillData } from '@/hooks/useSkillData';
@@ -32,7 +32,8 @@ import {
   openAgentPath,
   openSkillLibrary,
   pickDirectory,
-  saveSkillAgents,
+  createSkillAgent,
+  deleteSkillAgent,
 } from '@/services/skillService';
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -905,10 +906,6 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
   const [agentMethod, setAgentMethod] = useState<Record<string, 'symlink' | 'copy'>>({});
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Custom agent form
-  const [customName, setCustomName] = useState('');
-  const [customPath, setCustomPath] = useState('');
-  const [addingCustom, setAddingCustom] = useState(false);
 
   // current method per agent (from the skill's exports)
   const currentMethodByAgent = useMemo(() => {
@@ -1091,47 +1088,6 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
     });
   };
 
-  const handlePickDirectory = async () => {
-    try {
-      const p = await pickDirectory();
-      if (p) setCustomPath(p);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : t('skills.pickFolderError'), 'error');
-    }
-  };
-
-  const handleAddCustom = async () => {
-    const name = customName.trim();
-    const path = customPath.trim();
-    if (!name) {
-      setError(t('skills.customAgentNameRequired'));
-      return;
-    }
-    if (!path) {
-      setError(t('skills.customAgentPathRequired'));
-      return;
-    }
-    setAddingCustom(true);
-    setError(null);
-    const id = `custom-${Date.now()}`;
-    const custom: SkillAgent = { id, name, skillsPath: path };
-    const nextAgents = [...agents, custom];
-    try {
-      // Persist so the custom agent is available app-wide (import scan, export,
-      // settings). Phase 1: stubbed success.
-      await saveSkillAgents(nextAgents);
-    } catch {
-      // Even if persist fails, keep it locally so this install can proceed.
-    }
-    setAgents(nextAgents);
-    setAgentMethod((prev) => ({ ...prev, [id]: 'symlink' }));
-    setSelected((prev) => new Set(prev).add(id));
-    setCustomName('');
-    setCustomPath('');
-    setAddingCustom(false);
-    showToast(t('skills.customAgentAdded'), 'success');
-  };
-
   const handleUninstallConfirm = async () => {
     if (!uninstallTarget) return;
     const result = await onUninstall(skill.id, uninstallTarget.agentId);
@@ -1277,58 +1233,6 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
                   {availableList.map(renderRow)}
                 </>
               )}
-            </div>
-          </div>
-
-          {/* Add a custom agent (name + folder path) on the fly */}
-          <div>
-            <div className="flex items-center gap-1.5 mb-2">
-              <FolderPlus size={13} style={{ color: 'var(--hub-ink-3)' }} />
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                {t('skills.addCustomAgent')}
-              </label>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <input
-                type="text"
-                value={customName}
-                onChange={(e) => setCustomName(e.target.value)}
-                placeholder={t('skills.customAgentNamePlaceholder')}
-                className="block py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
-                style={{ width: 180 }}
-              />
-              <div className="flex items-center flex-1 min-w-[200px]">
-                <input
-                  type="text"
-                  value={customPath}
-                  onChange={(e) => setCustomPath(e.target.value)}
-                  placeholder={t('skills.customAgentPathPlaceholder')}
-                  className="flex-1 block py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input font-mono rounded-r-none"
-                />
-                <button
-                  type="button"
-                  onClick={handlePickDirectory}
-                  className="hub-btn ghost flex items-center gap-1"
-                  style={{
-                    height: 38,
-                    borderRadius: '0 6px 6px 0',
-                    border: '1px solid var(--hub-line)',
-                    borderLeft: 'none',
-                  }}
-                  title={t('skills.pickFolder')}
-                >
-                  <Folder size={14} />
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={handleAddCustom}
-                disabled={addingCustom}
-                className="hub-btn primary flex items-center gap-1"
-              >
-                <Plus size={13} />
-                {t('skills.addCustomAgent')}
-              </button>
             </div>
           </div>
         </div>
@@ -1529,6 +1433,249 @@ const DeleteSkillDialog: React.FC<DeleteSkillDialogProps> = ({ skill, onDelete, 
 };
 
 // ───────────────────────────────────────────────────────────────────────────
+// Agent management dialog: list all agents (built-in read-only, custom
+// deletable) + create custom agent form.
+// ───────────────────────────────────────────────────────────────────────────
+interface AgentManagementDialogProps {
+  onClose: () => void;
+}
+
+const AgentManagementDialog: React.FC<AgentManagementDialogProps> = ({ onClose }) => {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const [agents, setAgents] = useState<SkillAgent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState('');
+  const [path, setPath] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState('');
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await listSkillAgents();
+      setAgents(data);
+    } catch {
+      setAgents([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handlePick = async () => {
+    try {
+      const p = await pickDirectory();
+      if (p) setPath(p);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('skills.pickFolderError'), 'error');
+    }
+  };
+
+  const handleCreate = async () => {
+    const n = name.trim();
+    const p = path.trim();
+    if (!n) {
+      showToast(t('skills.customAgentNameRequired'), 'error');
+      return;
+    }
+    if (!p) {
+      showToast(t('skills.customAgentPathRequired'), 'error');
+      return;
+    }
+    setCreating(true);
+    try {
+      await createSkillAgent(n, p);
+      showToast(t('skills.customAgentAdded'), 'success');
+      setName('');
+      setPath('');
+      await refresh();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('skills.customAgentAddError'), 'error');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteId) return;
+    try {
+      await deleteSkillAgent(deleteId);
+      showToast(t('skills.uninstallSuccess'), 'success');
+      await refresh();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to delete agent', 'error');
+    } finally {
+      setDeleteId(null);
+    }
+  };
+
+  const sorted = useMemo(
+    () => [...agents].sort((a, b) => a.name.localeCompare(b.name)),
+    [agents],
+  );
+  const customCount = agents.filter((a) => a.custom).length;
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter((a) => a.name.toLowerCase().includes(q));
+  }, [sorted, search]);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-[40rem] w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <div className="min-w-0">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+              {t('skills.agentManagement')}
+            </h2>
+            <div className="text-[12px] hub-mono mt-1" style={{ color: 'var(--hub-ink-3)' }}>
+              {agents.length} ({customCount} custom)
+            </div>
+          </div>
+          <button onClick={onClose} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Fixed toolbar: create custom agent + search (does not scroll) */}
+        <div className="p-5 border-b border-[var(--hub-line-2)] space-y-3">
+          {/* Create custom agent */}
+          <div>
+            <div className="flex items-center gap-1.5 mb-2">
+              <FolderPlus size={13} style={{ color: 'var(--hub-ink-3)' }} />
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                {t('skills.addCustomAgent')}
+              </label>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={t('skills.customAgentNamePlaceholder')}
+                className="block py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                style={{ width: 180 }}
+              />
+              <div className="flex items-center flex-1 min-w-[200px]">
+                <input
+                  type="text"
+                  value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  placeholder={t('skills.customAgentPathPlaceholder')}
+                  className="flex-1 block py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input font-mono rounded-r-none"
+                />
+                <button
+                  type="button"
+                  onClick={handlePick}
+                  className="hub-btn ghost flex items-center gap-1"
+                  style={{ height: 38, borderRadius: '0 6px 6px 0', border: '1px solid var(--hub-line)', borderLeft: 'none' }}
+                  title={t('skills.pickFolder')}
+                >
+                  <Folder size={14} />
+                </button>
+              </div>
+              <button type="button" onClick={handleCreate} disabled={creating} className="hub-btn primary flex items-center gap-1">
+                {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                {t('skills.addCustomAgent')}
+              </button>
+            </div>
+          </div>
+
+          {/* Search by name (below the add form) */}
+          <div className="hub-card flex items-center gap-2 px-2.5" style={{ height: 32, background: 'var(--hub-surface)' }}>
+            <Search size={13} style={{ color: 'var(--hub-ink-3)' }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t('skills.searchAgents') || t('common.searchPlaceholder') || 'Search…'}
+              className="flex-1 bg-transparent outline-none text-[13px]"
+              style={{ color: 'var(--hub-ink)' }}
+            />
+            {search && (
+              <button onClick={() => setSearch('')} className="hub-icon-btn sm">
+                <X size={11} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Scrollable agent list */}
+        <div className="flex-1 overflow-y-auto p-5">
+          {loading ? (
+            <div className="flex items-center justify-center py-10 text-[var(--hub-ink-3)]">
+              <Loader2 size={15} className="animate-spin" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="hub-card p-8 text-center text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
+              {search ? t('pages.rag.noResults') : t('skills.noAgents')}
+            </div>
+          ) : (
+            <div className="hub-card overflow-hidden" style={{ background: 'var(--hub-surface)' }}>
+              {filtered.map((a, idx) => (
+                <div
+                  key={a.id}
+                  style={{
+                    padding: '10px 14px',
+                    borderTop: idx === 0 ? 0 : '1px solid var(--hub-line-2)',
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-3 w-full">
+                    <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="truncate text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }} title={a.name}>
+                          {a.name}
+                        </span>
+                        <span className="hub-tag whitespace-nowrap flex-shrink-0" style={{ fontSize: 10 }}>
+                          {a.custom ? t('skills.customAgentTag') : t('skills.builtinAgentTag')}
+                        </span>
+                      </div>
+                      <span className="hub-mono truncate" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }} title={a.skillsPath}>
+                        {a.skillsPath}
+                      </span>
+                    </div>
+                    {a.custom && (
+                      <button
+                        className="hub-icon-btn sm flex-shrink-0"
+                        onClick={() => setDeleteId(a.id)}
+                        title={t('skills.uninstall')}
+                        style={{ color: 'var(--hub-err)' }}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          <button onClick={onClose} className="hub-btn">
+            {t('skills.close')}
+          </button>
+        </div>
+      </div>
+
+      {deleteId && (
+        <ConfirmDialog
+          isOpen={!!deleteId}
+          onClose={() => setDeleteId(null)}
+          onConfirm={handleDeleteConfirm}
+          title={t('skills.deleteAgent')}
+          message={t('skills.deleteAgentConfirm')}
+          variant="danger"
+        />
+      )}
+    </div>
+  );
+};
+
+// ───────────────────────────────────────────────────────────────────────────
 // SkillsPage
 // ───────────────────────────────────────────────────────────────────────────
 const SkillsPage: React.FC = () => {
@@ -1543,6 +1690,7 @@ const SkillsPage: React.FC = () => {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const [showImport, setShowImport] = useState(false);
+  const [showAgentMgmt, setShowAgentMgmt] = useState(false);
   const [viewSkillId, setViewSkillId] = useState<string | null>(null);
   const [showExport, setShowExport] = useState(false);
   const [installSkill, setInstallSkill] = useState<Skill | null>(null);
@@ -1654,9 +1802,14 @@ const SkillsPage: React.FC = () => {
           </p>
         </div>
         {isAdmin && (
-          <button onClick={() => setShowImport(true)} className="hub-btn primary">
-            <Plus size={13} /> {t('skills.importExisting')}
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowAgentMgmt(true)} className="hub-btn">
+              <FolderPlus size={13} /> {t('skills.agentManagement')}
+            </button>
+            <button onClick={() => setShowImport(true)} className="hub-btn primary">
+              <Plus size={13} /> {t('skills.importExisting')}
+            </button>
+          </div>
         )}
       </div>
 
@@ -1914,6 +2067,9 @@ const SkillsPage: React.FC = () => {
           </div>
         </>
       )}
+
+      {/* Agent management dialog */}
+      {showAgentMgmt && <AgentManagementDialog onClose={() => setShowAgentMgmt(false)} />}
 
       {/* Import dialog */}
       {showImport && (
