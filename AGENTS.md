@@ -1376,16 +1376,43 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `5894e44` (origin/main, = `v1.0.27` tag) |
-| **对应 origin tag**            | `v1.0.27`               |
-| **桌面端版本号**               | `1.0.27001`             |
-| **同步执行日期**               | 2026-08-04              |
+| **当前已同步到 origin commit** | `45e2bd3` (origin/main，`v1.0.27` tag 之后 5 个未发布提交，无新 tag) |
+| **对应 origin tag**            | `v1.0.27`（仍为最新 tag） |
+| **桌面端版本号**               | `1.0.27001`（origin 无新 tag，版本号不变） |
+| **同步执行日期**               | 2026-08-06              |
 
-> 下次同步时，使用 `5894e44` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 5894e44..HEAD`）。
+> 下次同步时，使用 `45e2bd3` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 45e2bd3..HEAD`）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-08-06：同步 `5894e44` -> `45e2bd3`（5 个 commit）
+
+origin 仍为 `v1.0.27`（`45e2bd3` = `v1.0.27` tag 之后 5 个未发布提交，无新 tag）；桌面端版本号不变 `1.0.27001`。
+
+`cd mcphub-origin && git --no-pager log --oneline 5894e44..45e2bd3` 共 5 个 commit；`git diff --stat 5894e44..45e2bd3 -- frontend/ locales/` 涉及 `JSONImportForm.tsx`/`ServerCard.tsx`/`types/index.ts`/`jsonImport.ts`（#1014）+ 4 个 locales，以及 Node 后端 `mcpService.ts`/`mcpOAuthProvider.ts`/`jsonSchemaValidator.ts`（#1028，不同步）。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `45e2bd3` | fix(ui): clearer server-import validation and OAuth clientId/redirect-uri guidance (#1014) | 前端：`utils/jsonImport.ts`——`normalizeImportedServers` 改返回 `{servers, issues}`，新增 `KNOWN_KEYS`/`NormalizedServer`/`ImportIssue`/`NormalizeResult`，检测未知顶层字段 / remote 缺 `url` / stdio 缺 `command` 收集为 issue，remote 类型补传 `oauth`。**合并而非覆盖**：保留桌面端 `parseServerType`/`autoDetectType` 宽松类型检测（commit `74e3f17`），仅叠加 #1014 的 issue 上报与 `oauth` 透传，不回退宽松匹配（上游「unsupported type」严格分支因桌面端宽松检测总能在已知类型内消解而省略）。`components/JSONImportForm.tsx`——`handlePreview` 解构 `{servers, issues}`，有 issue 时展示 `jsonImport.validationErrors` + 详情，`servers` 为空则中止。`components/ServerCard.tsx`——`handleOAuth` 开窗后若 `server.oauth.clientIdConfigured` 追加 `status.oauthClientIdHint` 警告 toast。`types/index.ts`——`Server.oauth` 加 `clientIdConfigured?: boolean`。locales：en/zh/fr/tr 各加 `status.oauthClientIdHint` + `jsonImport.validationErrors` 2 键（用上游翻译）。 |
+| `aa1903d` | feat: add ResilientJsonSchemaValidator (#1028) | 前端无改动（上游改 Node 后端）。 |
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `aa1903d` | feat: add ResilientJsonSchemaValidator (#1028) | **不同步** | 上游 bug 源于 Node MCP SDK 的 `AjvJsonSchemaValidator` 在 `tools/list` 预编译 outputSchema 时对不可解析 `$ref` 抛异常。桌面端 Rust MCP 客户端（`stdio_transport.rs`/`http_transport.rs`/`sse_transport.rs`）仅把 `outputSchema` 原样存为 `serde_json::Value`（`models/server.rs:192`），不编译也不校验输出 schema，`Cargo.toml` 无 ajv/jsonschema/schemars/validator 依赖，该 bug 在桌面端不存在。 |
+| `45e2bd3`（后端部分） | fix(ui): OAuth `clientIdConfigured` 后端透传（`mcpOAuthProvider.ts`/`mcpService.ts`/`src/types/index.ts`） | **不同步** | 桌面端无**上游** OAuth provider：Rust `ServerInfo` 不暴露 `authorizationUrl`/`clientIdConfigured`（grep `authorization_url`/`clientIdConfigured` 在 `src-tauri/` 无命中），`ServerCard.handleOAuth` 的 `server.oauth?.authorizationUrl` 分支当前为 dormant。前端 `clientIdConfigured` 字段 + 警告 toast 仍已镜像（dormant），待上游 OAuth 实现后自动生效。`http_server.rs` 的 OAuth 是 hub 自身 REST 鉴权（下游），非上游 MCP 连接。 |
+| `d2a02fc` | chore(deps): bump hono 4.12.27->4.12.34 (#1027) | **不同步** | hono 为 Node 后端框架，桌面端 Rust 用 axum，`frontend/package.json` 无 hono 依赖。 |
+| `8d7f761` | chore(deps-dev): bump postcss 8.5.18->8.5.23 (#1026) | **不同步** | 桌面端 `frontend/package.json` 的 `postcss: "^8.5.6"` caret 已覆盖 8.5.23，无需改动。 |
+| `6dee783` | chore(deps): bump undici 7.28.0->7.29.0 (#1025) | **不同步** | undici 为 Node 后端 HTTP 客户端，桌面端 Rust 用 reqwest，`frontend/package.json` 无 undici 依赖。 |
+
+**同步后验证**：`cd frontend && npm run build` 通过（2.53s）；`npx tsc --noEmit` 在移植文件中无新增错误（`jsonImport.ts:130` 的 `parseServerType` 返回 `string` 赋给联合类型、`ServerCard.tsx:350-354` 的 `server.type`/`server.openapi` 均为 HEAD 既有，非本次引入；项目用 vite build 不做严格类型检查）。桌面端 `parseServerType`/`autoDetectType` 宽松检测保留未被覆盖；locales JSON 4 文件均通过 `JSON.parse` 校验；RAG/markdown WIP 同步前已 stash，未受影响。
+
+---
 
 #### 2026-08-04：同步 `29c0704` -> `5894e44`（11 个 commit）
 
