@@ -219,9 +219,11 @@ services/ (业务逻辑 = 原 services/)
 **文件**：`frontend/src/components/ServerForm.tsx`
 
 - 使用 mcphub-origin 的 `hub-*` 设计系统样式（`hub-card`, `hub-btn`, `hub-icon-btn` 等）
-- **隐藏了可见性选择器**（Private/Group/Public）——桌面端默认所有服务器为公开
+- **表单结构采用上游 #1034 的 3 分区布局**（2026-08-13 同步）：Section 1 Basic Info / Section 2 Connection / Section 3 Advanced Options（可折叠，`isAdvancedExpanded` state）。桌面端在此结构上定点保留差异（见下）。
+- **隐藏了可见性选择器**（Private/Group/Public）——桌面端默认所有服务器为公开。上游 #1034 把 visibility 选择器放进 Section 3 Advanced Options 折叠区；桌面端**删除该选择器块**，仅留 `{/* Visibility section hidden in desktop client - all servers are public by default */}` 注释。
 - 可见性默认值从 `private` 改为 `public`
 - 保留桌面端新增的 OAuth2 完整配置（`oauth2TokenUrl`, `oauth2ClientId`, `oauth2ClientSecret`）
+- `getInitialServerType` 显式返回类型 `: 'stdio' | 'sse' | 'streamable-http' | 'openapi'` 并跳过 `builtin`（ServerForm 仅用于自定义 server）
 - 使用 lucide-react 的 `X` 图标作为关闭按钮
 
 #### 3.2.1.1 ServerCard（服务器卡片）
@@ -1346,7 +1348,7 @@ PY
 | 文件                                             | 自定义内容                                                |
 | ------------------------------------------------ | --------------------------------------------------------- |
 | `frontend/src/components/ServerCard.tsx`         | 移除 sponsor/wechat/discord、样式调整；下载进度条 / 更新角标+「更新到」菜单项 / 名字后版本号（见 3.6）；传 `startOnDemand` prop 给 StatusDot（见 3.8） |
-| `frontend/src/components/ServerForm.tsx`         | hub-* 样式、隐藏 visibility、保留 OAuth2；stdio 专属「按需启动」checkbox + idle timeout 输入框（见 3.8） |
+| `frontend/src/components/ServerForm.tsx`         | hub-* 样式、隐藏 visibility（删除 Advanced 分区内的选择器块）、visibility 默认 public、保留 OAuth2、`getInitialServerType` 跳过 builtin；表单 3 分区布局随上游 #1034 同步（见 3.2.1）；stdio 专属「按需启动」checkbox + idle timeout 输入框（见 3.8） |
 | `frontend/src/components/ui/StatusDot.tsx`       | `startOnDemand` prop + 💤 Sleeping 渲染（见 3.8）            |
 | `frontend/src/components/LogViewer.tsx`          | source 类型改为 string[]、source filter UI 移除、滚动方向 |
 | `frontend/src/components/layout/Header.tsx`      | GitHub 链接、移除文档按钮                                 |
@@ -1416,16 +1418,42 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `45e2bd3` (origin/main，`v1.0.27` tag 之后 5 个未发布提交，无新 tag) |
-| **对应 origin tag**            | `v1.0.27`（仍为最新 tag） |
-| **桌面端版本号**               | `1.0.27001`（origin 无新 tag，版本号不变） |
-| **同步执行日期**               | 2026-08-06              |
+| **当前已同步到 origin commit** | `0e8fed0` (origin/main，`v1.0.28` tag 之后 2 个未发布提交，无新 tag) |
+| **对应 origin tag**            | `v1.0.28`（最新 tag，指向 `98d51ce`） |
+| **桌面端版本号**               | `1.0.28001` |
+| **同步执行日期**               | 2026-08-13              |
 
-> 下次同步时，使用 `45e2bd3` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 45e2bd3..HEAD`）。
+> 下次同步时，使用 `0e8fed0` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 0e8fed0..HEAD`）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-08-13：同步 `45e2bd3` -> `0e8fed0`（5 个 commit）
+
+origin 版本 `v1.0.27` -> `v1.0.28`；桌面端版本 `1.0.27001` -> `1.0.28001`。
+
+`cd mcphub-origin && git --no-pager log --oneline 45e2bd3..0e8fed0` 共 5 个 commit；`git diff --stat 45e2bd3..0e8fed0 -- frontend/ locales/` 涉及 `ServerForm.tsx`（#1034，2174 行重构）+ 4 个 locales（#1032，每文件 6 键），以及 Node 后端 `mcpService.ts`/`serverController.ts`/`mcpOAuthProvider.ts`/`serverConfigPersistence.ts`/测试（#1032/#1033/#1041，不同步）。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `cf1adc9` | fix: wake startOnDemand servers so they can serve tool calls (#1032) | locales：en/zh/fr/tr 各加 6 键（`server.startOnDemand`/`startOnDemandDescription`/`idleTimeoutMs`/`idleTimeoutMsDescription` + `status.sleeping`/`sleepingDescription`），用上游翻译。桌面端 `StatusDot.tsx`/`ServerForm.tsx` 此前用内联 fallback（`t('status.sleeping', 'Sleeping')` 等），现补齐真键使其走翻译。前端 tsx 无改动（#1032 前端只动 locales）。 |
+| `98d51ce` | refactor: restructure server edit form into 3 sections (#1034，= `v1.0.28` tag) | 前端：`ServerForm.tsx` 手动合并 3 分区重构（Section 1 Basic Info / Section 2 Connection / Section 3 Advanced Options 可折叠 + `isAdvancedExpanded` state）。**合并策略**：以 origin 新版（98d51ce）为基线（已含桌面端 openapi oauth2 字段 + perSessionClient + startOnDemand），再定点回加 3 处桌面端差异：① `getInitialServerType` 显式返回类型 `: 'stdio'\|'sse'\|'streamable-http'\|'openapi'` + `!== 'builtin'` 跳过（ServerForm 仅用于自定义 server）；② visibility 默认 `'public'`（origin 为 `'private'`）；③ 删除 Advanced 分区内的 visibility 选择器（桌面端隐藏可见性，所有 server 默认公开），留 `{/* Visibility section hidden in desktop client - all servers are public by default */}` 注释。origin 在 #1034 中移除的 OAuth 旧字段（authorizationEndpoint/tokenEndpoint/scopes/resource/accessToken/refreshToken）在桌面端本就被注释为死代码，随基线一并清理。perSessionClient 注释采纳 origin 更准确的「except openapi」（与 `serverType !== 'openapi'` 条件一致）。`diff -w origin新 vs 合并后` 仅余上述 3 处桌面差异，确认无误。无 locales 改动（origin 用内联 fallback）。 |
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `cf1adc9`（后端部分） | fix: wake startOnDemand（Node `mcpService.ts` 216 行：重写 `ensureServerReady` 直接 spawn+connect+缓存 tools/prompts/resources、`getServerByTool` 跳过 disabled、`primeOnDemandServers` 启动时填充工具缓存、startOnDemand 限 stdio） | **不同步** | origin 的关键 bug 是 `ensureServerReady` 走 `reconnectServer`→`initializeClientsFromSettings`，后者对 on-demand 跳过连接，导致**永远唤不醒睡眠 server**。桌面端 `mcp/on_demand.rs::call_tool_on_demand` 本就是直接 `build_client`+`connect`+`list_tools`+缓存（§3.8），不存在该 bug。逐项核对 origin 4 处修复：① 直接唤醒——桌面已具备；② disabled 守卫——桌面 disable 时 `disconnect_server` 移除 pool 占位 + `shutdown_on_demand_lifecycle`，disabled server 无 pool 条目，`call_tool` 落到「not connected」而非唤醒（比 origin 的 `enabled===false` 检查更彻底，覆盖所有 server 类型）；③ `primeOnDemandServers`（启动时唤醒每个 on-demand server 填充工具缓存再睡）——桌面端**有意不镜像**：on-demand 为低频 server 省内存，启动时全量唤醒会抵消收益；桌面端睡眠 server 工具在首次唤醒后缓存（§3.8.7），此前行为一致，属设计取舍（代价：外部 MCP 客户端 `tools/list` 在首次唤醒前看不到该 server 工具）；④ startOnDemand 限 stdio——桌面 `pool::connect_server` 已 `start_on_demand = cfg.start_on_demand.unwrap_or(false) && cfg.server_type == ServerType::Stdio`（§3.8.3），已具备。综上无需 Rust 镜像。 |
+| `63c84ff` | fix: apply resource description/enabled overrides in dashboard list (#1033) | **不同步** | origin 在 `getServersInfo`（dashboard 列表）给上游 server 的 resources 补上 per-URI 的 description/enabled 覆盖（`serverConfig?.resources?.[resource.uri]`）。桌面端 `list_servers`/`get_server` 返回 `resources: Vec::new()`（`commands/servers.rs` 多处），**dashboard 根本不暴露上游 server 的 resources**，没有可应用覆盖的 resource 列表。桌面端 `BuiltinResource` 是 hub 自有 builtin 资源（`builtin_resources` 表，`ResourcesPage` 管理），与上游 resource 覆盖是不同特性。架构不对应，N/A。 |
+| `0e8fed0` | Remove vector embeddings under old name when renaming a server (#1041) | **不同步** | origin 在 rename server 时调 `removeServerToolEmbeddings(oldName)` 清掉旧名下的 server-tool 向量嵌入，避免 `search_tools` 广告幻影工具。该向量嵌入属于 Smart Routing / `vectorSearchService`（按语义搜索 server 工具）。桌面端 Smart Routing 未实现（§7 待办），无 `vectorSearchService`/server-tool 嵌入；`http_server.rs` 的 `$smart` 仅是「调用所有已连接 server」的 fan-out 路由，非向量搜索。架构不对应，N/A。 |
+| `52e1f49` | chore(deps): bump js-yaml 4.3.0->4.3.1 (#1038) | **不同步** | 仅改 `package.json`+`pnpm-lock.yaml`；js-yaml 为 Node 后端 YAML 依赖，桌面端 Rust 用 serde_yaml，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
+
+**同步后验证**：`cd frontend && npm run build` 通过（7.16s，ServerForm 3 分区重构编译通过）；`cd src-tauri && ORT_SKIP_DOWNLOAD=1 CARGO_NET_OFFLINE=true cargo check` 通过（asdf cargo 1.96.0，22.95s）。桌面端自定义文件 `ServerForm.tsx` 经 `diff -w` 核对仅保留 3 处桌面差异未被覆盖；locales 4 文件均通过 `JSON.parse` 校验，runtime* 键未受影响。
+
+---
 
 #### 2026-08-06：同步 `5894e44` -> `45e2bd3`（5 个 commit）
 
