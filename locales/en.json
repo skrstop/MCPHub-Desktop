@@ -483,7 +483,6 @@
       "modelSelectFailed": "Failed to switch model",
       "modelNotReady": "Model not ready - download it first",
       "modelDownloadFailed": "Model download failed",
-      "modelFormatOnnx": "ONNX",
       "modelFormatGguf": "GGUF",
       "modelSizeUnknown": "Unknown",
       "modelDownloadable": "Downloadable",

@@ -1,53 +1,50 @@
-//! Embedder strategy: a uniform trait over the ONNX (ort) and GGUF (candle)
-//! backends so the rest of the RAG service is format-agnostic.
+//! Embedder strategy: the GGUF (candle) backend, wrapped so the rest of the
+//! RAG service is backend-agnostic.
 //!
-//! `load_embedder(size_dir)` probes the size directory and instantiates the
-//! right backend:
-//!   - `model.onnx` present -> `OrtEmbedder` (ort + tokenizers, see `embedding.rs`)
-//!   - `model.gguf` present -> `GgufEmbedder` (candle, see `gguf.rs`)
+//! `load_embedder(size_dir)` probes the size directory for a `*.gguf` file and
+//! instantiates `GgufEmbedder` (candle, see `gguf.rs`).
 //!
-//! Both backends implement `Embedder`: text -> `embed_dim`-long f32 vector
-//! (L2-normalized), with GPU-first + CPU-fallback execution providers (ort:
-//! CoreML/DirectML/CUDA; candle: Metal/CUDA). The trait keeps the service free
-//! of any backend-specific types - `Runtime` holds a `Box<dyn Embedder>`, and
-//! swapping in a new format is a new impl + a branch in `load_embedder`.
+//! The backend implements `Embedder`: text -> `embed_dim`-long f32 vector
+//! (L2-normalized), with GPU-first + CPU-fallback (candle: Metal on macOS). The
+//! trait keeps the service free of backend-specific types - `Runtime` holds a
+//! `Box<dyn Embedder>`.
 //!
 //! Shared, backend-agnostic helpers (memory probes, `read_max_context` from
-//! `config.json`) live here so both backends and the service (which needs the
+//! `config.json`) live here so the backend and the service (which needs the
 //! memory gate + the UI context bound even with RAG off) can use them without
-//! pulling in ort or candle.
+//! pulling in candle.
 
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::rag::embedding::OrtEmbedder;
 use crate::rag::gguf::GgufEmbedder;
 
-/// A loaded embedding model, abstracted over the on-disk format (ONNX / GGUF).
-/// All backends produce an `embed_dim`-long L2-normalized f32 vector per input
-/// text, expose their context window (for the chunk-size UI cap), and report
-/// the execution-provider config that took effect (for the enable-time log).
+/// A loaded embedding model (GGUF). Produces an `embed_dim`-long L2-normalized
+/// f32 vector per input text, exposes its context window (for the chunk-size
+/// UI cap), and reports the execution-provider config that took effect (for
+/// the enable-time log).
 ///
-/// `embed` / `embed_batch` take `&mut self` because the ort `Session::run` is
+/// `embed` / `embed_batch` take `&mut self` (the trait is unified on `&mut` so
+/// callers don't branch on backend).
+///
 /// Per-model deployment platform, read from a size dir's `deploy.json`
-/// (`{"platform": "AUTO"|"GPU"|"CPU"}`). Drives device selection for both
-/// backends: GGUF (candle Metal/CUDA/CPU) and ONNX (ort CoreML/DirectML/CUDA
-/// EP vs CPU). Missing file / field → `Auto` (GPU-first, CPU fallback).
+/// (`{"platform": "AUTO"|"GPU"|"CPU"}`). Drives device selection: GGUF (candle
+/// Metal/CUDA/CPU — though only Metal is built in practice (CUDA is disabled,
+/// see Cargo.toml). Missing file / field -> `Auto` (GPU-first, CPU fallback).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Platform {
-    /// GPU-first, CPU fallback (the default; format-aware for ort - quantized
-    /// ONNX models stay CPU because GPU EPs can't map the contrib int4 ops).
+    /// GPU-first, CPU fallback (the default).
     Auto,
-    /// Force GPU (Metal/CUDA/CoreML). Errors if no GPU is available (no silent
-    /// CPU fallback) - the user explicitly asked for GPU.
+    /// Force GPU (Metal/CUDA). Errors if no GPU is available (no silent CPU
+    /// fallback) - the user explicitly asked for GPU.
     Gpu,
     /// Force CPU.
     Cpu,
 }
 
 impl Platform {
-    /// Parse a platform string (case-insensitive); unknown/AUTO → Auto.
+    /// Parse a platform string (case-insensitive); unknown/AUTO -> Auto.
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_uppercase().as_str() {
             "GPU" => Platform::Gpu,
@@ -80,20 +77,20 @@ pub struct DeployConfig {
     /// in `reindex_doc`. Missing field / JSON null / non-string -> "".
     pub import_doc_prefix: String,
     /// Model-author-recommended chunk size in tokens (deploy.json `chunkSize`).
-    /// `None` if unset → the service falls back to a built-in default (1024).
+    /// `None` if unset -> the service falls back to a built-in default (1024).
     /// Applied by `reindex_doc` ONLY when the user's global `chunk_size` setting
     /// is `0` ("auto"); a positive user setting overrides it. Surfaced so the
     /// frontend can show the recommended value next to the Auto toggle.
     pub chunk_size: Option<u32>,
     /// Model-author-recommended chunk overlap in tokens (deploy.json
-    /// `chunkOverlap`). `None` if unset → falls back to a built-in default
+    /// `chunkOverlap`). `None` if unset -> falls back to a built-in default
     /// (100). Used the same auto-vs-override way as `chunk_size`.
     pub chunk_overlap: Option<u32>,
 }
 
 /// Read `size_dir/deploy.json`
 /// (`{"platform":"AUTO"|"GPU"|"CPU", "description":"...", "default":true}`).
-/// Missing file / invalid JSON / missing fields → `Auto`, empty description,
+/// Missing file / invalid JSON / missing fields -> `Auto`, empty description,
 /// `is_default=false`. One file read; both `resolve_platform` (at load) and
 /// `list_models` (for the dropdown + default selection) use this.
 pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
@@ -227,45 +224,39 @@ pub trait Embedder: Send + Sync {
     fn tokenize_offsets(&self, text: &str) -> Vec<(usize, usize)>;
 
     /// Human-readable execution-provider config that took effect, e.g.
-    /// "CoreML+CPU", "Metal+CPU", "CUDA+CPU", "CPU". Surfaced in the
-    /// enable-time log so slow imports can be diagnosed (GPU engaged or not).
-    /// Backend-specific diagnostics (e.g. ort's "CPU forced: contrib quantized")
-    /// are folded into this string.
+    /// "Metal+CPU", "CPU". Surfaced in the enable-time log so slow
+    /// imports can be diagnosed (GPU engaged or not). Backend-specific
+    /// diagnostics are folded into this string.
     fn ep_label(&self) -> &str;
 
-    /// The backend identifier: "onnx" or "gguf". Surfaced in the enable log +
-    /// the model dropdown so users can tell which engine a size uses.
+    /// The backend identifier: "gguf". Surfaced in the enable log + the model
+    /// dropdown.
     fn backend(&self) -> &str;
 }
 
-/// Load the right `Embedder` for `size_dir` by probing the model file present.
+/// Load the `Embedder` for `size_dir` by probing for a `*.gguf` model file.
 /// `size_dir` is self-contained (per the stage-18 dir layout): it holds the
-/// model file + `tokenizer.json` + `config.json`. ONNX = a `model.onnx` file;
-/// GGUF = any `*.gguf` file (bundled names like `model.gguf` and the
-/// downloaded `model.gguf` are both accepted). Returns an error if neither is
-/// present (the size isn't ready - the caller should have checked via
-/// `list_models`).
+/// model file + `tokenizer.json` + `config.json`. GGUF = any `*.gguf` file
+/// (bundled names like `model.gguf` and the downloaded `model.gguf` are both
+/// accepted). Returns an error if none is present (the size isn't ready - the
+/// caller should have checked via `list_models`).
 pub fn load_embedder(size_dir: &Path) -> Result<Box<dyn Embedder>> {
-    if size_dir.join("model.onnx").exists() {
-        OrtEmbedder::load(size_dir).map(|m| Box::new(m) as Box<dyn Embedder>)
-    } else if let Some(gguf) = find_gguf(size_dir) {
+    if let Some(gguf) = find_gguf(size_dir) {
         GgufEmbedder::load(&gguf).map(|m| Box::new(m) as Box<dyn Embedder>)
     } else {
         Err(anyhow!(
-            "no model file in '{}' (need model.onnx or *.gguf) - download it first",
+            "no model file in '{}' (need a *.gguf file) - download it first",
             size_dir.display()
         ))
     }
 }
 
-/// Detect the format of a ready size dir by file presence: "onnx" | "gguf" |
-/// "" (not ready). Used by `list_models` to populate `RagModelInfo.format`
-/// without loading the model. GGUF is any `*.gguf` file (so bundled
-/// `model.gguf` and downloaded `model.gguf` both register).
+/// Detect the format of a ready size dir by file presence: "gguf" | "" (not
+/// ready). Used by `list_models` to populate `RagModelInfo.format` without
+/// loading the model. GGUF is any `*.gguf` file (so bundled `model.gguf` and
+/// downloaded `model.gguf` both register).
 pub fn detect_format(size_dir: &Path) -> &'static str {
-    if size_dir.join("model.onnx").exists() {
-        "onnx"
-    } else if find_gguf(size_dir).is_some() {
+    if find_gguf(size_dir).is_some() {
         "gguf"
     } else {
         ""
@@ -287,8 +278,8 @@ fn find_gguf(dir: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// Read the model's max context window (tokens). Resolution order:
-/// 1. `config.json`'s `max_position_embeddings` (ONNX + GGUF dirs that ship
-///    one, e.g. Gemma3).
+/// 1. `config.json`'s `max_position_embeddings` (GGUF dirs that ship one,
+///    e.g. Gemma3).
 /// 2. GGUF metadata's `{arch}.context_length` (parsed from the `.gguf` header,
 ///    no model load - for GGUF-only dirs like Qwen3 that have no config.json).
 /// 3. Fallback 2048 (a safe common default) only when both are missing.

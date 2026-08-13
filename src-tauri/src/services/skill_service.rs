@@ -1225,7 +1225,7 @@ pub fn create_symlinks_elevated(items: &[(PathBuf, PathBuf)]) -> Vec<ManifestRes
 
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_NOCLOSEPROCESS.0;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
     info.lpVerb = PCWSTR(verb.as_ptr());
     info.lpFile = PCWSTR(exe_w.as_ptr());
     info.lpParameters = PCWSTR(params_w.as_ptr());

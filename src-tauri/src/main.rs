@@ -3,7 +3,7 @@
 
 // Use mimalloc as the global allocator. With the `override` feature it also
 // replaces the system malloc via symbol interposition, so C libraries (notably
-// ONNX Runtime / ort, candle) allocate through mimalloc too.
+// candle) allocate through mimalloc too.
 use mimalloc::MiMalloc;
 
 #[global_allocator]

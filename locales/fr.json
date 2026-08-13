@@ -446,7 +446,6 @@
       "modelSelectFailed": "Échec du changement de modèle",
       "modelNotReady": "Modèle non prêt - téléchargez-le d'abord",
       "modelDownloadFailed": "Échec du téléchargement du modèle",
-      "modelFormatOnnx": "ONNX",
       "modelFormatGguf": "GGUF",
       "modelSizeUnknown": "Inconnu",
       "modelDownloadable": "À télécharger",

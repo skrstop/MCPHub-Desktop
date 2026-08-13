@@ -15,7 +15,7 @@
 //!
 //! ## ⚠ Correctness caveat
 //! Compiles clean (cargo check 0 errors). The GGUF here is `gemma-embedding`
-//! (300M, 330M_Q4_0). Validate embeddings against the ONNX reference (cosine ~1.0).
+//! (300M, 330M_Q4_0).
 
 use std::io::{Read, Seek};
 

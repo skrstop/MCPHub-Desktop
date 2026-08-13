@@ -446,7 +446,6 @@
       "modelSelectFailed": "Model değiştirilemedi",
       "modelNotReady": "Model hazır değil - önce indirin",
       "modelDownloadFailed": "Model indirme başarısız",
-      "modelFormatOnnx": "ONNX",
       "modelFormatGguf": "GGUF",
       "modelSizeUnknown": "Bilinmiyor",
       "modelDownloadable": "İndirilebilir",

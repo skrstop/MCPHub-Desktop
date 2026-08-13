@@ -174,8 +174,8 @@ pub async fn rag_select_model(app: AppHandle, size: String) -> Result<crate::mod
     service::select_model(&app, &size).await.map_err(|e| e.to_string())
 }
 
-/// Download a model size via its `download.url` (a .zip archive of model.onnx
-/// + data). Streams with progress on `rag://model-download`, extracts into
+/// Download a model size via its `download.url` (a GGUF model file). Streams
+/// with progress on `rag://model-download` into
 /// `<app_data>/rag/models/<family>/<size>/`. After success the size is ready.
 #[tauri::command]
 pub async fn rag_download_model(app: AppHandle, size: String) -> Result<(), String> {

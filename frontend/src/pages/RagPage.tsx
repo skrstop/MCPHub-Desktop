@@ -937,11 +937,7 @@ const ModelSelector: React.FC<{
             const dl = modelDownload && modelDownload.size === m.size ? modelDownload : null;
             const downloading = !!dl && dl.phase === 'downloading';
             const fmtBadge =
-              m.format === 'gguf'
-                ? t('pages.rag.modelFormatGguf')
-                : m.format === 'onnx'
-                ? t('pages.rag.modelFormatOnnx')
-                : '';
+              m.format === 'gguf' ? t('pages.rag.modelFormatGguf') : '';
             return (
               <div
                 key={m.size}

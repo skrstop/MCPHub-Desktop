@@ -21,7 +21,7 @@
 
 - **Skills 管理** —— 统一管理 AI Agent 的技能库，一键安装/导出到数十种 Agent。
 - **RAG 知识库** —— 本地文档自动分块、向量化、入库与混合检索，作为 Agent 的**本地长期记忆（Long-term Memory）**。
-- **嵌入模型管理** —— ONNX / GGUF 双后端、多架构嵌入模型随包分发，本地推理、数据不出本机。
+- **嵌入模型管理** —— 多架构 GGUF 嵌入模型随包分发，本地推理、数据不出本机。
 
 > 💡 **本地长期记忆**：RAG 知识库让 AI Agent 拥有跨会话、可检索、可增删的长期记忆 —— 你上传的文档、笔记、代码、规范会被分块并向量化保存在本机，Agent 通过语义 + 关键词混合检索按需取用，不再受单次会话上下文窗口限制。所有向量数据**只存于你的电脑**，隐私可控、离线可用。
 
@@ -52,9 +52,9 @@
 - **MCP 工具暴露**：`rag_file_create` / `rag_file_update` / `rag_search` / `rag_get` / `rag_tag_search` 等工具经 MCP `tools/call` 暴露，Agent 可直接读写知识库 —— 即**把长期记忆当成可调用的工具**。
 
 ### 嵌入模型管理
-- 支持 ONNX（ort）与 GGUF（candle）两种后端，格式自动探测。
+- 支持 GGUF（candle）后端，格式自动探测。
 - 已支持架构：Gemma3、Qwen3、nomic-bert-moe、LFM2、**modern-bert**（Granite Embedding 97M Multilingual R2 等）。
-- 模型随包分发或按需下载，GPU 优先（Metal / CUDA / CoreML / DirectML）、CPU 兜底。
+- 模型随包分发或按需下载，GPU 优先（Metal / CUDA）、CPU 兜底。
 - 每个模型尺寸带 `deploy.json`：声明平台（GPU/CPU/AUTO）、描述、是否默认、非对称嵌入前缀、推荐分块尺寸。
 
 ### 其他
@@ -75,7 +75,7 @@
 | 鉴权 | JWT + bcrypt（环境变量配置） | JWT + bcrypt，密钥写入操作系统钥匙串（keyring 3） |
 | MCP 进程 | 由 Node 服务托管 | 由 Rust 进程托管，随包分发 Node/UV/Bun 运行时（见 [`src-tauri/runtimes/`](./src-tauri/runtimes)） |
 | 通信方式 | HTTP `/api/*` | Tauri `invoke`（前端 `fetchInterceptor` 透明转发） |
-| RAG / Skills / 嵌入模型 | 无 | 内置：Skills 一键分发 + RAG 知识库作本地长期记忆（GGUF/ONNX 嵌入 + lancedb 向量库 + tree-sitter 分块 + MCP 工具暴露） |
+| RAG / Skills / 嵌入模型 | 无 | 内置：Skills 一键分发 + RAG 知识库作本地长期记忆（GGUF 嵌入 + lancedb 向量库 + tree-sitter 分块 + MCP 工具暴露） |
 | 安装与分发 | Docker / npm CLI | 平台原生安装包（dmg / msi / AppImage），支持自动更新 |
 
 本项目在**保留上游前端 UI 与交互**的前提下，将后端用 Rust + Tauri 重新实现，并扩展了 **Skills 管理、RAG 知识库（Agent 本地长期记忆）、嵌入模型管理** 三大本地能力，沉淀为面向个人用户的桌面客户端。

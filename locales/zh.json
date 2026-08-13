@@ -485,7 +485,6 @@
       "modelSelectFailed": "切换模型失败",
       "modelNotReady": "模型未就绪,请先下载",
       "modelDownloadFailed": "模型下载失败",
-      "modelFormatOnnx": "ONNX",
       "modelFormatGguf": "GGUF",
       "modelSizeUnknown": "未知",
       "modelDownloadable": "待下载",

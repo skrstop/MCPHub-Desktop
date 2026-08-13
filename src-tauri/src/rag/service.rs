@@ -1,9 +1,9 @@
 //! High-level RAG service: lifecycle + document + search operations.
 //!
 //! Lifecycle is driven by `toggle(enabled)`:
-//!   enable  → `check_memory_sufficient()` → load `Embedder` (ort or candle) → open
-//!             `VectorDb` → store in the global runtime. Blocks until ready.
-//!   disable → drop the runtime (frees the ort session + closes lancedb).
+//!   enable  -> `check_memory_sufficient()` -> load `Embedder` (candle) -> open
+//!             `VectorDb` -> store in the global runtime. Blocks until ready.
+//!   disable -> drop the runtime (frees the candle model + closes lancedb).
 //!
 //! The runtime is held in a global `tokio::sync::Mutex<Option<Runtime>>`.
 //! Document metadata lives on disk under `<app_data_dir>/rag/files` (one
@@ -103,8 +103,7 @@ fn emit_reindex_progress(app: &AppHandle, current: u32, total: u32, name: &str) 
 }
 
 /// The loaded runtime. Dropped on disable to release resources. `model` is a
-/// format-agnostic `Embedder` (ONNX/ort or GGUF/candle) selected at load by
-/// `embedder::load_embedder`.
+/// GGUF `Embedder` (candle) selected at load by `embedder::load_embedder`.
 struct Runtime {
     model: Box<dyn Embedder>,
     db: VectorDb,
@@ -201,8 +200,8 @@ fn default_size(app: &AppHandle) -> Option<String> {
 /// dir's `config.json` `max_position_embeddings`. Used by the UI to cap the
 /// `chunk_size` input. Async because it reads the persisted selection; reads
 /// the file directly (no runtime) so the bound is available with RAG off.
-/// Both ONNX and GGUF size dirs ship a config.json, so this works for either
-/// format without loading the model. Falls back to 2048 if no size resolves.
+/// GGUF size dirs ship a config.json, so this works without loading the model.
+/// Falls back to 2048 if no size resolves.
 pub async fn model_max_context(app: &AppHandle) -> u32 {
     let size = current_model().await.or_else(|| default_size(app));
     let dir = size.and_then(|s| resolve_model_paths(app, &s).ok().flatten());
@@ -228,21 +227,17 @@ pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, O
     (max_ctx, cfg.chunk_size, cfg.chunk_overlap)
 }
 
-/// Sum the on-disk size of the model file(s) in a ready size dir: for ONNX the
-/// graph (`model.onnx`) + its external-data siblings (`*.onnx_data`); for GGUF
-/// any `*.gguf` file (bundled `model.gguf` or downloaded `model.gguf`). Small
-/// aux files (tokenizer.json/config.json) are excluded so the number reflects
-/// the model payload only.
+/// Sum the on-disk size of the model file(s) in a ready size dir: any `*.gguf`
+/// file (bundled `model.gguf` or downloaded `model.gguf`). Small aux files
+/// (tokenizer.json/config.json) are excluded so the number reflects the model
+/// payload only.
 fn model_file_size(dir: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if name == "model.onnx"
-                || name.ends_with(".onnx_data")
-                || name.ends_with(".gguf")
-            {
+            if name.ends_with(".gguf") {
                 if let Ok(m) = e.metadata() {
                     total += m.len();
                 }
@@ -252,7 +247,7 @@ fn model_file_size(dir: &Path) -> u64 {
     total
 }
 
-/// The parsed `download.url` (stage-18 JSON format): a `type` ("onnx"|"gguf")
+/// The parsed `download.url` (stage-18 JSON format): a `type` (must be "gguf")
 /// + an array of model-file URLs to fetch.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -266,8 +261,16 @@ struct DownloadUrl {
 fn read_download_url(path: &Path) -> Result<DownloadUrl> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
-    serde_json::from_str::<DownloadUrl>(&text)
-        .map_err(|e| anyhow!("parse {} as JSON ({{type, modelUrl}}): {}", path.display(), e))
+    let dl = serde_json::from_str::<DownloadUrl>(&text)
+        .map_err(|e| anyhow!("parse {} as JSON ({{type, modelUrl}}): {}", path.display(), e))?;
+    if !dl.format.is_empty() && dl.format != "gguf" {
+        return Err(anyhow!(
+            "download.url in {} has type '{}' - only 'gguf' is supported (ONNX backend was removed)",
+            path.display(),
+            dl.format
+        ));
+    }
+    Ok(dl)
 }
 
 // ── model selection ─────────────────────────────────────────────────────────
@@ -284,12 +287,12 @@ pub struct RagModelInfo {
     /// "ready" (model file present, bundled or downloaded) | "downloadable"
     /// (only download.url, not yet downloaded) | "unavailable".
     pub status: String,
-    /// True if the model file (model.onnx or model.gguf) is available now
+    /// True if the model file (*.gguf) is available now
     /// (selectable).
     pub ready: bool,
     /// True if a download.url exists (can be fetched).
     pub downloadable: bool,
-    /// Backend format: "onnx" | "gguf" | "" (not ready). Drives the strategy
+    /// Backend format: "gguf" | "" (not ready). Drives the strategy
     /// (`embedder::load_embedder`) and shows as a dropdown badge. For
     /// downloadable sizes the future format is read from download.url's `type`
     /// so the badge shows even before download.
@@ -316,7 +319,7 @@ pub struct RagModelInfo {
 
 /// Scan `model/<family>/<size>/` and return one entry per size. A size is
 /// "ready" if its size dir (downloaded copy preferred, else the bundled dir)
-/// contains `model.onnx` or `model.gguf`; "downloadable" if a `download.url` is
+/// contains a `*.gguf` file; "downloadable" if a `download.url` is
 /// present but no model file yet. `format` is detected from the file present
 /// (ready) or read from download.url's `type` (downloadable).
 pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
@@ -343,7 +346,7 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
             }
             let downloaded_dir = dl_root.join(fam_name).join(&size);
             // Ready dir = downloaded copy if it has a model file, else bundled.
-            // `detect_format` returns "onnx"/"gguf"/"" by file presence.
+            // `detect_format` returns "gguf"/"" by file presence.
             let ready_dir = if !detect_format(&downloaded_dir).is_empty() {
                 Some(downloaded_dir)
             } else if !detect_format(&sz_path.clone()).is_empty() {
@@ -403,7 +406,7 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
 /// `<app_data>/rag/models/<family>/<size>/`) if it has a model file, else the
 /// bundled size dir if it has a model file. Returns `None` if the size isn't
 /// found or not ready (download.url only). Each size dir is self-contained
-/// (holds model.onnx/model.gguf + tokenizer.json + config.json).
+/// (holds a *.gguf file + tokenizer.json + config.json).
 fn resolve_model_paths(app: &AppHandle, size: &str) -> Result<Option<PathBuf>> {
     let root = model_root(app)?;
     let dl_root = download_root(app)?;
@@ -509,13 +512,11 @@ fn emit_model_download(app: &AppHandle, p: RagModelDownloadProgress) {
 }
 
 /// Download a model size via its `download.url` (stage-18 JSON format:
-/// `{"type":"onnx"|"gguf", "modelUrl":[...]}). Each URL is streamed directly
-/// into `<app_data>/rag/models/<family>/<size>/`: for onnx, file 0 -> `model.onnx`
-/// (the graph), the rest keep their URL basename (must match the name
-/// model.onnx references internally - HF resolve URLs satisfy this); for gguf,
-/// file 0 -> `model.gguf`. After success the size becomes "ready" and
-/// selectable. Emits `rag://model-download` throughout with cumulative %,
-/// speed, ETA, and file index/total.
+/// `{"type":"gguf", "modelUrl":[...]}`). Each URL is streamed directly into
+/// `<app_data>/rag/models/<family>/<size>/`: file 0 -> `model.gguf`; additional
+/// URLs (if any) keep their URL basename. After success the size becomes
+/// "ready" and selectable. Emits `rag://model-download` throughout with
+/// cumulative %, speed, ETA, and file index/total.
 pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
     // Locate the download.url + family for this size.
     let root = model_root(app)?;
@@ -585,12 +586,9 @@ pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
     let mut cumulative: u64 = 0;
     for (idx, url) in urls.iter().enumerate() {
         let file_current = (idx as u32) + 1;
-        // Output filename: gguf -> model.gguf; onnx file 0 -> model.onnx
-        // (graph); onnx others keep URL basename (the external-data name).
-        let out_name = if fmt == "gguf" {
+        // Output filename: file 0 -> model.gguf; others keep URL basename.
+        let out_name = if idx == 0 {
             "model.gguf".to_string()
-        } else if idx == 0 {
-            "model.onnx".to_string()
         } else {
             url_basename(url)
         };
@@ -672,8 +670,8 @@ pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
         let _ = &sizes[idx]; // per-file size available if needed for logging
     }
 
-    // Verify the model file landed (model.onnx for onnx, model.gguf for gguf).
-    let model_file = if fmt == "gguf" { "model.gguf" } else { "model.onnx" };
+    // Verify the model file landed.
+    let model_file = "model.gguf";
     if !target_dir.join(model_file).exists() {
         return Err(anyhow!("{} download failed for '{}'", model_file, size));
     }
@@ -709,9 +707,9 @@ fn pct(done: u64, total: u64) -> u8 {
     }
 }
 
-/// Basename of a URL's path - used to save the data file under the name ort
-/// expects (model.onnx references its external data by this filename). Strips a
-/// trailing query string first; falls back to "model_data.bin".
+/// Basename of a URL's path - used to save an additional model file under its
+/// URL basename. Strips a trailing query string first; falls back to
+/// "model_data.bin".
 fn url_basename(url: &str) -> String {
     let path = url.split('?').next().unwrap_or(url);
     path.rsplit('/')
@@ -767,7 +765,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         // out-of-box default (the size whose deploy.json has "default": true).
         // If the persisted size can't be resolved (deleted in a later version),
         // fall back to the default and persist it so we don't keep trying the
-        // gone one. The size dir is self-contained (model.onnx/model.gguf +
+        // gone one. The size dir is self-contained (*.gguf file +
         // tokenizer + config); `embedder::load_embedder` detects the format.
         let size = {
             let persisted = current_model().await;
@@ -807,7 +805,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         let deploy = crate::rag::embedder::read_deploy_config(&size_dir);
         // Model name = "<family>-<size>" (the dropdown label, e.g.
         // "embeddinggemma-default") - derived from the resolved size dir so it
-        // works for both backends (GGUF + ONNX) and matches what the user sees.
+        // works for the GGUF backend and matches what the user sees.
         let family = size_dir
             .parent()
             .and_then(|p| p.file_name())
@@ -815,7 +813,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
             .unwrap_or("");
         let model_name = format!("{}-{}", family, size);
         // Surface the model + backend + execution-provider decision to the Logs
-        // page so slow imports can be diagnosed. `backend()` = onnx/gguf;
+        // page so slow imports can be diagnosed. `backend()` = gguf;
         // `ep_label()` carries the EP detail (e.g. "Metal", "CoreML+CPU", "CPU").
         // This is THE signal for whether the model is on GPU or stuck on CPU.
         rag_log(
@@ -881,13 +879,12 @@ pub async fn stop() {
         rag_log("info", "stop: runtime found, dropping model + db");
         let Runtime { model, db, .. } = rt;
         drop(db);    // lancedb Connection -> freed
-        // Drop the model (candle GgufEmbedder / ort OrtEmbedder). For candle:
+        // Drop the model (candle GgufEmbedder). For candle:
         //   CPU: Tensors (CpuStorage Vec<f32>) freed by Rust drop; mi_collect
         //        returns freed pages to OS.
         //   Metal: Tensors (MetalStorage Arc<Buffer>) freed when the buffer
         //        pool Arc hits 0 (all MetalDevice clones dropped). Metal
         //        framework releases GPU buffers (not mimalloc-managed).
-        // For ort: Session dropped -> ort releases model + arena.
         drop(model);
     } else {
         rag_log("info", "stop: no runtime (model was never loaded or already stopped)");
@@ -1943,8 +1940,8 @@ pub async fn update_doc(
 const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// Decode raw bytes into a UTF-8 `String` and report the detected encoding.
-/// Strategy (fast → fallback):
-/// 1. UTF-8 BOM / valid UTF-8 → SIMD-validated by `std::str::from_utf8`, BOM
+/// Strategy (fast -> fallback):
+/// 1. UTF-8 BOM / valid UTF-8 -> SIMD-validated by `std::str::from_utf8`, BOM
 ///    stripped. The common case; no detector runs.
 /// 2. Otherwise `chardetng` detects (Mozilla statistical; honors BOMs incl.
 ///    UTF-16) and `encoding_rs` converts (SIMD). Covers GBK/GB18030, Big5,
@@ -1967,7 +1964,7 @@ pub fn decode_text(bytes: &[u8], source: &str) -> (String, &'static str) {
     det.feed(bytes, true);
     let enc = det.guess(None, chardetng::Utf8Detection::Allow);
 
-    // Conversion: valid UTF-8 (SIMD-validated) → no conversion, just strip a
+    // Conversion: valid UTF-8 (SIMD-validated) -> no conversion, just strip a
     // leading BOM. Otherwise decode via the detected encoding (SIMD).
     let (out, convert, had_bom) = match std::str::from_utf8(bytes) {
         Ok(s) => {
@@ -2020,7 +2017,7 @@ async fn reindex_doc(
             return Err(anyhow!("RAG not enabled"));
         };
         // Resolve the effective chunk size / overlap. `0` in the user's global
-        // setting means "auto" → use the model's deploy.json-recommended value
+        // setting means "auto" -> use the model's deploy.json-recommended value
         // (chunkSize/chunkOverlap); a positive value is an explicit override.
         // `chunk_size` is capped by the loaded model's context window so a chunk
         // can never exceed what the embedder accepts (the GGUF/ONNX backends
@@ -2206,8 +2203,8 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
         emit_reindex_progress(app, i as u32, total, &meta.name);
         // Read the doc content. MUST use `content_path_for` (not `dir.join(id)`)
         // — uploads are stored as `{id}.{ext}` (ext from the original filename),
-        // so a bare `{id}` path doesn't exist and `read_to_string` would fail →
-        // empty content → 0 chunks (looked like a silent reindex "success").
+        // so a bare `{id}` path doesn't exist and `read_to_string` would fail ->
+        // empty content -> 0 chunks (looked like a silent reindex "success").
         let content_path = content_path_for(&dir, &meta.id, &meta.name);
         let content = match std::fs::read_to_string(&content_path) {
             Ok(c) => c,
@@ -2624,20 +2621,20 @@ pub async fn save_settings(settings: RagSettings) -> Result<()> {
 /// Sniff whether `bytes` look like plain text (vs binary). Content-based — we
 /// don't trust the file extension (text extensions can't be exhaustively
 /// enumerated). Heuristic (same idea as the `file` utility):
-/// - A NUL byte (0x00) in the first 8 KiB → binary (PDF/Word/Excel/ZIP/EXE
+/// - A NUL byte (0x00) in the first 8 KiB -> binary (PDF/Word/Excel/ZIP/EXE
 ///   all contain NULs). Text files never do.
-/// - Otherwise, if >30% of the sample is non-text control bytes → binary.
+/// - Otherwise, if >30% of the sample is non-text control bytes -> binary.
 /// ASCII/UTF-8/legacy-CJK text passes (printable ASCII, tab/LF/CR, or high
 /// bytes for multibyte/extended chars are all "text").
 fn is_likely_text(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(8192)];
     if sample.is_empty() {
-        return true; // empty file → treat as text
+        return true; // empty file -> treat as text
     }
     let mut non_text = 0usize;
     for &b in sample {
         if b == 0 {
-            return false; // NUL → binary
+            return false; // NUL -> binary
         }
         // text bytes: TAB(9) LF(10) CR(13), printable ASCII (32..=126),
         // or high byte (>=128, valid in UTF-8 multibyte / legacy CJK).
@@ -2649,7 +2646,7 @@ fn is_likely_text(bytes: &[u8]) -> bool {
 }
 
 /// Display-label catalog compiled in from `runtimes/rag/file_support.json`
-/// (extension → human-readable name, e.g. ".md" → "Markdown"). Display-only —
+/// (extension -> human-readable name, e.g. ".md" -> "Markdown"). Display-only —
 /// does NOT gate upload (validation is content-based via `is_likely_text`).
 static FILE_TYPE_MAP: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
 

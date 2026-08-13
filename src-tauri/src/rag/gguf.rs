@@ -21,8 +21,8 @@
 //! drive manual prepend/append (encode without special tokens, then add bos/eos
 //! per the GGUF's convention) - so each arch gets the input it was trained on.
 //!
-//! Device strategy mirrors ort's: GPU-first (Metal/CUDA), CPU fallback, driven
-//! by `deploy.json`'s `platform` (AUTO/GPU/CPU).
+//! Device strategy: GPU-first (Metal on macOS), CPU fallback, driven by
+//! `deploy.json`'s `platform` (AUTO/GPU/CPU). Linux/Windows are CPU-only.
 
 use std::path::Path;
 
@@ -228,7 +228,7 @@ impl Embedder for GgufEmbedder {
         //   - CPU + accelerate (macOS): AMX BLAS sgemm (internally multi-threaded).
         //   - CPU + mkl (Linux x86_64): MKL BLAS sgemm (internally multi-threaded).
         //   - CPU + gemm (other): pure-Rust gemm crate (rayon multi-threaded).
-        //   - GPU (Metal/CUDA): quantized int4 kernels (inherently parallel).
+        //   - GPU (Metal): quantized int4 kernels (inherently parallel).
         // No external batch splitting needed — the BLAS/gemm handles it, and a
         // bigger [batch*seq, hidden] GEMM is more efficient than N small ones.
         let n = all_ids.len();
@@ -597,17 +597,9 @@ fn pick_gpu() -> Option<(Device, &'static str)> {
             Err(e) => log::warn!("[RAG] candle Metal device init failed: {e}"),
         }
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        match Device::new_cuda(0) {
-            Ok(d) => return Some((d, "CUDA")),
-            Err(e) => log::warn!("[RAG] candle CUDA device init failed: {e}"),
-        }
-    }
-    #[cfg(not(any(target_os = "macos", all(unix, not(target_os = "macos")))))]
-    {
-        // No GPU backend on this platform (e.g. Windows - candle has no DirectML).
-    }
+    // Linux & Windows: CPU-only — candle has no usable GPU backend here (no
+    // DirectML on Windows; Linux CUDA is disabled, see Cargo.toml). Falls
+    // through to None -> CPU.
     None
 }
 

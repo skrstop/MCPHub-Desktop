@@ -345,7 +345,7 @@ mod tests {
     #[ignore]
     fn granite_loads_and_embeds() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m/granite-embedding-97M-multilingual-r2-Q8_0.gguf");
+            .join("runtimes/rag/model/granite/97m/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: {} not present", gguf.display());
             return;

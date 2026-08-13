@@ -324,7 +324,7 @@ export interface RagStatus {
 
 /** One selectable model size (scanned from runtimes/rag/model/<family>/<size>/).
  *  `status`: "ready" (selectable) | "downloadable" (has download.url, fetch
- *  first) | "unavailable". `format`: "onnx" | "gguf" | "" (drives the backend
+ *  first) | "unavailable". `format`: "gguf" | "" (drives the backend
  *  strategy + a dropdown badge). `fileSize`: model payload bytes (ready) or 0. */
 export interface RagModelInfo {
   size: string;

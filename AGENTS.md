@@ -1692,4 +1692,4 @@ npm run build
 - [ ]  CI/CD 打包配置
 
 ### 已知问题
-- [ ]  RAG ort Session 图优化缓存内存泄露（`src-tauri/src/rag/service.rs:148`）：`stop()` 中 `drop(model)` 会触发 ort `ReleaseSession`，但 Session 构建时设置的是 `GraphOptimizationLevel::All`（`src-tauri/src/rag/embedding.rs:47`），session 内部缓存的图优化结果在 `ReleaseSession` 后不会被释放，反复 enable/disable RAG 会累积内存。可选解法：① 降级为 `GraphOptimizationLevel::Level0`（无优化缓存可泄露，但推理略慢；CPU arena 已关见 `embedding.rs:51-62`，频繁开关属于低频操作，为了低频操作放弃性能，不可取）；② 在 ort/ONNX Runtime 层寻找显式释放优化缓存的 API（ort crate safe API 当前可能未暴露）。详见 `doc/rag_feature_20260730.md`。
+（暂无）
