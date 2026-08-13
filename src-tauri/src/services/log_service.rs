@@ -144,7 +144,7 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
 
     // Count query
     let count_sql = format!("SELECT COUNT(*) as cnt FROM activity_log {}", where_clause);
-    let mut count_q = sqlx::query(&count_sql);
+    let mut count_q = sqlx::query(sqlx::AssertSqlSafe(&*count_sql));
     if let Some(ref s) = q.server { count_q = count_q.bind(s); }
     if let Some(ref s) = q.status { count_q = count_q.bind(s); }
     if let Some(ref t) = q.tool { count_q = count_q.bind(format!("%{}%", t)); }
@@ -157,7 +157,7 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
          ORDER BY created_at DESC LIMIT ? OFFSET ?",
         where_clause
     );
-    let mut data_q = sqlx::query(&data_sql);
+    let mut data_q = sqlx::query(sqlx::AssertSqlSafe(&*data_sql));
     if let Some(ref s) = q.server { data_q = data_q.bind(s); }
     if let Some(ref s) = q.status { data_q = data_q.bind(s); }
     if let Some(ref t) = q.tool { data_q = data_q.bind(format!("%{}%", t)); }
@@ -189,7 +189,7 @@ pub async fn get_activity_stats(server: Option<&str>, status: Option<&str>, tool
          FROM activity_log {}",
         where_clause
     );
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(&*sql));
     if let Some(s) = server { q = q.bind(s); }
     if let Some(s) = status { q = q.bind(s); }
     if let Some(t) = tool { q = q.bind(format!("%{}%", t)); }
@@ -229,13 +229,13 @@ pub async fn clear_activities() -> Result<i64> {
 pub async fn cleanup_by_days(days_old: i64) -> Result<(i64, String)> {
     let cutoff = format!("datetime('now', 'localtime', '-{} days')", days_old);
     let sql = format!("DELETE FROM activity_log WHERE created_at < {}", cutoff);
-    let result = sqlx::query(&sql).execute(db::pool()).await?;
+    let result = sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(db::pool()).await?;
     let deleted = result.rows_affected() as i64;
     if deleted > 0 {
         let _ = sqlx::raw_sql("VACUUM").execute(db::pool()).await;
     }
     // Read back the actual cutoff datetime for the response
-    let cutoff_row = sqlx::query(&format!("SELECT {} as c", cutoff))
+    let cutoff_row = sqlx::query(sqlx::AssertSqlSafe(&*format!("SELECT {} as c", cutoff)))
         .fetch_one(db::pool())
         .await?;
     let cutoff_date: String = cutoff_row.try_get("c")?;
@@ -314,7 +314,7 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
         "DELETE FROM app_log WHERE created_at < {}",
         cutoff
     );
-    let app_result = sqlx::query(&app_log_sql)
+    let app_result = sqlx::query(sqlx::AssertSqlSafe(&*app_log_sql))
         .execute(db::pool())
         .await?;
     let app_deleted = app_result.rows_affected() as i64;
@@ -324,7 +324,7 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
         "DELETE FROM activity_log WHERE created_at < {}",
         cutoff
     );
-    let activity_result = sqlx::query(&activity_sql)
+    let activity_result = sqlx::query(sqlx::AssertSqlSafe(&*activity_sql))
         .execute(db::pool())
         .await?;
     let activity_deleted = activity_result.rows_affected() as i64;

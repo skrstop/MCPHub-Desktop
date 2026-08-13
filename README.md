@@ -11,6 +11,8 @@
 [![Upstream](https://img.shields.io/badge/Upstream-samanhappy%2Fmcphub-orange?logo=github)](https://github.com/samanhappy/mcphub)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](./mcphub-origin/LICENSE)
 
+![MCPHub Desktop 主界面](./doc/imgs/home.png)
+
 ## 项目简介
 
 **MCPHub Desktop** 是一款基于 [Tauri 2](https://tauri.app/) 构建的**本地优先（Local-first）**桌面客户端，用于在个人电脑上统一管理 MCP（Model Context Protocol）服务器、**Skills**、**RAG 知识库**与**嵌入模型**。所有进程、配置、密钥与向量数据都运行/保存在用户自己的机器上，不依赖任何远端服务。

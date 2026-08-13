@@ -428,14 +428,14 @@ async fn migrate_v8(pool: &SqlitePool) -> Result<()> {
             "UPDATE {} SET created_at = datetime(created_at, 'localtime') WHERE created_at IS NOT NULL",
             table
         );
-        sqlx::query(&sql).execute(pool).await.ok();
+        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await.ok();
     }
     for table in &["users", "servers", "templates", "server_tool_config"] {
         let sql = format!(
             "UPDATE {} SET updated_at = datetime(updated_at, 'localtime') WHERE updated_at IS NOT NULL",
             table
         );
-        sqlx::query(&sql).execute(pool).await.ok();
+        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await.ok();
     }
 
     log::info!("[db] migration v8: converted existing timestamps to local time");
@@ -508,7 +508,7 @@ async fn migrate_v10(pool: &SqlitePool) -> Result<()> {
 async fn migrate_v11(pool: &SqlitePool) -> Result<()> {
     for table in &["builtin_prompts", "builtin_resources"] {
         let sql = format!("ALTER TABLE {} DROP COLUMN server_name", table);
-        sqlx::query(&sql).execute(pool).await.ok(); // ignore if column already absent
+        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await.ok(); // ignore if column already absent
     }
     sqlx::query("ALTER TABLE builtin_prompts ADD COLUMN title TEXT")
         .execute(pool).await.ok();
@@ -766,18 +766,18 @@ async fn add_column_if_missing(
     column: &str,
     definition: &str,
 ) -> Result<()> {
-    let exists: i64 = sqlx::query_scalar(&format!(
+    let exists: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(&*format!(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{}') WHERE name = '{}')",
         table, column
-    ))
+    )))
     .fetch_one(pool)
     .await
     .map_err(|e| anyhow!("check column {}.{} existence failed: {}", table, column, e))?;
     if exists == 0 {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
             "ALTER TABLE {} ADD COLUMN {} {}",
             table, column, definition
-        ))
+        )))
         .execute(pool)
         .await
         .map_err(|e| anyhow!("add column {}.{} failed: {}", table, column, e))?;

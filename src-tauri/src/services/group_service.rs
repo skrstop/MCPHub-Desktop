@@ -19,9 +19,9 @@ fn row_to_group(r: &sqlx::sqlite::SqliteRow) -> Result<Group> {
 const SELECT_COLS: &str = "id, name, description, servers, created_at";
 
 pub async fn list_all() -> Result<Vec<Group>> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "SELECT {SELECT_COLS} FROM groups ORDER BY name"
-    ))
+    )))
     .fetch_all(db::pool())
     .await?;
 
@@ -29,9 +29,9 @@ pub async fn list_all() -> Result<Vec<Group>> {
 }
 
 pub async fn find_by_name_or_id(name_or_id: &str) -> Result<Option<Group>> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "SELECT {SELECT_COLS} FROM groups WHERE name = ? OR id = ?"
-    ))
+    )))
     .bind(name_or_id)
     .bind(name_or_id)
     .fetch_optional(db::pool())
@@ -78,9 +78,9 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     .execute(db::pool())
     .await?;
 
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "SELECT {SELECT_COLS} FROM groups WHERE id=?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(db::pool())
     .await?

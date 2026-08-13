@@ -176,6 +176,24 @@ jobs:
           workspaces: src-tauri
           key: ${{ matrix.target }}
 
+      # ─── protoc ───────────────────────────────────────────────────────────
+      # lancedb → lance-encoding → prost-build 会在构建脚本中调用 `protoc` 二进制。
+      # protoc 是宿主架构的构建期工具（在 runner 上执行，与交叉编译目标无关），
+      # 因此对所有 matrix 条目统一安装即可，含交叉编译任务。
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '23.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify protoc
+        shell: bash
+        run: |
+          echo "=== protoc ==="
+          which protoc
+          protoc --version
+          echo "PROTOC=${PROTOC:-<not set>}"
+
       # ─── Linux 系统依赖 ────────────────────────────────────────────────────
       - name: Install Linux dependencies
         if: runner.os == 'Linux'

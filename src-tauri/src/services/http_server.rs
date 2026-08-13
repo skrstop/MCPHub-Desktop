@@ -32,7 +32,6 @@ use axum::{
     Router,
 };
 use futures_util::StreamExt;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -45,7 +44,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 
 fn new_session_id() -> String {
-    let id: u128 = rand::thread_rng().gen();
+    let id: u128 = rand::random();
     format!("{:032x}", id)
 }
 
@@ -1465,16 +1464,16 @@ fn build_router(body_limit_bytes: usize) -> Router {
         .route("/.well-known/oauth-protected-resource", get(oauth_protected_resource))
         .route("/servers", get(list_servers))
         // Legacy REST API (moved to /rest prefix to avoid wildcard conflict)
-        .route("/rest/:server/tools", get(list_server_tools))
-        .route("/rest/:server/call", post(call_server_tool))
-        .route("/rest/group/:group/tools", get(list_group_tools))
-        .route("/rest/group/:group/call", post(call_group_tool))
+        .route("/rest/{server}/tools", get(list_server_tools))
+        .route("/rest/{server}/call", post(call_server_tool))
+        .route("/rest/group/{group}/tools", get(list_group_tools))
+        .route("/rest/group/{group}/call", post(call_group_tool))
         // MCP Streamable HTTP protocol (JSON-RPC 2.0)
         .route("/mcp", get(mcp_root_get).post(mcp_root_post).delete(mcp_root_delete))
         // Legacy 2024-11-05 SSE transport: POST target named in the `endpoint`
         // event. Static route wins over the /mcp/*path wildcard below.
         .route("/mcp/message", post(mcp_message_post))
-        .route("/mcp/*path", get(mcp_scope_get).post(mcp_scope_post).delete(mcp_scope_delete))
+        .route("/mcp/{*path}", get(mcp_scope_get).post(mcp_scope_post).delete(mcp_scope_delete))
         .layer(axum::extract::DefaultBodyLimit::max(body_limit_bytes))
         .layer(CorsLayer::permissive())
 }

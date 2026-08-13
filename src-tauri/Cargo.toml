@@ -43,14 +43,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP client (SSE + Streamable HTTP MCP transports)
-reqwest = { version = "0.12", features = [
+reqwest = { version = "0.13", features = [
   "json",
   "stream",
-  "rustls-tls",
+  "rustls-native-certs",
+  "query",
 ] }
 
 # SQLite database
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
   "runtime-tokio",
   "sqlite",
   "macros",
@@ -60,8 +61,8 @@ sqlx = { version = "0.8", features = [
 ] }
 
 # Authentication
-jsonwebtoken = "9"
-bcrypt = "0.15"
+jsonwebtoken = "11"
+bcrypt = "0.19"
 
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
@@ -74,15 +75,15 @@ log = "0.4"
 env_logger = "0.11"
 
 # Error handling
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 
 # OS keychain (secure credential storage)
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "4", features = ["v1"] }
 
 # HTTP server (expose MCP endpoints when expose_http = true)
-axum = { version = "0.7", features = ["json"] }
-tower-http = { version = "0.5", features = ["cors"] }
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.7", features = ["cors"] }
 
 # Async trait
 async-trait = "0.1"
@@ -91,10 +92,10 @@ async-trait = "0.1"
 url = "2"
 
 # Base64
-base64 = "0.22"
+base64 = "0.23"
 
 # Random generation
-rand = "0.8"
+rand = "0.10"
 
 # Futures utilities
 futures-util = "0.3"
@@ -117,8 +118,8 @@ ort = "2.0.0-rc.13"
 # `default-features = false` avoids the esaxx C++ dependency (the macOS CLT
 # C++ headers are incomplete); BPE tokenization only needs fancy-regex.
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex", "progressbar"] }
-lancedb = "0.33"
-ndarray = "0.16"
+lancedb = "0.37"
+ndarray = "0.17"
 # RAG GGUF backend: candle (pure-Rust tensor lib by HF). Used by `GgufEmbedder`
 # for GGUF embedding models (candle's quantized QMatMul has native int4 kernels
 # on CPU/Metal - the speed win ort's MLAS couldn't deliver for Q4 ONNX). GPU is
@@ -145,13 +146,13 @@ tree-sitter = "0.26"
 # Each is a small C grammar compiled via its own `cc` build script (same build
 # model as the existing ort-sys/candle C deps). Add a grammar + an extension
 # entry in `chunker::code_language` to support a new language.
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-javascript = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
+tree-sitter-go = "0.25"
 tree-sitter-java = "0.23"
-tree-sitter-c = "0.23"
+tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 # Global allocator experiment: with `override` it replaces the system malloc
 # (incl. for the C ort library) and returns freed pages to the OS more
@@ -163,9 +164,9 @@ mimalloc = { version = "0.1", features = ["override"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-zip = "2"
-winreg = "0.55"
-windows = { version = "0.61", features = [
+zip = "8"
+winreg = "0.56"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
