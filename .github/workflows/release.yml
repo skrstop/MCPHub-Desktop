@@ -66,8 +66,13 @@ jobs:
 
     steps:
       # ─── 检出代码 ──────────────────────────────────────────────────────────
+      # lfs: true 必须开启 —— .gitattributes 把 *.gguf 交给 Git LFS 管理，
+      # 默认 lfs:false 只会检出 ~130B 的 LFS 指针文件，导致打包产物里的
+      # src-tauri/runtimes/rag/model/.../*.gguf 是索引指针而非真实模型（~110MB）。
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          lfs: true
 
       - name: Print build info
         shell: bash
@@ -576,6 +581,28 @@ jobs:
           find "$BUNDLE_DIR" \( -name "*.deb" -o -name "*.rpm" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done || echo "  (none)"
           echo "Windows (.exe, .msi, .nsis.zip):"
           find "$BUNDLE_DIR" \( -name "*.exe" -o -name "*.msi" -o -name "*.nsis.zip" \) -type f 2>/dev/null | while read f; do echo "  $(ls -lh "$f")"; done || echo "  (none)"
+          echo ""
+
+          echo "=== .gguf files (must be real model, NOT LFS pointer) ==="
+          # .gitattributes 把 *.gguf 交给 Git LFS；若 checkout 未开 lfs:true，
+          # 产物里会是 ~130B 的 LFS 指针而非真实模型（~110MB）。
+          GGCOUNT=0
+          if [ -d "$BUNDLE_DIR" ]; then
+            while IFS= read -r f; do
+              GGSIZE=$(stat -c '%s' "$f" 2>/dev/null || stat -f '%z' "$f" 2>/dev/null)
+              GGCOUNT=$((GGCOUNT + 1))
+              if [ "${GGSIZE:-0}" -lt 1048576 ]; then
+                echo "  ❌ $f (${GGSIZE} bytes) — 疑似 LFS 指针文件！检查 Checkout 是否开启 lfs:true"
+                echo "     首字节内容:"
+                xxd "$f" | head -3
+              else
+                echo "  ✅ $f ($(ls -lh "$f" | awk '{print $5}'))"
+              fi
+            done < <(find "$BUNDLE_DIR" -name "*.gguf" -type f 2>/dev/null)
+          fi
+          if [ "$GGCOUNT" -eq 0 ]; then
+            echo "  ⚠️  未在 bundle 中找到 .gguf 文件（确认 runtimes/rag 是否作为 resource 打包）"
+          fi
           echo ""
           echo "========================================="
 
