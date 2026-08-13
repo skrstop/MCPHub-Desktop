@@ -181,7 +181,14 @@ jobs:
       # protoc 是宿主架构的构建期工具（在 runner 上执行，与交叉编译目标无关），
       # 因此对所有 matrix 条目统一安装即可，含交叉编译任务。
       - name: Setup protoc
-        uses: arduino/setup-protoc@v3
+        # arduino/setup-protoc@v3 still targets node20 (deprecated; GitHub
+        # forces it to node24 with a warning, and a hard cutoff would break
+        # the build — upstream master hasn't shipped node24 as of 2026-08).
+        # This community fork publishes a native node24 runtime with the same
+        # `version`/`repo-token` inputs, so it's a drop-in.
+        # ⚠️ Supply-chain note: this runs third-party JS with access to the
+        # GITHUB_TOKEN passed via repo-token — review the fork before bumping.
+        uses: StackOverflowExcept1on/setup-protoc@node24
         with:
           version: '23.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
