@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::models::rag::{
     RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus, RagTagStat,
 };
+use crate::rag::chunker::chunk_document;
 use crate::rag::embedder::{check_memory_sufficient, detect_format, load_embedder, read_max_context, Embedder};
 use crate::rag::vectordb::{ChunkInput, VectorDb};
 
@@ -107,6 +108,21 @@ fn emit_reindex_progress(app: &AppHandle, current: u32, total: u32, name: &str) 
 struct Runtime {
     model: Box<dyn Embedder>,
     db: VectorDb,
+    /// Prefix prepended to each search query before embedding (from the loaded
+    /// model's deploy.json `searchQueryPrefix`). "" for symmetric models. Used
+    /// in `search` on the query side of an asymmetric embedding model.
+    search_query_prefix: String,
+    /// Prefix prepended to each imported document chunk before embedding (from the loaded
+    /// model's deploy.json `importDocPrefix`). "" for symmetric models. Used
+    /// in `reindex_doc` on the document side.
+    import_doc_prefix: String,
+    /// Model-author-recommended chunk size in tokens (deploy.json `chunkSize`),
+    /// `None` if unset. Used as the default chunk size when the user's global
+    /// `chunk_size` setting is `0` ("auto"); a positive user setting overrides.
+    deploy_chunk_size: Option<u32>,
+    /// Model-author-recommended chunk overlap (deploy.json `chunkOverlap`),
+    /// `None` if unset. Same auto-vs-override semantics as `deploy_chunk_size`.
+    deploy_chunk_overlap: Option<u32>,
 }
 
 static RUNTIME: OnceLock<Mutex<Option<Runtime>>> = OnceLock::new();
@@ -191,6 +207,25 @@ pub async fn model_max_context(app: &AppHandle) -> u32 {
     let size = current_model().await.or_else(|| default_size(app));
     let dir = size.and_then(|s| resolve_model_paths(app, &s).ok().flatten());
     dir.map(|d| read_max_context(&d)).unwrap_or(2048)
+}
+
+/// The loaded model's chunk-size recommendation: `(max_context, chunk_size?,
+/// chunk_overlap?)`. The chunk values come from the selected size's
+/// `deploy.json` (`chunkSize` / `chunkOverlap`) — the model author's
+/// recommended retrieval granularity. `None` when the size dir isn't ready or
+/// the deploy.json omits the fields (the service falls back to 1024/100).
+/// Surfaced via `rag_model_limits` so the frontend's Auto mode can SHOW the
+/// resolved values (sliders disabled) and seed them when the user switches to
+/// manual. `max_context` is read the same way as `model_max_context`.
+pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, Option<u32>) {
+    let size = current_model().await.or_else(|| default_size(app));
+    let dir = size.and_then(|s| resolve_model_paths(app, &s).ok().flatten());
+    let Some(d) = dir else {
+        return (2048, None, None);
+    };
+    let max_ctx = read_max_context(&d);
+    let cfg = crate::rag::embedder::read_deploy_config(&d);
+    (max_ctx, cfg.chunk_size, cfg.chunk_overlap)
 }
 
 /// Sum the on-disk size of the model file(s) in a ready size dir: for ONNX the
@@ -765,6 +800,11 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         let size_dir = resolve_model_paths(app, &size)?
             .ok_or_else(|| anyhow!("model '{}' not ready - download it first", size))?;
         let model = load_embedder(&size_dir)?;
+        // Read the model's deploy.json once for the asymmetric embedding
+        // prefixes (searchQueryPrefix / importDocPrefix) - applied per-call in
+        // `search` (query side) and `reindex_doc` (document side). "" for
+        // symmetric models (Gemma) so behavior is unchanged when unset.
+        let deploy = crate::rag::embedder::read_deploy_config(&size_dir);
         // Model name = "<family>-<size>" (the dropdown label, e.g.
         // "embeddinggemma-default") - derived from the resolved size dir so it
         // works for both backends (GGUF + ONNX) and matches what the user sees.
@@ -781,12 +821,14 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         rag_log(
             "info",
             format!(
-                "model loaded: name={} dim={} max_context={} backend={} ep={}",
+                "model loaded: name={} dim={} max_context={} backend={} ep={} query_prefix={:?} doc_prefix={:?}",
                 model_name,
                 model.embed_dim(),
                 model.max_context(),
                 model.backend(),
                 model.ep_label(),
+                deploy.search_query_prefix,
+                deploy.import_doc_prefix,
             ),
         );
         // Open the vector DB for the loaded model's embed_dim. If an existing
@@ -801,7 +843,14 @@ pub async fn start(app: &AppHandle) -> Result<()> {
             zero_all_chunk_counts(app)?;
         }
         let mut guard = runtime().lock().await;
-        *guard = Some(Runtime { model, db });
+        *guard = Some(Runtime {
+            model,
+            db,
+            search_query_prefix: deploy.search_query_prefix,
+            import_doc_prefix: deploy.import_doc_prefix,
+            deploy_chunk_size: deploy.chunk_size,
+            deploy_chunk_overlap: deploy.chunk_overlap,
+        });
         let rss_after_load = crate::rag::embedder::process_rss_mib().unwrap_or(0);
         rag_log("info", format!("model stored in runtime (RSS: {} MiB)", rss_after_load));
         Ok::<_, anyhow::Error>(needs_reindex)
@@ -830,7 +879,7 @@ pub async fn stop() {
     let mut guard = runtime().lock().await;
     if let Some(rt) = guard.take() {
         rag_log("info", "stop: runtime found, dropping model + db");
-        let Runtime { model, db } = rt;
+        let Runtime { model, db, .. } = rt;
         drop(db);    // lancedb Connection -> freed
         // Drop the model (candle GgufEmbedder / ort OrtEmbedder). For candle:
         //   CPU: Tensors (CpuStorage Vec<f32>) freed by Rust drop; mi_collect
@@ -922,6 +971,48 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                 "required": []
             }
         }),
+        json!({
+            "name": "rag_file_create",
+            "description": "Create a new RAG document from UTF-8 text content and index it for semantic search. The file is stored as {docName}.{docType} (e.g. readme.md). Returns the created docId. Overwrites any existing document with the same filename.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docName": { "type": "string", "description": "Document name (without extension, e.g. \"readme\"). Path separators are sanitized to dashes." },
+                    "docType": { "type": "string", "description": "File type as a bare extension without dot, e.g. \"md\", \"java\", \"py\", \"txt\"." },
+                    "docContent": { "type": "string", "description": "Full text content of the document (UTF-8). Encoding detection is skipped - the input must already be valid UTF-8." },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to attach to the document (used for tag-filtered searches)." }
+                },
+                "required": ["docName", "docType", "docContent"]
+            }
+        }),
+        json!({
+            "name": "rag_file_update",
+            "description": "Update an existing RAG document by docId. Any of docName/docType/docContent can be omitted (only supplied fields are updated). When docContent is provided, docContentAppend decides whether to append to the existing content (true) or replace it (false, default); the document is re-indexed so semantic search reflects the new text. docId stays the same.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docId": { "type": "string", "description": "The document id (as returned by rag_file_create or rag_search)." },
+                    "docName": { "type": "string", "description": "New document name (optional)." },
+                    "docType": { "type": "string", "description": "New file type as a bare extension, e.g. \"md\" (optional)." },
+                    "docContent": { "type": "string", "description": "New text content (optional). When set, docContentAppend controls append vs replace." },
+                    "docContentAppend": { "type": "boolean", "description": "Only meaningful when docContent is set. true = append to existing content; false (default) = replace. Ignored if docContent is omitted.", "default": false },
+                    "addTags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to add to the document (case-insensitive dedup; preserves existing order)." },
+                    "removeTags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to remove from the document (case-insensitive match)." }
+                },
+                "required": ["docId"]
+            }
+        }),
+        json!({
+            "name": "rag_file_delete",
+            "description": "Delete a RAG document by docId. Removes its content file, metadata, and all its vector chunks from the index. Irreversible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docId": { "type": "string", "description": "The document id (as returned by rag_file_create or rag_search)." }
+                },
+                "required": ["docId"]
+            }
+        }),
     ]
 }
 
@@ -950,6 +1041,99 @@ pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
             output_schema: None,
         })
         .collect()
+}
+
+/// Dispatch a builtin RAG tool call (`rag_search` / `rag_get` / `rag_tag_search`
+/// / `rag_file_create` / `rag_file_update` / `rag_file_delete`) and return a
+/// `ToolCallResult`. Single source of truth - used by both the HTTP MCP
+/// dispatch path (`http_server.rs`) and the Tauri `call_tool` command
+/// (`pool::call_tool` routes builtin server names here, so invoking a RAG tool
+/// from the "servers" panel works instead of erroring "not connected").
+///
+/// Requires RAG enabled (same guard as the HTTP path); `rag_get`/`rag_tag_search`
+/// are read-only but kept under the same flag for consistency.
+pub async fn call_builtin_tool(
+    app: &AppHandle,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Result<crate::models::server::ToolCallResult> {
+    use crate::models::server::ToolCallResult;
+    if !is_enabled() {
+        return Err(anyhow!("RAG is not enabled"));
+    }
+    let text_content = |s: String| vec![serde_json::json!({ "type": "text", "text": s })];
+    let ok = |s: String| ToolCallResult {
+        content: text_content(s),
+        is_error: false,
+        structured_content: None,
+    };
+    let str_arr = |key: &str| -> Vec<String> {
+        args.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default()
+    };
+    let doc_id = || {
+        args.get("docId")
+            .and_then(|v| v.as_str())
+            .or_else(|| args.get("id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string()
+    };
+    match tool_name {
+        "rag_search" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let results = search(query.to_string(), str_arr("tags")).await?;
+            let text = serde_json::to_string_pretty(&results).unwrap_or_default();
+            Ok(ok(text))
+        }
+        "rag_get" => {
+            let id = doc_id();
+            match get_doc(app, &id).await? {
+                Some(doc) => Ok(ok(doc.content)),
+                None => Err(anyhow!("document not found: {}", id)),
+            }
+        }
+        "rag_tag_search" => {
+            let tags = list_tags(str_arr("search_key")).await?;
+            let text = serde_json::to_string_pretty(&tags).unwrap_or_else(|_| "[]".to_string());
+            Ok(ok(text))
+        }
+        "rag_file_create" => {
+            let doc_name = args.get("docName").and_then(|v| v.as_str()).unwrap_or("");
+            let doc_type = args.get("docType").and_then(|v| v.as_str()).unwrap_or("");
+            let doc_content = args.get("docContent").and_then(|v| v.as_str()).unwrap_or("");
+            if doc_name.is_empty() || doc_type.is_empty() || doc_content.is_empty() {
+                return Err(anyhow!("docName, docType and docContent are all required"));
+            }
+            let id = create_doc_from_content(app, doc_name, doc_type, doc_content, str_arr("tags")).await?;
+            let text = serde_json::to_string(&serde_json::json!({ "docId": id })).unwrap_or_default();
+            Ok(ok(text))
+        }
+        "rag_file_update" => {
+            let id = doc_id();
+            if id.is_empty() {
+                return Err(anyhow!("docId is required"));
+            }
+            let name = args.get("docName").and_then(|v| v.as_str());
+            let doc_type = args.get("docType").and_then(|v| v.as_str());
+            let content = args.get("docContent").and_then(|v| v.as_str());
+            let append = args.get("docContentAppend").and_then(|v| v.as_bool()).unwrap_or(false);
+            update_doc(app, &id, name, doc_type, content, append, str_arr("addTags"), str_arr("removeTags")).await?;
+            let text = serde_json::to_string(&serde_json::json!({ "docId": id, "updated": true })).unwrap_or_default();
+            Ok(ok(text))
+        }
+        "rag_file_delete" => {
+            let id = doc_id();
+            if id.is_empty() {
+                return Err(anyhow!("docId is required"));
+            }
+            delete_doc(app, &id).await?;
+            let text = serde_json::to_string(&serde_json::json!({ "docId": id, "deleted": true })).unwrap_or_default();
+            Ok(ok(text))
+        }
+        _ => Err(anyhow!("Tool '{}' not found", tool_name)),
+    }
 }
 
 /// A synthetic `ServerInfo` for the "mcphub-desktop" builtin server, always
@@ -1017,6 +1201,24 @@ struct DocMeta {
     uploaded_at: String,
     #[serde(default)]
     chunk_count: u32,
+    /// Content version. 1 on first upload, incremented on each `update_doc`
+    /// (content overwrite). Lets the UI show "vN" + track which content rev a
+    /// doc's embeddings correspond to (esp. after a re-embed).
+    #[serde(default = "default_version")]
+    version: u32,
+    /// Persisted file-type label (e.g. "Markdown", "Java"). Set by
+    /// `rag_file_create`/`rag_file_update` from the caller-supplied docType so
+    /// the UI's renderer picks the right viewer even when the filename has no
+    /// extension. `None` for legacy docs / uploads -> falls back to
+    /// `file_type_label(name)` at read time.
+    #[serde(default)]
+    file_type: Option<String>,
+}
+
+/// Default content version for a freshly-uploaded doc + back-compat fallback
+/// for legacy `.meta` files written before the `version` field existed.
+fn default_version() -> u32 {
+    1
 }
 
 /// List distinct tags with their document counts. Reads from the
@@ -1098,7 +1300,10 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    let mut entries = tokio::task::spawn_blocking(move || std::fs::read_dir(&dir)).await??;
+    // Clone the dir into the read_dir closure so `dir` stays borrowable below
+    // (used to resolve the on-disk file name per doc).
+    let dir_clone = dir.clone();
+    let mut entries = tokio::task::spawn_blocking(move || std::fs::read_dir(&dir_clone)).await??;
     while let Some(entry) = entries.next() {
         let entry = entry?;
         let path = entry.path();
@@ -1107,6 +1312,14 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
         }
         let bytes = std::fs::read(&path)?;
         let meta: DocMeta = serde_json::from_slice(&bytes)?;
+        // The actual on-disk file name (uuid for uploads, meta.name for
+        // rag_file_create) — content_path_for resolves which exists. Surfaced
+        // so the user can match the file when its folder is opened.
+        let file_name = content_path_for(&dir, &meta.id, &meta.name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         out.push(RagDocInfo {
             id: meta.id,
             name: meta.name.clone(),
@@ -1114,7 +1327,9 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
             uploaded_at: meta.uploaded_at,
             tags: meta.tags,
             chunk_count: meta.chunk_count,
-            file_type: file_type_label(&meta.name),
+            file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name)),
+            version: meta.version.max(1),
+            file_name,
         });
     }
     out.sort_by(|a, b| b.uploaded_at.cmp(&a.uploaded_at));
@@ -1125,11 +1340,13 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
 pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", id));
-    let content_path = dir.join(id);
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
         return Ok(None);
     };
     let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
+    // Content file is `dir/{id}` for uploads, `dir/{meta.name}` for
+    // rag_file_create docs - content_path_for handles both.
+    let content_path = content_path_for(&dir, id, &meta.name);
     let content = std::fs::read_to_string(&content_path).unwrap_or_default();
     Ok(Some(RagDoc {
         id: meta.id,
@@ -1139,8 +1356,28 @@ pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
         uploaded_at: meta.uploaded_at,
         tags: meta.tags,
         chunk_count: meta.chunk_count,
-        file_type: file_type_label(&meta.name),
+        file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name)),
     }))
+}
+
+/// Read a document's chunks (index + text, no embeddings) for the "view chunks"
+/// dialog. Returns chunks ordered by `chunk_index`. Requires RAG enabled
+/// (chunks live in lancedb). Returns an empty vec if the doc has no chunks
+/// (not yet indexed / model swapped + not re-indexed).
+pub async fn get_doc_chunks(id: &str) -> Result<Vec<crate::models::rag::RagChunk>> {
+    let guard = runtime().lock().await;
+    let Some(rt) = guard.as_ref() else {
+        return Err(anyhow!("RAG is not enabled - turn on RAG before viewing chunks"));
+    };
+    let mut records = rt.db.read_chunks_by_doc(id).await?;
+    records.sort_by_key(|r| r.chunk_index);
+    Ok(records
+        .into_iter()
+        .map(|r| crate::models::rag::RagChunk {
+            chunk_index: r.chunk_index,
+            chunk_text: r.chunk_text,
+        })
+        .collect())
 }
 
 /// Open the OS multi-file picker. No extension filter — validation is
@@ -1167,6 +1404,49 @@ pub fn pick_files(app: &AppHandle) -> Vec<RagPickedFile> {
 /// Upload (read + decode + embed + index) a single file given by disk path.
 /// Called per-file by the frontend so it can show per-file progress; the
 /// frontend loops over the picked paths.
+/// Core write+index pipeline shared by `upload_one_path_inner` (from disk,
+/// with encoding detection) and `create_doc_from_content` (from the MCP tool,
+/// already UTF-8). Writes `dir/{file_stem}` (content) + `dir/{file_stem}.meta`,
+/// then indexes into lancedb via `reindex_doc`. Caller handles same-name
+/// overwrite cleanup (`find_doc_ids_by_name` + delete) and tag-stat recompute.
+///
+/// `file_stem` is the on-disk filename without extension: uploads pass the
+/// uuid, `rag_file_create` passes `{name}.{docType}` so the file is
+/// human-readable. `display_name` is `meta.name` (what the UI shows). Returns
+/// chunk_count.
+async fn write_doc_and_index(
+    app: &AppHandle,
+    dir: &Path,
+    doc_id: &str,
+    file_stem: &str,
+    display_name: &str,
+    content: &str,
+    tags: Vec<String>,
+    size: u64,
+    file_type: Option<String>,
+    version: u32,
+) -> Result<u32> {
+    let content_path = dir.join(file_stem);
+    let meta_path = dir.join(format!("{}.meta", doc_id));
+    let uploaded_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    std::fs::write(&content_path, content)?;
+    let chunk_count = reindex_doc(app, doc_id, display_name, content, tags.clone()).await? as u32;
+    let title = extract_title(content, display_name);
+    let meta = DocMeta {
+        id: doc_id.to_string(),
+        name: display_name.to_string(),
+        title: Some(title),
+        tags,
+        size,
+        uploaded_at,
+        chunk_count,
+        version,
+        file_type,
+    };
+    std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
+    Ok(chunk_count)
+}
+
 pub async fn upload_one_path(app: &AppHandle, file_path: &str, tags: Vec<String>) -> Result<()> {
     // Derive the display name first so we can attribute any failure to it in
     // the log (the body below returns early on many `?`, and without this
@@ -1182,6 +1462,79 @@ pub async fn upload_one_path(app: &AppHandle, file_path: &str, tags: Vec<String>
         rag_log("error", format!("upload failed for '{}': {:#}", name, e));
     }
     result
+}
+
+/// Update an existing document in place: replace its on-disk content, meta
+/// (name/size/uploaded_at/title/file_type), and vector chunks by picking a new
+/// file. The doc_id is preserved (links/refs to the id stay valid). Tags are
+/// preserved from the existing meta (the update replaces content, not the
+/// user's tag organization). Requires RAG enabled (reindex_doc needs the
+/// runtime to embed the new content).
+pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) -> Result<u32> {
+    let dir = files_dir(app)?;
+    let path = Path::new(file_path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_path.to_string());
+
+    // Read + validate the new file (same rules as upload).
+    let raw = std::fs::read(path).map_err(|e| anyhow!("read failed for {}: {}", name, e))?;
+    if raw.len() > MAX_UPLOAD_BYTES {
+        return Err(anyhow!(
+            "file too large: {} ({} bytes, max {} bytes)",
+            name,
+            raw.len(),
+            MAX_UPLOAD_BYTES
+        ));
+    }
+    if !is_likely_text(&raw) {
+        return Err(anyhow!("UNSUPPORTED_FORMAT: {}", name));
+    }
+    let (content, _encoding) = decode_text(&raw, &name);
+    let size = raw.len() as u64;
+
+    // Read the existing meta (for tags + to clean up the OLD on-disk file,
+    // whose name may use a different extension than the new file).
+    let meta_path = dir.join(format!("{}.meta", id));
+    let old_meta_bytes = std::fs::read(&meta_path)
+        .map_err(|e| anyhow!("update: read meta {} failed: {}", id, e))?;
+    let old_meta: DocMeta = serde_json::from_slice(&old_meta_bytes)?;
+    let tags = old_meta.tags.clone();
+
+    // Remove the OLD on-disk content file (resolved by the old meta's name)
+    // so a different extension doesn't leave an orphan. The new file is
+    // written below by write_doc_and_index.
+    let old_content = content_path_for(&dir, id, &old_meta.name);
+    if old_content.exists() {
+        if let Err(e) = std::fs::remove_file(&old_content) {
+            rag_log("warn", format!("update: remove old {} failed: {}", old_content.display(), e));
+        }
+    }
+
+    // New on-disk filename = `{id}{ext}` with the NEW file's extension.
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .unwrap_or_default();
+    let file_stem = format!("{id}{ext}");
+
+    rag_log("info", format!("updating '{}' ({} bytes) -> id {}", name, raw.len(), id));
+    // Bump the content version (1 on first upload; +1 each update). Legacy
+    // metas without the field default to 1 (see `default_version`).
+    let version = old_meta.version.saturating_add(1);
+    // write_doc_and_index writes the new disk file, reindexes (reindex_doc
+    // deletes the old vectors by id then adds the new ones), and overwrites
+    // the meta with the new name/size/uploaded_at/title/version — id preserved.
+    let chunk_count =
+        write_doc_and_index(app, &dir, id, &file_stem, &name, &content, tags, size, None, version)
+            .await?;
+
+    if let Err(e) = recompute_tag_stats(app).await {
+        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    }
+    Ok(chunk_count)
 }
 
 async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<String>) -> Result<()> {
@@ -1220,29 +1573,17 @@ async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<Strin
     let size = raw.len() as u64;
     let char_count = content.chars().count() as u64;
 
-    // Overwrite semantics: if a doc with the same display name already exists,
-    // remove its content + meta now (its vector chunks are removed below). This
-    // makes re-uploading a file of the same name replace the previous doc.
-    let stale_ids = find_doc_ids_by_name(&dir, &name);
-    if !stale_ids.is_empty() {
-        for sid in &stale_ids {
-            let _ = std::fs::remove_file(dir.join(sid));
-            let _ = std::fs::remove_file(dir.join(format!("{}.meta", sid)));
-        }
-        rag_log("info", format!("overwriting existing '{}' ({} doc(s))", name, stale_ids.len()));
-    }
-
-    let id = Uuid::new_v4().to_string();
-    let content_path = dir.join(&id);
-    let meta_path = dir.join(format!("{}.meta", id));
-    let uploaded_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    // Upload always creates a NEW document (fresh uuid). We do NOT overwrite
+    // same-named docs anymore — the on-disk filename is `{uuid}.{ext}` (unique
+    // by uuid), so two uploads of "report.txt" coexist as separate docs. The
+    // per-file "update" button (update_doc) is the explicit overwrite path:
+    // it replaces one doc's content + vectors + meta by id.
     let tags = tags
         .iter()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>();
-
-    std::fs::write(&content_path, &content)?;
+    let id = Uuid::new_v4().to_string();
     rag_log(
         "info",
         format!(
@@ -1250,36 +1591,21 @@ async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<Strin
             name, raw.len(), char_count, encoding
         ),
     );
+    // On-disk filename = `{id}{ext}` (uuid + original extension). The uuid
+    // keeps it unique across same-named uploads; the extension lets the file
+    // show its type in the OS file manager + lets the UI display a recognizable
+    // name. Files with no extension fall back to the bare uuid.
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .unwrap_or_default();
+    let file_stem = format!("{id}{ext}");
     // reindex_doc returns the chunk count AND drives the per-batch char-progress
     // events for the UI's second progress bar.
-    let chunk_count = reindex_doc(app, &id, &name, &content, tags.clone()).await? as u32;
-
-    let title = extract_title(&content, &name);
-    let meta = DocMeta {
-        id: id.clone(),
-        name: name.clone(),
-        title: Some(title),
-        tags,
-        size,
-        uploaded_at: uploaded_at.clone(),
-        chunk_count,
-    };
-    std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
-
-    // Remove the overwritten docs' vector chunks (the new doc uses a fresh id)
-    // and prune the freed space. (The runtime is guaranteed to be loaded here:
-    // reindex_doc above already errors out with "RAG not enabled" if it isn't.)
-    if !stale_ids.is_empty() {
-        let guard = runtime().lock().await;
-        if let Some(rt) = guard.as_ref() {
-            for sid in &stale_ids {
-                let _ = rt.db.delete_by_doc(sid).await;
-            }
-            if let Err(e) = rt.db.optimize().await {
-                rag_log("warn", format!("optimize after overwrite failed: {:#}", e));
-            }
-        }
-    }
+    let chunk_count =
+        write_doc_and_index(app, &dir, &id, &file_stem, &name, &content, tags.clone(), size, None, 1)
+            .await?;
 
     // Re-sync tag stats after this file's tags are written.
     if let Err(e) = recompute_tag_stats(app).await {
@@ -1308,6 +1634,8 @@ async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<Strin
 
 /// Find the ids of all docs whose stored display `name` equals `name` (for
 /// overwrite-on-re-upload). Reads `.meta` files; returns an empty vec if none.
+/// (meta files are named `{id}.meta`, so the id is the filename stem - but we
+/// return the id from inside the meta to be robust.)
 fn find_doc_ids_by_name(dir: &Path, name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1325,6 +1653,290 @@ fn find_doc_ids_by_name(dir: &Path, name: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Resolve the content file path for a doc. Uploads name the content file by
+/// the doc id (uuid); `rag_file_create` names it by `{docName}.{docType}`
+/// (which equals `meta.name`). Try `dir/{id}` first, then `dir/{meta_name}` so
+/// both naming schemes resolve without scanning.
+/// Resolve the on-disk content path for a document. Tries, in order:
+/// 1. `dir/{id}{ext}` — the current upload scheme (uuid + original extension,
+///    so the file shows its type in the OS file manager). `ext` is taken from
+///    `meta_name` (the display name, which carries the original extension for
+///    uploads and is `{name}.{docType}` for rag_file_create).
+/// 2. `dir/{id}` — the legacy upload scheme (uuid, no extension) for docs
+///    uploaded before the extension-preserving change. Kept for back-compat.
+/// 3. `dir/{meta_name}` — rag_file_create docs (human-readable name).
+/// Returns the first candidate that exists; if none exist, the last candidate
+/// (`meta_name`) so callers get a sensible path to create/remove/error on.
+fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf {
+    // Extract the extension (with the dot, e.g. ".txt") from the display name.
+    // For uploads meta_name = original filename; for rag_file_create it's
+    // `{name}.{docType}`. Either way the extension matches what was written.
+    let ext = std::path::Path::new(meta_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_ascii_lowercase()));
+    // Candidate 1: {id}{ext} (current scheme). Only when there IS an ext.
+    if let Some(ref ext) = ext {
+        let by_id_ext = dir.join(format!("{id}{ext}"));
+        if by_id_ext.exists() {
+            return by_id_ext;
+        }
+    }
+    // Candidate 2: {id} (legacy upload, no extension).
+    let by_id = dir.join(id);
+    if by_id.exists() {
+        return by_id;
+    }
+    // Candidate 3: {meta_name} (rag_file_create).
+    dir.join(meta_name)
+}
+
+/// Resolve a file-type label from a docType extension (e.g. "md" -> "Markdown",
+/// "java" -> "Java"). Used by `rag_file_create`/`rag_file_update` to persist an
+/// explicit type even when the filename has no extension. Returns None if the
+/// extension isn't in the catalog.
+fn file_type_label_from_ext(doc_type: &str) -> Option<String> {
+    let dt = doc_type.trim().trim_start_matches('.');
+    if dt.is_empty() {
+        return None;
+    }
+    let label = file_type_label(&format!(".{}", dt.to_lowercase()));
+    if label.is_empty() {
+        None
+    } else {
+        Some(label)
+    }
+}
+
+/// Sanitize a caller-supplied docName into a safe single-segment filename:
+/// replace path separators and other shell-unsafe chars with `-`, strip
+/// leading dots (so the file isn't hidden / can't be `.` or `..`). Returns ""
+/// if the result is empty.
+fn sanitize_file_name(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            _ => c,
+        })
+        .collect();
+    let s = s.trim_start_matches('.').trim().to_string();
+    if s.is_empty() || s == "." || s == ".." {
+        String::new()
+    } else {
+        s
+    }
+}
+
+/// `rag_file_create` MCP tool: create a document from UTF-8 content (no
+/// encoding detection - the tool input is already a UTF-8 string). Writes the
+/// file as `{docName}.{docType}` (human-readable) under files/, indexes it into
+/// lancedb, and returns the new docId. Overwrites any existing doc with the
+/// same resolved filename. `docType` is a bare extension like "md"/"java"/"py".
+pub async fn create_doc_from_content(
+    app: &AppHandle,
+    doc_name: &str,
+    doc_type: &str,
+    content: &str,
+    tags: Vec<String>,
+) -> Result<String> {
+    let dir = files_dir(app)?;
+    std::fs::create_dir_all(&dir)?;
+
+    let name_base = sanitize_file_name(doc_name);
+    if name_base.is_empty() {
+        return Err(anyhow!("docName must not be empty"));
+    }
+    let dt = doc_type.trim().trim_start_matches('.');
+    if dt.is_empty() {
+        return Err(anyhow!("docType must not be empty"));
+    }
+    // If docName already ends with .{docType}, keep it; else append.
+    let file_name = if name_base.to_lowercase().ends_with(&format!(".{}", dt.to_lowercase())) {
+        name_base.clone()
+    } else {
+        format!("{}.{}", name_base, dt)
+    };
+
+    let byte_len = content.len();
+    if byte_len > MAX_UPLOAD_BYTES {
+        return Err(anyhow!(
+            "docContent too large: {} bytes, max {} bytes",
+            byte_len, MAX_UPLOAD_BYTES
+        ));
+    }
+    let file_type = file_type_label_from_ext(dt);
+    // Sanitize tags (trim, drop empty) - same rules as the upload path.
+    let tags: Vec<String> = tags
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // Overwrite same-named doc (same as upload path).
+    let stale_ids = find_doc_ids_by_name(&dir, &file_name);
+    if !stale_ids.is_empty() {
+        for sid in &stale_ids {
+            let _ = std::fs::remove_file(content_path_for(&dir, sid, &file_name));
+            let _ = std::fs::remove_file(dir.join(format!("{}.meta", sid)));
+        }
+        rag_log(
+            "info",
+            format!(
+                "rag_file_create overwriting '{}' ({} doc(s))",
+                file_name,
+                stale_ids.len()
+            ),
+        );
+    }
+
+    let id = Uuid::new_v4().to_string();
+    rag_log(
+        "info",
+        format!("rag_file_create '{}' ({} bytes), indexing...", file_name, byte_len),
+    );
+    let _chunk_count = write_doc_and_index(
+        app,
+        &dir,
+        &id,
+        &file_name,
+        &file_name,
+        content,
+        tags,
+        byte_len as u64,
+        file_type,
+        1,
+    )
+    .await?;
+
+    // Remove overwritten docs' vector chunks + reclaim space.
+    if !stale_ids.is_empty() {
+        let guard = runtime().lock().await;
+        if let Some(rt) = guard.as_ref() {
+            for sid in &stale_ids {
+                let _ = rt.db.delete_by_doc(sid).await;
+            }
+            let _ = rt.db.optimize().await;
+        }
+    }
+    if let Err(e) = recompute_tag_stats(app).await {
+        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    }
+    Ok(id)
+}
+
+/// `rag_file_update` MCP tool: update a document's name/type/content. docId is
+/// stable. When `docContent` is provided, `docContentAppend` decides append
+/// (old + "\n" + new) vs replace; the old vector chunks are deleted and the
+/// new content re-indexed (via `reindex_doc`, which delete_by_doc + add_chunks).
+/// A name change on a `rag_file_create` doc renames the on-disk content file
+/// (uploads name content by id, so they're untouched).
+pub async fn update_doc(
+    app: &AppHandle,
+    doc_id: &str,
+    name: Option<&str>,
+    doc_type: Option<&str>,
+    content: Option<&str>,
+    append: bool,
+    add_tags: Vec<String>,
+    remove_tags: Vec<String>,
+) -> Result<()> {
+    let dir = files_dir(app)?;
+    let meta_path = dir.join(format!("{}.meta", doc_id));
+    let Ok(meta_bytes) = std::fs::read(&meta_path) else {
+        return Err(anyhow!("document not found: {}", doc_id));
+    };
+    let mut meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
+    let old_name = meta.name.clone();
+    let content_path = content_path_for(&dir, doc_id, &old_name);
+
+    // Update display name.
+    if let Some(n) = name {
+        let n = sanitize_file_name(n);
+        if !n.is_empty() {
+            meta.name = n;
+        }
+    }
+    // Update persisted file-type label.
+    if let Some(dt) = doc_type {
+        meta.file_type = file_type_label_from_ext(dt);
+    }
+    // Update tags: add new ones, remove specified ones (case-insensitive dedup,
+    // preserve order of existing + additions). Tags live on each chunk in
+    // lancedb, so a tag change requires re-indexing to propagate.
+    let tags_changed = !add_tags.is_empty() || !remove_tags.is_empty();
+    if tags_changed {
+        let remove_set: std::collections::HashSet<String> = remove_tags
+            .iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let mut new_tags: Vec<String> = meta
+            .tags
+            .iter()
+            .filter(|t| !remove_set.contains(&t.trim().to_lowercase()))
+            .cloned()
+            .collect();
+        for t in &add_tags {
+            let t = t.trim();
+            if !t.is_empty()
+                && !new_tags.iter().any(|x| x.trim().eq_ignore_ascii_case(t))
+            {
+                new_tags.push(t.to_string());
+            }
+        }
+        meta.tags = new_tags;
+    }
+    // Re-index when content changed OR tags changed (tag edits must propagate
+    // to the chunks' stored tags). Reads existing content from disk when only
+    // tags changed.
+    if content.is_some() || tags_changed {
+        let content_text = if let Some(c) = content {
+            let new_content = if append {
+                let old = std::fs::read_to_string(&content_path).unwrap_or_default();
+                format!("{}\n{}", old, c)
+            } else {
+                c.to_string()
+            };
+            let byte_len = new_content.len();
+            if byte_len > MAX_UPLOAD_BYTES {
+                return Err(anyhow!(
+                    "docContent too large: {} bytes, max {} bytes",
+                    byte_len, MAX_UPLOAD_BYTES
+                ));
+            }
+            std::fs::write(&content_path, &new_content)?;
+            meta.size = byte_len as u64;
+            new_content
+        } else {
+            std::fs::read_to_string(&content_path).unwrap_or_default()
+        };
+        let chunk_count =
+            reindex_doc(app, doc_id, &meta.name, &content_text, meta.tags.clone()).await? as u32;
+        meta.chunk_count = chunk_count;
+    }
+
+    // If the content file is named by old_name (rag_file_create doc, not uuid)
+    // and the name changed, rename it so content_path_for still resolves.
+    if meta.name != old_name {
+        let by_id = dir.join(doc_id);
+        if !by_id.exists() {
+            let old_path = dir.join(&old_name);
+            let new_path = dir.join(&meta.name);
+            if old_path.exists() && old_path != new_path {
+                let _ = std::fs::rename(&old_path, &new_path);
+            }
+        }
+    }
+
+    std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
+    if let Err(e) = recompute_tag_stats(app).await {
+        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    }
+    Ok(())
 }
 
 /// Hard cap to avoid indexing pathological files (embed cost is ~linear).
@@ -1401,16 +2013,36 @@ async fn reindex_doc(
     tags: Vec<String>,
 ) -> Result<usize> {
     let settings = get_settings().await?;
-    let chunk_size = settings.chunk_size.max(1) as usize;
-    let chunk_overlap = settings.chunk_overlap as usize;
     let n_chunks;
     {
         let mut guard = runtime().lock().await;
         let Some(rt) = guard.as_mut() else {
             return Err(anyhow!("RAG not enabled"));
         };
-        // Chunk by characters using the live chunkSize / chunkOverlap settings.
-        let chunks = chunk_text(content, &*rt.model, chunk_size, chunk_overlap);
+        // Resolve the effective chunk size / overlap. `0` in the user's global
+        // setting means "auto" → use the model's deploy.json-recommended value
+        // (chunkSize/chunkOverlap); a positive value is an explicit override.
+        // `chunk_size` is capped by the loaded model's context window so a chunk
+        // can never exceed what the embedder accepts (the GGUF/ONNX backends
+        // silently truncate at max_context, which would drop the chunk tail).
+        // Fallbacks: 1024 / 100 when neither the user nor deploy.json specify.
+        let max_ctx = rt.model.max_context().max(1) as u32;
+        let chunk_size = match settings.chunk_size {
+            0 => rt.deploy_chunk_size.unwrap_or(1024),
+            v => v,
+        }
+        .min(max_ctx)
+        .max(1) as usize;
+        let chunk_overlap = match settings.chunk_overlap {
+            0 => rt.deploy_chunk_overlap.unwrap_or(100),
+            v => v,
+        } as usize;
+        // Chunk via the strategy pattern (text/markdown/code) — text-splitter
+        // sizes each chunk in tokens via the loaded model's tokenizer, so
+        // chunk_size maps directly to the model's context budget. Picked by
+        // the file extension (CodeSplitter for source, MarkdownSplitter for
+        // .md, TextSplitter otherwise). See `rag/chunker.rs`.
+        let chunks = chunk_document(doc_name, content, &*rt.model, chunk_size as u32, chunk_overlap as u32);
         // Total chars (UTF-8 chars, not bytes) drives the per-file progress bar.
         let total_chars = content.chars().count() as u64;
 
@@ -1430,8 +2062,31 @@ async fn reindex_doc(
         // slow - forward finishes. Without this a large file shows no doc
         // progress for the duration of its first embedding batch.
         emit_upload_progress(app, doc_name, 0, total_chars);
-        for sub in chunks.chunks(batch_size) {
-            let sub_refs: Vec<&str> = sub.iter().map(|s| s.as_str()).collect();
+        // Empty / whitespace-only docs produce no chunks (`chunk_document`
+        // returns an empty vec after trim). Skip the batch loop in that case:
+        // `Vec::chunks(0)` panics with "chunk size must be non-zero", so without
+        // this guard an empty file (e.g. 0-byte upload or whitespace-only) would
+        // panic during reindex — a latent bug surfaced by reindexing after a
+        // model swap. The doc is still stored, just with zero searchable chunks.
+        // Prepend the model's document prefix (deploy.json `importDocPrefix`) to
+        // each chunk before embedding - asymmetric models (Qwen3, BGE) require a
+        // distinct prefix on the document side. Cloned once (a few bytes) so the
+        // mutable `rt.model.embed_batch` borrow below is unencumbered. The
+        // stored chunk_text + the char-progress count use the ORIGINAL chunk
+        // (no prefix) so retrieved snippets + the progress bar reflect the real
+        // content, and the prefix doesn't inflate the char total.
+        let import_doc_prefix = rt.import_doc_prefix.clone();
+        // For an empty doc the loop below doesn't run (no chunks to embed), so
+        // emit the 100% tick here to finish its progress bar.
+        if chunks.is_empty() {
+            emit_upload_progress(app, doc_name, total_chars, total_chars);
+        }
+        for sub in chunks.chunks(batch_size.max(1)) {
+            let prefixed: Vec<String> = sub
+                .iter()
+                .map(|c| format!("{}{}", import_doc_prefix, c))
+                .collect();
+            let sub_refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
             let embs = if sub_refs.is_empty() {
                 Vec::new()
             } else {
@@ -1549,8 +2204,26 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
     let mut done = 0usize;
     for (i, (meta_path, mut meta)) in docs.into_iter().enumerate() {
         emit_reindex_progress(app, i as u32, total, &meta.name);
-        // Read the doc content (stored decoded-UTF-8 under files/<id>).
-        let content = std::fs::read_to_string(dir.join(&meta.id)).unwrap_or_default();
+        // Read the doc content. MUST use `content_path_for` (not `dir.join(id)`)
+        // — uploads are stored as `{id}.{ext}` (ext from the original filename),
+        // so a bare `{id}` path doesn't exist and `read_to_string` would fail →
+        // empty content → 0 chunks (looked like a silent reindex "success").
+        let content_path = content_path_for(&dir, &meta.id, &meta.name);
+        let content = match std::fs::read_to_string(&content_path) {
+            Ok(c) => c,
+            Err(e) => {
+                rag_log(
+                    "warn",
+                    format!(
+                        "reindex: content read failed for '{}' ({}): {}",
+                        meta.name,
+                        content_path.display(),
+                        e
+                    ),
+                );
+                continue;
+            }
+        };
         let tags = meta.tags.clone();
         match reindex_doc(app, &meta.id, &meta.name, &content, tags).await {
             Ok(cc) => {
@@ -1670,8 +2343,47 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
         rt.db.optimize().await?;
     }
 
-    let _ = std::fs::remove_file(dir.join(id));
-    let _ = std::fs::remove_file(dir.join(format!("{}.meta", id)));
+    // Content file is `dir/{id}` for uploads, `dir/{meta.name}` for
+    // rag_file_create docs - read the meta to resolve the human-readable name.
+    // Remove BOTH candidate paths (id + meta.name) so a content file is never
+    // orphaned regardless of which naming scheme wrote it. Log any removal
+    // failure (rather than `let _ =`) so a permissions/path bug surfaces in the
+    // Logs page instead of silently leaving the file on disk.
+    let meta_name = std::fs::read(dir.join(format!("{}.meta", id)))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
+        .map(|m| m.name);
+    // Remove every candidate on-disk path (current `{id}{ext}` upload scheme,
+    // legacy bare-`{id}` upload, and `{meta_name}` for rag_file_create) so no
+    // content file is orphaned regardless of which scheme wrote it.
+    let ext = meta_name
+        .as_deref()
+        .and_then(|n| std::path::Path::new(n).extension().and_then(|e| e.to_str()))
+        .map(|e| format!(".{}", e.to_ascii_lowercase()));
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(ref ext) = ext {
+        candidates.push(dir.join(format!("{id}{ext}")));
+    }
+    candidates.push(dir.join(id));
+    if let Some(ref name) = meta_name {
+        let p = dir.join(name);
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+    for p in &candidates {
+        if p.exists() {
+            if let Err(e) = std::fs::remove_file(p) {
+                rag_log("warn", format!("delete_doc: remove {} failed: {}", p.display(), e));
+            }
+        }
+    }
+    let meta_path = dir.join(format!("{}.meta", id));
+    if meta_path.exists() {
+        if let Err(e) = std::fs::remove_file(&meta_path) {
+            rag_log("warn", format!("delete_doc: remove {} failed: {}", meta_path.display(), e));
+        }
+    }
 
     rag_log("info", format!("deleted document {}", id));
     if let Err(e) = recompute_tag_stats(app).await {
@@ -1683,11 +2395,19 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
 /// Reveal a document's file location in the OS file manager.
 pub async fn open_file_location(app: &AppHandle, id: &str) -> Result<()> {
     let dir = files_dir(app)?;
-    let target = dir.join(id);
+    let meta_name = std::fs::read(dir.join(format!("{}.meta", id)))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
+        .map(|m| m.name);
+    // Resolve the actual on-disk file (`dir/{id}` for uploads, `dir/{meta.name}`
+    // for rag_file_create) and reveal + select it. The on-disk name may differ
+    // from the display name (uploads are `dir/{uuid}`), so selecting the file
+    // in the OS file manager is what lets the user find it.
+    let target = content_path_for(&dir, id, meta_name.as_deref().unwrap_or(id));
     if !target.exists() {
         return Err(anyhow!("file not found: {}", target.display()));
     }
-    spawn_file_manager(&dir)?;
+    reveal_in_file_manager(&target)?;
     Ok(())
 }
 
@@ -1716,7 +2436,12 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
 
     // Vector channel.
     let vec_hits = if vw > 0.0 {
-        let qvec = rt.model.embed(&query)?;
+        // Prepend the model's query prefix (deploy.json `searchQueryPrefix`)
+        // before embedding - asymmetric models (Qwen3, BGE) require a distinct
+        // prefix on the query side. The keyword channel below uses the RAW
+        // query (no prefix) since it's literal text matching.
+        let q = format!("{}{}", &rt.search_query_prefix, query);
+        let qvec = rt.model.embed(&q)?;
         match rt.db.search(&qvec, fetch).await {
             Ok(hits) => hits,
             Err(e) => {
@@ -1748,13 +2473,14 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
         .collect();
     let term_count = terms.len().max(1);
 
-    // Merge by (doc_id, chunk_index): vec_score = 1/(1+distance),
-    // kw_score = matched_query_terms / total_query_terms. Carry the doc's tags
-    // (all chunks of a doc share the same tags).
+    // Merge by (doc_id, chunk_index): vec_score = cosine similarity (the search
+    // uses cosine distance = 1 - cos, so 1 - distance = cos, clamped to [0,1] -
+    // 0 = unrelated, 1 = identical); kw_score = matched_query_terms /
+    // total_query_terms. Carry the doc's tags (all chunks of a doc share tags).
     use std::collections::HashMap;
     let mut merged: HashMap<(String, i64), (f32, f32, String, String, Vec<String>)> = HashMap::new();
     for h in vec_hits {
-        let vs = 1.0 / (1.0 + h.distance.max(0.0));
+        let vs = (1.0 - h.distance).clamp(0.0, 1.0);
         let e = merged
             .entry((h.doc_id.clone(), h.chunk_index))
             .or_insert((0.0, 0.0, h.doc_name.clone(), h.chunk_text.clone(), h.tags.clone()));
@@ -1836,31 +2562,45 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
 pub async fn get_settings() -> Result<RagSettings> {
     let cfg = crate::services::config_service::get().await?;
     let rag = cfg.get("rag").cloned().unwrap_or_else(|| json!({}));
+    // Defaults come from `RagSettings::default()` — the same struct the serde
+    // `default = ...` fns use — so there's one source of truth for the weights
+    // (0.9/0.1), score_threshold (0.65), and chunk_size/overlap (0 = auto). A
+    // persisted config keeps its stored values; the defaults only fill keys
+    // that aren't present.
+    let d = RagSettings::default();
     Ok(RagSettings {
         vector_weight: rag
             .get("vectorWeight")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.5) as f32,
+            .map(|v| v as f32)
+            .unwrap_or(d.vector_weight),
         keyword_weight: rag
             .get("keywordWeight")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.5) as f32,
+            .map(|v| v as f32)
+            .unwrap_or(d.keyword_weight),
         max_results: rag
             .get("maxResults")
             .and_then(|v| v.as_u64())
-            .unwrap_or(20) as u32,
+            .map(|v| v as u32)
+            .unwrap_or(d.max_results),
         score_threshold: rag
             .get("scoreThreshold")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as f32,
+            .map(|v| v as f32)
+            .unwrap_or(d.score_threshold),
+        // 0 = "auto": the effective chunk size is resolved per-loaded-model in
+        // `reindex_doc` from the model's deploy.json (capped by max_context).
         chunk_size: rag
             .get("chunkSize")
             .and_then(|v| v.as_u64())
-            .unwrap_or(512) as u32,
+            .map(|v| v as u32)
+            .unwrap_or(d.chunk_size),
         chunk_overlap: rag
             .get("chunkOverlap")
             .and_then(|v| v.as_u64())
-            .unwrap_or(100) as u32,
+            .map(|v| v as u32)
+            .unwrap_or(d.chunk_overlap),
     })
 }
 
@@ -1965,59 +2705,34 @@ fn extract_title(content: &str, filename: &str) -> String {
         .unwrap_or_else(|| filename.to_string())
 }
 
-/// Split `text` into chunks of roughly `chunk_size` **tokens** with
-/// `chunk_overlap` tokens of overlap between consecutive chunks.
-///
-/// Sizes in tokens (the model's own unit) so chunk_size maps directly to the
-/// model's context budget - no char<->token conversion anywhere. O(n):
-/// tokenize the whole text ONCE (`tokenize_offsets`), then slice on token
-/// boundaries. Slicing uses the byte offset of the next token's start, so each
-/// chunk is valid UTF-8 by construction (no mid-char cut).
-fn chunk_text(text: &str, model: &dyn Embedder, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let chunk_size = chunk_size.max(1);
-    let offsets = model.tokenize_offsets(text);
-    if offsets.is_empty() {
-        return vec![text.to_string()];
-    }
-    let n = offsets.len();
-    // Forward progress per chunk = chunk_size - overlap, at least 1 token.
-    let step = chunk_size.saturating_sub(chunk_overlap).max(1);
-    let mut chunks = Vec::new();
-    let mut start = 0usize; // token index
-    while start < n {
-        let end = (start + chunk_size).min(n);
-        let start_byte = offsets[start].0;
-        // End at the START of the first token we're leaving out (so we never
-        // split a token), or end-of-text for the last chunk.
-        let end_byte = if end >= n { text.len() } else { offsets[end].0 };
-        let chunk = text[start_byte..end_byte].trim();
-        if !chunk.is_empty() {
-            chunks.push(chunk.to_string());
-        }
-        if end >= n {
-            break;
-        }
-        start += step;
-    }
-    chunks
-}
-
+/// Reveal `file` in the OS file manager, highlighting/selecting it so the user
+/// can identify it even when the on-disk name differs from the display name
+/// (uploads are stored as `dir/{uuid}`, so the file the user uploaded isn't
+/// findable by its original name). On macOS/Windows the file is selected; on
+/// Linux (no portable "select file" API) we open the containing directory.
 #[cfg(target_os = "macos")]
-fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
-    std::process::Command::new("open").arg(p).spawn()?.wait()?;
+fn reveal_in_file_manager(file: &Path) -> std::io::Result<()> {
+    // `open -R` opens the file's parent in Finder with the file selected.
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(file)
+        .spawn()?
+        .wait()?;
     Ok(())
 }
 #[cfg(target_os = "windows")]
-fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
-    std::process::Command::new("explorer").arg(p).spawn()?;
+fn reveal_in_file_manager(file: &Path) -> std::io::Result<()> {
+    // `explorer /select,<path>` opens Explorer with the file selected.
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", file.display()))
+        .spawn()?;
     Ok(())
 }
 #[cfg(all(unix, not(target_os = "macos")))]
-fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
-    std::process::Command::new("xdg-open").arg(p).spawn()?;
+fn reveal_in_file_manager(file: &Path) -> std::io::Result<()> {
+    // No portable "select file" on Linux; open the containing directory. The
+    // file is at least visible there.
+    let dir = file.parent().unwrap_or(file);
+    std::process::Command::new("xdg-open").arg(dir).spawn()?;
     Ok(())
 }

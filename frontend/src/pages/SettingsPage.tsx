@@ -12,15 +12,14 @@ import { PermissionChecker } from '@/components/PermissionChecker';
 import { PERMISSIONS } from '@/constants/permissions';
 import { isTauri } from '@/utils/tauriClient';
 import { invoke } from '@tauri-apps/api/core';
-import { Copy, Check, Download, Edit, Plus, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText, Folder } from 'lucide-react';
+import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText } from 'lucide-react';
 import { EndpointCopy } from '@/components/ui/EndpointCopy';
-import type { BearerKey, User, SkillAgent } from '@/types';
+import type { BearerKey, User } from '@/types';
 import { useServerContext } from '@/contexts/ServerContext';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useAuth } from '@/contexts/AuthContext';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { apiGet, apiPost, apiPut } from '@/utils/fetchInterceptor';
-import { listSkillAgents, saveSkillAgents, pickDirectory } from '@/services/skillService';
 import {
   filterBearerKeysByScopeFilter,
   getBearerKeyScopeFilterOptions,
@@ -401,150 +400,6 @@ function parseBasePacingDelayForUpdate(
 
 const DEFAULT_OIDC_SCOPES = ['openid', 'profile', 'email'];
 
-// ── Skills agents path management card ────────────────────────────────────
-// Per-section save (self-contained state). Lists configured AI agents and
-// their skills install paths; supports add/edit/delete. Persisted to
-// system_config.config_json.skills.agents (Phase 1: stubbed success).
-const SkillsAgentsCard: React.FC<{ collapsed: boolean; onToggle: () => void }> = ({
-  collapsed,
-  onToggle,
-}) => {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const [agents, setAgents] = useState<SkillAgent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-
-  const load = async () => {
-    try {
-      setLoading(true);
-      const data = await listSkillAgents();
-      setAgents(data.length ? data : agents);
-    } catch {
-      // ignore — keep existing
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const update = (id: string, patch: Partial<SkillAgent>) => {
-    setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
-  };
-  const remove = (id: string) => setAgents((prev) => prev.filter((a) => a.id !== id));
-  const add = () => {
-    const id = `agent-${Date.now()}`;
-    setAgents((prev) => [...prev, { id, name: '', skillsPath: '', custom: true }]);
-  };
-
-  const pickPath = async (id: string) => {
-    try {
-      const p = await pickDirectory();
-      if (p) update(id, { skillsPath: p });
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : t('skills.pickFolderError'), 'error');
-    }
-  };
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      // Trim names; drop fully-empty rows before persisting.
-      const cleaned = agents
-        .map((a) => ({ ...a, name: a.name.trim(), skillsPath: a.skillsPath.trim() }))
-        .filter((a) => a.name || a.skillsPath);
-      await saveSkillAgents(cleaned);
-      setAgents(cleaned);
-      showToast(t('settings.skillsAgentsSaved'), 'success');
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : t('settings.skillsAgentsSaveError'), 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="hub-card mb-6 overflow-hidden">
-      <div
-        className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
-        onClick={onToggle}
-      >
-        <div className="flex items-center gap-2.5">
-          <Wrench size={15} className="text-[var(--hub-ink-2)]" />
-          <h2 className="font-medium text-[var(--hub-ink)]">{t('settings.skillsAgentsTitle')}</h2>
-        </div>
-        <span className="text-[var(--hub-ink-3)]">{collapsed ? '+' : '−'}</span>
-      </div>
-
-      {!collapsed && (
-        <div className="space-y-3 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-          <p className="text-sm text-gray-500" style={{ marginBottom: 4 }}>
-            {t('settings.skillsAgentsDescription')}
-          </p>
-          {loading ? (
-            <div className="text-sm text-gray-500">Loading…</div>
-          ) : (
-            agents.map((a) => (
-              <div key={a.id} className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={a.name}
-                  onChange={(e) => update(a.id, { name: e.target.value })}
-                  placeholder={t('settings.skillsAgentNamePlaceholder')}
-                  className="flex-1 block py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
-                />
-                <div className="flex flex-[2] items-center">
-                  <input
-                    type="text"
-                    value={a.skillsPath}
-                    onChange={(e) => update(a.id, { skillsPath: e.target.value })}
-                    placeholder={t('settings.skillsAgentPathPlaceholder')}
-                    className="flex-1 block py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input font-mono rounded-r-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => pickPath(a.id)}
-                    className="hub-btn ghost flex items-center gap-1"
-                    style={{
-                      height: 38,
-                      borderRadius: '0 6px 6px 0',
-                      border: '1px solid var(--hub-line)',
-                      borderLeft: 'none',
-                    }}
-                    title={t('skills.pickFolder')}
-                  >
-                    <Folder size={14} />
-                  </button>
-                </div>
-                <button
-                  onClick={() => remove(a.id)}
-                  className="hub-icon-btn sm"
-                  title={t('common.delete')}
-                  style={{ color: 'var(--hub-err)' }}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))
-          )}
-          <div className="flex items-center justify-between pt-1">
-            <button onClick={add} className="hub-btn ghost sm" style={{ color: 'var(--hub-accent)' }}>
-              <Plus size={12} /> {t('settings.addSkillsAgent')}
-            </button>
-            <button onClick={save} disabled={saving} className="hub-btn primary">
-              {saving ? t('common.saving') : t('common.save')}
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
 const SettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -838,7 +693,6 @@ const SettingsPage: React.FC = () => {
   const [sectionsVisible, setSectionsVisible] = useState({
     routingConfig: false,
     installConfig: false,
-    skillsAgents: false,
     smartRoutingConfig: false,
     toolResultCompressionConfig: false,
     oauthServerConfig: false,
@@ -854,7 +708,6 @@ const SettingsPage: React.FC = () => {
     section:
       | 'routingConfig'
       | 'installConfig'
-      | 'skillsAgents'
       | 'smartRoutingConfig'
       | 'toolResultCompressionConfig'
       | 'oauthServerConfig'
@@ -3767,14 +3620,6 @@ const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </PermissionChecker>
-
-      {/* Skills — Agent install paths management */}
-      <PermissionChecker permissions={PERMISSIONS.SETTINGS_INSTALL_CONFIG}>
-        <SkillsAgentsCard
-          collapsed={!sectionsVisible.skillsAgents}
-          onToggle={() => toggleSection('skillsAgents')}
-        />
       </PermissionChecker>
 
       {/* Change Password - Hidden in no-login (skipAuth) mode */}

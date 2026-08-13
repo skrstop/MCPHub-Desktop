@@ -1,0 +1,10 @@
+{
+  "platform": "AUTO",
+  "default": true,
+  "description": "",
+  "sort": 1,
+  "searchQueryPrefix": "",
+  "importDocPrefix": "",
+  "chunkSize": 1024,
+  "chunkOverlap": 200
+}

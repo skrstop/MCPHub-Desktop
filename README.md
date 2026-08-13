@@ -13,53 +13,70 @@
 
 ## 项目简介
 
-**MCPHub Desktop** 是一款使用 [Tauri 2](https://tauri.app/) 构建的跨平台桌面客户端，基于第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub) 的前端复用 + 后端重写而来：
+**MCPHub Desktop** 是一款基于 [Tauri 2](https://tauri.app/) 构建的**本地优先（Local-first）**桌面客户端，用于在个人电脑上统一管理 MCP（Model Context Protocol）服务器、**Skills**、**RAG 知识库**与**嵌入模型**。所有进程、配置、密钥与向量数据都运行/保存在用户自己的机器上，不依赖任何远端服务。
 
-- 复用了上游 mcphub 的 React/Vite 前端 UI；
-- 将上游基于 Node.js + Express 的后端能力，使用 Rust 在本地进程中重新实现；
-- 让用户无需常驻 Web 服务，即可在本机统一管理多个 MCP（Model Context Protocol）服务器。
+除 MCP 服务器聚合外，本项目面向个人用户重点扩展了三大本地能力：
 
-> 上游 mcphub 项目并非本仓库作者所有；本项目是对其的二次开发与桌面化改写。
+- **Skills 管理** —— 统一管理 AI Agent 的技能库，一键安装/导出到数十种 Agent。
+- **RAG 知识库** —— 本地文档自动分块、向量化、入库与混合检索，作为 Agent 的**本地长期记忆（Long-term Memory）**。
+- **嵌入模型管理** —— ONNX / GGUF 双后端、多架构嵌入模型随包分发，本地推理、数据不出本机。
+
+> 💡 **本地长期记忆**：RAG 知识库让 AI Agent 拥有跨会话、可检索、可增删的长期记忆 —— 你上传的文档、笔记、代码、规范会被分块并向量化保存在本机，Agent 通过语义 + 关键词混合检索按需取用，不再受单次会话上下文窗口限制。所有向量数据**只存于你的电脑**，隐私可控、离线可用。
 
 - **产品名称**：MCPHub Desktop
 - **应用标识**：`app.mcphub.desktop`
 - **当前版本**：见 [`src-tauri/tauri.conf.json`](./src-tauri/tauri.conf.json)
 - **上游项目**：<https://github.com/samanhappy/mcphub>（仓库内副本位于 [`mcphub-origin/`](./mcphub-origin)，**非本项目代码**）
 
-## 改写自上游 mcphub 的原因
+## 核心功能
 
-> **本项目与上游 mcphub 处于不同赛道**：上游聚焦于"服务端 / 团队侧"的 MCP 聚合服务，本项目聚焦于"个人客户端本地"的 MCP 工具统一管理。
-> 因此重写的出发点 **不是** 部署门槛、性能或资源占用，而是 **使用场景与产品形态完全不同**。
+### MCP 服务器管理
+- 本地统一查看、启停、调试、分组多个 MCP Server，进程由 Rust 托管。
+- 随包分发 Node / UV / Bun 运行时（见 [`src-tauri/runtimes/`](./src-tauri/runtimes)），装上即用、无需预装环境。
+- 支持分组、智能路由、Bearer Key 鉴权、OAuth/OIDC、活动日志。
 
-上游 [mcphub](https://github.com/samanhappy/mcphub)（仓库内副本位于 [`mcphub-origin/`](./mcphub-origin)，**版权归原作者所有，并非本项目自有代码**）是一个面向服务端部署的 MCP 聚合管理 Web 服务，定位是"被多客户端共享访问的中心化 Hub"。
+### Skills 管理
+- 本地统一管理 **Skills 库**：导入（扫描已安装 Agent 的技能目录或手动指定文件夹）、卸载、查看，集中沉淀个人技能资产。
+- **一键安装/导出到 AI Agent**：内置数十种 Agent 目录（见 [`src-tauri/runtimes/skill/install.json`](./src-tauri/runtimes/skill/install.json)），涵盖 Claude Code、Cursor、Windsurf、Cline、Roo Code、Continue、Goose、OpenHands、Codex 等主流客户端；也支持自定义 Agent 路径。
+- **两种安装方式**：软链接（symlink，源库变更自动同步、省空间）或文件拷贝（copy，独立副本、便于分发），按 Agent 灵活选择。
+- Skills 在多个 Agent 间**共享与同步**，避免重复维护；导出状态可追溯（每个 Skill 记录已安装到哪些 Agent、用何种方式）。
 
-而本项目想解决的是另一个问题：**个人开发者/普通用户在自己电脑上同时使用 Claude Desktop、Cursor、Cherry Studio、各类 IDE 插件等多种 MCP Client 时，本地散落着大量 MCP Server / SKILL / RAG 配置，缺乏一个统一的本地管理入口。** 具体诉求包括：
+### RAG 知识库（Agent 本地长期记忆）
+- 上传文档自动 **分块 + 向量化 + 入库**，提供**混合检索**（向量语义相似度 + 关键词），让 Agent 拥有跨会话的**本地长期记忆**。
+- **语义化分块（策略模式）**：基于 [`text-splitter`](https://crates.io/crates/text-splitter) —— 普通文本走 Unicode 词/句边界，Markdown 走块/标题边界，源代码走 tree-sitter AST 边界（按扩展名自动分派）。
+- **分块参数模型自适应**：`chunk_size` / `chunk_overlap` 默认 "Auto"（按模型 `deploy.json` 推荐值取用，受模型上下文窗口钳制）；关闭 Auto 后可手动覆盖。
+- 支持查看任意文档的分片内容、按 Tag 过滤检索、文档删除时同步清理本地文件与向量。
+- **文件查看可视化**：Markdown / 代码 / 纯文本按类型渲染（代码经 highlight.js 着色），搜索片段同样按类型高亮。
+- **MCP 工具暴露**：`rag_file_create` / `rag_file_update` / `rag_search` / `rag_get` / `rag_tag_search` 等工具经 MCP `tools/call` 暴露，Agent 可直接读写知识库 —— 即**把长期记忆当成可调用的工具**。
 
-1. **本地统一管理**：把分散在不同 MCP Client 配置文件里的 Server，集中到一个本地客户端中查看、启停、调试、分组。
-2. **本地优先（Local-first）**：所有 MCP Server 进程、配置、密钥都运行/保存在用户自己的机器上，不依赖任何远端服务，也无需暴露监听端口。
-3. **桌面原生体验**：托盘常驻、原生窗口、跨平台安装包（dmg / msi / AppImage）、自动更新、随包分发的 Node / UV / Bun 运行时，做到"装上即用"。
-4. **面向最终用户而非运维**：不需要懂 Docker、反向代理、数据库，直接双击安装即可使用。
-5. **与上游解耦演进**：在桌面客户端这一形态下，可以独立迭代 UI 交互、本地存储、进程管理等能力，不必受 Web 端架构约束。
+### 嵌入模型管理
+- 支持 ONNX（ort）与 GGUF（candle）两种后端，格式自动探测。
+- 已支持架构：Gemma3、Qwen3、nomic-bert-moe、LFM2、**modern-bert**（Granite Embedding 97M Multilingual R2 等）。
+- 模型随包分发或按需下载，GPU 优先（Metal / CUDA / CoreML / DirectML）、CPU 兜底。
+- 每个模型尺寸带 `deploy.json`：声明平台（GPU/CPU/AUTO）、描述、是否默认、非对称嵌入前缀、推荐分块尺寸。
 
-简言之：**上游 mcphub 解决"如何把多个 MCP Server 聚合成一个共享服务"，本项目解决"如何在我自己的电脑上统一管理本地的多个 MCP 工具"**——两者互补，而非替代。
+### 其他
+- 多语言界面（en / zh / fr / tr）、托盘常驻、自动更新、暗色模式同步。
+- 鉴权密钥写入操作系统钥匙串（keyring）；数据存于本机 SQLite（`$APPDATA/mcphub.db`）。
 
-因此本项目在**完全保留上游前端 UI 与交互**的前提下，将后端用 **Rust + Tauri** 重新实现，沉淀为面向个人用户的桌面客户端。
+## 与上游项目的定位差异
 
-## 与上游项目的核心差异
-
-> 再次强调：以下差异是因为**两者赛道不同**（服务端聚合 Hub vs 个人本地 MCP 工具管理客户端），并非"谁更好"的对比。
+> 上游 [mcphub](https://github.com/samanhappy/mcphub)（仓库内副本位于 [`mcphub-origin/`](./mcphub-origin)，版权归原作者所有）是面向**服务端 / 团队侧**的 MCP 聚合 Web 服务；本项目是面向**个人本机**的桌面客户端。两者赛道不同，互补而非替代。
 
 | 维度 | 上游 mcphub（Web，第三方项目） | MCPHub Desktop（本项目） |
 | --- | --- | --- |
-| 定位 | 服务端 / 团队侧的 MCP 聚合 Hub，被多客户端共享访问 | 个人本机的 MCP 工具统一管理客户端，本地优先 |
+| 定位 | 服务端 MCP 聚合 Hub，被多客户端共享访问 | 个人本机 MCP 工具统一管理客户端，本地优先 |
 | 形态 | Node.js Web 服务 + 浏览器访问 | Tauri 2 原生桌面应用 |
 | 后端语言 | TypeScript (Express.js, ESM) | Rust（位于 `src-tauri/`） |
 | 前端 | React + Vite + Tailwind | 复用上游前端（拷贝至 `frontend/`，按需适配 Tauri invoke） |
 | 数据存储 | JSON 文件 / PostgreSQL | 本机 SQLite（`$APPDATA/mcphub.db`，sqlx 0.8） |
 | 鉴权 | JWT + bcrypt（环境变量配置） | JWT + bcrypt，密钥写入操作系统钥匙串（keyring 3） |
 | MCP 进程 | 由 Node 服务托管 | 由 Rust 进程托管，随包分发 Node/UV/Bun 运行时（见 [`src-tauri/runtimes/`](./src-tauri/runtimes)） |
-| 通信方式 | HTTP `/api/*` | Tauri `invoke`（前端 `fetchInterceptor` 透明转发，无需改动业务代码） |
-| 安装与分发 | Docker / npm CLI | 平台原生安装包（dmg / msi / AppImage 等），支持自动更新 |
+| 通信方式 | HTTP `/api/*` | Tauri `invoke`（前端 `fetchInterceptor` 透明转发） |
+| RAG / Skills / 嵌入模型 | 无 | 内置：Skills 一键分发 + RAG 知识库作本地长期记忆（GGUF/ONNX 嵌入 + lancedb 向量库 + tree-sitter 分块 + MCP 工具暴露） |
+| 安装与分发 | Docker / npm CLI | 平台原生安装包（dmg / msi / AppImage），支持自动更新 |
+
+本项目在**保留上游前端 UI 与交互**的前提下，将后端用 Rust + Tauri 重新实现，并扩展了 **Skills 管理、RAG 知识库（Agent 本地长期记忆）、嵌入模型管理** 三大本地能力，沉淀为面向个人用户的桌面客户端。
 
 ## 仓库结构
 
@@ -69,13 +86,14 @@
 mcphub-desktop/
 ├── frontend/          # 【本项目】桌面端使用的前端（源自上游 frontend，按需适配 Tauri）
 ├── src-tauri/         # 【本项目】Tauri / Rust 后端
-│   ├── src/           #   Rust 源码（业务逻辑、MCP 管理、鉴权、SQLite 等）
+│   ├── src/           #   Rust 源码（业务逻辑、MCP 管理、鉴权、SQLite、RAG、Skills 等）
 │   ├── migrations/    #   SQLite 迁移脚本
-│   ├── runtimes/      #   随包分发的本地运行时（Node / UV / Bun）
+│   ├── runtimes/      #   随包分发的本地运行时（Node / UV / Bun）+ 嵌入模型
 │   └── tauri.conf.json
 ├── locales/           # 【本项目】i18n 翻译文件（en / zh / fr / tr）
 ├── scripts/           # 【本项目】构建辅助脚本（运行时下载、暗色模式同步等）
-├── agent.md           # 【本项目】详细的迁移与开发文档（强烈建议先阅读）
+├── doc/               # 【本项目】升级说明与设计文档
+├── AGENTS.md          # 【本项目】迁移与开发完整参考（强烈建议先阅读）
 ├── package.json       # 【本项目】桌面端入口（tauri dev / tauri build）
 └── mcphub-origin/     # 【第三方】🔒 上游 samanhappy/mcphub 源码快照
                        #            版权归原作者所有，仅供参考，禁止修改
@@ -89,7 +107,7 @@ mcphub-desktop/
 
 - macOS / Windows / Linux
 - [Node.js](https://nodejs.org/) ≥ 18
-- [Rust](https://www.rust-lang.org/) stable（含 `cargo`）
+- [Rust](https://www.rust-lang.org/) stable（含 `cargo`，MSRV 见 `src-tauri/Cargo.toml`）
 - [Tauri 2 系统依赖](https://tauri.app/start/prerequisites/)
 
 ### 准备运行时（首次）
@@ -144,6 +162,7 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 ## 文档
 
 - [`AGENTS.md`](AGENTS.md)：迁移背景、目录约定、模块划分、待办事项等完整开发参考。
+- [`doc/upgrade/`](./doc/upgrade)：各版本升级说明。
 - [`mcphub-origin/README.md`](./mcphub-origin/README.md)：**第三方上游项目** 的 README（英文）。
 - [`mcphub-origin/README.zh.md`](./mcphub-origin/README.zh.md)：**第三方上游项目** 的 README（中文）。
 
@@ -152,4 +171,3 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 - **上游项目归属**：[`mcphub-origin/`](./mcphub-origin) 内的全部代码、文档、资源均来自第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub)，**版权归原作者 [@samanhappy](https://github.com/samanhappy) 及其贡献者所有**，本项目仅作镜像保留以便溯源，未对其主张任何权利。
 - **致谢**：感谢 [@samanhappy](https://github.com/samanhappy) 及所有上游贡献者提供了优秀的开源实现。
 - **许可证**：上游项目许可证见 [`mcphub-origin/LICENSE`](./mcphub-origin/LICENSE)；本桌面端在严格遵守该许可证的前提下进行二次开发与发布。
-

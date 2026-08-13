@@ -684,14 +684,26 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
         args: { filePath: b?.filePath ?? '', tags: b?.tags ?? [] },
       };
     }
-    // POST /rag/docs/delete — delete a doc + its vector records
+    // POST /rag/docs/delete - delete a doc + its vector records
     if (segs[1] === 'docs' && segs[2] === 'delete' && m === 'POST') {
       const b = body as { id?: string } | null;
       return { command: 'delete_rag_doc', args: { id: b?.id ?? '' } };
     }
+    // POST /rag/docs/update - replace a doc's content + meta + vectors by id
+    // (pick a new file; id preserved; tags preserved; content re-embedded).
+    if (segs[1] === 'docs' && segs[2] === 'update' && m === 'POST') {
+      const b = body as { id?: string; filePath?: string } | null;
+      return { command: 'update_rag_doc', args: { id: b?.id ?? '', filePath: b?.filePath ?? '' } };
+    }
     // GET /rag/docs/:id — full document (with content)
     if (segs[1] === 'docs' && m === 'GET' && segs.length === 3)
       return { command: 'get_rag_doc', args: { id: decodeURIComponent(segs[2]) } };
+    // POST /rag/docs/chunks - a document's chunks (index + text) for the
+    // "view chunks" dialog (RAG must be enabled; chunks live in lancedb).
+    if (segs[1] === 'docs' && segs[2] === 'chunks' && m === 'POST') {
+      const b = body as { id?: string } | null;
+      return { command: 'get_rag_chunks', args: { id: b?.id ?? '' } };
+    }
     // GET /rag/docs — list documents (metadata only)
     if (segs[1] === 'docs' && m === 'GET' && segs.length === 2)
       return { command: 'list_rag_docs', args: {} };

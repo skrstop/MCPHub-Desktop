@@ -7,6 +7,9 @@
 //! `general.architecture`:
 //!   - `gemma`/`gemma2`/`gemma3`/`gemma-embedding` -> `Gemma3EmbedArch`
 //!   - `qwen2`/`qwen3` -> `Qwen3EmbedArch`
+//!   - `nomic-bert-moe`/`nomic-bert` -> `NomicBertMoeArch`
+//!   - `lfm2` -> `Lfm2Arch`
+//!   - `modern-bert` -> `ModernBertArch`
 //! Adding a new arch = a new `GgufArch` impl + a dispatch arm here.
 //!
 //! Tokenizer: if `tokenizer.json` ships in the size dir, use it (fast path).
@@ -26,18 +29,44 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use candle_core::quantized::gguf_file::{Content, Value};
 use candle_core::Device;
-use tokenizers::tokenizer::Tokenizer;
-use tokenizers::{
-    models::{bpe::BpeBuilder, unigram::Unigram},
-    pre_tokenizers::{
-        byte_level::ByteLevel,
-        metaspace::{Metaspace, PrependScheme},
-    },
+use tokenizers::models::{bpe::BpeBuilder, unigram::Unigram};
+use tokenizers::normalizers::Precompiled;
+use tokenizers::pre_tokenizers::{
+    byte_level::ByteLevel,
+    metaspace::{Metaspace, PrependScheme},
+    sequence::Sequence,
+    whitespace::WhitespaceSplit,
 };
+use tokenizers::tokenizer::Tokenizer;
 
 use crate::rag::embedder::{Embedder, Platform};
 use crate::rag::gguf_gemma::{Gemma3EmbedArch, GgufArch};
+use crate::rag::gguf_lfm2::Lfm2Arch;
+use crate::rag::gguf_modernbert::ModernBertArch;
+use crate::rag::gguf_nomic::NomicBertMoeArch;
 use crate::rag::gguf_qwen3::Qwen3EmbedArch;
+
+/// Read the model's max context length from a GGUF file's metadata, WITHOUT
+/// loading the model - parses only the GGUF header (metadata key-values, no
+/// tensors are read into memory). Used by `read_max_context` for GGUF-only
+/// size dirs that don't ship a `config.json` (e.g. Qwen3-Embedding). Returns
+/// None if no `.gguf` file in `model_dir` or the `{arch}.context_length` key
+/// is absent.
+pub fn read_gguf_context_length(model_dir: &Path) -> Option<u32> {
+    let gguf_file = std::fs::read_dir(model_dir)
+        .ok()?
+        .flatten()
+        .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("gguf"))
+        .map(|e| e.path())?;
+    let mut file = std::fs::File::open(&gguf_file).ok()?;
+    let content = Content::read(&mut file).ok()?;
+    let md = &content.metadata;
+    let arch = md
+        .get("general.architecture")
+        .and_then(|v| v.to_string().ok())?;
+    let key = format!("{}.context_length", arch);
+    md.get(&key).and_then(|v| v.to_u32().ok())
+}
 
 /// A loaded GGUF embedding model: tokenizer + architecture-specific forward
 /// (held as a `Box<dyn GgufArch>`). `embed`/`embed_batch` tokenize (with manual
@@ -109,9 +138,24 @@ impl GgufEmbedder {
             "qwen2" | "qwen3" => {
                 Box::new(Qwen3EmbedArch::from_content(&mut file, &content, &device)?)
             }
+            // nomic-embed-text-v2-moe (BERT-MoE encoder, mean-pool). "nomic-bert"
+            // (v1, dense) shares the arch - moe_every_n_layers=0 -> all dense.
+            "nomic-bert-moe" | "nomic-bert" => {
+                Box::new(NomicBertMoeArch::from_content(&mut file, &content, &device)?)
+            }
+            // LFM2.5-Embedding (hybrid ShortConv + attention encoder, CLS-pool).
+            "lfm2" => {
+                Box::new(Lfm2Arch::from_content(&mut file, &content, &device)?)
+            }
+            // modern-bert (ModernBert encoder, CLS-pool + L2, pre-norm, full-
+            // head_dim RoPE, sliding-window pattern). For Granite Embedding 97M
+            // Multilingual R2 and any other modern-bert GGUF embedding.
+            "modern-bert" => {
+                Box::new(ModernBertArch::from_content(&mut file, &content, &device)?)
+            }
             other => {
                 return Err(anyhow!(
-                    "unsupported gguf architecture '{}' (supported: gemma*, qwen2/qwen3)",
+                    "unsupported gguf architecture '{}' (supported: gemma*, qwen2/qwen3, nomic-bert-moe, lfm2, modern-bert)",
                     other
                 ))
             }
@@ -233,8 +277,18 @@ fn build_gguf_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result
     match model.as_str() {
         "gpt2" | "qwen2" | "llama3" | "bert" => build_bpe_tokenizer(md),
         "llama" => build_spm_tokenizer(md),
+        // T5 / XLM-RoBERTa-style SentencePiece Unigram (nomic-embed-text-v2-moe).
+        "t5" => build_t5_tokenizer(md),
+        // Gemma SentencePiece BPE (`gemma`/`gemma2`/`gemma3`/`gemma4`): vocab +
+        // merges + a `▁` Metaspace pre-tokenizer + byte-fallback (`<0xNN>` for
+        // any unknown byte). Token content uses the `▁` metaspace prefix and the
+        // vocab ships 256 `<0x00>`..`<0xFF>` byte tokens (token_type=BYTE), so
+        // `byte_fallback` reconstructs the exact Gemma tokenization from the
+        // GGUF metadata alone (no tokenizer.json needed). Granite Embedding
+        // 311M Multilingual R2 ships `gemma4`; the 97M ships `gpt2`.
+        "gemma" | "gemma2" | "gemma3" | "gemma4" => build_gemma_tokenizer(md),
         _ => Err(anyhow!(
-            "no tokenizer.json and GGUF tokenizer model '{}' is not reconstructable (supported: gpt2/qwen2/llama3/llama) - ship a tokenizer.json",
+            "no tokenizer.json and GGUF tokenizer model '{}' is not reconstructable (supported: gpt2/qwen2/llama3/llama/t5/gemma) - ship a tokenizer.json",
             model
         )),
     }
@@ -269,6 +323,50 @@ fn build_bpe_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<
     Ok(tok)
 }
 
+/// Gemma SentencePiece BPE (`gemma`/`gemma2`/`gemma3`/`gemma4`): a BPE model
+/// (vocab + merges, same as the gpt2 builder) BUT with a `▁` Metaspace
+/// pre-tokenizer and byte-fallback enabled. Gemma's vocab stores tokens with
+/// the `▁` metaspace prefix and ships 256 `<0x00>`..`<0xFF>` byte tokens, so
+/// `byte_fallback` reproduces Gemma's SentencePiece-with-byte-fallback behavior:
+/// any byte not covered by a vocab token is emitted as its `<0xNN>` token
+/// instead of `<unk>`. bos/eos are still added manually by the embedder per the
+/// GGUF's `add_bos_token`/`add_eos_token`.
+///
+/// Verified against the `granite-embedding-311M-multilingual-r2` GGUF
+/// (`tokenizer.ggml.model = gemma4`): produces correct in-range ids for
+/// EN/CJK/AR samples (e.g. `今天天气真好` -> `▁今天 天气 真 好`).
+fn build_gemma_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
+    let tokens = meta_string_array(md, "tokenizer.ggml.tokens")?;
+    let merges_raw = meta_string_array(md, "tokenizer.ggml.merges")?;
+    let vocab: ahash::AHashMap<String, u32> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), i as u32))
+        .collect();
+    let merges: Vec<(String, String)> = merges_raw
+        .iter()
+        .filter_map(|m| {
+            let mut it = m.splitn(2, ' ');
+            Some((it.next()?.to_string(), it.next()?.to_string()))
+        })
+        .collect();
+    let unk = meta_u32(md, "tokenizer.ggml.unknown_token_id")
+        .and_then(|id| tokens.get(id as usize).cloned())
+        .unwrap_or_else(|| "<unk>".to_string());
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .unk_token(unk)
+        // Gemma maps unknown bytes to their <0xNN> token (the vocab ships all
+        // 256) rather than emitting <unk>.
+        .byte_fallback(true)
+        .build()
+        .map_err(|e| anyhow!("build Gemma BPE from gguf: {}", e))?;
+    let mut tok = Tokenizer::new(bpe);
+    // ▁ metaspace, always prepend (Gemma convention).
+    tok.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
+    Ok(tok)
+}
+
 /// SentencePiece (llama) tokenizer: Unigram model (tokens + scores) + Metaspace
 /// pre-tokenizer (▁ replacement, always prepend). byte_fallback=true (llama SPM
 /// typically ships the 256 byte tokens). bos/eos added manually by the embedder
@@ -290,6 +388,66 @@ fn build_spm_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<
     let mut tok = Tokenizer::new(unigram);
     // Metaspace: ▁ (U+2581) replaces spaces, always prepend (llama convention).
     tok.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
+    Ok(tok)
+}
+
+/// T5 / XLM-RoBERTa-style tokenizer (GGUF `tokenizer.ggml.model == "t5"`):
+/// a SentencePiece Unigram model (same as `llama` SPM) BUT with a
+/// `Precompiled` normalizer built from the GGUF's `precompiled_charsmap`
+/// (NFKC-style normalization baked in) and a `Sequence[WhitespaceSplit,
+/// Metaspace]` pre-tokenizer. Without the Precompiled normalizer, multilingual
+/// text tokenizes wrong. Used by nomic-embed-text-v2-moe.
+///
+/// Verified byte-identical to the official `tokenizer.json` on the nomic v2 MoE
+/// vocab (250048 tokens incl. 46 `score=-10000` padding tokens) across
+/// EN/CJK/ES/EL/RU/JA/AR samples + the `search_query:`/`search_document:`
+/// prefixes - so the GGUF is self-contained (no tokenizer.json needed).
+fn build_t5_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
+    let tokens = meta_string_array(md, "tokenizer.ggml.tokens")?;
+    let scores = meta_f32_array(md, "tokenizer.ggml.scores").unwrap_or_else(|_| {
+        // No scores -> uniform default (unigram needs a score per token).
+        vec![-10.0_f32; tokens.len()]
+    });
+    let vocab: Vec<(String, f64)> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), scores.get(i).copied().unwrap_or(-10.0) as f64))
+        .collect();
+    let unk_id = meta_u32(md, "tokenizer.ggml.unknown_token_id").map(|id| id as usize);
+    let unigram = Unigram::from(vocab, unk_id, true)
+        .map_err(|e| anyhow!("build Unigram (t5) from gguf: {}", e))?;
+    let mut tok = Tokenizer::new(unigram);
+
+    // Precompiled SentencePiece charsmap normalizer. The GGUF stores it as an
+    // array of U8 bytes (e.g. 237539 for nomic); `spm_precompiled::Precompiled`
+    // parses the blob. If absent, skip (rare - multilingual normalization would
+    // be off, but Unigram + Metaspace still tokenizes).
+    if let Some(Value::Array(items)) = md.get("tokenizer.ggml.precompiled_charsmap") {
+        let bytes: Vec<u8> = items
+            .iter()
+            .map(|v| match v {
+                Value::U8(b) => Ok(*b),
+                _ => Err(anyhow!("precompiled_charsmap element is not U8")),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !bytes.is_empty() {
+            let precompiled = Precompiled::from(&bytes)
+                .map_err(|e| anyhow!("build Precompiled charsmap from gguf: {}", e))?;
+            // with_normalizer returns Result (it refreshes added-token
+            // normalization); propagate a failure rather than silently dropping
+            // the normalizer (multilingual text would tokenize wrong without it).
+            tok.with_normalizer(Some(precompiled))
+                .map_err(|e| anyhow!("set t5 Precompiled normalizer: {}", e))?;
+        }
+    }
+
+    // Pre-tokenizer: WhitespaceSplit then Metaspace (▁, always prepend) -
+    // matches the official tokenizer.json's Sequence pre-tokenizer.
+    let seq = Sequence::new(vec![
+        WhitespaceSplit.into(),
+        Metaspace::new('▁', PrependScheme::Always, true).into(),
+    ]);
+    tok.with_pre_tokenizer(Some(seq));
     Ok(tok)
 }
 
@@ -451,4 +609,73 @@ fn pick_gpu() -> Option<(Device, &'static str)> {
         // No GPU backend on this platform (e.g. Windows - candle has no DirectML).
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Load the real Granite Embedding 311M GGUF (whose GGUF tags
+    /// `tokenizer.ggml.model = "gemma4"`), reconstruct the tokenizer from its
+    /// metadata via `build_gguf_tokenizer`, and verify it tokenizes correctly.
+    /// Guards against the regression where switching to the 311m model errored
+    /// `gemma4 is not reconstructable`. `#[ignore]` because it needs the bundled
+    /// GGUF on disk; run with
+    /// `cargo test --lib rag::gguf::tests::granite_311m_gemma4_tokenizer -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn granite_311m_gemma4_tokenizer() {
+        let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/granite/311m/granite-embedding-311M-multilingual-r2-Q8_0.gguf");
+        if !gguf.exists() {
+            eprintln!("skipping: {} not present", gguf.display());
+            return;
+        }
+        let mut file = std::fs::File::open(&gguf).expect("open gguf");
+        let content = Content::read(&mut file).expect("read gguf");
+        let md = &content.metadata;
+
+        // The dispatch used to error here: "gemma4 is not reconstructable".
+        assert_eq!(meta_string(md, "general.architecture").as_deref(), Some("modern-bert"));
+        assert_eq!(meta_string(md, "tokenizer.ggml.model").as_deref(), Some("gemma4"));
+        let tokenizer = build_gguf_tokenizer(md).expect("build gemma4 tokenizer");
+
+        let vocab_size = meta_string_array(md, "tokenizer.ggml.tokens").unwrap().len();
+
+        // Each sample encodes to ids that are all in-range, and the known word
+        // "machine" / "learning" round-trip as single metaspace-prefixed tokens.
+        // (These ids were cross-checked against the same reconstruction in Python
+        // `tokenizers` — they are the ids the real GGUF tokenizer produces.)
+        let cases: &[(&str, &[&str])] = &[
+            ("machine learning model", &["▁machine", "▁learning", "▁model"]),
+            ("Rust lifetime error", &["▁Rust", "▁lifetime", "▁error"]),
+        ];
+        for &(text, expected_tokens) in cases {
+            let enc = tokenizer.encode(text, false).expect("encode");
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            assert!(
+                ids.iter().all(|&id| (id as usize) < vocab_size),
+                "{text:?}: id out of range ({:?}; vocab={vocab_size})",
+                ids
+            );
+            let toks: Vec<&str> = enc.get_tokens().iter().map(|s| s.as_str()).collect();
+            assert_eq!(
+                toks, expected_tokens,
+                "{text:?}: tokens {toks:?} != expected {expected_tokens:?}"
+            );
+        }
+
+        // Multilingual byte-fallback path: CJK + Arabic must all encode to
+        // in-range ids (no out-of-vocab <unk>, byte-fallback covers every byte).
+        for text in ["今天天气真好", "你好,世界!", "مرحبا بالعالم"] {
+            let enc = tokenizer.encode(text, false).expect("encode");
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            assert!(
+                ids.iter().all(|&id| (id as usize) < vocab_size),
+                "{text:?}: id out of range ({:?})",
+                ids
+            );
+            assert!(!ids.is_empty(), "{text:?}: produced no tokens");
+        }
+    }
 }

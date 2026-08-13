@@ -276,7 +276,7 @@ fn forward_layer(
 }
 
 /// Padding bias [b,1,1,seq]: 0 real / -1e9 pad (bidirectional, no causal).
-fn attn_bias(mask: &Tensor) -> Result<Tensor> {
+pub(crate) fn attn_bias(mask: &Tensor) -> Result<Tensor> {
     let (b, s) = mask.dims2()?;
     let mask_f = mask.to_dtype(DType::F32)?;
     // 1-mask -> 0 real / 1 pad; * -1e9 -> 0 / -1e9.
@@ -289,7 +289,8 @@ fn attn_bias(mask: &Tensor) -> Result<Tensor> {
 /// uploaded once - avoids Metal op gaps (e.g. `uabs U32` isn't implemented on
 /// Metal, so an `arange(u32).abs()` path would error there). For the typical
 /// chunk (≤ window tokens) this mask is a no-op anyway (all in-window).
-fn sliding_window_mask(seq: usize, window: usize, device: &Device) -> Result<Tensor> {
+/// `pub(crate)` so the modern-bert arch (sliding-window layers) can reuse it.
+pub(crate) fn sliding_window_mask(seq: usize, window: usize, device: &Device) -> Result<Tensor> {
     let mut m = vec![0f32; seq * seq];
     for ii in 0..seq {
         let row = ii * seq;
@@ -304,7 +305,7 @@ fn sliding_window_mask(seq: usize, window: usize, device: &Device) -> Result<Ten
 }
 
 /// RoPE (rotate-half) over `head_dim` (full head). cos/sin precomputed per-seq.
-fn apply_rope(
+pub(crate) fn apply_rope(
     q: &Tensor,
     positions: &Tensor,
     head_dim: usize,
@@ -330,21 +331,50 @@ fn apply_rope(
     Ok(Tensor::cat(&[o1, o2], 3)?)
 }
 
+/// Matmul a hidden tensor `h` (`[..., in]`) by a 2D weight `w` (`[in, out]`),
+/// returning `[..., out]`. candle's `matmul` requires both operands to share the
+/// same rank (3D @ 2D is rejected) with no batch broadcasting, so this flattens
+/// the leading dims to 2D, matmuls, and reshapes back. Used by the nomic/lfm2
+/// arches which hold dequantized 2D `[in, out]` weights (QMatMul, which handles
+/// 3D internally, expects `[out, in]` and would double-transpose these).
+pub(crate) fn linear(h: &Tensor, w: &Tensor) -> Result<Tensor> {
+    let in_dim = w.dim(0)?;
+    let out_dim = w.dim(1)?;
+    let h_dims = h.dims();
+    match h_dims.len() {
+        2 => Ok(h.matmul(w)?),
+        3 => {
+            let (b, seq) = (h_dims[0], h_dims[1]);
+            Ok(h.reshape((b * seq, in_dim))?.matmul(w)?.reshape((b, seq, out_dim))?)
+        }
+        _ => Err(anyhow!("linear: unsupported hidden rank {}", h_dims.len())),
+    }
+}
+
+/// L2-normalize a `[b, dim]` tensor row-wise. The vectordb uses L2 distance
+/// assuming normalized embeddings (so L2 ranking == cosine ranking) - every
+/// arch must normalize its pooled output, even when the HF reference doesn't
+/// (e.g. LFM2's `modules.json` has no Normalize module).
+pub(crate) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
+    let b = x.dim(0)?;
+    let norm = x
+        .sqr()?
+        .sum(1)?
+        .sqrt()?
+        .broadcast_add(&Tensor::new(&[1e-12f32], x.device())?)?
+        .reshape((b, 1))?;
+    Ok(x.broadcast_div(&norm)?)
+}
+
 /// Mean-pool (masked) over seq + L2-normalize. [b,seq,hidden] -> [b,hidden].
-fn pool_and_normalize(x: &Tensor, mask: &Tensor) -> Result<Tensor> {
+pub(crate) fn pool_and_normalize(x: &Tensor, mask: &Tensor) -> Result<Tensor> {
     let (b, seq, _hidden) = x.dims3()?;
     let mask_f = mask.to_dtype(DType::F32)?.reshape((b, seq, 1))?;
     let masked = x.broadcast_mul(&mask_f)?;
     let sum = masked.sum(1)?;
     let denom = mask_f.sum(1)?.broadcast_add(&Tensor::new(&[1e-9f32], x.device())?)?;
     let pooled = sum.broadcast_div(&denom)?;
-    let norm = pooled
-        .sqr()?
-        .sum(1)?
-        .sqrt()?
-        .broadcast_add(&Tensor::new(&[1e-12f32], x.device())?)?
-        .reshape((b, 1))?;
-    Ok(pooled.broadcast_div(&norm)?)
+    l2_normalize(&pooled)
 }
 
 fn gemma_rms_norm<R: Read + Seek>(

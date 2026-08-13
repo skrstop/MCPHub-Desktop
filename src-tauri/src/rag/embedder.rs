@@ -58,15 +58,37 @@ impl Platform {
 }
 
 /// Parsed `deploy.json` config for a size dir: the platform (device strategy),
-/// an optional human description (shown in the model dropdown), and an
-/// optional `default` flag (marks this size as the out-of-box model + the
-/// fallback when the persisted selection is gone).
+/// an optional human description (shown in the model dropdown), an optional
+/// `default` flag (marks this size as the out-of-box model + the fallback when
+/// the persisted selection is gone), and the asymmetric embedding prefixes
+/// (`searchQueryPrefix` / `importDocPrefix`).
 pub struct DeployConfig {
     pub platform: Platform,
     pub description: String,
     pub is_default: bool,
     /// Sort order in the dropdown (lower = higher in list; default 0).
     pub sort: i32,
+    /// Prefix prepended to a search QUERY before embedding (deploy.json
+    /// `searchQueryPrefix`). Asymmetric embedding models (Qwen3-Embedding, BGE)
+    /// require a distinct instruction prefix on the query side; "" for symmetric
+    /// models (Gemma). Applied by the service in `search`. Missing field / JSON
+    /// null / non-string -> "".
+    pub search_query_prefix: String,
+    /// Prefix prepended to each imported DOCUMENT chunk before embedding
+    /// (deploy.json `importDocPrefix`). The document-side counterpart of
+    /// `search_query_prefix`; "" for symmetric models. Applied by the service
+    /// in `reindex_doc`. Missing field / JSON null / non-string -> "".
+    pub import_doc_prefix: String,
+    /// Model-author-recommended chunk size in tokens (deploy.json `chunkSize`).
+    /// `None` if unset → the service falls back to a built-in default (1024).
+    /// Applied by `reindex_doc` ONLY when the user's global `chunk_size` setting
+    /// is `0` ("auto"); a positive user setting overrides it. Surfaced so the
+    /// frontend can show the recommended value next to the Auto toggle.
+    pub chunk_size: Option<u32>,
+    /// Model-author-recommended chunk overlap in tokens (deploy.json
+    /// `chunkOverlap`). `None` if unset → falls back to a built-in default
+    /// (100). Used the same auto-vs-override way as `chunk_size`.
+    pub chunk_overlap: Option<u32>,
 }
 
 /// Read `size_dir/deploy.json`
@@ -76,11 +98,29 @@ pub struct DeployConfig {
 /// `list_models` (for the dropdown + default selection) use this.
 pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
     let Ok(text) = std::fs::read_to_string(size_dir.join("deploy.json")) else {
-        return DeployConfig { platform: Platform::Auto, description: String::new(), is_default: false, sort: 0 };
+        return DeployConfig {
+            platform: Platform::Auto,
+            description: String::new(),
+            is_default: false,
+            sort: 0,
+            search_query_prefix: String::new(),
+            import_doc_prefix: String::new(),
+            chunk_size: None,
+            chunk_overlap: None,
+        };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         log::warn!("[RAG] deploy.json in {} is not valid JSON - using AUTO", size_dir.display());
-        return DeployConfig { platform: Platform::Auto, description: String::new(), is_default: false, sort: 0 };
+        return DeployConfig {
+            platform: Platform::Auto,
+            description: String::new(),
+            is_default: false,
+            sort: 0,
+            search_query_prefix: String::new(),
+            import_doc_prefix: String::new(),
+            chunk_size: None,
+            chunk_overlap: None,
+        };
     };
     let platform = match v.get("platform").and_then(|p| p.as_str()) {
         Some(s) => Platform::parse(s),
@@ -93,7 +133,45 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         .to_string();
     let is_default = v.get("default").and_then(|d| d.as_bool()).unwrap_or(false);
     let sort = v.get("sort").and_then(|s| s.as_i64()).unwrap_or(0) as i32;
-    DeployConfig { platform, description, is_default, sort }
+    // Asymmetric embedding prefixes (deploy.json `searchQueryPrefix` /
+    // `importDocPrefix`). Missing field / JSON null / non-string -> "" (symmetric
+    // models like Gemma need no prefix). Applied by the service on the query vs
+    // document side respectively. `as_str()` returns None on JSON null, so an
+    // explicit null also falls back to "".
+    let search_query_prefix = v
+        .get("searchQueryPrefix")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    let import_doc_prefix = v
+        .get("importDocPrefix")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Model-author-recommended chunk size / overlap (deploy.json `chunkSize` /
+    // `chunkOverlap`, in tokens). Optional — `None` if absent / null / negative
+    // / non-int. Used by `reindex_doc` when the user's global setting is `0`
+    // ("auto"); a positive user setting overrides them.
+    let chunk_size = v
+        .get("chunkSize")
+        .and_then(|n| n.as_u64())
+        .filter(|&n| n > 0 && n <= u32::MAX as u64)
+        .map(|n| n as u32);
+    let chunk_overlap = v
+        .get("chunkOverlap")
+        .and_then(|n| n.as_u64())
+        .filter(|&n| n <= u32::MAX as u64)
+        .map(|n| n as u32);
+    DeployConfig {
+        platform,
+        description,
+        is_default,
+        sort,
+        search_query_prefix,
+        import_doc_prefix,
+        chunk_size,
+        chunk_overlap,
+    }
 }
 
 /// Read the per-size deployment platform (convenience over `read_deploy_config`).
@@ -208,18 +286,26 @@ fn find_gguf(dir: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Read the model's max context window (tokens) from `config.json`'s
-/// `max_position_embeddings`. Standalone (no runtime / no backend crate
-/// needed) so the UI can show the chunk_size upper bound even when RAG is off.
-/// Both ONNX and GGUF size dirs ship a `config.json` (small), so this works
-/// for either format without touching ort/candle. Falls back to 2048 (a safe
-/// common default) only when the file/field is missing.
+/// Read the model's max context window (tokens). Resolution order:
+/// 1. `config.json`'s `max_position_embeddings` (ONNX + GGUF dirs that ship
+///    one, e.g. Gemma3).
+/// 2. GGUF metadata's `{arch}.context_length` (parsed from the `.gguf` header,
+///    no model load - for GGUF-only dirs like Qwen3 that have no config.json).
+/// 3. Fallback 2048 (a safe common default) only when both are missing.
+/// Standalone (no runtime / no backend crate needed) so the UI can show the
+/// chunk_size upper bound even when RAG is off.
 pub fn read_max_context(model_dir: &Path) -> u32 {
-    let cfg = std::fs::read_to_string(model_dir.join("config.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    cfg.and_then(|v| v.get("max_position_embeddings").and_then(|m| m.as_u64()))
-        .unwrap_or(2048) as u32
+    if let Ok(s) = std::fs::read_to_string(model_dir.join("config.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(m) = v.get("max_position_embeddings").and_then(|m| m.as_u64()) {
+                return m as u32;
+            }
+        }
+    }
+    if let Some(ctx) = crate::rag::gguf::read_gguf_context_length(model_dir) {
+        return ctx;
+    }
+    2048
 }
 
 /// Check whether the device has enough free memory to run the embedding model

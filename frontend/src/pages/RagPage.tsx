@@ -5,6 +5,7 @@ import {
   SlidersHorizontal,
   Trash2,
   Eye,
+  Layers,
   Info,
   X,
   Loader2,
@@ -16,8 +17,13 @@ import {
   Download,
   Check,
   ChevronDown,
+  Code,
+  Plus,
+  Minus,
+  RefreshCw,
 } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
+import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
 import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
 import { getRagTools } from '@/services/ragService';
@@ -36,6 +42,8 @@ const RagPage: React.FC = () => {
     ragDocs,
     enabled,
     initializing,
+    togglingTo,
+    switchingModel,
     settings,
     modelLimits,
     viewedDoc,
@@ -46,6 +54,7 @@ const RagPage: React.FC = () => {
     uploadProgress,
     charProgress,
     reindexing,
+    updatingDoc,
     reindexConfirm,
     confirmReindex,
     cancelReindex,
@@ -57,10 +66,16 @@ const RagPage: React.FC = () => {
     downloadModel,
     toggleEnabled,
     upload,
+    updateDoc,
     remove,
     removeMany,
     view,
     closeView,
+    chunksDoc,
+    chunksList,
+    chunksLoading,
+    viewChunks,
+    closeChunks,
     openLocation,
     search,
     setTags,
@@ -82,8 +97,10 @@ const RagPage: React.FC = () => {
   const [showBatchDelete, setShowBatchDelete] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
-  // disabled = OFF (default) OR initializing. The switch itself stays interactive.
-  const disabled = (!enabled && !initializing) || initializing;
+  // disabled = OFF (default) OR initializing OR switching model. The switch
+  // itself stays interactive (so the user can cancel a slow init by toggling
+  // off) except during a model switch, where toggling would race the swap.
+  const disabled = (!enabled && !initializing && !switchingModel) || initializing || switchingModel;
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -190,6 +207,27 @@ const RagPage: React.FC = () => {
     }
   };
 
+  // Update an existing document in place: open the OS file picker, then
+  // overwrite the doc's content + meta + vectors with the picked file (id +
+  // tags preserved). Drives the upload-progress overlay (file-level 1/1 +
+  // char-level from reindex_doc) the same way `upload` does, so the user sees
+  // both progress bars. `updatingId` drives the row's update-button spinner.
+  // Requires RAG enabled; the button is disabled when RAG is off.
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const handleUpdate = async (doc: RagDocInfo) => {
+    const picked = await pickFiles();
+    if (picked.length === 0) return;
+    setUpdatingId(doc.id);
+    try {
+      await updateDoc(doc.id, picked[0].path, doc.name);
+      showToast(t('pages.rag.updateDone'), 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.updateFailed'), 'error');
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   // Fuzzy filename search (client-side, case-insensitive).
   const filteredDocs = useMemo(() => {
     const q = fileNameSearch.trim().toLowerCase();
@@ -201,6 +239,7 @@ const RagPage: React.FC = () => {
   const existingNames = useMemo(() => new Set(ragDocs.map((d) => d.name)), [ragDocs]);
 
   return (
+    <>
     <div className={disabled ? 'opacity-60 pointer-events-none' : ''}>
       {/* Header: title + switch + memory warning on the right of the title */}
       <div className="flex items-end justify-between gap-4 mb-6">
@@ -211,11 +250,11 @@ const RagPage: React.FC = () => {
             <Switch
               checked={enabled}
               onCheckedChange={handleToggle}
-              disabled={initializing}
+              disabled={initializing || switchingModel}
               aria-label={t('pages.rag.title')}
             />
             <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
-              {initializing ? t('pages.rag.opening') : enabled ? t('pages.rag.enabled') : t('pages.rag.disabled')}
+              {switchingModel ? t('pages.rag.switchingModel') : initializing ? (togglingTo === 'off' ? t('pages.rag.closing') : t('pages.rag.opening')) : enabled ? t('pages.rag.enabled') : t('pages.rag.disabled')}
             </span>
             <span
               className="inline-flex items-center justify-center cursor-help"
@@ -241,7 +280,7 @@ const RagPage: React.FC = () => {
               models={models}
               currentModel={currentModel}
               modelDownload={modelDownload}
-              disabled={initializing}
+              disabled={initializing || switchingModel}
               onSelect={selectModel}
               onDownload={downloadModel}
               onRefresh={fetchModels}
@@ -343,7 +382,7 @@ const RagPage: React.FC = () => {
             <span style={{ width: 90 }}>{t('pages.rag.columnSize')}</span>
             <span style={{ width: 64 }}>{t('pages.rag.columnChunks')}</span>
             <span style={{ width: 160 }}>{t('pages.rag.columnTime')}</span>
-            <span style={{ width: 108 }} />
+            <span style={{ width: 170 }} />
           </div>
           {filteredDocs.map((doc, idx) => {
             const checked = selectedIds.has(doc.id);
@@ -375,6 +414,11 @@ const RagPage: React.FC = () => {
                       {doc.fileType}
                     </span>
                   )}
+                  {doc.version > 1 && (
+                    <span className="hub-tag flex-shrink-0" title={t('pages.rag.versionTitle', { v: doc.version })} style={{ fontSize: 10 }}>
+                      v{doc.version}
+                    </span>
+                  )}
                 </div>
                 {(doc.tags || []).length > 0 && (
                   <div className="flex items-center gap-1 flex-wrap" style={{ paddingLeft: 26 }}>
@@ -383,6 +427,15 @@ const RagPage: React.FC = () => {
                         {tag}
                       </span>
                     ))}
+                  </div>
+                )}
+                {doc.fileName && doc.fileName !== doc.name && (
+                  <div
+                    className="hub-mono truncate"
+                    style={{ paddingLeft: 26, fontSize: 10, color: 'var(--hub-ink-3)' }}
+                    title={doc.fileName}
+                  >
+                    {doc.fileName}
                   </div>
                 )}
               </div>
@@ -395,7 +448,7 @@ const RagPage: React.FC = () => {
               <span className="hub-mono text-[12px]" style={{ width: 160, color: 'var(--hub-ink-3)' }}>
                 {doc.uploadedAt || '-'}
               </span>
-              <div className="flex items-center gap-1" style={{ width: 108 }}>
+              <div className="flex items-center gap-1" style={{ width: 170 }}>
                 <button
                   className="hub-icon-btn sm"
                   onClick={() => view(doc.id)}
@@ -403,6 +456,22 @@ const RagPage: React.FC = () => {
                   disabled={disabled}
                 >
                   {viewLoading ? <Loader2 size={13} className="animate-spin" /> : <Eye size={13} />}
+                </button>
+                <button
+                  className="hub-icon-btn sm"
+                  onClick={() => viewChunks(doc)}
+                  title={t('pages.rag.viewChunks')}
+                  disabled={disabled || (doc.chunkCount ?? 0) === 0}
+                >
+                  <Layers size={13} />
+                </button>
+                <button
+                  className="hub-icon-btn sm"
+                  onClick={() => handleUpdate(doc)}
+                  title={t('pages.rag.update')}
+                  disabled={disabled || updatingId === doc.id}
+                >
+                  {updatingId === doc.id ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
                 </button>
                 <button
                   className="hub-icon-btn sm"
@@ -451,6 +520,8 @@ const RagPage: React.FC = () => {
         <SearchSettingsDialog
           initial={settings}
           maxContext={modelLimits.maxContext}
+          recommendedChunkSize={modelLimits.chunkSize}
+          recommendedChunkOverlap={modelLimits.chunkOverlap}
           onClose={() => setShowSettings(false)}
           onSave={(s) => {
             updateSettings(s);
@@ -492,6 +563,67 @@ const RagPage: React.FC = () => {
             await view(viewedDoc.id);
           }}
         />
+      )}
+
+      {/* View chunks dialog - lists all chunks (index + text) of a doc */}
+      {chunksDoc && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+              <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+                {t('pages.rag.chunksTitle', { name: chunksDoc.name })}
+              </h2>
+              <button onClick={closeChunks} className="hub-icon-btn sm">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+              {chunksLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 size={22} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+                </div>
+              ) : chunksList.length === 0 ? (
+                <p className="text-[13px] text-center py-12" style={{ color: 'var(--hub-ink-3)' }}>
+                  {t('pages.rag.chunksEmpty')}
+                </p>
+              ) : (
+                chunksList.map((c) => (
+                  <div
+                    key={c.chunkIndex}
+                    className="rounded-lg border p-3"
+                    style={{ borderColor: 'var(--hub-line-2)', background: 'var(--hub-bg-2)' }}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span
+                        className="hub-mono text-[11px] px-2 py-0.5 rounded"
+                        style={{ background: 'var(--hub-line)', color: 'var(--hub-ink-2)' }}
+                      >
+                        #{c.chunkIndex + 1}
+                      </span>
+                      <span className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                        {t('pages.rag.chunkTokens', { count: c.chunkText.length })}
+                      </span>
+                    </div>
+                    <pre
+                      className="text-[12px] whitespace-pre-wrap break-words"
+                      style={{ color: 'var(--hub-ink)', fontFamily: 'inherit', margin: 0 }}
+                    >
+                      {c.chunkText}
+                    </pre>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="flex items-center justify-between p-5 border-t border-[var(--hub-line-2)]">
+              <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.chunksCount', { count: chunksList.length })}
+              </span>
+              <button onClick={closeChunks} className="hub-btn">
+                {t('pages.rag.close')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Delete confirm dialog */}
@@ -606,6 +738,10 @@ const RagPage: React.FC = () => {
                       name: uploadProgress.name,
                     })
                   : t('pages.rag.reindexingDone', { total: uploadProgress.total })
+                : updatingDoc
+                ? uploadProgress.name
+                  ? t('pages.rag.updatingFile', { name: uploadProgress.name })
+                  : t('pages.rag.update')
                 : uploadProgress.name
                 ? t('pages.rag.uploadingFile', {
                     current: uploadProgress.current + 1,
@@ -684,17 +820,29 @@ const RagPage: React.FC = () => {
         </div>
       )}
 
-      {/* Initializing overlay label */}
-      {initializing && (
-        <div
-          className="fixed top-4 left-1/2 -translate-x-1/2 z-50 hub-card flex items-center gap-2 px-4 py-2 shadow-lg"
-          style={{ borderColor: 'var(--hub-line)', background: 'var(--hub-surface)' }}
-        >
-          <Loader2 size={14} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
-          <span className="text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>{t('pages.rag.opening')}</span>
+    </div>
+
+      {/* Model loading overlay. A sibling of the `opacity-60` disabled
+          wrapper (NOT a child) so it isn't dimmed by the parent's opacity —
+          `opacity` creates a stacking context, so a dimmed child can't escape
+          via z-index. Rendered at z-[60] with its own bg-black/40 scrim, full
+          screen, matching the upload overlay's style. Shows a large spinning
+          Loader2 + "switching"/"opening" label while the backend loads a model
+          (toggle on) or swaps models (selectModel). */}
+      {(initializing || switchingModel) && (
+        <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+          <div
+            className="hub-card w-full max-w-sm p-6 flex flex-col items-center gap-4 shadow-2xl"
+            style={{ background: 'var(--hub-surface)' }}
+          >
+            <Loader2 size={26} className="animate-spin" style={{ color: 'var(--hub-ink-2)' }} />
+            <div className="text-[13px] text-center" style={{ color: 'var(--hub-ink)' }}>
+              {switchingModel ? t('pages.rag.switchingModel') : togglingTo === 'off' ? t('pages.rag.closing') : t('pages.rag.opening')}
+            </div>
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 };
 
@@ -1037,6 +1185,9 @@ const VectorSearchDialog: React.FC<{
   const [query, setQuery] = useState('');
   const [tags, setTags] = useState<string[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
+  // Snippet is hidden by default in the result list (cluttered the overview);
+  // a per-result button opens a modal showing the full snippet rendered.
+  const [viewSnippet, setViewSnippet] = useState<{ docName: string; snippet: string } | null>(null);
 
   const handleSearch = async () => {
     if (!query.trim()) return;
@@ -1104,7 +1255,7 @@ const VectorSearchDialog: React.FC<{
                     className="hub-card"
                     style={{ padding: '10px 14px', background: 'var(--hub-surface)' }}
                   >
-                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
                         <FileText size={13} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
                         <span className="truncate text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }} title={r.title}>
@@ -1116,12 +1267,19 @@ const VectorSearchDialog: React.FC<{
                           </span>
                         )}
                       </div>
-                      <span className="hub-tag accent hub-mono flex-shrink-0 whitespace-nowrap" style={{ fontSize: 11 }}>
-                        {t('pages.rag.resultScore')}: {r.score.toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="hub-mono text-[12px] leading-snug" style={{ color: 'var(--hub-ink-3)' }}>
-                      {r.snippet}
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        <span className="hub-tag accent hub-mono whitespace-nowrap" style={{ fontSize: 11 }}>
+                          {t('pages.rag.resultScore')}: {r.score.toFixed(2)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setViewSnippet({ docName: r.docName, snippet: r.snippet })}
+                          className="hub-btn sm inline-flex items-center gap-1"
+                          title={t('pages.rag.viewSnippet')}
+                        >
+                          <Eye size={12} />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))
@@ -1135,6 +1293,30 @@ const VectorSearchDialog: React.FC<{
           </button>
         </div>
       </div>
+      {/* Snippet detail modal - rendered on top of the search dialog (z-[60])
+          so the user can read the full snippet without it cluttering the list. */}
+      {viewSnippet && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-3xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+              <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 truncate" title={viewSnippet.docName}>
+                {viewSnippet.docName}
+              </h2>
+              <button onClick={() => setViewSnippet(null)} className="hub-icon-btn sm">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              <FileTypeRenderer content={viewSnippet.snippet} fileName={viewSnippet.docName} />
+            </div>
+            <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+              <button onClick={() => setViewSnippet(null)} className="hub-btn">
+                {t('pages.rag.close')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1144,25 +1326,28 @@ const VectorSearchDialog: React.FC<{
 const SearchSettingsDialog: React.FC<{
   initial: RagSettings;
   maxContext: number;
+  recommendedChunkSize?: number;
+  recommendedChunkOverlap?: number;
   onClose: () => void;
   onSave: (s: RagSettings) => void;
-}> = ({ initial, maxContext, onClose, onSave }) => {
+}> = ({ initial, maxContext, recommendedChunkSize, recommendedChunkOverlap, onClose, onSave }) => {
   const { t } = useTranslation();
   const [vectorWeight, setVectorWeight] = useState(initial.vectorWeight);
   const [keywordWeight, setKeywordWeight] = useState(initial.keywordWeight);
   const [maxResults, setMaxResults] = useState(initial.maxResults);
   const [scoreThreshold, setScoreThreshold] = useState(initial.scoreThreshold);
-  // Only clamp to the model's bounds when a value actually EXCEEDS them -
-  // in-range values are kept as-is (don't rewrite the user's saved setting).
-  // A chunkSize saved under a model with a larger context could exceed the
-  // current model's max, so we cap it at maxContext; overlap must stay below
-  // chunkSize.
-  const [chunkSize, setChunkSize] = useState(
-    initial.chunkSize > maxContext ? maxContext : Math.max(1, initial.chunkSize),
-  );
-  const [chunkOverlap, setChunkOverlap] = useState(
-    initial.chunkOverlap > chunkSize - 1 ? Math.max(0, chunkSize - 1) : Math.max(0, initial.chunkOverlap),
-  );
+  // chunk_size / chunk_overlap: `0` = "auto" (use the loaded model's
+  // deploy.json-recommended values; the backend caps by max_context). A positive
+  // value is an explicit override. `resolvedSize`/`resolvedOverlap` are the
+  // defaults the backend applies when auto is on (deploy.json `chunkSize`/
+  // `chunkOverlap`, else 1024/100, capped by max_context): shown in the
+  // disabled sliders so the user sees what Auto does, and used to seed the
+  // sliders when switching to manual.
+  const resolvedSize = Math.max(1, Math.min(maxContext, recommendedChunkSize ?? 1024));
+  const resolvedOverlap = recommendedChunkOverlap ?? 100;
+  const [chunkSize, setChunkSize] = useState(initial.chunkSize === 0 ? resolvedSize : initial.chunkSize);
+  const [chunkOverlap, setChunkOverlap] = useState(initial.chunkOverlap === 0 ? resolvedOverlap : initial.chunkOverlap);
+  const [chunkAuto, setChunkAuto] = useState(initial.chunkSize === 0);
   const sum = vectorWeight + keywordWeight;
 
   const handleVectorChange = (v: number) => {
@@ -1214,13 +1399,36 @@ const SearchSettingsDialog: React.FC<{
             <p className="text-[12px] font-medium" style={{ color: 'var(--hub-ink-2)' }}>
               {t('pages.rag.chunkingSection')}
             </p>
+            <label className="flex items-center gap-2 text-[13px] cursor-pointer" style={{ color: 'var(--hub-ink)' }}>
+              <input
+                type="checkbox"
+                checked={chunkAuto}
+                onChange={(e) => {
+                  const auto = e.target.checked;
+                  setChunkAuto(auto);
+                  if (!auto) {
+                    // Switching to manual: seed the sliders from the model's
+                    // recommended values (clamped to maxContext; overlap capped at
+                    // size-1) so the user starts from a sensible base.
+                    const size = Math.max(1, Math.min(maxContext, resolvedSize));
+                    setChunkSize(size);
+                    setChunkOverlap(Math.max(0, Math.min(size - 1, resolvedOverlap)));
+                  }
+                }}
+              />
+              {t('pages.rag.chunkAuto')}
+            </label>
+            <p className="text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+              {chunkAuto ? t('pages.rag.chunkAutoHint') : t('pages.rag.chunkManualHint')}
+            </p>
             <div>
               <NumericSlider
                 label={t('pages.rag.chunkSize')}
-                value={chunkSize}
+                value={chunkAuto ? resolvedSize : chunkSize}
                 min={1}
                 max={maxContext}
                 unit={t('pages.rag.unitChars')}
+                disabled={chunkAuto}
                 onChange={(v) => {
                   setChunkSize(v);
                   // Pull overlap back only if it now exceeds the (smaller) chunk size.
@@ -1234,10 +1442,11 @@ const SearchSettingsDialog: React.FC<{
             <div>
               <NumericSlider
                 label={t('pages.rag.chunkOverlap')}
-                value={chunkOverlap}
+                value={chunkAuto ? resolvedOverlap : chunkOverlap}
                 min={0}
-                max={Math.max(0, chunkSize - 1)}
+                max={Math.max(0, (chunkAuto ? resolvedSize : chunkSize) - 1)}
                 unit={t('pages.rag.unitChars')}
+                disabled={chunkAuto}
                 onChange={setChunkOverlap}
               />
               <p className="mt-1 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
@@ -1251,7 +1460,17 @@ const SearchSettingsDialog: React.FC<{
             {t('pages.rag.cancel')}
           </button>
           <button
-            onClick={() => onSave({ vectorWeight, keywordWeight, maxResults, scoreThreshold, chunkSize, chunkOverlap })}
+            onClick={() =>
+              onSave({
+                vectorWeight,
+                keywordWeight,
+                maxResults,
+                scoreThreshold,
+                // Auto: send 0 so the backend resolves per loaded model.
+                chunkSize: chunkAuto ? 0 : chunkSize,
+                chunkOverlap: chunkAuto ? 0 : chunkOverlap,
+              })
+            }
             className="hub-btn primary"
           >
             {t('pages.rag.save')}
@@ -1314,13 +1533,15 @@ const NumericSlider: React.FC<{
   max: number;
   step?: number;
   unit?: string;
+  disabled?: boolean;
   onChange: (v: number) => void;
-}> = ({ label, value, min, max, step = 1, unit, onChange }) => {
+}> = ({ label, value, min, max, step = 1, unit, disabled = false, onChange }) => {
   const lo = Math.min(min, max);
   const hi = Math.max(min, max);
   const unitSuffix = unit ? ` ${unit}` : '';
+  const disabledStyle = disabled ? { opacity: 0.5, cursor: 'not-allowed' } : {};
   return (
-    <div>
+    <div style={disabledStyle}>
       <div className="flex items-center justify-between mb-1 gap-2">
         <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
           {label}
@@ -1334,6 +1555,7 @@ const NumericSlider: React.FC<{
             max={hi}
             step={step}
             value={value}
+            disabled={disabled}
             onChange={(e) => {
               const v = parseInt(e.target.value, 10);
               if (Number.isNaN(v)) return;
@@ -1353,6 +1575,7 @@ const NumericSlider: React.FC<{
         max={hi}
         step={step}
         value={Math.max(lo, Math.min(value, hi))}
+        disabled={disabled}
         onChange={(e) => {
           const v = parseInt(e.target.value, 10);
           if (Number.isNaN(v)) return;
@@ -1527,6 +1750,58 @@ const ViewDialog: React.FC<{
   const { t } = useTranslation();
   const [tags, setTags] = useState<string[]>(doc.tags || []);
   const [busy, setBusy] = useState(false);
+  // Render vs source view + zoom level. Zoom is gesture-driven (Ctrl/Cmd +
+  // wheel, or trackpad pinch which the WebView synthesizes as ctrl+wheel) -
+  // no buttons.
+  const [mode, setMode] = useState<'render' | 'source'>('render');
+  const [zoom, setZoom] = useState(1);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Mirror zoom into a ref so the gesture handlers (bound once) read the
+  // latest value without re-binding on every zoom change.
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
+  // Apply zoom via CSS `zoom` (NOT transform: scale). `zoom` affects layout -
+  // the content reflows and the parent's overflow-y-auto scrolls naturally,
+  // with no visual overflow / draggable artefact (transform: scale left the
+  // scaled content overflowing the wrapper, which the WebView let the user
+  // drag around). Set via setProperty because CSSProperties doesn't type the
+  // (non-standard but Safari+Chromium-supported) `zoom` property.
+  useEffect(() => {
+    contentRef.current?.style.setProperty('zoom', String(zoom));
+  }, [zoom]);
+  // Gesture zoom: Ctrl/Cmd + wheel (Chromium WebView2 + Safari ctrl+wheel),
+  // AND Mac trackpad pinch (WKWebView fires Safari's gesturestart/gesturechange
+  // with e.scale = cumulative scale since gesturestart). preventDefault stops
+  // browser page zoom; needs non-passive listeners.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const clamp = (n: number) => Math.min(3, Math.max(0.5, +n.toFixed(3)));
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      setZoom(clamp(zoomRef.current - e.deltaY * 0.005));
+    };
+    let startZoom = 1;
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      startZoom = zoomRef.current;
+    };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      const scale = (e as unknown as { scale?: number }).scale ?? 1;
+      setZoom(clamp(startZoom * scale));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('gesturestart', onGestureStart as EventListener);
+    el.addEventListener('gesturechange', onGestureChange as EventListener);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('gesturestart', onGestureStart as EventListener);
+      el.removeEventListener('gesturechange', onGestureChange as EventListener);
+    };
+  }, []);
 
   // Sync from the (re-fetched) doc prop after each save completes.
   useEffect(() => {
@@ -1545,7 +1820,7 @@ const ViewDialog: React.FC<{
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-5xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
           <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 truncate" title={doc.name}>
             {doc.name}
@@ -1554,7 +1829,7 @@ const ViewDialog: React.FC<{
             <X size={16} />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-5 space-y-4">
           {/* Tags editor (real-time) */}
           <div>
             <div className="flex items-center gap-1.5 mb-1.5">
@@ -1568,10 +1843,69 @@ const ViewDialog: React.FC<{
               <TagEditor tags={tags} onChange={handleChange} />
             </div>
           </div>
-          {/* Content */}
-          <pre className="hub-mono text-[12.5px] whitespace-pre-wrap break-words" style={{ color: 'var(--hub-ink-2)' }}>
-            {doc.content}
-          </pre>
+          {/* Content toolbar: render/source toggle. Zoom is gesture-only
+              (Ctrl/Cmd + wheel or pinch) - show the level as a hint. */}
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setMode((m) => (m === 'render' ? 'source' : 'render'))}
+              className="hub-btn sm inline-flex items-center gap-1"
+              title={mode === 'render' ? t('pages.rag.viewSource') : t('pages.rag.viewRender')}
+            >
+              {mode === 'render' ? <Code size={13} /> : <Eye size={13} />}
+              <span>{mode === 'render' ? t('pages.rag.viewSource') : t('pages.rag.viewRender')}</span>
+            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.1).toFixed(2)))}
+                className="hub-icon-btn sm"
+                title={t('pages.rag.zoomOut')}
+              >
+                <Minus size={13} />
+              </button>
+              <span
+                className="text-[11px] hub-mono"
+                style={{ minWidth: 40, textAlign: 'center', color: 'var(--hub-ink-3)' }}
+                title={t('pages.rag.zoomHint')}
+              >
+                {Math.round(zoom * 100)}%
+              </span>
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.min(3, +(z + 0.1).toFixed(2)))}
+                className="hub-icon-btn sm"
+                title={t('pages.rag.zoomIn')}
+              >
+                <Plus size={13} />
+              </button>
+              {zoom !== 1 && (
+                <button
+                  type="button"
+                  onClick={() => setZoom(1)}
+                  className="hub-btn sm"
+                  title={t('pages.rag.zoomReset')}
+                >
+                  {t('pages.rag.zoomReset')}
+                </button>
+              )}
+            </div>
+          </div>
+          {/* Content - rendered by file type. Zoom is applied via CSS `zoom`
+              on this div (layout-affecting, so no overflow/drag artefact).
+              Background + padding + radius give the content a clear card edge
+              so zoom looks intentional (not floating text on the dialog). */}
+          <div
+            ref={contentRef}
+            style={{ background: 'var(--hub-bg)', padding: 12, borderRadius: 6 }}
+          >
+            <FileTypeRenderer
+              content={doc.content}
+              fileName={doc.name}
+              fileType={doc.fileType}
+              raw={mode === 'source'}
+            />
+          </div>
         </div>
         <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
           <button onClick={onClose} className="hub-btn">

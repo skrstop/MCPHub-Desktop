@@ -133,6 +133,26 @@ ahash = "0.8"
 # Encoding detection + SIMD-accelerated conversion for non-UTF-8 text uploads.
 encoding_rs = "0.8"
 chardetng = "1.0"
+# RAG chunking: semantic text/markdown/code splitting. `default-features=false`
+# keeps the `tokenizers` feature OFF — it would pull tokenizers' `onig`
+# (Oniguruma C dep) which this project deliberately avoids (see the `tokenizers`
+# pin above). We supply our own `ChunkSizer` (counts tokens via the loaded
+# `Embedder::tokenize_offsets`) in `rag/chunker.rs`. `code` pulls tree-sitter
+# 0.26 (AST-aware code splitting); `markdown` pulls pulldown-cmark (pure Rust).
+text-splitter = { version = "0.32", default-features = false, features = ["code", "markdown"] }
+tree-sitter = "0.26"
+# tree-sitter grammars for CodeSplitter (one per supported source language).
+# Each is a small C grammar compiled via its own `cc` build script (same build
+# model as the existing ort-sys/candle C deps). Add a grammar + an extension
+# entry in `chunker::code_language` to support a new language.
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
 # Global allocator experiment: with `override` it replaces the system malloc
 # (incl. for the C ort library) and returns freed pages to the OS more
 # aggressively. Helps verify if RAG disable can drop RSS. Revert by removing

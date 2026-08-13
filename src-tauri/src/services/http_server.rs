@@ -957,57 +957,21 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
                     // RAG builtin server: dispatch to the local rag service
                     // (no MCP pool call). Only the three RAG tools are routed.
                     if sn == rag_name {
-                        if !crate::rag::service::is_enabled() {
-                            return jsonrpc_error(id, -32603, "RAG is not enabled".to_string());
-                        }
-                        if orig_name == "rag_search" {
-                            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                            let tags: Vec<String> = args
-                                .get("tags")
-                                .and_then(|v| v.as_array())
-                                .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-                                .unwrap_or_default();
-                            match crate::rag::service::search(query.to_string(), tags).await {
-                                Ok(results) => {
-                                    let text = serde_json::to_string_pretty(&results).unwrap_or_default();
-                                    let resp = json!({"content": [{"type":"text","text":text}], "isError": false});
-                                    return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
-                                }
-                                Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
+                        // Builtin RAG server: dispatch via the shared
+                        // call_builtin_tool (same path the Tauri call_tool
+                        // command uses). Returns a ToolCallResult we wrap into a
+                        // JSON-RPC response. call_builtin_tool guards is_enabled
+                        // and "tool not found" itself.
+                        let Some(app) = crate::mcp::progress::get_app_handle() else {
+                            return jsonrpc_error(id, -32603, "app handle unavailable".to_string());
+                        };
+                        match crate::rag::service::call_builtin_tool(&app, &orig_name, &args).await {
+                            Ok(result) => {
+                                let resp = json!({"content": result.content, "isError": result.is_error});
+                                return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
                             }
+                            Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
                         }
-                        if orig_name == "rag_get" {
-                            let doc_id = args.get("docId").and_then(|v| v.as_str())
-                                .or_else(|| args.get("id").and_then(|v| v.as_str()))
-                                .unwrap_or("");
-                            let Some(app) = crate::mcp::progress::get_app_handle() else {
-                                return jsonrpc_error(id, -32603, "app handle unavailable".to_string());
-                            };
-                            match crate::rag::service::get_doc(app, doc_id).await {
-                                Ok(Some(doc)) => {
-                                    let resp = json!({"content": [{"type":"text","text":doc.content}], "isError": false});
-                                    return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
-                                }
-                                Ok(None) => return jsonrpc_error(id, -32602, format!("document not found: {}", doc_id)),
-                                Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
-                            }
-                        }
-                        if orig_name == "rag_tag_search" {
-                            let keys: Vec<String> = args
-                                .get("search_key")
-                                .and_then(|v| v.as_array())
-                                .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-                                .unwrap_or_default();
-                            match crate::rag::service::list_tags(keys).await {
-                                Ok(tags) => {
-                                    let text = serde_json::to_string_pretty(&tags).unwrap_or_else(|_| "[]".to_string());
-                                    let resp = json!({"content": [{"type":"text","text":text}], "isError": false});
-                                    return jsonrpc_response(id, strategy.shape_tool_call_result(resp));
-                                }
-                                Err(e) => return jsonrpc_error(id, -32603, e.to_string()),
-                            }
-                        }
-                        return jsonrpc_error(id, -32602, format!("Tool '{}' not found", orig_name));
                     }
                     // Check if tool is enabled
                     if let Ok(ts) = pool::list_tools_for(&sn).await {

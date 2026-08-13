@@ -15,7 +15,7 @@
 use serde_json::{json, Value};
 
 /// Transport a revision uses to deliver responses to the downstream client.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TransportMode {
     /// 2025-03-26+: single POST endpoint, JSON (or SSE-upgraded) responses.
     StreamableHttp,

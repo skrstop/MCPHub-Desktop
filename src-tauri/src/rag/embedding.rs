@@ -178,7 +178,7 @@ impl Embedder for OrtEmbedder {
     fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         // Larger batch = fewer session.run calls and better CPU/CoreML
         // utilization. 128 chunks per run keeps peak activation memory bounded
-        // for the typical chunk (~200 tokens from chunk_size=512 chars); the
+        // for the typical chunk (~400 tokens from chunk_size=1024 tokens); the
         // arena allocator reuses tensors across the many sub-batches during a
         // single import. Exposed as `EMBED_BATCH_SIZE` so the service can chunk
         // its per-file progress reporting on the same boundary.

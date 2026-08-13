@@ -2,6 +2,7 @@ import { apiGet, apiPost, apiPut } from '../utils/fetchInterceptor';
 import {
   RagDoc,
   RagDocInfo,
+  RagChunk,
   RagPickedFile,
   RagSettings,
   RagSearchResult,
@@ -40,6 +41,14 @@ export const getRagDoc = async (id: string): Promise<RagDoc | null> => {
   return response.data ?? null;
 };
 
+/** Get a document's chunks (index + text, no embeddings) for the "view
+ *  chunks" dialog. Requires RAG enabled (chunks live in lancedb). */
+export const getRagChunks = async (id: string): Promise<RagChunk[]> => {
+  const response: ApiResponse<RagChunk[]> = await apiPost('/rag/docs/chunks', { id });
+  if (!response.success) throw new Error(response.message || 'Failed to get RAG chunks');
+  return response.data ?? [];
+};
+
 /**
  * Open the OS multi-file picker (plain-text filter). Returns the chosen paths
  * + display names — no file bytes cross the IPC boundary; the backend reads
@@ -68,6 +77,15 @@ export const deleteRagDoc = async (id: string): Promise<void> => {
   if (!response.success) throw new Error(response.message || 'Failed to delete RAG doc');
 };
 
+/** Update an existing document in place: pick a new file, overwrite its content
+ *  + meta (id preserved, tags preserved) + re-embed its vectors. Returns the
+ *  new chunk count. Requires RAG enabled (re-embeds). */
+export const updateRagDoc = async (id: string, filePath: string): Promise<number> => {
+  const response: ApiResponse<number> = await apiPost('/rag/docs/update', { id, filePath });
+  if (!response.success) throw new Error(response.message || 'Failed to update RAG doc');
+  return response.data ?? 0;
+};
+
 /** Set the absolute tag list for a document (re-indexes its chunks). */
 export const setRagTags = async (id: string, tags: string[]): Promise<void> => {
   const response: ApiResponse = await apiPost('/rag/docs/set-tags', { id, tags });
@@ -93,7 +111,7 @@ export const getRagSettings = async (): Promise<RagSettings> => {
   const response: ApiResponse<RagSettings> = await apiGet('/rag/settings');
   if (!response.success) throw new Error(response.message || 'Failed to get RAG settings');
   return (
-    response.data ?? { vectorWeight: 0.5, keywordWeight: 0.5, maxResults: 20, scoreThreshold: 0, chunkSize: 512, chunkOverlap: 100 }
+    response.data ?? { vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0 }
   );
 };
 

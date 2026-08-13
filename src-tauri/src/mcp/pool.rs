@@ -525,6 +525,12 @@ pub async fn list_all_tools() -> Vec<Tool> {
 
 /// List tools for a specific server (returns cached list, no network call)
 pub async fn list_tools_for(server_name: &str) -> Result<Vec<Tool>> {
+    // Builtin "mcphub-desktop" server is virtual (no pool entry). Its tools are
+    // the RAG builtin tools - return them so the Tauri call_tool path and the
+    // "servers" panel can list/enable/disable them like any other server.
+    if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        return Ok(crate::rag::service::builtin_tools());
+    }
     let map = pool().read().await;
     let entry = map.get(server_name).ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
     Ok(entry.tools.clone())
@@ -538,6 +544,14 @@ pub async fn get_entry_info(name: &str) -> Option<(ServerStatus, Vec<Tool>)> {
 
 /// Call a tool — automatically routes to the correct server
 pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> Result<ToolCallResult> {
+    // Builtin "mcphub-desktop" server (RAG tools): virtual, not in the pool.
+    // Route to the RAG dispatch so invoking rag_* via the Tauri call_tool
+    // command / "servers" panel works instead of erroring "not connected".
+    if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        let app = crate::mcp::progress::get_app_handle()
+            .ok_or_else(|| anyhow!("app handle unavailable"))?;
+        return crate::rag::service::call_builtin_tool(&app, tool_name, &arguments).await;
+    }
     // On-demand stdio servers keep their live client in the on-demand store
     // (the pool entry is a sleeping shadow). Route there so the call lazily
     // spawns the process on first use.

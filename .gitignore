@@ -11,3 +11,4 @@ build/
 src-tauri/.codegraph
 .codemoss
 **/.playwright-mcp
+.claude

@@ -26,6 +26,13 @@ pub async fn get_rag_doc(app: AppHandle, id: String) -> Result<Option<RagDoc>, S
     service::get_doc(&app, &id).await.map_err(|e| e.to_string())
 }
 
+/// Read a document's chunks (index + text, no embeddings) for the "view
+/// chunks" dialog. Requires RAG enabled (chunks live in lancedb).
+#[tauri::command]
+pub async fn get_rag_chunks(id: String) -> Result<Vec<crate::models::rag::RagChunk>, String> {
+    service::get_doc_chunks(&id).await.map_err(|e| e.to_string())
+}
+
 /// Open the OS multi-file picker (no extension filter — validation is
 /// content-based) and return the chosen paths + display names. No file bytes
 /// cross the IPC boundary — the backend reads from disk at upload time.
@@ -42,6 +49,16 @@ pub async fn pick_rag_files(app: AppHandle) -> Result<Vec<RagPickedFile>, String
 #[tauri::command]
 pub async fn upload_rag_doc(app: AppHandle, file_path: String, tags: Vec<String>) -> Result<(), String> {
     service::upload_one_path(&app, &file_path, tags)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Update an existing document in place: pick a new file, overwrite the
+/// document's on-disk content + meta (id preserved) + vector chunks. Returns
+/// the new chunk count. Requires RAG enabled (the new content is re-embedded).
+#[tauri::command]
+pub async fn update_rag_doc(app: AppHandle, id: String, file_path: String) -> Result<u32, String> {
+    service::update_doc_from_file(&app, &id, &file_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -82,12 +99,23 @@ pub async fn get_rag_settings() -> Result<RagSettings, String> {
 #[serde(rename_all = "camelCase")]
 pub struct RagModelLimits {
     pub max_context: u32,
+    /// Model-author-recommended chunk size (tokens), from the loaded model's
+    /// deploy.json `chunkSize`. `None` if unset (the service falls back to
+    /// 1024). Shown by the frontend's Auto mode + used to seed manual sliders.
+    pub chunk_size: Option<u32>,
+    /// Model-author-recommended chunk overlap (tokens), from deploy.json
+    /// `chunkOverlap`. `None` if unset (falls back to 100).
+    pub chunk_overlap: Option<u32>,
 }
 
 #[tauri::command]
 pub async fn rag_model_limits(app: AppHandle) -> Result<RagModelLimits, String> {
+    let (max_context, chunk_size, chunk_overlap) =
+        service::model_chunk_recommendation(&app).await;
     Ok(RagModelLimits {
-        max_context: service::model_max_context(&app).await,
+        max_context,
+        chunk_size,
+        chunk_overlap,
     })
 }
 

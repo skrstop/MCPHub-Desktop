@@ -4,14 +4,16 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import { isTauri } from '@/utils/tauriClient';
-import { RagDoc, RagDocInfo, RagModelInfo, RagPickedFile, RagSettings, RagSearchResult } from '@/types';
+import { RagChunk, RagDoc, RagDocInfo, RagModelInfo, RagModelLimits, RagPickedFile, RagSettings, RagSearchResult } from '@/types';
 import {
   listRagDocs,
   getRagSettings,
   getRagModelLimits,
   saveRagSettings,
   deleteRagDoc,
+  updateRagDoc,
   getRagDoc,
+  getRagChunks,
   uploadRagDoc,
   pickRagFiles,
   openRagFileLocation,
@@ -48,10 +50,23 @@ const useRagDataState = () => {
   const [ragDocs, setRagDocs] = useState<RagDocInfo[]>([]);
   const [enabled, setEnabled] = useState(false);
   const [initializing, setInitializing] = useState(false);
-  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.5, keywordWeight: 0.5, maxResults: 20, scoreThreshold: 0, chunkSize: 512, chunkOverlap: 100 });
-  const [modelLimits, setModelLimits] = useState<{ maxContext: number }>({ maxContext: 2048 });
+  // Target state of an in-flight toggle ('on' | 'off' | null) so the loading
+  // overlay can say "开启中" vs "关闭中" — `initializing` alone can't tell the
+  // two apart (both set it true). Cleared when the toggle resolves.
+  const [togglingTo, setTogglingTo] = useState<'on' | 'off' | null>(null);
+  // True while switching the embedding model (selectModel). Distinct from
+  // `initializing` (toggle on/off) so the switch can show "切换中" instead of
+  // "开启中". Either flag grays out the page.
+  const [switchingModel, setSwitchingModel] = useState(false);
+  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0 });
+  const [modelLimits, setModelLimits] = useState<RagModelLimits>({ maxContext: 2048 });
   const [viewedDoc, setViewedDoc] = useState<RagDoc | null>(null);
   const [viewLoading, setViewLoading] = useState(false);
+  // "View chunks" dialog: the doc whose chunks are shown + the loaded chunks +
+  // a loading flag while fetching (RAG must be enabled to read lancedb).
+  const [chunksDoc, setChunksDoc] = useState<RagDocInfo | null>(null);
+  const [chunksList, setChunksList] = useState<RagChunk[]>([]);
+  const [chunksLoading, setChunksLoading] = useState(false);
   const [searchResults, setSearchResults] = useState<RagSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -65,6 +80,9 @@ const useRagDataState = () => {
   // upload overlay is reused (same bars); `reindexing` just switches the
   // title text from "uploading" to "reindexing".
   const [reindexing, setReindexing] = useState(false);
+  // True while a single-doc update (updateDoc) is re-embedding — reuses the
+  // upload overlay (same bars) but switches the title text to "updating".
+  const [updatingDoc, setUpdatingDoc] = useState(false);
   // When a model swap changes the embedding dim, the backend recreates the
   // vector table (old embeddings gone). We DON'T auto-reindex - we set this
   // flag so the page can prompt the user to confirm before re-embedding all
@@ -108,7 +126,18 @@ const useRagDataState = () => {
       const [list, cur] = await Promise.all([listRagModels(), currentRagModel()]);
       if (!mounted.current) return;
       setModels(list);
-      setCurrentModel(cur);
+      if (cur) {
+        setCurrentModel(cur);
+      } else if (list.length > 0) {
+        // Never selected before - default to the size whose deploy.json has
+        // "default": true (and is ready), else the first ready size. UI-only:
+        // the backend persists the default on next `start`. Prevents the
+        // dropdown from showing a blank placeholder on first run.
+        const fallback = list.find((m) => m.default && m.ready) ?? list.find((m) => m.ready);
+        setCurrentModel(fallback ? fallback.size : null);
+      } else {
+        setCurrentModel(null);
+      }
     } catch {
       if (mounted.current) setModels([]);
     }
@@ -264,13 +293,19 @@ const useRagDataState = () => {
   // (file-level) and `rag://upload-progress` (char-level) per doc. Triggered
   // automatically from `toggleEnabled` when `status.needsReindex` is set.
   const reindexAll = useCallback(async (): Promise<void> => {
+    console.log('[RAG] reindexAll: start (uploading=true, overlay should show)');
     setReindexing(true);
     setUploading(true);
     setUploadProgress({ current: 0, total: 0, name: '' });
     setCharProgress(null);
     try {
-      await reindexAllRag();
+      const done = await reindexAllRag();
+      console.log('[RAG] reindexAll: backend returned', done);
       await fetchDocs();
+      // Success toast gives explicit feedback even if the progress overlay
+      // flashed too briefly to notice (few/small docs, fast GPU, or per-doc
+      // embed failures swallowed by the backend's match).
+      showToast(t('pages.rag.reindexDone', { count: done }), 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : t('pages.rag.reindexFailed'), 'error');
       console.error('[RAG] reindex failed', err);
@@ -330,7 +365,7 @@ const useRagDataState = () => {
         return;
       }
       if (size === currentModel) return;
-      setInitializing(true);
+      setSwitchingModel(true);
       // Remember the model before the switch so a cancelled reindex confirm
       // can revert to it (no toast on the revert).
       setPrevModel(currentModel);
@@ -339,6 +374,9 @@ const useRagDataState = () => {
         if (!mounted.current) return;
         setCurrentModel(size);
         setEnabled(st.enabled);
+        setSwitchingModel(false);
+        // The backend's stop+start may still be settling (e.g. async cleanup);
+        // mirror its initializing flag so the "开启中" state shows if needed.
         setInitializing(st.initializing);
         if (st.enabled) fetchModelLimits();
         if (st.enabled && st.needsReindex) {
@@ -351,7 +389,7 @@ const useRagDataState = () => {
         }
       } catch (err) {
         if (mounted.current) {
-          setInitializing(false);
+          setSwitchingModel(false);
           setPrevModel(null);
         }
         showToast(err instanceof Error ? err.message : t('pages.rag.modelSelectFailed'), 'error');
@@ -383,11 +421,13 @@ const useRagDataState = () => {
     async (next: boolean) => {
       if (next === enabled) return;
       setInitializing(true);
+      setTogglingTo(next ? 'on' : 'off');
       try {
         const st = await ragToggle(next);
         if (mounted.current) {
           setEnabled(st.enabled);
           setInitializing(st.initializing);
+          setTogglingTo(null);
           // After a successful enable the model is freshly loaded from disk -
           // re-read its context window so the chunk_size max reflects the
           // CURRENT model (the bound can change if the model files were
@@ -403,6 +443,7 @@ const useRagDataState = () => {
         if (mounted.current) {
           setEnabled(false);
           setInitializing(false);
+          setTogglingTo(null);
         }
         throw err;
       }
@@ -465,6 +506,33 @@ const useRagDataState = () => {
     }
   }, []);
 
+  // Update an existing document in place: overwrite its content + meta (id
+  // preserved, tags preserved) + re-embed its vectors. Drives the SAME
+  // upload-progress overlay as `upload` (file-level 1/1 + the backend's
+  // `rag://upload-progress` char-level events emitted from reindex_doc), so
+  // the user sees both progress bars while the new content is re-embedded.
+  // Caller picks the file (via pickFiles) and passes the path + display name.
+  // Requires RAG enabled (re-embeds).
+  const updateDoc = useCallback(
+    async (id: string, filePath: string, name: string) => {
+      setUploading(true);
+      setUpdatingDoc(true);
+      setUploadProgress({ current: 0, total: 1, name });
+      setCharProgress({ name, charsDone: 0, charsTotal: 0 });
+      try {
+        await updateRagDoc(id, filePath);
+        setUploadProgress({ current: 1, total: 1, name });
+        await fetchDocs();
+      } finally {
+        setUploading(false);
+        setUpdatingDoc(false);
+        setUploadProgress(null);
+        setCharProgress(null);
+      }
+    },
+    [fetchDocs],
+  );
+
   const remove = useCallback(
     async (id: string) => {
       await deleteRagDoc(id);
@@ -496,6 +564,29 @@ const useRagDataState = () => {
   }, []);
 
   const closeView = useCallback(() => setViewedDoc(null), []);
+
+  // Fetch a document's chunks (for the "view chunks" dialog). RAG must be
+  // enabled (chunks live in lancedb); the backend errors otherwise - we surface
+  // it as a toast and don't open the dialog.
+  const viewChunks = useCallback(async (doc: RagDocInfo) => {
+    setChunksLoading(true);
+    setChunksList([]);
+    setChunksDoc(doc);
+    try {
+      const chunks = await getRagChunks(doc.id);
+      if (mounted.current) setChunksList(chunks);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Failed to load chunks', 'error');
+      if (mounted.current) setChunksDoc(null);
+    } finally {
+      if (mounted.current) setChunksLoading(false);
+    }
+  }, [showToast]);
+
+  const closeChunks = useCallback(() => {
+    setChunksDoc(null);
+    setChunksList([]);
+  }, []);
 
   const openLocation = useCallback(async (id: string) => {
     await openRagFileLocation(id);
@@ -529,6 +620,8 @@ const useRagDataState = () => {
     ragDocs,
     enabled,
     initializing,
+    togglingTo,
+    switchingModel,
     settings,
     modelLimits,
     viewedDoc,
@@ -539,6 +632,7 @@ const useRagDataState = () => {
     uploadProgress,
     charProgress,
     reindexing,
+    updatingDoc,
     reindexConfirm,
     confirmReindex,
     cancelReindex,
@@ -551,10 +645,16 @@ const useRagDataState = () => {
     toggleEnabled,
     upload,
     pickFiles,
+    updateDoc,
     remove,
     removeMany,
     view,
     closeView,
+    chunksDoc,
+    chunksList,
+    chunksLoading,
+    viewChunks,
+    closeChunks,
     openLocation,
     search,
     setTags,

@@ -259,6 +259,12 @@ export interface RagDocInfo {
   chunkCount: number;
   /** Display label from file_support.json (ext→name); "" if unknown. */
   fileType: string;
+  /** Content version. 1 on first upload, +1 each update. Legacy docs = 1. */
+  version: number;
+  /** The actual on-disk filename (uuid for uploads, meta.name for
+   *  rag_file_create) — shown under the display name so the user can match the
+   *  file when its folder is opened (reveal-in-file-manager). */
+  fileName: string;
 }
 
 // RAG search settings: weights applied to hybrid search scoring.
@@ -268,15 +274,32 @@ export interface RagSettings {
   maxResults: number;
   /** Minimum similarity score (0..1) for a hit to be shown. Default 0. */
   scoreThreshold: number;
-  /** Chunk size in characters, used at upload/reindex. Default 512. */
+  /** Chunk size in tokens. `0` = "auto" — use the loaded model's deploy.json
+   * `chunkSize` (else 1024), capped by maxContext. A positive value is an
+   * explicit override. Default 0 (auto). */
   chunkSize: number;
-  /** Chunk overlap in characters. Default 100. */
+  /** Chunk overlap in tokens. `0` = "auto" — use the model's deploy.json
+   * `chunkOverlap` (else 100). A positive value is an explicit override. */
   chunkOverlap: number;
 }
 
 /** Model context window (tokens), read from the model's config.json. */
 export interface RagModelLimits {
   maxContext: number;
+  /** Model-author-recommended chunk size (tokens) from deploy.json `chunkSize`.
+   *  Undefined when the model omits it (the backend falls back to 1024). Shown
+   *  by Auto mode + used to seed the manual sliders. */
+  chunkSize?: number;
+  /** Model-author-recommended chunk overlap (tokens) from deploy.json
+   *  `chunkOverlap`. Undefined when omitted (fallback 100). */
+  chunkOverlap?: number;
+}
+
+/** A single chunk of a document (for the "view chunks" dialog): its 0-based
+ *  index + the text. No embedding is returned (view-only). */
+export interface RagChunk {
+  chunkIndex: number;
+  chunkText: string;
 }
 
 // A single search result fragment returned by a similarity search.

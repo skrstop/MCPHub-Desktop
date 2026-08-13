@@ -1274,6 +1274,46 @@ PY
 - `connect()` 的 `initialize` 握手失败 `map_err` 路径：锁 `stderr_tail`，`trim_end` 后非空则返回 `anyhow!("... handshake failed: {e}\n--- upstream stderr ---\n{tail}")`，否则原样返回 `e`。
 - 该 error 经 `pool::connect_server` 的 `Ok(Err(e))` 分支存入 `ServerStatus.error`，前端 ServerCard 显示。
 
+### 3.10 RAG 文件创建/更新工具 + 文件查看可视化（桌面端独有）
+
+> 新增 2 个 MCP 工具（`rag_file_create` / `rag_file_update`）+ 文件详情/搜索片段的按类型可视化渲染。工具经 MCP `tools/call`（`http_server.rs` dispatch_mcp）暴露，与 `rag_search`/`rag_get`/`rag_tag_search` 同级。
+
+#### 3.10.1 存储/命名（与上传的区别）
+- **位置**：`<app_data>/rag/files/`（与上传同目录）。
+- **meta 文件名**：统一 `{id}.meta`（id=uuid，与上传一致，`get_doc`/`delete_doc`/`set_tags` 等按 id 定位 meta 不变）。
+- **content 文件名**：上传用 `{id}`（uuid），`rag_file_create` 用 `{docName}.{docType}`（人类可读）。新增 `content_path_for(dir, id, meta_name)` helper：先试 `dir/{id}`，不存在再试 `dir/{meta.name}`，兼容两种命名。`get_doc`/`delete_doc`/`open_file_location`/`find_doc_ids_by_name` 删除均改用该 helper。
+- **DocMeta 加 `file_type: Option<String>`**（`#[serde(default)]`，向后兼容旧 meta）：`rag_file_create`/`rag_file_update` 从 docType 查 `file_support.json` 得标签（如 "Markdown"）持久化。`list_docs`/`get_doc` 优先用 `meta.file_type`，否则回退 `file_type_label(name)`。
+
+#### 3.10.2 `rag_file_create` 工具
+- **入参**：`docName`（必选，不含扩展名）、`docType`（必选，裸扩展名如 "md"/"java"/"py"/"txt"）、`docContent`（必选，UTF-8）。
+- **出参**：`{ docId }`。
+- **流程**（`service::create_doc_from_content`）：sanitize docName -> 文件名 `{docName}.{docType}`（若 docName 已以 .{docType} 结尾则不重复拼）-> 大小校验（`MAX_UPLOAD_BYTES` 64MiB）-> 同名覆盖 -> `write_doc_and_index` -> 删旧向量 + `recompute_tag_stats` -> 返回 docId。跳过编码检测（入参 UTF-8）。
+
+#### 3.10.3 `rag_file_update` 工具
+- **入参**：`docId`（必选）、`docName`/`docType`/`docContent`（可选）、`docContentAppend`（bool，默认 false，仅 docContent 有值时生效：true=追加，false=替换）。
+- **流程**（`service::update_doc`）：按 id 读 meta -> 更新 name/file_type -> 若 docContent 有值：写新 content + `reindex_doc`（内部 delete_by_doc + add_chunks 重建向量）+ 更新 size/chunk_count -> 若 name 变且 content 按旧名命名（非 uuid）则重命名 content 文件 -> 写 meta。docId 不变。
+
+#### 3.10.4 `write_doc_and_index` helper
+- `upload_one_path_inner` 与 `create_doc_from_content` 共用的「写 content + reindex_doc + 写 meta」抽取为 helper。upload 传 `file_stem=id`/`file_type=None`；create 传 `file_stem={name}.{ext}`/`file_type=Some(label)`。
+
+#### 3.10.5 文件查看可视化
+- **前端依赖**：新增 `rehype-highlight` + `highlight.js/styles/atom-one-dark-reasonable.css` 主题。
+- **新组件 `frontend/src/components/ui/FileTypeRenderer.tsx`**：Markdown -> `<Markdown>` 组件；代码 -> `<ReactMarkdown rehypePlugins=[rehypeHighlight]>` 包成 ``` ```{lang} ``` ``` fenced 代码块着色；纯文本 -> `<pre>`。`inline` 模式供搜索片段用。
+- **新 helper `frontend/src/utils/fileType.ts`**：`extOf`/`isMarkdown`/`hlLangFor`（扩展名 + Dockerfile/Makefile 特殊名 -> highlight.js 语言别名）。
+- **ViewDialog**：`<pre>{doc.content}</pre>` -> `<FileTypeRenderer content={doc.content} fileName={doc.name} fileType={doc.fileType} />`。
+- **VectorSearchDialog**：`{r.snippet}` -> `<FileTypeRenderer content={r.snippet} fileName={r.docName} inline />`（fileType 从 docName 推导）。
+
+#### 3.10.6 工具分发
+- `http_server.rs` dispatch_mcp 在 `rag_tag_search` 后加 `rag_file_create`/`rag_file_update` 分支：取参（必选校验）-> 调 service -> 返回 `{docId}`/`{docId, updated}` 作为 text content。RAG 关闭返回 `-32603`。
+
+#### 3.10.7 边界
+- docName sanitize 防路径穿越。
+- `rag_file_update` 改 name：仅 create 文档（content 按名命名）重命名 content 文件；上传文档（content 按 id）不重命名。
+- `content_path_for` 兼容两种命名，旧/新文档都能正确定位。
+- 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过；`npm run build` 通过。
+
+---
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录

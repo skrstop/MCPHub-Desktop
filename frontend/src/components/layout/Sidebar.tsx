@@ -35,6 +35,7 @@ interface MenuItem {
   label: string;
   icon: React.ReactNode;
   badge?: string | number;
+  beta?: boolean;
   end?: boolean;
 }
 
@@ -75,7 +76,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     { path: '/prompts', label: t('nav.prompts'), icon: <MessageSquare className="h-4 w-4" />, badge: prompts.length || undefined },
     { path: '/resources', label: t('nav.resources'), icon: <FileText className="h-4 w-4" />, badge: resources.length || undefined },
     { path: '/skills', label: t('nav.skills'), icon: <Wrench className="h-4 w-4" />, badge: skills.length || undefined },
-    { path: '/rag', label: t('nav.rag'), icon: <Library className="h-4 w-4" />, badge: ragDocs.length || undefined },
+    { path: '/rag', label: t('nav.rag'), icon: <Library className="h-4 w-4" />, badge: ragDocs.length || undefined, beta: true },
     { path: '/market', label: t('nav.market'), icon: <Store className="h-4 w-4" /> },
   ];
 
@@ -121,6 +122,11 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
           {!collapsed && (
             <>
               <span className="truncate">{item.label}</span>
+              {item.beta && (
+                <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
+                  {t('nav.beta')}
+                </span>
+              )}
               {item.badge != null && (
                 <span className="ml-auto hub-mono hub-num text-[11px] text-[var(--hub-ink-3)]">
                   {item.badge}

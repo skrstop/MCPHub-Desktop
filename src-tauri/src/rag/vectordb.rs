@@ -1,9 +1,11 @@
 //! Vector database (lancedb) for RAG document chunks.
 //!
 //! Stores one row per text chunk: `{ id, doc_id, doc_name, chunk_index,
-//! chunk_text, embedding }`. `embedding` is a `FixedSizeList<f32, 768>`.
-//! Embeddings from the model are already L2-normalized, so default L2 search
-//! ranks identically to cosine search.
+//! chunk_text, embedding }`. `embedding` is a `FixedSizeList<f32, embed_dim>`.
+//! Search uses **cosine** distance (magnitude-invariant) so ranking reflects
+//! semantic direction, not vector magnitude - robust to models whose
+//! embeddings aren't L2-normalized (LFM2). With L2 distance, small-magnitude
+//! docs would rank high regardless of relevance (inverted results).
 //!
 //! The DB lives at `<app_data_dir>/rag/lancedb`. Operations:
 //!   - `open(dir)`       → connect + ensure the `rag_chunk` table exists
@@ -297,7 +299,12 @@ impl VectorDb {
     }
 
     /// Vector nearest-neighbor search. Returns up to `limit` hits sorted by
-    /// distance (closest first).
+    /// distance (closest first). Uses **cosine** distance (magnitude-invariant)
+    /// so ranking reflects semantic direction, not vector magnitude - this
+    /// matters for models whose embeddings aren't L2-normalized (e.g. LFM2);
+    /// with L2 distance, small-magnitude docs would rank high regardless of
+    /// relevance. There's no vector index on this table (only a LabelList index
+    /// on `tags`), so this is a brute-force cosine scan.
     pub async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
         let table = self
             .conn
@@ -309,6 +316,7 @@ impl VectorDb {
             .query()
             .nearest_to(query)
             .map_err(|e| anyhow!("nearest_to: {}", e))?
+            .distance_type(lancedb::DistanceType::Cosine)
             .limit(limit)
             .execute()
             .await
