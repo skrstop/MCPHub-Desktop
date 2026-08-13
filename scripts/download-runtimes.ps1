@@ -261,11 +261,18 @@ if (-not $PythonExists) {
         }
         Write-Host "--> Cross-compiling: downloading Python $PythonVersion for $PyTriple directly..."
         # 通过 GitHub API 获取 python-build-standalone 最新 release 中匹配的 asset
-        # 先尝试 GitHub API，失败时回退到直接构造 URL
+        # 先尝试 GitHub API，失败时回退到扫描近期 release 的 asset 清单。
         $AssetName = $null
         $DownloadUrl = $null
+        # GitHub API 未认证调用限 60 次/小时/IP，GitHub Actions runner 共享
+        # 出口 IP 秒级耗尽 → 403 rate limit。带 GITHUB_TOKEN 提到 5000/hr。
+        $GhHeaders = @{}
+        if ($env:GITHUB_TOKEN) {
+            $GhHeaders["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+            $GhHeaders["Accept"] = "application/vnd.github+json"
+        }
         try {
-            $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=5"
+            $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=8" -Headers $GhHeaders
             foreach ($Rel in $Releases) {
                 foreach ($A in $Rel.assets) {
                     if ($A.name -match "cpython-$PythonVersion\.\d+\+.*-$PyTriple-install_only\.tar\.gz" -and
@@ -281,19 +288,28 @@ if (-not $PythonExists) {
             Write-Host "    GitHub API unavailable: $($_.Exception.Message)"
         }
 
-        # 回退：直接构造已知版本的下载 URL
+        # 回退：API 全挂时的最后手段。扫描一组近期已知存在的 release tag，
+        # 从其 asset 清单（expanded_assets HTML 页，走 github.com 而非 API，
+        # 不消耗 API 速率配额）正则匹配真实 asset 文件名。这样不需要硬编码
+        # patch 版本（各 tag 的 patch 会漂移，旧实现写死 .1 是 404 死链），
+        # 某个 tag 被撤下时也能自动跳到下一个。主路径正常时不会走到这里。
         if (-not $DownloadUrl) {
-            Write-Host "--> GitHub API unavailable or no matching asset found, trying direct URL construction..."
-            $PythonReleaseVersion = "2024.10.16"
-            $DirectUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$PythonReleaseVersion/cpython-$PythonVersion.1+$PythonReleaseVersion-$PyTriple-install_only.tar.gz"
-            try {
-                $Response = Invoke-WebRequest -Uri $DirectUrl -Method Head -UseBasicParsing
-                if ($Response.StatusCode -eq 200) {
-                    $DownloadUrl = $DirectUrl
-                    Write-Host "--> Found Python via direct URL: $(Split-Path $DownloadUrl -Leaf)"
+            Write-Host "--> GitHub API unavailable or no matching asset found, scanning recent release assets..."
+            $FallbackTags = @("20260807", "20260805", "20260804", "20260728", "20260718")
+            foreach ($Tag in $FallbackTags) {
+                $AssetsUrl = "https://github.com/astral-sh/python-build-standalone/releases/expanded_assets/$Tag"
+                try {
+                    $Html = Invoke-WebRequest -Uri $AssetsUrl -UseBasicParsing
+                    $Match = [regex]::Match($Html.Content, "cpython-$PythonVersion\.\d+\+$Tag-$PyTriple-install_only\.tar\.gz")
+                    if ($Match.Success) {
+                        $AssetName = $Match.Value
+                        $DownloadUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$Tag/$AssetName"
+                        Write-Host "--> Found Python via asset scan: $AssetName"
+                        break
+                    }
+                } catch {
+                    Write-Host "    Asset scan failed for tag $Tag"
                 }
-            } catch {
-                Write-Host "    Direct URL also unavailable: $DirectUrl"
             }
         }
 

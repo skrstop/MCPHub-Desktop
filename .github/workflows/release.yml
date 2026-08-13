@@ -282,6 +282,11 @@ jobs:
       # ─── 下载运行时（Node.js + uv + Python）────────────────────────────────
       - name: Download runtimes
         shell: bash
+        env:
+          # GITHUB_TOKEN lets download-runtimes.ps1 authenticate its GitHub API
+          # calls (python-build-standalone asset lookup) — unauthenticated
+          # calls are capped at 60/hr per shared runner IP and 403 constantly.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "========================================="
           echo "  Downloading Runtimes"
