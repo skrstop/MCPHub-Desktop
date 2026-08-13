@@ -1229,7 +1229,7 @@ pub fn create_symlinks_elevated(items: &[(PathBuf, PathBuf)]) -> Vec<ManifestRes
     info.lpVerb = PCWSTR(verb.as_ptr());
     info.lpFile = PCWSTR(exe_w.as_ptr());
     info.lpParameters = PCWSTR(params_w.as_ptr());
-    info.nShow = SW_HIDE.0 as u32;
+    info.nShow = SW_HIDE.0;
 
     let launched = unsafe { ShellExecuteExW(&mut info) };
     if launched.is_err() {

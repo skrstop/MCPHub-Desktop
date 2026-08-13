@@ -182,23 +182,21 @@ objc = "0.2"
 candle-core = { version = "0.11", features = ["metal", "accelerate"] }
 candle-nn = { version = "0.11", features = ["metal"] }
 
-# Linux: CPU-only by design. candle's `cuda` feature pulls cudarc with
-# `cuda-version-from-build-system` (build.rs panics if `nvcc` is missing) AND
-# `dynamic-linking` (bakes a hard `DT_NEEDED` on libcudart/libcublas). So a
-# CUDA build can't compile on a CUDA-less CI runner, AND the resulting binary
-# won't start on any Linux box without the NVIDIA CUDA runtime installed —
-# both break the universal package. A candle fork switching cudarc to
-# `dynamic-loading` would fix it, but isn't worth maintaining here. CPU-only
-# keeps the package universal; MKL (below) accelerates CPU matmul on x86_64.
-# aarch64 Linux falls back to the pure-Rust `gemm` path (no MKL build exists).
-
-# Intel MKL BLAS for x86_64 Linux — same role as `accelerate` on macOS: makes
-# CPU f32 matmul use a highly-optimized BLAS (multi-threaded, AVX2/AVX512)
-# instead of the pure-Rust `gemm` crate. x86_64 Linux only (intel-mkl-src has
-# no aarch64 build).
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-candle-core = { version = "0.11", features = ["mkl"] }
-candle-nn = { version = "0.11", features = ["mkl"] }
+# Linux: CPU-only by design. No `cuda` and no `mkl` features:
+#
+# - `cuda`: pulls cudarc with `cuda-version-from-build-system` (build.rs panics
+#   if `nvcc` is missing) AND `dynamic-linking` (bakes a hard `DT_NEEDED` on
+#   libcudart/libcublas). Won't compile on a CUDA-less CI runner, and the
+#   binary won't start on any Linux box without the NVIDIA CUDA runtime.
+# - `mkl`: candle routes F16 matmul to MKL's `hgemm_`, but the
+#   intel-mkl-src static package (`rust-math/rust-mkl` via ocipkg, 2020.1)
+#   only ships `sgemm_`/`dgemm_` — `hgemm_` is undefined → link failure. Since
+#   the F16 matmul path is compiled whenever `mkl` is on, there's no way to
+#   keep MKL for f32/f64 without forking candle. So drop it entirely.
+#
+# Both Linux arches fall back to the pure-Rust `gemm` crate (rayon
+# multi-threaded; handles f16). Same path the Windows build uses. A candle
+# fork (cuda→dynamic-loading) would re-enable GPU; not worth maintaining here.
 
 [features]
 default = ["custom-protocol"]
