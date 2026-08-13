@@ -925,7 +925,7 @@ struct Manifest {
 
 #[cfg(windows)]
 #[derive(Serialize, Deserialize, Clone)]
-struct ManifestResultItem {
+pub(crate) struct ManifestResultItem {
     link: String,
     success: bool,
     message: Option<String>,
@@ -1174,7 +1174,7 @@ fn run_helper_inner(manifest_path: &str) -> ManifestResults {
 }
 
 #[cfg(windows)]
-pub fn create_symlinks_elevated(items: &[(PathBuf, PathBuf)]) -> Vec<ManifestResultItem> {
+pub(crate) fn create_symlinks_elevated(items: &[(PathBuf, PathBuf)]) -> Vec<ManifestResultItem> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;

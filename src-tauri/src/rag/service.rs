@@ -892,7 +892,11 @@ pub async fn stop() {
     drop(guard);
     ENABLED.store(false, std::sync::atomic::Ordering::SeqCst);
     NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
-    unsafe { mi_collect(true); }
+    // Use the `libmimalloc-sys` binding (not a raw extern): referencing the
+    // crate forces its static archive into this (cdylib) link, so the
+    // `mi_collect` symbol resolves. See Cargo.toml for why the bin's
+    // #[global_allocator] alone isn't enough for the lib.
+    unsafe { libmimalloc_sys::mi_collect(true); }
     // Wait 5s for mimalloc's purge_delay (default 10ms) to complete so the
     // RSS measurement reflects the actual freed memory (MADV_DONTNEED returns
     // pages to OS asynchronously on macOS).
@@ -907,12 +911,9 @@ pub async fn stop() {
     );
 }
 
-// mimalloc C FFI: force full collection, returning freed pages to the OS.
-// Available because the mimalloc C library is linked via the `mimalloc`
-// crate (with `override` feature).
-extern "C" {
-    fn mi_collect(force: bool);
-}
+// `mi_collect` is provided by `libmimalloc-sys` (the `extended` feature) —
+// used above to force mimalloc to return freed pages to the OS after RAG
+// shutdown. See Cargo.toml for the linkage rationale.
 
 pub fn status() -> RagStatus {
     RagStatus {
