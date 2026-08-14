@@ -11,6 +11,7 @@ import { RagDataProvider } from './hooks/useRagData';
 import { SkillDataProvider } from './hooks/useSkillData';
 import MainLayout from './layouts/MainLayout';
 import ProtectedRoute from './components/ProtectedRoute';
+import { HttpServerStatusProvider } from './components/HttpServerStatusListener';
 import { UpdateCheckProvider } from './contexts/UpdateCheckContext';
 
 class AppErrorBoundary extends React.Component<
@@ -80,6 +81,7 @@ function App() {
         <ServerProvider>
           <ServerInstallProgressProvider>
           <ToastProvider>
+            <HttpServerStatusProvider>
             <SettingsProvider>
             <BuiltinDataProvider>
               <SkillDataProvider>
@@ -127,6 +129,7 @@ function App() {
               </SkillDataProvider>
             </BuiltinDataProvider>
             </SettingsProvider>
+            </HttpServerStatusProvider>
           </ToastProvider>
           </ServerInstallProgressProvider>
         </ServerProvider>

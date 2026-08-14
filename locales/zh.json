@@ -378,7 +378,27 @@
       "connectingServers": "连接中",
       "recentServers": "最近的服务器",
       "endpoints": "MCP 接入端点",
-      "endpointsHint": "把这些 URL 配到 Claude Desktop / Cursor 等 MCP 客户端即可使用"
+      "endpointsHint": "把这些 URL 配到 Claude Desktop / Cursor 等 MCP 客户端即可使用",
+      "copyMcpConfig": "复制 MCP 配置",
+      "mcpConfigCopied": "MCP 客户端配置已复制到剪贴板",
+      "mcpConfigCopiedWithAuth": "MCP 客户端配置已复制（含 Bearer 鉴权头）",
+      "mcpConfigCopiedPlaceholder": "MCP 客户端配置已复制。已开启鉴权，请把 <your-bearer-token> 换成你要使用的密钥（可在密钥管理复制）。",
+      "httpFailTitle": "MCP HTTP 服务启动失败",
+      "httpFailAddress": "服务地址",
+      "httpFailReason": "失败原因",
+      "httpFailSuggestion": "处理建议",
+      "httpFailRetry": "重试启动",
+      "httpFailRetryFailed": "重试失败，请检查防火墙/端口后再次重试，详见日志。",
+      "httpFailCauseAddrInUse": "端口 {{port}} 已被其他应用占用。",
+      "httpFailActionAddrInUse": "关闭占用该端口的应用，或在设置中更换 HTTP 端口。",
+      "httpFailCausePermissionDenied": "权限被拒绝——防火墙可能拦截了本应用。",
+      "httpFailActionPermissionDenied": "在 Windows Defender 防火墙中放行 MCPHub 并开放入站 TCP {{port}}，或在设置中更换 HTTP 端口。",
+      "httpFailCauseAddrNotAvailable": "端口 {{port}} 在本机不可用。",
+      "httpFailActionAddrNotAvailable": "请在设置中更换 HTTP 端口。",
+      "httpFailCauseOther": "端口 {{port}} 绑定失败。",
+      "httpFailActionOther": "请查看日志了解详情；Windows 上也可检查防火墙设置。",
+      "httpFailBadge": "MCP HTTP 服务未启动",
+      "httpFailBadgeHint": "点击查看失败原因并重试"
     },
     "servers": {
       "title": "服务器管理"

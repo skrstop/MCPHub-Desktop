@@ -42,6 +42,7 @@ use std::{
 use tokio::{net::TcpListener, sync::{mpsc, Mutex, RwLock}};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
+use tauri::Emitter;
 
 fn new_session_id() -> String {
     let id: u128 = rand::random();
@@ -182,6 +183,118 @@ static SERVER_HANDLE: OnceLock<Arc<Mutex<Option<ServerHandle>>>> = OnceLock::new
 
 fn handle() -> &'static Arc<Mutex<Option<ServerHandle>>> {
     SERVER_HANDLE.get_or_init(|| Arc::new(Mutex::new(None)))
+}
+
+// ── status reporting ─────────────────────────────────────────────────────────
+// The last start/stop outcome, stashed process-globally. `maybe_start` runs at
+// app startup (lib.rs) BEFORE the webview has registered its event listener, so
+// a startup bind failure would otherwise be invisible to the UI. The frontend
+// fetches `current_status` on mount via the `get_http_server_status` command to
+// catch that missed failure; `set_status` also emits a live `http://server-status`
+// event for updates that happen after the listener is up (e.g. the user changes
+// the port in Settings → `sync_with_config` → `start`).
+
+#[derive(Clone, serde::Serialize)]
+pub struct HttpServerStatus {
+    pub running: bool,
+    pub port: u16,
+    /// Human-readable failure reason (None when running or never started). On
+    /// Windows the message is worded to flag the firewall as a likely cause.
+    pub error: Option<String>,
+    /// Machine-readable failure category ("addrInUse" | "permissionDenied" |
+    /// "addrNotAvailable" | "other") so the frontend can localize the reason
+    /// text by kind instead of showing this raw (English) message. None when
+    /// no error.
+    #[serde(rename = "errorKind", skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// Short OS error string (e.g. "Address already in use (os error 98)") for
+    /// the dialog's technical detail line on the "other" kind. None when no error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+static HTTP_STATUS: OnceLock<std::sync::Mutex<HttpServerStatus>> = OnceLock::new();
+
+fn status_lock() -> &'static std::sync::Mutex<HttpServerStatus> {
+    HTTP_STATUS.get_or_init(|| std::sync::Mutex::new(HttpServerStatus {
+        running: false,
+        port: 0,
+        error: None,
+        error_kind: None,
+        detail: None,
+    }))
+}
+
+/// Snapshot of the last start/stop outcome (backs the `get_http_server_status`
+/// command — lets the frontend catch a startup failure it missed).
+pub fn current_status() -> HttpServerStatus {
+    status_lock()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(HttpServerStatus {
+            running: false,
+            port: 0,
+            error: None,
+            error_kind: None,
+            detail: None,
+        })
+}
+
+/// Record the latest outcome and, if an AppHandle is stashed (it is, after
+/// `mcp::progress::set_app_handle` runs at startup), emit a `http://server-status`
+/// event the frontend toasts on. Best-effort: a missing handle just means no
+/// live toast (the status is still queryable via `current_status`).
+fn set_status(s: HttpServerStatus) {
+    if let Ok(mut g) = status_lock().lock() {
+        *g = s.clone();
+    }
+    if let Some(app) = crate::mcp::progress::get_app_handle() {
+        let _ = app.emit("http://server-status", &s);
+    }
+}
+
+/// Machine-readable failure category for the status payload — the frontend
+/// localizes the reason text from this instead of the raw English message.
+fn bind_failure_kind(e: &std::io::Error) -> &'static str {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse => "addrInUse",
+        std::io::ErrorKind::PermissionDenied => "permissionDenied",
+        std::io::ErrorKind::AddrNotAvailable => "addrNotAvailable",
+        _ => "other",
+    }
+}
+
+/// Build a human-readable bind-failure message. On Windows the firewall is a
+/// frequent cause (the app blocked from listening, or the port reserved by a
+/// firewall rule), so it is called out alongside the usual "port occupied" so
+/// the user knows what to fix. The message is both logged and surfaced to the
+/// UI as the `error` field of the status event.
+fn bind_failure_message(port: u16, e: &std::io::Error) -> String {
+    let cause = match e.kind() {
+        std::io::ErrorKind::AddrInUse => {
+            "The port is already in use by another application.".to_string()
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            "Permission denied — the port may be blocked by a firewall rule or require elevation.".to_string()
+        }
+        std::io::ErrorKind::AddrNotAvailable => {
+            "The address is not available on this host.".to_string()
+        }
+        _ => format!("OS error: {e}"),
+    };
+    if cfg!(windows) {
+        format!(
+            "Failed to start the MCP HTTP server on port {port}. {cause} \
+             On Windows this is frequently caused by Windows Defender Firewall blocking the app. \
+             Try allowing MCPHub through the firewall (and opening inbound TCP {port}), free the port, \
+             or change the HTTP port in Settings."
+        )
+    } else {
+        format!(
+            "Failed to start the MCP HTTP server on port {port}. {cause} \
+             If the port is occupied, free it or change the HTTP port in Settings."
+        )
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1511,12 +1624,18 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            let err_msg = format!(
-                "Failed to bind HTTP server to port {}: {}. The port may be occupied by another application.",
-                port, e
-            );
+            let err_msg = bind_failure_message(port, &e);
             log::error!("{}", err_msg);
             app_logger::log_to_db("error", &err_msg);
+            // Surface to the UI: emit a status event (live toast) + stash it so
+            // the frontend can fetch it on mount if it missed this (startup race).
+            set_status(HttpServerStatus {
+                running: false,
+                port,
+                error: Some(err_msg.clone()),
+                error_kind: Some(bind_failure_kind(&e).to_string()),
+                detail: Some(format!("{e}")),
+            });
             return Err(anyhow::anyhow!(err_msg));
         }
     };
@@ -1524,15 +1643,56 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     log::info!("{}", http_msg);
     app_logger::log_to_db("info", &http_msg);
 
+    // On Windows, external clients are commonly blocked by Windows Defender
+    // Firewall even though the bind succeeded (loopback works, 0.0.0.0 inbound
+    // doesn't). Log a proactive hint so "started but unreachable" shows up in the
+    // logs, not just "listening" with no clue why clients can't connect.
+    #[cfg(windows)]
+    {
+        let fw_hint = format!(
+            "If external clients cannot connect on port {p}, allow this app through Windows Defender Firewall \
+             (inbound TCP {p}). Loopback (127.0.0.1) is unaffected.",
+            p = port
+        );
+        log::info!("[firewall] {fw_hint}");
+        app_logger::log_to_db("info", &fw_hint);
+    }
+
+    set_status(HttpServerStatus {
+        running: true,
+        port,
+        error: None,
+        error_kind: None,
+        detail: None,
+    });
+
     let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
 
+    // Bound graceful shutdown so a long-lived connection (SSE / Streamable HTTP
+    // streams that stay open indefinitely) can't keep the server task alive
+    // forever after a stop/restart. Mirrors upstream #1042 (bound graceful
+    // shutdown for long-lived connections): give in-flight requests a grace
+    // period to finish, then force-close by dropping the serve future (which
+    // aborts the listener + remaining connections) instead of waiting forever.
+    const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
     tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = abort_rx.await;
-            })
-            .await
-            .ok();
+        let serve = axum::serve(listener, app).with_graceful_shutdown(async {
+            let _ = abort_rx.await;
+        });
+        match tokio::time::timeout(SHUTDOWN_GRACE, serve).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::warn!("[shutdown] HTTP server ended with error: {e}"),
+            Err(_) => {
+                log::warn!(
+                    "[shutdown] HTTP server graceful shutdown exceeded {}s grace period; \
+                     force-closing in-flight (long-lived SSE/HTTP) connections",
+                    SHUTDOWN_GRACE.as_secs()
+                );
+                // The `serve` future was dropped on timeout, aborting the
+                // listener and any remaining in-flight connections.
+            }
+        }
         log::info!("MCPHub HTTP server stopped");
     });
 
@@ -1546,6 +1706,13 @@ pub async fn stop() {
     if let Some(h) = guard.take() {
         let _ = h.abort_tx.send(());
         log::info!("MCPHub HTTP server shutdown requested");
+        set_status(HttpServerStatus {
+            running: false,
+            port: h.port,
+            error: None,
+            error_kind: None,
+            detail: None,
+        });
     }
 }
 

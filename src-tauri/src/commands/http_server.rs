@@ -24,12 +24,15 @@ pub async fn stop_http_server() -> Result<Value, String> {
     Ok(json!({ "success": true }))
 }
 
-/// Get the current HTTP server status.
+/// Get the current HTTP server status — running / port / last error.
+///
+/// The `error` field carries the last bind/start failure message (Windows
+/// firewall / port-in-use, etc.); it is None when the server is running or has
+/// never been started. The frontend fetches this on mount to catch a startup
+/// failure it may have missed (the server starts before the webview registers
+/// its event listener); live updates arrive on the `http://server-status` event.
 #[tauri::command]
 pub async fn get_http_server_status() -> Result<Value, String> {
-    let port = http_server::current_port().await;
-    Ok(json!({
-        "running": port.is_some(),
-        "port": port,
-    }))
+    let s = http_server::current_status();
+    serde_json::to_value(&s).map_err(|e| e.to_string())
 }

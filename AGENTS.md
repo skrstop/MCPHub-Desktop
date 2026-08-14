@@ -1418,16 +1418,43 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `0e8fed0` (origin/main，`v1.0.28` tag 之后 2 个未发布提交，无新 tag) |
+| **当前已同步到 origin commit** | `a8ace62` (origin/main，`v1.0.28` tag 之后 4 个未发布提交，无新 tag) |
 | **对应 origin tag**            | `v1.0.28`（最新 tag，指向 `98d51ce`） |
-| **桌面端版本号**               | `1.0.28001` |
-| **同步执行日期**               | 2026-08-13              |
+| **桌面端版本号**               | `1.0.28002` |
+| **同步执行日期**               | 2026-08-14              |
 
-> 下次同步时，使用 `0e8fed0` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 0e8fed0..HEAD`）。
+> 下次同步时，使用 `a8ace62` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline a8ace62..HEAD`）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-08-14：同步 `0e8fed0` -> `a8ace62`（2 个 commit）
+
+origin 仍为 `v1.0.28`（`a8ace62` = `v1.0.28` tag 之后 4 个未发布提交，无新 tag）；桌面端版本 `1.0.28001` -> `1.0.28002`。
+
+`cd mcphub-origin && git --no-pager log --oneline 0e8fed0..a8ace62` 共 2 个 commit（`de60851` #1042 + `a8ace62` merge）；`git diff --stat 0e8fed0..a8ace62 -- frontend/ locales/` 为空（无前端/locales 改动）。
+
+**已同步到 desktop（前端 / locales）**
+
+无。本次两 commit 均不触及 `frontend/` 或 `locales/`。
+
+**已镜像到 desktop（Rust 后端）**
+
+| 来源 commit | 说明 | desktop 镜像方式 |
+| ----------- | ---- | ---------------- |
+| `de60851` | fix: bound graceful shutdown for long-lived connections (#1042) | `services/http_server.rs::start()` 的 `axum::serve(...).with_graceful_shutdown(...)` 用 `tokio::time::timeout(SHUTDOWN_GRACE=10s, serve)` 包裹：宽限期内正常优雅关闭；超时则丢弃 serve future 强制中止残留连接（含永不结束的 SSE/Streamable HTTP 长连接），并打 warn 日志。对应 origin `closeHttpServer` 的 10s 宽限期 + `socket.destroy()` 强销毁语义。修复前长连接会令优雅关闭永久挂起（重启服务时旧 task 泄漏、「HTTP server stopped」日志不打印）。 |
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `de60851`（测试部分） | `src/utils/serverShutdown.test.ts`（55 行 Node 单测） | **不同步** | 纯 Node 测试；桌面端 Rust 无对应单测基建，#1042 的 Rust 镜像已通过 `cargo check` 验证编译。 |
+| `a8ace62` | Merge commit from fork | **不同步** | 纯合并提交，无内容改动。 |
+
+**同步后验证**：`cd src-tauri && cargo check` 通过（asdf cargo 1.96.0，17.75s）。本次无 frontend/locales 改动，`frontend && npm run build` 状态与同步前一致，无需重跑；桌面端自定义文件未触及。
+
+---
 
 #### 2026-08-13：同步 `45e2bd3` -> `0e8fed0`（5 个 commit）
 

@@ -376,7 +376,27 @@
       "connectingServers": "Connecting",
       "recentServers": "Recent Servers",
       "endpoints": "MCP Endpoints",
-      "endpointsHint": "Use these URLs in Claude Desktop, Cursor or any MCP client"
+      "endpointsHint": "Use these URLs in Claude Desktop, Cursor or any MCP client",
+      "copyMcpConfig": "Copy MCP Config",
+      "mcpConfigCopied": "MCP client config copied to clipboard",
+      "mcpConfigCopiedWithAuth": "MCP client config copied (includes Bearer auth header)",
+      "mcpConfigCopiedPlaceholder": "MCP client config copied. Bearer auth is on — replace <your-bearer-token> with the key you want to use (copy it from Bearer key management).",
+      "httpFailTitle": "MCP HTTP service failed to start",
+      "httpFailAddress": "Service address",
+      "httpFailReason": "Reason",
+      "httpFailSuggestion": "Suggestion",
+      "httpFailRetry": "Retry start",
+      "httpFailRetryFailed": "Retry failed. Check the firewall / port, then try again. See logs for details.",
+      "httpFailCauseAddrInUse": "Port {{port}} is already in use by another application.",
+      "httpFailActionAddrInUse": "Close the app occupying the port, or change the HTTP port in Settings.",
+      "httpFailCausePermissionDenied": "Permission denied — the firewall is likely blocking this app.",
+      "httpFailActionPermissionDenied": "Allow MCPHub through Windows Defender Firewall and open inbound TCP {{port}}, or change the HTTP port in Settings.",
+      "httpFailCauseAddrNotAvailable": "Port {{port}} is not available on this host.",
+      "httpFailActionAddrNotAvailable": "Change the HTTP port in Settings.",
+      "httpFailCauseOther": "Failed to bind port {{port}}.",
+      "httpFailActionOther": "Check the logs for details; on Windows also check the firewall.",
+      "httpFailBadge": "MCP HTTP service is not running",
+      "httpFailBadgeHint": "Click to view the failure reason and retry"
     },
     "servers": {
       "title": "Server Management"

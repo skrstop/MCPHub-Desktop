@@ -15,7 +15,7 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
     let app_dir = app
         .path()
         .app_data_dir()
-        .expect("Failed to resolve app data dir");
+        .map_err(|e| anyhow::anyhow!("Failed to resolve app data dir: {e}"))?;
 
     std::fs::create_dir_all(&app_dir)?;
     let db_path = app_dir.join("mcphub.db");

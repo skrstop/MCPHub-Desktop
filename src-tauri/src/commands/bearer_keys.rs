@@ -7,7 +7,14 @@ use tauri::State;
 use crate::commands::auth::SessionState;
 
 /// Helper to verify that the current session belongs to an admin user.
+/// In no-login (skipAuth) mode the dashboard treats the user as an admin, so
+/// bearer-key management is allowed without a session - mirrors
+/// `commands::config::require_admin`. Without this, the "add key" button in
+/// guest/skipAuth mode fails with "Not authenticated".
 async fn require_admin(session: &SessionState) -> Result<(), String> {
+    if crate::commands::auth::is_skip_auth_enabled().await {
+        return Ok(());
+    }
     let token_str = {
         let guard = session.0.lock().await;
         guard.as_ref().ok_or("Not authenticated")?.token.clone()

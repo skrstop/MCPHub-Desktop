@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { Copy, Check } from 'lucide-react';
+import { Copy, Check, FileJson } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from '@/contexts/ToastContext';
 import { cn } from '@/utils/cn';
 
-const copyText = async (value: string): Promise<boolean> => {
+export const copyText = async (value: string): Promise<boolean> => {
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(value);
@@ -37,6 +37,12 @@ interface EndpointCopyProps {
   /** Optionally override the value placed on the clipboard. */
   copyValue?: string;
   ariaLabel?: string;
+  /** When provided, renders a second button (beside the URL copy) that copies a
+   *  complete MCP client config (mcpServers JSON) pointing at this endpoint —
+   *  ready to paste into Claude Desktop / Cursor. */
+  configValue?: () => string;
+  /** Toast shown after the config copy (defaults to the generic copy success). */
+  configCopiedMessage?: string;
 }
 
 export const EndpointCopy: React.FC<EndpointCopyProps> = ({
@@ -46,10 +52,13 @@ export const EndpointCopy: React.FC<EndpointCopyProps> = ({
   className,
   copyValue,
   ariaLabel,
+  configValue,
+  configCopiedMessage,
 }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const [copied, setCopied] = useState(false);
+  const [copiedConfig, setCopiedConfig] = useState(false);
 
   const onCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -62,6 +71,22 @@ export const EndpointCopy: React.FC<EndpointCopyProps> = ({
     showToast(t('common.copySuccess') || 'Copied to clipboard', 'success');
     setTimeout(() => setCopied(false), 1200);
   };
+
+  const onCopyConfig = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const json = configValue?.();
+    if (!json) return;
+    const ok = await copyText(json);
+    if (!ok) {
+      showToast(t('common.copyFailed') || 'Copy failed', 'error');
+      return;
+    }
+    setCopiedConfig(true);
+    showToast(configCopiedMessage || t('common.copySuccess') || 'Copied to clipboard', 'success');
+    setTimeout(() => setCopiedConfig(false), 1200);
+  };
+
+  const configTitle = t('pages.dashboard.copyMcpConfig') || 'Copy MCP Config';
 
   return (
     <div className={cn('hub-endpoint', className)} role="group" aria-label={ariaLabel || url}>
@@ -79,6 +104,17 @@ export const EndpointCopy: React.FC<EndpointCopyProps> = ({
       >
         {copied ? <Check size={13} /> : <Copy size={13} />}
       </button>
+      {configValue && (
+        <button
+          type="button"
+          onClick={onCopyConfig}
+          className={cn('hub-endpoint-copy', copiedConfig ? 'copied' : '')}
+          title={configTitle}
+          aria-label={configTitle}
+        >
+          {copiedConfig ? <Check size={13} /> : <FileJson size={13} />}
+        </button>
+      )}
     </div>
   );
 };

@@ -161,6 +161,29 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 
 根据你的发行版下载 `.deb`、`.AppImage` 或 `.rpm` 包安装。
 
+## 常见问题与故障排查
+
+### HTTP 服务无法开启 / 外部客户端连不上
+
+仪表盘与设置页的「HTTP 服务端口」默认为 `23333`。若服务无法启动，应用会弹出错误提示并写入日志（应用内「日志」页可查看）。常见原因与处理：
+
+- **端口被占用**：换一个空闲端口（设置 → HTTP 服务端口，修改后重启应用生效）。
+- **Windows 防火墙拦截**：Windows Defender 防火墙可能阻止本应用监听端口或被外部访问。
+  - 在「Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙」中放行 `MCPHub Desktop`；
+  - 或为对应端口（默认 `23333`）放行入站 TCP 规则。
+  - 仅本机访问（`127.0.0.1`）不受防火墙影响；要让局域网其他设备访问才需放行。
+- **复制接入配置**：仪表盘「MCP 接入端点」卡片右上角有「复制 MCP 配置」按钮，可一键复制可直接粘贴到 Claude Desktop / Cursor 等客户端的 `mcpServers` 配置（开启 Bearer 鉴权时自动带上鉴权头）。桌面端默认地址为 `http://localhost:<端口>/mcp`；分享给其他设备时把 `localhost` 换成本机局域网 IP，并放行防火墙。
+
+### Windows 首次安装后启动闪退
+
+少数情况下，Windows 安装完成后从安装程序直接打开应用会闪退，手动重新打开一次即正常。已通过以下方式缓解：
+
+- 安装程序改为**按用户安装**（`installMode: currentUser`，不再提权），避免提权启动导致的启动失败。
+- 新增**启动崩溃日志**：若仍闪退，请到应用数据目录（即 `mcphub.db` 所在目录）查看 `crash.log`，把内容反馈给开发者便于定位：
+  - Windows：`%APPDATA%\app.mcphub.desktop\crash.log`
+  - macOS：`~/Library/Application Support/app.mcphub.desktop/crash.log`
+  - Linux：`~/.local/share/app.mcphub.desktop/crash.log`（或 `$XDG_DATA_HOME` 下对应目录）
+
 ## 文档
 
 - [`AGENTS.md`](AGENTS.md)：迁移背景、目录约定、模块划分、待办事项等完整开发参考。

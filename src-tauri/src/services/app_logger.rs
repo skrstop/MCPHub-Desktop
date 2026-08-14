@@ -2,9 +2,16 @@
 ///
 /// This works alongside env_logger — env_logger handles stderr output,
 /// while this module handles database persistence.
+use std::io::Write;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 static LOG_SENDER: std::sync::OnceLock<mpsc::UnboundedSender<LogEntry>> = std::sync::OnceLock::new();
+
+/// `<app_data_dir>/logs/` - where daily log files (`app-YYYY-MM-DD.log`) live.
+/// Set by `init()`; when unset (dir unavailable) file mirroring is silently
+/// skipped (DB logging still works).
+static LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 struct LogEntry {
     level: String,
@@ -12,14 +19,26 @@ struct LogEntry {
     server_name: Option<String>,
 }
 
-/// Initialize the database log writer.
+/// Initialize the database log writer + file mirror.
 ///
-/// Call this once after the database is initialized.
-/// Then use `log_to_db()` to send log messages to the database.
+/// Call this once after the database is initialized, passing the app data dir
+/// (file logs go to `<app_data_dir>/logs/app-YYYY-MM-DD.log`). Then use
+/// `log_to_db()` to send log messages - each entry is written to BOTH the DB
+/// (`app_log` table) and today's log file.
 ///
 /// Uses a dedicated thread with its own Tokio runtime because `init()` is called
 /// from Tauri's `setup` closure which runs outside any Tokio runtime context.
-pub fn init() {
+pub fn init(app_data_dir: Option<PathBuf>) {
+    // File mirror goes to `<app_data_dir>/logs/`. When the dir can't be resolved
+    // (shouldn't happen post-setup) file mirroring is skipped - DB logging still
+    // works. Never create a relative "logs" dir in cwd.
+    if let Some(app_data_dir) = app_data_dir {
+        let log_dir = app_data_dir.join("logs");
+        if std::fs::create_dir_all(&log_dir).is_ok() {
+            let _ = LOG_DIR.set(log_dir);
+        }
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<LogEntry>();
 
     LOG_SENDER.set(tx).ok();
@@ -44,6 +63,8 @@ pub fn init() {
                     {
                         eprintln!("[app_logger] Failed to write log to DB: {}", e);
                     }
+                    // Mirror to the daily log file (independent of DB success).
+                    write_log_file(&entry);
                 }
             });
         })
@@ -73,6 +94,52 @@ fn extract_server_name(message: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Append a log entry to today's daily log file (`<log_dir>/app-YYYY-MM-DD.log`).
+/// Sync IO on the dedicated app-logger thread - fine since it's the only writer
+/// and the thread's sole job is draining the log channel. Best-effort: any IO
+/// error is swallowed (the DB already has the entry) so logging never panics.
+fn write_log_file(entry: &LogEntry) {
+    let Some(dir) = LOG_DIR.get() else { return };
+    let now = chrono::Local::now();
+    let path = dir.join(format!("app-{}.log", now.format("%Y-%m-%d")));
+    let server = entry
+        .server_name
+        .as_deref()
+        .map(|s| format!("[{}] ", s))
+        .unwrap_or_default();
+    let line = format!(
+        "[{}] [{}] {}{}\n",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        entry.level,
+        server,
+        entry.message,
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Delete daily log files older than `retention_days` (by the date in the
+/// filename `app-YYYY-MM-DD.log`). Called from the same periodic cleanup that
+/// trims the DB logs, so on-disk and DB retention stay in sync. ISO date
+/// strings compare lexicographically == chronologically, so a string compare
+/// against the cutoff date is exact.
+pub fn cleanup_old_log_files(retention_days: i64) {
+    let Some(dir) = LOG_DIR.get() else { return };
+    let cutoff = chrono::Local::now() - chrono::Duration::days(retention_days);
+    let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(date_str) = name.strip_prefix("app-").and_then(|s| s.strip_suffix(".log")) {
+            if date_str < cutoff_str.as_str() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Custom writer that duplicates env_logger output to the database.

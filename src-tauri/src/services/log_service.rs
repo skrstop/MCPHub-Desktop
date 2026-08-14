@@ -358,6 +358,10 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
         (true, size_before)
     };
 
+    // Trim on-disk daily log files with the same retention as the DB, so file
+    // and DB logs age out together (file mirror written by app_logger).
+    crate::services::app_logger::cleanup_old_log_files(LOG_RETENTION_DAYS);
+
     Ok((app_deleted, activity_deleted, vacuum_done, size_before, size_after))
 }
 

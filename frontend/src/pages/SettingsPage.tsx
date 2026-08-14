@@ -11,9 +11,10 @@ import { useToast } from '@/contexts/ToastContext';
 import { PermissionChecker } from '@/components/PermissionChecker';
 import { PERMISSIONS } from '@/constants/permissions';
 import { isTauri } from '@/utils/tauriClient';
+import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText } from 'lucide-react';
-import { EndpointCopy } from '@/components/ui/EndpointCopy';
+import { EndpointCopy, copyText } from '@/components/ui/EndpointCopy';
 import type { BearerKey, User } from '@/types';
 import { useServerContext } from '@/contexts/ServerContext';
 import { useGroupData } from '@/hooks/useGroupData';
@@ -191,7 +192,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                   <span
                     className={`text-sm mr-3 ${enabled ? 'text-green-600 font-medium' : 'text-gray-500'}`}
                   >
-                    {enabled ? 'Active' : 'Inactive'}
+                    {enabled ? t('common.active') || 'Active' : t('common.inactive') || 'Inactive'}
                   </span>
                   <Switch
                     disabled={loading}
@@ -227,10 +228,10 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
               </div>}
 
               {/* Show single selector for groups or servers mode */}
-              {isAdmin && isSystemKey && !isCustomMode && (
+              {isAdmin && isSystemKey && !isCustomMode && accessType !== 'all' && (
                 <div className="flex-1 min-w-[200px]">
                   <label
-                    className={`block text-sm font-medium mb-1 ${accessType === 'all' ? 'text-gray-400' : 'text-gray-700'}`}
+                    className="block text-sm font-medium mb-1 text-gray-700"
                   >
                     {isGroupsMode
                       ? t('settings.bearerKeyAllowedGroups') || 'Allowed groups'
@@ -245,7 +246,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                         ? t('settings.selectGroups') || 'Select groups...'
                         : t('settings.selectServers') || 'Select servers...'
                     }
-                    disabled={loading || accessType === 'all'}
+                    disabled={loading}
                   />
                 </div>
               )}
@@ -311,11 +312,27 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
       </td>
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
         <div className="flex items-center gap-2">
-          <span>
+          <span title={keyData.token}>
             {keyData.token.length > 12
               ? `${keyData.token.substring(0, 8)}...${keyData.token.substring(keyData.token.length - 4)}`
               : keyData.token}
           </span>
+          <button
+            type="button"
+            onClick={async (e) => {
+              e.stopPropagation();
+              const ok = await copyText(keyData.token);
+              showToast(
+                ok ? t('common.copySuccess') || 'Copied to clipboard' : t('common.copyFailed') || 'Copy failed',
+                ok ? 'success' : 'error',
+              );
+            }}
+            className="hub-icon-btn sm"
+            title={t('common.copy') || 'Copy'}
+            aria-label={t('common.copy') || 'Copy'}
+          >
+            <Copy size={13} />
+          </button>
         </div>
       </td>
       <td className="px-6 py-4 whitespace-nowrap text-sm">
@@ -504,7 +521,6 @@ const SettingsPage: React.FC = () => {
 
   const [tempNameSeparator, setTempNameSeparator] = useState<string>('-');
   const [showAddBearerKeyForm, setShowAddBearerKeyForm] = useState(false);
-  const [createdBearerToken, setCreatedBearerToken] = useState('');
   const [users, setUsers] = useState<User[]>([]);
   const [bearerKeyScopeFilter, setBearerKeyScopeFilter] = useState<BearerKeyScopeFilterValue>('all');
   const [bearerKeySearch, setBearerKeySearch] = useState('');
@@ -545,6 +561,20 @@ const SettingsPage: React.FC = () => {
     deleteBearerKey,
     refreshBearerKeys,
   } = useSettingsData();
+
+  // Desktop access base URL: in Tauri mode the service port is `routingConfig.httpPort`
+  // (install.baseUrl is hidden in the desktop client - see the install section - the
+  // port is configured in route config). Derive the URL from httpPort so every
+  // displayed endpoint matches the port the HTTP service actually binds, instead of
+  // the independent install.baseUrl (which could be a stale :3000). Web mode keeps
+  // using install.baseUrl (the deployment URL). Mirrors Dashboard/ServerCard/GroupCard.
+  const accessBaseUrl = (() => {
+    const tauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (tauri && routingConfig?.httpPort) {
+      return `http://localhost:${routingConfig.httpPort}`;
+    }
+    return (installConfig.baseUrl || '').replace(/\/+$/, '');
+  })();
 
   // Update local installConfig when savedInstallConfig changes
   useEffect(() => {
@@ -1273,19 +1303,18 @@ const SettingsPage: React.FC = () => {
   const [copiedConfig, setCopiedConfig] = useState(false);
   const [mcpSettingsJson, setMcpSettingsJson] = useState<string>('');
 
+  // New-key form state. Desktop has no user/key-type system (the legacy
+  // `kind`/`owner` fields were UI-only - dropped by the backend), so every key
+  // is effectively system-level and always gets the access-scope UI.
   const [newBearerKey, setNewBearerKey] = useState<{
     name: string;
     enabled: boolean;
-    kind: 'system' | 'user';
-    owner: string;
     accessType: 'all' | 'groups' | 'servers' | 'custom';
     allowedGroups: string;
     allowedServers: string;
   }>({
     name: '',
     enabled: true,
-    kind: 'system',
-    owner: '',
     accessType: 'all',
     allowedGroups: '',
     allowedServers: '',
@@ -1421,16 +1450,11 @@ const SettingsPage: React.FC = () => {
       return;
     }
 
-    if (isAdmin && newBearerKey.kind === 'user' && !newBearerKey.owner) {
-      showToast(t('settings.bearerKeyOwnerRequired') || 'Owner is required', 'error');
-      return;
-    }
-
-    if (newBearerKey.kind === 'system' && newBearerKey.accessType === 'groups' && newSelectedGroups.length === 0) {
+    if (newBearerKey.accessType === 'groups' && newSelectedGroups.length === 0) {
       showToast(t('settings.selectAtLeastOneGroup') || 'Please select at least one group', 'error');
       return;
     }
-    if (newBearerKey.kind === 'system' && newBearerKey.accessType === 'servers' && newSelectedServers.length === 0) {
+    if (newBearerKey.accessType === 'servers' && newSelectedServers.length === 0) {
       showToast(
         t('settings.selectAtLeastOneServer') || 'Please select at least one server',
         'error',
@@ -1438,7 +1462,6 @@ const SettingsPage: React.FC = () => {
       return;
     }
     if (
-      newBearerKey.kind === 'system' &&
       newBearerKey.accessType === 'custom' &&
       newSelectedGroups.length === 0 &&
       newSelectedServers.length === 0
@@ -1453,8 +1476,6 @@ const SettingsPage: React.FC = () => {
     const created = await createBearerKey({
       name: newBearerKey.name,
       enabled: newBearerKey.enabled,
-      kind: isAdmin ? newBearerKey.kind : 'user',
-      owner: isAdmin && newBearerKey.kind === 'user' ? newBearerKey.owner : undefined,
       accessType: newBearerKey.accessType,
       allowedGroups:
         (newBearerKey.accessType === 'groups' || newBearerKey.accessType === 'custom') &&
@@ -1468,13 +1489,14 @@ const SettingsPage: React.FC = () => {
           : undefined,
     } as any);
     if (!created) return;
-    setCreatedBearerToken(created.token);
+    // The new key now appears in the list (with a per-row copy button), so we
+    // don't need a one-time token banner — close the add form so the "Add
+    // bearer key" button reappears for the next key.
+    setShowAddBearerKeyForm(false);
 
     setNewBearerKey({
       name: '',
       enabled: true,
-      kind: 'system',
-      owner: '',
       accessType: 'all',
       allowedGroups: '',
       allowedServers: '',
@@ -1535,14 +1557,6 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.bearerKeys && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              {createdBearerToken && (
-                <div className="p-3 rounded-md border border-amber-300 bg-amber-50 text-sm">
-                  <div className="font-medium">
-                    {t('settings.bearerKeyShownOnce') || 'Copy this token now. It will not be shown again.'}
-                  </div>
-                  <div className="mt-2 font-mono break-all">{createdBearerToken}</div>
-                </div>
-              )}
               {isAdmin && <>
               <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div>
@@ -1755,32 +1769,6 @@ const SettingsPage: React.FC = () => {
                           disabled={loading}
                         />
                       </div>
-                      {isAdmin && <div className="md:col-span-4">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          {t('settings.bearerKeyKind') || 'Key type'}
-                        </label>
-                        <select
-                          className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md sm:text-sm form-select"
-                          value={newBearerKey.kind}
-                          onChange={(e) => setNewBearerKey((prev) => ({ ...prev, kind: e.target.value as 'system' | 'user' }))}
-                        >
-                          <option value="system">{t('settings.bearerKeyKindSystem') || 'System-level'}</option>
-                          <option value="user">{t('settings.bearerKeyKindUser') || 'User-level'}</option>
-                        </select>
-                      </div>}
-                      {isAdmin && newBearerKey.kind === 'user' && <div className="md:col-span-4">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          {t('settings.bearerKeyOwner') || 'Owner'}
-                        </label>
-                        <select
-                          className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md sm:text-sm form-select"
-                          value={newBearerKey.owner}
-                          onChange={(e) => setNewBearerKey((prev) => ({ ...prev, owner: e.target.value }))}
-                        >
-                          <option value="">{t('settings.bearerKeySelectOwner') || 'Select user...'}</option>
-                          {users.map((user) => <option key={user.username} value={user.username}>{user.username}</option>)}
-                        </select>
-                      </div>}
                     </div>
 
                     <div className="flex flex-wrap items-end gap-4 mb-2">
@@ -1792,7 +1780,9 @@ const SettingsPage: React.FC = () => {
                           <span
                             className={`text-sm mr-3 ${newBearerKey.enabled ? 'text-green-600 font-medium' : 'text-gray-500'}`}
                           >
-                            {newBearerKey.enabled ? 'Active' : 'Inactive'}
+                            {newBearerKey.enabled
+                              ? t('common.active') || 'Active'
+                              : t('common.inactive') || 'Inactive'}
                           </span>
                           <Switch
                             disabled={loading}
@@ -1804,7 +1794,8 @@ const SettingsPage: React.FC = () => {
                         </div>
                       </div>
 
-                      {isAdmin && newBearerKey.kind === 'system' && <div className="w-48">
+                      {isAdmin && (
+                        <div className="w-48">
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           {t('settings.bearerKeyAccessType') || 'Access scope'}
                         </label>
@@ -1832,12 +1823,15 @@ const SettingsPage: React.FC = () => {
                             {t('settings.bearerKeyAccessCustom') || 'Custom (Groups & Servers)'}
                           </option>
                         </select>
-                      </div>}
+                      </div>
+                      )}
 
-                      {isAdmin && newBearerKey.kind === 'system' && newBearerKey.accessType !== 'custom' && (
+                      {isAdmin &&
+                        newBearerKey.accessType !== 'all' &&
+                        newBearerKey.accessType !== 'custom' && (
                         <div className="flex-1 min-w-[200px]">
                           <label
-                            className={`block text-sm font-medium mb-1 ${newBearerKey.accessType === 'all' ? 'text-gray-400' : 'text-gray-700'}`}
+                            className="block text-sm font-medium mb-1 text-gray-700"
                           >
                             {newBearerKey.accessType === 'groups'
                               ? t('settings.bearerKeyAllowedGroups') || 'Allowed groups'
@@ -1864,12 +1858,12 @@ const SettingsPage: React.FC = () => {
                                 ? t('settings.selectGroups') || 'Select groups...'
                                 : t('settings.selectServers') || 'Select servers...'
                             }
-                            disabled={loading || newBearerKey.accessType === 'all'}
+                            disabled={loading}
                           />
                         </div>
                       )}
 
-                      {isAdmin && newBearerKey.kind === 'system' && newBearerKey.accessType === 'custom' && (
+                      {isAdmin && newBearerKey.accessType === 'custom' && (
                         <>
                           <div className="flex-1 min-w-[200px]">
                             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -2022,7 +2016,24 @@ const SettingsPage: React.FC = () => {
                     </div>
                     <EndpointCopy
                       label="SMART"
-                      url={`${(installConfig.baseUrl || '').replace(/\/+$/, '')}/mcp/$smart`}
+                      url={`${accessBaseUrl}/mcp/$smart`}
+                      configValue={() =>
+                        buildMcpClientConfig(
+                          `${accessBaseUrl}/mcp/$smart`,
+                          routingConfig,
+                          bearerKeys,
+                        )
+                      }
+                      configCopiedMessage={
+                        !routingConfig?.enableBearerAuth
+                          ? t('pages.dashboard.mcpConfigCopied') ||
+                            'MCP client config copied to clipboard'
+                          : mcpConfigUsesTokenPlaceholder(routingConfig, bearerKeys)
+                            ? t('pages.dashboard.mcpConfigCopiedPlaceholder') ||
+                              'MCP client config copied. Bearer auth is on — replace <your-bearer-token> with the key you want to use (copy it from Bearer key management).'
+                            : t('pages.dashboard.mcpConfigCopiedWithAuth') ||
+                              'MCP client config copied (includes Bearer auth header)'
+                      }
                     />
                   </div>
                   <div style={{ background: 'var(--hub-line)', height: 36 }} />

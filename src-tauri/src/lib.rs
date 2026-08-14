@@ -10,11 +10,115 @@ pub mod rag;
 pub mod services;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
+
+// ── crash logging ────────────────────────────────────────────────────────────
+// A panic hook + fatal-error writer so a startup crash - notably the Windows
+// "launched-by-installer first-run flash-exit" - leaves a trace in
+// `<app_data_dir>/crash.log` instead of dying silently with no window. The hook
+// is installed early in `run()` (stderr-only until the app data dir is known)
+// and `CRASH_DIR` is populated at the top of `setup()` once the real dir is
+// resolved, so panics/errors in the DB-init path (the most common silent-crash
+// source: `app_data_dir()` failing when launched elevated by the installer) are
+// captured to the file. Combined with NSIS `installMode: "currentUser"` (no
+// elevated auto-launch), this both fixes the common cause and makes any
+// residual crash diagnosable.
+
+static CRASH_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Write a crash/fatal line to stderr and, if the app data dir is known, append
+/// it to `<app_data_dir>/crash.log`. Best-effort: any IO failure is swallowed
+/// (stderr already has the line) so this never masks the original error.
+fn write_crash_log(prefix: &str, msg: &str) {
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let line = format!("[{}] [{}] {}\n", stamp, prefix, msg);
+    eprint!("{}", line);
+    if let Some(dir) = CRASH_DIR.get() {
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join("crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+    }
+}
+
+/// Install the global panic hook. `force_capture` yields a backtrace even
+/// without `RUST_BACKTRACE=1`. Must run before any code that can panic.
+fn install_crash_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        write_crash_log("panic", &format!("{}\n{}", info, bt));
+    }));
+}
+
+// ── Windows de-elevation ─────────────────────────────────────────────────────
+// A desktop app shouldn't run elevated. When the NSIS installer's "launch on
+// finish" auto-starts the app after a per-machine (elevated) install, the
+// process runs with a high-integrity token - and that elevated first-launch is
+// exactly what crashes on Windows (the non-elevated manual relaunch works).
+// `relaunch_if_elevated` detects the elevated token and re-launches this exe
+// non-elevated via explorer.exe (the existing non-elevated shell opens the
+// target at medium integrity), then exits. The relaunched child is
+// non-elevated, so the check returns false there - no loop. This lets us keep
+// `installMode: "both"` (per-machine option) WITHOUT the first-launch crash.
+// cfg(windows)-gated; on mac/linux this module is absent (cargo check there
+// never compiles it - verify via the Windows CI build).
+#[cfg(windows)]
+mod win_deelevate {
+    use std::process::Command;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// True iff the current process runs with an elevated (high-integrity) token.
+    fn is_elevated() -> bool {
+        unsafe {
+            let mut token = windows::Win32::Foundation::HANDLE::default();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+                return false;
+            }
+            let mut elev = TOKEN_ELEVATION::default();
+            let mut ret_len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elev as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret_len,
+            );
+            let _ = CloseHandle(token);
+            ok.is_ok() && elev.TokenIsElevated != 0
+        }
+    }
+
+    /// If running elevated, relaunch this exe non-elevated via explorer.exe and
+    /// exit. No-op when not elevated. If the explorer relaunch somehow fails we
+    /// fall through and run elevated (better than not starting at all); the
+    /// crash hook + crash.log still catch any subsequent panic.
+    pub fn relaunch_if_elevated() {
+        if !is_elevated() {
+            return;
+        }
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if Command::new("explorer.exe")
+            .arg(exe.as_os_str())
+            .spawn()
+            .is_ok()
+        {
+            std::process::exit(0);
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,6 +132,17 @@ pub fn run() {
         if args.iter().any(|a| a == "--symlink-helper") {
             services::skill_service::run_helper_mode();
         }
+        // De-elevate: if launched elevated (NSIS installer's "launch on finish"
+        // after a per-machine install runs the app with a high-integrity token),
+        // relaunch ourselves non-elevated via explorer.exe (the existing
+        // non-elevated shell opens the target at medium integrity) and exit.
+        // This is what fixes the Windows "first launch from installer crashes,
+        // manual relaunch works" symptom - the elevated auto-launch is exactly
+        // the crashing path; the non-elevated relaunch is the working one.
+        // Must run BEFORE the heavy init (db/runtimes/webview). The relaunched
+        // process is non-elevated, so the check returns false there - no loop.
+        // Skipped for --symlink-helper (that mode is intentionally elevated).
+        win_deelevate::relaunch_if_elevated();
     }
 
     // On macOS dev mode, set the process display name so the Dock shows "MCPHub Desktop"
@@ -57,6 +172,10 @@ pub fn run() {
             )
         })
         .init();
+    // Install the crash hook BEFORE the builder so panics during plugin init /
+    // setup (e.g. DB creation on Windows first launch) are captured to
+    // crash.log. stderr-only until `setup()` resolves the app data dir.
+    install_crash_hook();
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -74,6 +193,14 @@ pub fn run() {
             }
         }))
         .setup(|app| {
+            // Resolve the app data dir FIRST so the crash hook can write to
+            // <app_data_dir>/crash.log during the heavy first-run init below
+            // (DB creation, runtime init, MCP start). This is the path that
+            // matters for the Windows "first launch from installer" crash.
+            if let Ok(dir) = app.path().app_data_dir() {
+                let _ = CRASH_DIR.set(dir);
+            }
+
             // Register session state
             app.manage(commands::auth::SessionState(tokio::sync::Mutex::new(None)));
 
@@ -107,13 +234,27 @@ pub fn run() {
                     .map_err(|e| format!("{:#}", e));
                 tx.send(result).ok();
             });
-            if let Err(e) = rx.recv().unwrap() {
-                log::error!("Failed to initialize database: {}", e);
-                std::process::exit(1);
+            // `recv().unwrap()` used to panic (silent flash-exit) if the spawned
+            // task panicked (e.g. `app_data_dir()` failing under the elevated
+            // installer launch) - the sender would drop and recv() return None.
+            // Handle both the Err case and the task-panic case explicitly so the
+            // reason lands in crash.log instead of vanishing.
+            match rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    write_crash_log("fatal", &format!("Database initialization failed: {e}"));
+                    std::process::exit(1);
+                }
+                Err(_) => {
+                    // The db::initialize task panicked; the panic hook already
+                    // wrote the backtrace to crash.log.
+                    write_crash_log("fatal", "Database initialization task panicked (see panic entry above).");
+                    std::process::exit(1);
+                }
             }
 
-            // Initialize database log writer
-            services::app_logger::init();
+            // Initialize database log writer (+ file mirror under <app_data_dir>/logs/)
+            services::app_logger::init(app.path().app_data_dir().ok());
             services::app_logger::log_to_db("info", "Application started, database initialized");
 
             // Log the enhanced PATH at startup (after DB is ready so it's persisted)

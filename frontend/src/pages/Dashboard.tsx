@@ -1,16 +1,18 @@
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { RefreshCw, Plus, ChevronRight, AlertCircle } from 'lucide-react';
+import { RefreshCw, Plus, ChevronRight, AlertCircle, AlertTriangle } from 'lucide-react';
 import { useServerData } from '@/hooks/useServerData';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useCostData } from '@/hooks/useCostData';
 import { formatTokens } from '@/utils/contextCost';
+import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { isTauri } from '@/utils/tauriClient';
 import { Server } from '@/types';
 import { EndpointCopy } from '@/components/ui/EndpointCopy';
 import { ServerStatusDot } from '@/components/ui/StatusDot';
+import { useHttpServerStatus } from '@/components/HttpServerStatusListener';
 
 const Stat: React.FC<{ label: string; value: React.ReactNode; tone?: 'ok' | 'warn' | 'err' | 'muted' | 'default' }> = ({
   label,
@@ -65,8 +67,9 @@ const DashboardPage: React.FC = () => {
     refreshOnMount: true,
   });
   const { groups } = useGroupData();
-  const { installConfig, routingConfig } = useSettingsData();
+  const { installConfig, routingConfig, bearerKeys } = useSettingsData();
   const { serverCosts } = useCostData();
+  const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);
   React.useEffect(() => {
@@ -110,6 +113,23 @@ const DashboardPage: React.FC = () => {
     }
     return installConfig?.baseUrl?.replace(/\/+$/, '') || '';
   }, [installConfig?.baseUrl, routingConfig?.httpPort]);
+
+  // Builds a ready-to-paste MCP client config (mcpServers block) pointing at the
+  // given endpoint URL, so someone else can drop it into Claude Desktop /
+  // Cursor. Includes the Bearer auth header when bearer auth is enabled, since
+  // the hub would reject the connection otherwise. Passed to each EndpointCopy
+  // row as `configValue` — the per-row config-copy button lives beside the URL
+  // copy button.
+  const buildMcpConfigJson = (endpointUrl: string): string =>
+    buildMcpClientConfig(endpointUrl, routingConfig, bearerKeys);
+  const configCopiedMessage = !routingConfig?.enableBearerAuth
+    ? t('pages.dashboard.mcpConfigCopied') || 'MCP client config copied to clipboard'
+    : mcpConfigUsesTokenPlaceholder(routingConfig, bearerKeys)
+      ? t('pages.dashboard.mcpConfigCopiedPlaceholder') ||
+        'MCP client config copied. Bearer auth is on — replace <your-bearer-token> with the key you want to use (copy it from Bearer key management).'
+      : t('pages.dashboard.mcpConfigCopiedWithAuth') ||
+        'MCP client config copied (includes Bearer auth header)';
+
   const recentServerColumns =
     'minmax(220px,1.9fr) minmax(110px,0.95fr) minmax(120px,0.95fr) 80px 80px 90px 72px';
 
@@ -128,6 +148,24 @@ const DashboardPage: React.FC = () => {
           </p>
         </div>
         <div className="flex gap-2">
+          {/* MCP HTTP service down (e.g. firewall blocked the port): persistent
+              warning triangle — re-opens the failure dialog with retry. Hidden
+              once the service recovers. */}
+          {httpFailure && (
+            <button
+              className="hub-btn"
+              onClick={openHttpFailDialog}
+              title={t('pages.dashboard.httpFailBadgeHint') || 'Click to view the failure reason and retry'}
+              style={{
+                color: 'oklch(0.45 0.18 25)',
+                borderColor: 'oklch(0.85 0.1 25)',
+                background: 'oklch(0.97 0.03 25)',
+              }}
+            >
+              <AlertTriangle size={14} className="animate-pulse" />
+              {t('pages.dashboard.httpFailBadge') || 'MCP HTTP service is not running'}
+            </button>
+          )}
           <button className="hub-btn" onClick={() => triggerRefresh()}>
             <RefreshCw size={13} /> {t('common.refresh')}
           </button>
@@ -280,15 +318,38 @@ const DashboardPage: React.FC = () => {
           )}
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-          <EndpointCopy label="ALL" url={`${baseUrl}/mcp`} />
+          <EndpointCopy
+            label="ALL"
+            url={`${baseUrl}/mcp`}
+            configValue={() => buildMcpConfigJson(`${baseUrl}/mcp`)}
+            configCopiedMessage={configCopiedMessage}
+          />
           {/* SMART routing not implemented in desktop client */}
-          {!isTauri() && <EndpointCopy label="SMART" url={`${baseUrl}/mcp/$smart`} />}
+          {!isTauri() && (
+            <EndpointCopy
+              label="SMART"
+              url={`${baseUrl}/mcp/$smart`}
+              configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/$smart`)}
+              configCopiedMessage={configCopiedMessage}
+            />
+          )}
           {groups.slice(0, 2).map((g) => (
-            <EndpointCopy key={g.id} label="GROUP" url={`${baseUrl}/mcp/${g.name}`} />
+            <EndpointCopy
+              key={g.id}
+              label="GROUP"
+              url={`${baseUrl}/mcp/${g.name}`}
+              configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/${g.name}`)}
+              configCopiedMessage={configCopiedMessage}
+            />
           ))}
           {/* Pad with first server endpoint if there's space */}
           {groups.length < 2 && allServers[0] && (
-            <EndpointCopy label="SERVER" url={`${baseUrl}/mcp/${allServers[0].name}`} />
+            <EndpointCopy
+              label="SERVER"
+              url={`${baseUrl}/mcp/${allServers[0].name}`}
+              configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/${allServers[0].name}`)}
+              configCopiedMessage={configCopiedMessage}
+            />
           )}
         </div>
       </div>

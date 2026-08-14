@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.28001"
+version = "1.0.28002"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -177,6 +177,10 @@ windows = { version = "0.62", features = [
     # windows 0.62 bindings (used by skill_service::create_symlinks_elevated
     # for the UAC-elevated launch path).
     "Win32_System_Registry",
+    # TokenElevation / GetTokenInformation / TOKEN_ELEVATION for the startup
+    # elevation check in lib::win_deelevate (relaunch non-elevated when the
+    # NSIS installer auto-launches the app elevated after a per-machine install).
+    "Win32_Security",
 ] }
 # Windows RAG embedding is CPU-only (candle has no DirectML EP).
 
