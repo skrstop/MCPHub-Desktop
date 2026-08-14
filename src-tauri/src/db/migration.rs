@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 17;
+pub const TARGET_VERSION: i64 = 19;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -121,6 +121,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         15 => migrate_v15(pool).await,
         16 => migrate_v16(pool).await,
         17 => migrate_v17(pool).await,
+        18 => migrate_v18(pool).await,
+        19 => migrate_v19(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -183,7 +185,7 @@ async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
             registry    TEXT,
             log_level   TEXT DEFAULT 'info',
             expose_http INTEGER DEFAULT 0,
-            http_port   INTEGER DEFAULT 3000,
+            http_port   INTEGER DEFAULT 23333,
             updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )",
     )
@@ -688,8 +690,12 @@ async fn migrate_v14(pool: &SqlitePool) -> Result<()> {
 ///
 /// RAG config lives in the same `config_json` blob as skills (vector DB files
 /// are separate, under app_data_dir/rag/lancedb). Defaults:
-///   { enabled: false, vectorWeight: 0.5, keywordWeight: 0.5, maxResults: 20 }
-/// Only seeds when the `rag` key is missing — never overwrites user edits.
+///   { enabled: false, vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20 }
+/// These MUST match `RagSettings::default()` in `models/rag.rs` — `get_settings`
+/// only falls back to the struct defaults for *missing* keys, so a value seeded
+/// here shadows the struct default forever. Only seeds when the `rag` key is
+/// missing — never overwrites user edits. (Pre-existing installs seeded with
+/// the old 0.5/0.5 split are corrected by `migrate_v18`.)
 async fn migrate_v15(pool: &SqlitePool) -> Result<()> {
     let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
         .fetch_optional(pool)
@@ -704,8 +710,8 @@ async fn migrate_v15(pool: &SqlitePool) -> Result<()> {
     if config.get("rag").is_none() {
         config["rag"] = serde_json::json!({
             "enabled": false,
-            "vectorWeight": 0.5,
-            "keywordWeight": 0.5,
+            "vectorWeight": 0.9,
+            "keywordWeight": 0.1,
             "maxResults": 20
         });
         let json_str = serde_json::to_string(&config)?;
@@ -749,6 +755,109 @@ async fn migrate_v17(pool: &SqlitePool) -> Result<()> {
     add_column_if_missing(pool, "servers", "start_on_demand", "INTEGER NOT NULL DEFAULT 0").await?;
     add_column_if_missing(pool, "servers", "idle_timeout_ms", "INTEGER NOT NULL DEFAULT 0").await?;
     log::info!("[db] migration v17: added start_on_demand / idle_timeout_ms columns to servers");
+    Ok(())
+}
+
+/// v17 → v18: Correct stale RAG search-weight seed (0.5/0.5 → 0.9/0.1).
+///
+/// `migrate_v15` originally seeded `vectorWeight: 0.5, keywordWeight: 0.5`,
+/// which shadowed the `RagSettings::default()` split (0.9/0.1) because
+/// `get_settings` only falls back to the struct default for *missing* keys.
+/// The struct default was always 0.9/0.1 (vector dominates; keyword is a
+/// recall backstop), so the seeded 0.5/0.5 was simply a bug.
+///
+/// This migration rewrites the stored weights to 0.9/0.1, but ONLY when they
+/// still equal the old seeded 0.5/0.5 — i.e. when the user never touched the
+/// search settings dialog (any save through `save_settings` would have stored
+/// a different pair). A user who deliberately set 0.5/0.5 is indistinguishable
+/// from the stale seed, so we accept that edge case to fix the far more common
+/// "untouched install shows the wrong default" path. Idempotent.
+async fn migrate_v18(pool: &SqlitePool) -> Result<()> {
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(()); };
+    let s: Option<String> = row.try_get("config_json")?;
+    let mut config: serde_json::Value = match s.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
+        Some(v) if v.is_object() => v,
+        _ => return Ok(()),
+    };
+
+    let Some(rag) = config.get_mut("rag") else {
+        // No rag config yet — v15 (now corrected) will seed 0.9/0.1 on a later
+        // fresh path, or the user simply hasn't enabled RAG. Nothing to do.
+        return Ok(());
+    };
+    let Some(obj) = rag.as_object_mut() else { return Ok(()); };
+
+    // 0.5/0.5 are exactly representable in f64, so an exact compare is safe;
+    // a tiny epsilon guards against any future rounding on save.
+    let is_old_seed = |key: &str| -> bool {
+        obj.get(key)
+            .and_then(|v| v.as_f64())
+            .map(|v| (v - 0.5).abs() < 1e-9)
+            .unwrap_or(false)
+    };
+    if is_old_seed("vectorWeight") && is_old_seed("keywordWeight") {
+        obj["vectorWeight"] = serde_json::json!(0.9);
+        obj["keywordWeight"] = serde_json::json!(0.1);
+        let json_str = serde_json::to_string(&config)?;
+        sqlx::query("UPDATE system_config SET config_json=?, updated_at=datetime('now','localtime') WHERE id=1")
+            .bind(&json_str)
+            .execute(pool)
+            .await?;
+        log::info!("[db] migration v18: corrected stale RAG weight seed 0.5/0.5 → 0.9/0.1");
+    } else {
+        log::info!("[db] migration v18: RAG weights already customized, left untouched");
+    }
+    Ok(())
+}
+
+/// v18 → v19: Correct stale HTTP port seed (3000 → 23333).
+///
+/// The v1 schema seeded `system_config.http_port DEFAULT 3000`, and `migrate_v3`
+/// copied that column into `config_json.httpPort`. That shadowed the runtime
+/// default in `http_server::maybe_start` (`unwrap_or(23333)` only fires when the
+/// key is absent), so every install that ran v3 ended up bound to 3000 — the
+/// "changed default to 23333" only updated the dead fallback. The v1 column
+/// default is now 23333, so fresh installs are correct; this migration fixes
+/// existing installs.
+///
+/// Rewrites `config_json.httpPort` 3000 → 23333 ONLY when it still equals the
+/// old seeded 3000 — i.e. the user never customized the port. A user who
+/// deliberately set 3000 is indistinguishable from the stale seed, so we accept
+/// that edge case to fix the far more common "untouched install on the wrong
+/// port" path. Idempotent. Runs before `http_server::maybe_start`, so the very
+/// first launch after upgrade binds 23333 without a restart.
+async fn migrate_v19(pool: &SqlitePool) -> Result<()> {
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(()); };
+    let s: Option<String> = row.try_get("config_json")?;
+    let mut config: serde_json::Value = match s.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
+        Some(v) if v.is_object() => v,
+        _ => return Ok(()),
+    };
+
+    let is_old_seed = config
+        .get("httpPort")
+        .and_then(|v| v.as_f64())
+        .map(|v| (v - 3000.0).abs() < 1e-9)
+        .unwrap_or(false);
+    if is_old_seed {
+        if let Some(obj) = config.as_object_mut() {
+            obj["httpPort"] = serde_json::json!(23333);
+        }
+        let json_str = serde_json::to_string(&config)?;
+        sqlx::query("UPDATE system_config SET config_json=?, updated_at=datetime('now','localtime') WHERE id=1")
+            .bind(&json_str)
+            .execute(pool)
+            .await?;
+        log::info!("[db] migration v19: corrected stale HTTP port seed 3000 → 23333");
+    } else {
+        log::info!("[db] migration v19: httpPort already customized or absent, left untouched");
+    }
     Ok(())
 }
 
