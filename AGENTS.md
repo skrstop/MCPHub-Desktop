@@ -259,6 +259,7 @@ services/ (业务逻辑 = 原 services/)
 - **布局**：卡片 `max-h-[85vh] flex flex-col`，标题+关闭按钮固定（`shrink-0`），中间内容区（新版本说明+历史列表）`flex-1 overflow-y-auto` 滚动，底部按钮行 `shrink-0 border-t` 固定——长说明不再顶跑标题与按钮
 - 「最近更新」多版本卡片在 tauri-fallback 路径隐藏（`source !== 'tauri-fallback'`），因桌面端单条 entry 与上方「新版本可用」重复
 - 安装中状态：「安装更新」按钮图标用 `Loader2` spinner（`isInstalling`），未安装态与「下载更新」链接用 `Download`
+- 🆕 **下载/安装进度可视化**（见 3.4.8）：点击「安装更新」后，AboutDialog 内容区显示进度卡片——下载阶段显示百分比进度条 + 已下载/总字节 + 实时下载速度（EMA 平滑），安装阶段显示 indeterminate spinner，完成/失败显示对应状态。按钮文案随阶段切换（下载中→安装中→安装更新）。`installAppUpdate(onEvent)` 的 `DownloadEvent` 流被驱动为 `installPhase` state（`downloading`/`installing`/`done`/`error`）。
 - **移除「忽略此版本」按钮**（见 3.4.7）：更新与否由用户决定，应用只提示
 
 #### 3.2.5 Dashboard（仪表盘）
@@ -635,6 +636,32 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 - `frontend/package.json`
 
 `doc/upgrade/{version}.md` 存在对应版本时，CI 会将其全文作为 `latest.json` 的 `notes` 发布（见 3.4.3/3.4.4）。
+
+#### 3.4.8 安装进度可视化（下载进度 / 下载速度 / 安装阶段）
+
+> 背景：之前点击「安装更新」后 UI 只有一个 spinner，用户无法判断更新是否正常进行（下载是否卡住、装到哪一步）。现把 Tauri updater 的 `DownloadEvent` 流驱动成可见的进度状态。
+
+**文件**：`frontend/src/components/ui/AboutDialog.tsx`（⚠️ 修改）
+
+- 新增 `installPhase` state：`'idle' | 'downloading' | 'installing' | 'done' | 'error'`，替代原来的 `isInstalling` 布尔（`isInstalling` 派生为 `downloading || installing`，保留给按钮 disabled 逻辑）。
+- 新增 `downloaded` / `totalBytes` / `speedBps` state + `lastTsRef` / `speedEmaRef` ref。
+- `handleInstallUpdate` 重写：重置状态后调 `installAppUpdate(onEvent)`，`onEvent` 按 `DownloadEvent` 分支更新：
+  - `Started`（`data.contentLength`）→ 记录总字节、进入 `downloading`。
+  - `Progress`（`data.chunkLength`）→ 用 `performance.now()` 计算 chunk 间隔 `dt`，瞬时速度 `= chunkLength/dt`，EMA（α=0.3）平滑后写 `speedBps`；累加 `downloaded`。
+  - `Finished` → 下载完成，进入 `installing`（indeterminate）。**Tauri updater 不暴露安装阶段百分比**（`Finished` 后插件静默校验签名+解压安装，无逐步事件），故安装阶段只能用 indeterminate spinner 表示，不造假百分比。
+  - `installAppUpdate` resolve → `done`；reject → `error`。
+- 进度卡片 UI（下载阶段）：百分比进度条（`downloaded/totalBytes*100`，totalBytes 未知时 indeterminate `animate-pulse`）+ 「已下载 / 总字节」+ `NN%` + `速度/s`（`formatBytes`/`formatSpeed` 模块级 helper，B/KB/MB/GB）。
+- 安装阶段：`Loader2` spinner + `about.installing` 文案；完成：`CheckCircle2` + `about.installed`；失败：`X` + `about.installFailed`。
+- 「安装更新」按钮文案随阶段切换：`downloading`→`about.downloading`、`installing`→`about.installing`、其余→`about.installUpdate`。
+
+**i18n 新增翻译键**（en/zh/fr/tr 四语言，均带 inline fallback 防漏语种）：
+
+- `about.downloading` — "正在下载..." / "Downloading..." / "Téléchargement..." / "İndiriliyor..."
+- `about.installed` — "更新已安装，即将重启..." / "Update installed. Relaunching..." / ...
+- `about.installFailed` — "安装失败，请重试。" / "Update failed. Please try again." / ...
+- `about.installing` 复用既有键（"正在安装更新..."）。
+
+> 注：仅 macOS / Windows（`canAutoUpdate=true`）走此流程；Linux 回退为「下载更新」外链，无此进度卡片。
 
 ### 3.5 Rust 后端差异
 
@@ -1704,6 +1731,7 @@ npm run build
 - [X]  启动更新检查（根级 `UpdateCheckProvider`：应用启动即检查、不依赖登录态；检测到新版本自动弹「关于」+ 侧边栏红点；移除「忽略此版本」；详见 3.4.7）
 - [X]  更新检查日志（`log_event` Tauri command 写入 `app_log`，前端 `[update]` 全流程日志：检查/新版本/已最新/失败/安装；日志页按来源 `update` 可过滤；详见 3.4.7）
 - [X]  release notes Markdown 渲染（`Markdown` 组件 react-markdown+remark-gfm；notes 即 `doc/upgrade/{version}.md` 全文；详见 3.4.7）
+- [X]  安装进度可视化（下载百分比进度条 + 已下载/总字节 + 实时下载速度 EMA；安装阶段 indeterminate spinner；按钮文案随阶段切换；详见 3.4.8）
 - [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.27001；详见 3.4.7）
 - [X]  stdio 服务器按需启动（startOnDemand：跳过启动连接、首次工具调用懒建进程、空闲超时自动关闭、缓存工具保留；详见 3.8）
 - [X]  stdio 连接错误包含上游 stderr（`stderr_tail` 滚动缓存拼接进 handshake 失败 error；详见 3.9）

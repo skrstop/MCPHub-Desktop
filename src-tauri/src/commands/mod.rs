@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod updater;
 pub mod servers;
 pub mod groups;
 pub mod tools;

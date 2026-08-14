@@ -1,6 +1,7 @@
 import { check, type Update, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { isTauri } from '@/utils/tauriClient';
 
 export interface UpdateInfo {
@@ -151,28 +152,83 @@ const checkFallbackUpdate = async (): Promise<UpdateInfo | null> => {
  * Download and install the latest update, then relaunch the app.
  * Re-uses the most recent `check()` result when present.
  * Only works on platforms with Tauri updater support (macOS, Windows).
+ *
+ * Uses the custom `install_update_cancelable` command instead of the plugin's
+ * `downloadAndInstall` so the download can be aborted via `cancelAppUpdate`
+ * (the plugin IPC has no cancellation API). Resolves to `false` when the user
+ * cancelled — callers must not relaunch or treat it as success.
  */
 export const installAppUpdate = async (
   onEvent?: (event: DownloadEvent) => void,
-): Promise<void> => {
+): Promise<boolean> => {
   const update = cachedUpdate ?? (await check());
+  cachedUpdate = update;
   if (!update) {
     logUpdateEvent('warn', '[update] install requested but no update is available');
     throw new Error('No update available');
   }
   const currentVersion = await getCurrentVersion();
   logUpdateEvent('info', `[update] installing update: ${currentVersion} -> ${update.version}`);
-  try {
-    await update.downloadAndInstall(onEvent);
-    logUpdateEvent('info', `[update] update installed, relaunching (-> ${update.version})`);
-    await relaunch();
-  } catch (error) {
-    logUpdateEvent(
-      'error',
-      `[update] install failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    throw error;
+
+  // Progress streams over the channel (same wire shape as the plugin's
+  // DownloadEvent); the terminal result arrives via a `updater://install-result`
+  // event, since cancelling aborts the download task without rejecting the
+  // channel. installId ties the result to this attempt.
+  const installId = Date.now();
+  const channel = new Channel<DownloadEvent>();
+  if (onEvent) channel.onmessage = onEvent;
+  let installError: Error | null = null;
+
+  const finished = new Promise<boolean>((resolve) => {
+    let settled = false;
+    let unlisten: (() => void) | undefined;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      unlisten?.();
+      resolve(ok);
+    };
+    listen<{ installId: number; status: string; error?: string }>(
+      'updater://install-result',
+      (e) => {
+        if (e.payload.installId !== installId) return; // stale attempt
+        if (e.payload.status === 'ok') settle(true);
+        else if (e.payload.status === 'cancelled') settle(false);
+        else {
+          logUpdateEvent('error', `[update] install failed: ${e.payload.error ?? 'unknown'}`);
+          installError = new Error(e.payload.error ?? 'Install failed');
+          settle(false);
+        }
+      },
+    ).then((fn) => {
+      if (settled) fn();
+      else unlisten = fn;
+    });
+  });
+
+  await invoke('install_update_cancelable', {
+    installId,
+    rid: update.rid,
+    onEvent: channel,
+  });
+  const ok = await finished;
+  if (!ok) {
+    if (installError) throw installError;
+    logUpdateEvent('info', '[update] install cancelled by user');
+    return false;
   }
+  logUpdateEvent('info', `[update] update installed, relaunching (-> ${update.version})`);
+  await relaunch();
+  return true;
+};
+
+/**
+ * Cancel an in-flight update download (download phase only — the install
+ * section is atomic and cannot be interrupted). No-op when nothing is running.
+ */
+export const cancelAppUpdate = async (): Promise<void> => {
+  logUpdateEvent('info', '[update] cancelling update install');
+  await invoke('cancel_update_install', {});
 };
 
 /**

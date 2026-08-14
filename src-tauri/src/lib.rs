@@ -384,6 +384,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            // App update (cancelable install)
+            commands::updater::install_update_cancelable,
+            commands::updater::cancel_update_install,
             // Auth commands
             commands::auth::login,
             commands::auth::register,

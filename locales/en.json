@@ -35,6 +35,10 @@
     "earlierReleases": "+ {{count}} earlier releases",
     "installUpdate": "Install Update",
     "installing": "Installing update...",
+    "downloading": "Downloading...",
+    "cancelUpdate": "Cancel Update",
+    "installed": "Update installed. Relaunching...",
+    "installFailed": "Update failed. Please try again.",
     "downloadManual": "Download Update"
   },
   "profile": {

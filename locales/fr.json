@@ -35,6 +35,10 @@
     "earlierReleases": "+ {{count}} versions précédentes",
     "installUpdate": "Installer la mise à jour",
     "installing": "Installation de la mise à jour...",
+    "downloading": "Téléchargement...",
+    "cancelUpdate": "Annuler la mise à jour",
+    "installed": "Mise à jour installée. Redémarrage...",
+    "installFailed": "Échec de l'installation. Veuillez réessayer.",
     "downloadManual": "Télécharger la mise à jour"
   },
   "profile": {

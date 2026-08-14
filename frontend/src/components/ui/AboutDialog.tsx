@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowUpRight, CheckCircle2, Download, Loader2, RefreshCw, X } from 'lucide-react';
 import { ChangelogUpdateInfo } from '@/types';
@@ -6,9 +6,26 @@ import {
   buildChangelogFromTauriUpdate,
   fetchChangelogUpdateInfo,
 } from '@/services/changelogService';
-import { checkForAppUpdate, installAppUpdate, type UpdateInfo } from '@/utils/version';
+import {
+  cancelAppUpdate,
+  checkForAppUpdate,
+  installAppUpdate,
+  type UpdateInfo,
+} from '@/utils/version';
 import { isTauri } from '@/utils/tauriClient';
 import Markdown from './Markdown';
+
+/** Format a byte count as a human-readable size (B/KB/MB/GB). */
+const formatBytes = (n: number): string => {
+  if (!Number.isFinite(n) || n < 0) return '0 B';
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+};
+
+/** Format a download speed (bytes/sec) as a human-readable rate. */
+const formatSpeed = (bps: number): string => `${formatBytes(bps)}/s`;
 
 interface AboutDialogProps {
   isOpen: boolean;
@@ -31,7 +48,21 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
   );
   const [isChecking, setIsChecking] = useState(false);
   const [tauriUpdate, setTauriUpdate] = useState<UpdateInfo | null>(null);
-  const [isInstalling, setIsInstalling] = useState(false);
+  // Install lifecycle phases surfaced to the UI. The Tauri updater plugin emits
+  // Started/Progress/Finished for the *download*; the install itself runs silently
+  // after `Finished` (no per-step percent), so it is shown as indeterminate.
+  const [installPhase, setInstallPhase] = useState<
+    'idle' | 'downloading' | 'installing' | 'done' | 'error'
+  >('idle');
+  const [downloaded, setDownloaded] = useState(0);
+  const [totalBytes, setTotalBytes] = useState(0);
+  const [speedBps, setSpeedBps] = useState(0);
+  // Rolling speed tracking across Progress events (EMA). Refs avoid re-render
+  // thrash and keep timing state out of React state.
+  const lastTsRef = useRef<number | null>(null);
+  const speedEmaRef = useRef<number>(0);
+
+  const isInstalling = installPhase === 'downloading' || installPhase === 'installing';
 
   useEffect(() => {
     setUpdateInfo(initialUpdateInfo ?? null);
@@ -122,15 +153,63 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
 
   const handleInstallUpdate = async () => {
     if (!tauriUpdate) return;
-    setIsInstalling(true);
+    // Reset download/install state for a fresh run.
+    setInstallPhase('downloading');
+    setDownloaded(0);
+    setTotalBytes(0);
+    setSpeedBps(0);
+    lastTsRef.current = null;
+    speedEmaRef.current = 0;
     try {
-      await installAppUpdate((event) => {
-        console.log('Download event:', event);
+      const completed = await installAppUpdate((event) => {
+        if (event.event === 'Started') {
+          setTotalBytes(event.data.contentLength ?? 0);
+          setInstallPhase('downloading');
+          setDownloaded(0);
+        } else if (event.event === 'Progress') {
+          const now = performance.now();
+          if (lastTsRef.current != null) {
+            const dt = (now - lastTsRef.current) / 1000;
+            if (dt > 0) {
+              const inst = event.data.chunkLength / dt;
+              // Exponential moving average smooths bursty chunk reads.
+              speedEmaRef.current =
+                speedEmaRef.current === 0
+                  ? inst
+                  : 0.3 * inst + 0.7 * speedEmaRef.current;
+              setSpeedBps(speedEmaRef.current);
+            }
+          }
+          lastTsRef.current = now;
+          setDownloaded((prev) => prev + event.data.chunkLength);
+        } else if (event.event === 'Finished') {
+          // Download done — the updater now verifies signature + installs
+          // silently, then resolves. No granular install percent is exposed,
+          // so we show an indeterminate "installing" state until relaunch.
+          setInstallPhase('installing');
+          setSpeedBps(0);
+        }
       });
+      // `false` = user cancelled — return to idle so the button can be used again.
+      if (!completed) {
+        setInstallPhase('idle');
+        return;
+      }
+      setInstallPhase('done');
     } catch (error) {
       console.error('Failed to install update:', error);
-    } finally {
-      setIsInstalling(false);
+      setInstallPhase('error');
+    }
+  };
+
+  const handleCancelInstall = async () => {
+    // Optimistically show cancelling; the terminal event resets phase to idle
+    // via the install promise resolving false. Install phase cannot cancel.
+    if (installPhase !== 'downloading') return;
+    try {
+      await cancelAppUpdate();
+    } catch (error) {
+      console.error('Failed to cancel update install:', error);
     }
   };
 
@@ -269,6 +348,85 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
             ) : null}
           </div>
 
+          {/* Download / install progress. Surfaced from the Tauri updater
+              DownloadEvent stream so the user can tell the update is actually
+              working (percent + speed while downloading; indeterminate while
+              installing, since the plugin exposes no install percent).
+              Pinned OUTSIDE the scrollable notes area — long release notes
+              must never push the progress indicator out of view. */}
+          {installPhase !== 'idle' && (
+            <div
+              className="mx-5 mb-3 rounded-md border p-3 shrink-0"
+              style={{
+                borderColor: 'var(--hub-line)',
+                background: 'var(--hub-bg-2)',
+              }}
+            >
+                {installPhase === 'downloading' && (
+                  <>
+                    <div className="flex items-center justify-between gap-3 text-[12px] tabular-nums">
+                      <span className="flex items-center gap-1.5" style={{ color: 'var(--hub-ink-2)' }}>
+                        <Download className="h-3.5 w-3.5 animate-pulse" style={{ color: 'var(--hub-accent)' }} />
+                        {t('about.downloading') || 'Downloading...'}
+                      </span>
+                      {totalBytes > 0 && (
+                        <span style={{ color: 'var(--hub-ink-3)' }}>
+                          {formatBytes(downloaded)} / {formatBytes(totalBytes)}
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      className="mt-2 h-1.5 w-full rounded overflow-hidden"
+                      style={{ background: 'var(--hub-bg-1, rgba(0,0,0,0.06))' }}
+                    >
+                      {totalBytes > 0 ? (
+                        <div
+                          className="h-full transition-all duration-150"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, (downloaded / totalBytes) * 100))}%`,
+                            background: 'var(--hub-accent, #3b82f6)',
+                          }}
+                        />
+                      ) : (
+                        <div
+                          className="h-full w-1/3 animate-pulse"
+                          style={{ background: 'var(--hub-accent, #3b82f6)' }}
+                        />
+                      )}
+                    </div>
+                    <div className="mt-1.5 flex items-center justify-between text-[11px] tabular-nums">
+                      <span style={{ color: 'var(--hub-ink-3)' }}>
+                        {totalBytes > 0
+                          ? `${Math.min(100, (downloaded / totalBytes) * 100).toFixed(0)}%`
+                          : ''}
+                      </span>
+                      <span style={{ color: 'var(--hub-ink-3)' }}>
+                        {speedBps > 0 ? formatSpeed(speedBps) : ''}
+                      </span>
+                    </div>
+                  </>
+                )}
+                {installPhase === 'installing' && (
+                  <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--hub-ink-2)' }}>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--hub-accent)' }} />
+                    {t('about.installing') || 'Installing update...'}
+                  </div>
+                )}
+                {installPhase === 'done' && (
+                  <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--hub-ink-2)' }}>
+                    <CheckCircle2 className="h-3.5 w-3.5" style={{ color: 'var(--hub-ok)' }} />
+                    {t('about.installed') || 'Update installed. Relaunching...'}
+                  </div>
+                )}
+                {installPhase === 'error' && (
+                  <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--hub-warn)' }}>
+                    <X className="h-3.5 w-3.5" />
+                    {t('about.installFailed') || 'Update failed. Please try again.'}
+                  </div>
+                )}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2 pt-3 px-5 pb-5 shrink-0 border-t" style={{ borderColor: 'var(--hub-line)' }}>
               <button
                 onClick={() => checkForUpdates(true)}
@@ -279,18 +437,31 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                 {isChecking ? t('about.checking') : t('about.checkForUpdates')}
               </button>
               {tauriUpdate && tauriUpdate.canAutoUpdate !== false && (
-                <button
-                  onClick={handleInstallUpdate}
-                  disabled={isInstalling}
-                  className={`hub-btn primary ${isInstalling ? 'opacity-60 cursor-not-allowed' : ''}`}
-                >
-                  {isInstalling ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Download className="h-4 w-4" />
-                  )}
-                  {isInstalling ? t('about.installing') : t('about.installUpdate')}
-                </button>
+                installPhase === 'downloading' ? (
+                  <button
+                    onClick={handleCancelInstall}
+                    className="hub-btn"
+                    style={{ borderColor: 'var(--hub-line)' }}
+                  >
+                    <X className="h-4 w-4" />
+                    {t('about.cancelUpdate') || 'Cancel Update'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleInstallUpdate}
+                    disabled={isInstalling}
+                    className={`hub-btn primary ${isInstalling ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    {isInstalling ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Download className="h-4 w-4" />
+                    )}
+                    {installPhase === 'installing'
+                      ? t('about.installing') || 'Installing update...'
+                      : t('about.installUpdate')}
+                  </button>
+                )
               )}
               {tauriUpdate && tauriUpdate.canAutoUpdate === false && (
                 <a

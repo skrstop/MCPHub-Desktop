@@ -12,3 +12,4 @@ src-tauri/.codegraph
 .codemoss
 **/.playwright-mcp
 .claude
+doc/test

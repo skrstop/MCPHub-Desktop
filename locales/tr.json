@@ -35,6 +35,10 @@
     "earlierReleases": "+ {{count}} önceki sürüm",
     "installUpdate": "Güncellemeyi Yükle",
     "installing": "Güncelleme yükleniyor...",
+    "downloading": "İndiriliyor...",
+    "cancelUpdate": "Güncellemeyi İptal Et",
+    "installed": "Güncelleme yüklendi. Yeniden başlatılıyor...",
+    "installFailed": "Yükleme başarısız. Lütfen tekrar deneyin.",
     "downloadManual": "Güncellemeyi İndir"
   },
   "profile": {
