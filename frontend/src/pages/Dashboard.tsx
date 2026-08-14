@@ -333,21 +333,28 @@ const DashboardPage: React.FC = () => {
               configCopiedMessage={configCopiedMessage}
             />
           )}
-          {groups.slice(0, 2).map((g) => (
-            <EndpointCopy
-              key={g.id}
-              label="GROUP"
-              url={`${baseUrl}/mcp/${g.name}`}
-              configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/${g.name}`)}
-              configCopiedMessage={configCopiedMessage}
-            />
-          ))}
+          {groups.slice(0, 2).map((g) => {
+            const placeholderUrl = `${baseUrl}/mcp/${t('pages.dashboard.groupNamePlaceholder') || '<group-name>'}`;
+            return (
+              <EndpointCopy
+                key={g.id}
+                label="GROUP"
+                url={placeholderUrl}
+                copyValue={placeholderUrl}
+                configValue={() => buildMcpConfigJson(placeholderUrl)}
+                configCopiedMessage={configCopiedMessage}
+              />
+            );
+          })}
           {/* Pad with first server endpoint if there's space */}
           {groups.length < 2 && allServers[0] && (
             <EndpointCopy
               label="SERVER"
-              url={`${baseUrl}/mcp/${allServers[0].name}`}
-              configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/${allServers[0].name}`)}
+              url={`${baseUrl}/mcp/${t('pages.dashboard.serverNamePlaceholder') || '<server-name>'}`}
+              copyValue={`${baseUrl}/mcp/${t('pages.dashboard.serverNamePlaceholder') || '<server-name>'}`}
+              configValue={() =>
+                buildMcpConfigJson(`${baseUrl}/mcp/${t('pages.dashboard.serverNamePlaceholder') || '<server-name>'}`)
+              }
               configCopiedMessage={configCopiedMessage}
             />
           )}

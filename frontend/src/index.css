@@ -429,7 +429,10 @@
   border: 1px solid var(--hub-line);
   border-radius: 8px;
   background: var(--hub-bg-2);
-  overflow: hidden;
+  /* overflow: visible so the copy dropdown (an absolutely-positioned child of
+     the button) can extend below the row. URL truncation is handled by
+     .hub-endpoint-url's own overflow:hidden + ellipsis, not by the parent. */
+  overflow: visible;
   min-width: 0;
   height: 32px;
 }

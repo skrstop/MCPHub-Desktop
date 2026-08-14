@@ -398,7 +398,9 @@
       "httpFailCauseOther": "端口 {{port}} 绑定失败。",
       "httpFailActionOther": "请查看日志了解详情；Windows 上也可检查防火墙设置。",
       "httpFailBadge": "MCP HTTP 服务未启动",
-      "httpFailBadgeHint": "点击查看失败原因并重试"
+      "httpFailBadgeHint": "点击查看失败原因并重试",
+      "groupNamePlaceholder": "<分组名>",
+      "serverNamePlaceholder": "<服务名>"
     },
     "servers": {
       "title": "服务器管理"

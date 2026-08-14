@@ -396,7 +396,9 @@
       "httpFailCauseOther": "Failed to bind port {{port}}.",
       "httpFailActionOther": "Check the logs for details; on Windows also check the firewall.",
       "httpFailBadge": "MCP HTTP service is not running",
-      "httpFailBadgeHint": "Click to view the failure reason and retry"
+      "httpFailBadgeHint": "Click to view the failure reason and retry",
+      "groupNamePlaceholder": "<group-name>",
+      "serverNamePlaceholder": "<server-name>"
     },
     "servers": {
       "title": "Server Management"
