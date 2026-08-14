@@ -89,7 +89,7 @@ mod win_deelevate {
             let ok = GetTokenInformation(
                 token,
                 TokenElevation,
-                &mut elev as *mut _ as *mut std::ffi::c_void,
+                Some(&mut elev as *mut _ as *mut std::ffi::c_void),
                 std::mem::size_of::<TOKEN_ELEVATION>() as u32,
                 &mut ret_len,
             );
