@@ -8,14 +8,11 @@ pub mod mcp;
 pub mod models;
 pub mod rag;
 pub mod services;
+pub mod tray;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
-};
+use tauri::{Manager, WindowEvent};
 
 // ── crash logging ────────────────────────────────────────────────────────────
 // A panic hook + fatal-error writer so a startup crash - notably the Windows
@@ -183,6 +180,13 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Autostart: default off — the plugin only registers/unregisters the
+        // OS login item on enable()/disable(); no entry is created until the
+        // user toggles it on from the tray menu.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             log::info!("Single instance triggered with args: {:?}, cwd: {:?}", argv, cwd);
 
@@ -324,55 +328,9 @@ pub fn run() {
                 });
             });
 
-            // Set up system tray icon with menu
-            let quit = MenuItem::with_id(app, "quit", "Quit MCPHub", true, None::<&str>)?;
-            let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-
-            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
-                .expect("failed to load tray icon");
-
-            TrayIconBuilder::new()
-                .icon(tray_icon)
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => {
-                        // Disconnect all MCP upstream clients (shared pool +
-                        // per-session isolated) before quitting so child
-                        // processes are reaped via kill_process_tree rather
-                        // than orphaned at process exit. Runs synchronously on
-                        // the runtime so the teardown completes before exit.
-                        let app_handle = app.clone();
-                        tauri::async_runtime::block_on(async move {
-                            crate::mcp::pool::disconnect_all().await;
-                            let _ = app_handle;
-                        });
-                        app.exit(0);
-                    }
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
+            // Set up the system tray icon + native app menu (localized,
+            // includes check-update and the autostart toggle). See tray.rs.
+            tray::rebuild_menus(app.handle())?;
 
             Ok(())
         })
@@ -384,6 +342,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            // Tray/app-menu language switching
+            tray::set_menu_language,
+            // Open an external URL in the default browser (used by About dialog links)
+            tray::open_external_url,
             // App update (cancelable install)
             commands::updater::install_update_cancelable,
             commands::updater::cancel_update_install,
@@ -402,6 +364,8 @@ pub fn run() {
             commands::servers::toggle_server,
             commands::servers::reload_server,
             commands::servers::reinstall_server,
+            commands::servers::check_stdio_updates,
+            commands::servers::check_server_update,
             commands::servers::clear_cache,
             // Group commands
             commands::groups::list_groups,

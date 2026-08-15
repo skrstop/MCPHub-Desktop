@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X } from 'lucide-react';
+import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X, Loader2 } from 'lucide-react';
 import { Server } from '@/types';
 import ServerCard from '@/components/ServerCard';
 import AddServerForm from '@/components/AddServerForm';
@@ -9,6 +9,8 @@ import EditServerForm from '@/components/EditServerForm';
 import McpbUploadForm from '@/components/McpbUploadForm';
 import JSONImportForm from '@/components/JSONImportForm';
 import Pagination from '@/components/ui/Pagination';
+import { useToast } from '@/contexts/ToastContext';
+import { apiPost } from '@/utils/fetchInterceptor';
 import { useServerData } from '@/hooks/useServerData';
 import { useCostData } from '@/hooks/useCostData';
 import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/utils/serverFilters';
@@ -16,6 +18,7 @@ import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/ut
 const ServersPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const {
     servers,
     allServers,
@@ -46,6 +49,7 @@ const ServersPage: React.FC = () => {
 
   const [editingServer, setEditingServer] = useState<Server | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [showMcpbUpload, setShowMcpbUpload] = useState(false);
   const [showJsonImport, setShowJsonImport] = useState(false);
   const [filter, setFilter] = useState<ServerFilter>('all');
@@ -62,6 +66,16 @@ const ServersPage: React.FC = () => {
   }, [allServers, typeFilter]);
 
   const counts = useMemo(() => getServerFilterCounts(typeFilteredServers), [typeFilteredServers]);
+
+  // Whether any npx/uvx stdio server exists — gates the "stdio update check"
+  // button (only package-manager-backed stdio servers have a registry to check).
+  const hasStdioServer = useMemo(
+    () =>
+      allServers.some(
+        (s) => s.config?.command === 'npx' || s.config?.command === 'uvx',
+      ),
+    [allServers],
+  );
 
   // Filter against the full list and paginate the filtered result client-side,
   // so status filters reach servers that live on other pagination pages.
@@ -92,6 +106,32 @@ const ServersPage: React.FC = () => {
     }
   };
 
+  const handleCheckStdioUpdates = async () => {
+    setIsCheckingUpdates(true);
+    try {
+      const result = await apiPost<{ success: boolean; checked?: number; message?: string }>(
+        '/servers/check-stdio-updates',
+        {},
+      );
+      const count = result?.checked ?? 0;
+      if (result?.success) {
+        showToast(
+          t('server.checkStdioUpdatesStarted', { count }) ||
+            `Checking ${count} stdio server(s) for updates`,
+          'success',
+        );
+      } else {
+        showToast(result?.message || t('server.checkStdioUpdatesError') || 'Check failed', 'error');
+      }
+      // The command returns immediately; keep the spinner spinning while the
+      // per-server results trickle back via server://update-available (each
+      // registry fetch can take a few seconds).
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
+
   return (
     <div>
       {/* Header */}
@@ -106,6 +146,21 @@ const ServersPage: React.FC = () => {
           </p>
         </div>
         <div className="flex gap-2">
+          {hasStdioServer && (
+            <button
+              className="hub-btn"
+              onClick={handleCheckStdioUpdates}
+              disabled={isCheckingUpdates}
+              aria-label={t('server.checkStdioUpdates') || 'stdio update check'}
+            >
+              {isCheckingUpdates ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <RefreshCw size={13} />
+              )}
+              {t('server.checkStdioUpdates') || 'stdio update check'}
+            </button>
+          )}
           <button className="hub-btn" onClick={() => navigate('/market')}>
             <Plus size={13} /> {t('nav.market')}
           </button>

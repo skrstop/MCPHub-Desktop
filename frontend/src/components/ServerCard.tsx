@@ -15,6 +15,7 @@ import {
   Trash2,
   DownloadCloud,
   LogOut,
+  Loader2,
   type LucideIcon,
 } from 'lucide-react';
 import { Server, ServerCost } from '@/types';
@@ -31,6 +32,7 @@ import { useServerInstallProgress } from '@/contexts/ServerInstallProgressContex
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useAuth } from '@/contexts/AuthContext';
 import { canManageServer } from '@/utils/serverPermissions';
+import { apiPost } from '@/utils/fetchInterceptor';
 import {
   getServerVisibilityDisplay,
   getServerVisibilityOptions,
@@ -171,6 +173,7 @@ const ServerCard = ({
   const [isUpdatingVisibility, setIsUpdatingVisibility] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
   const [isReinstalling, setIsReinstalling] = useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [isDisconnectingOAuth, setIsDisconnectingOAuth] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showErrorPopover, setShowErrorPopover] = useState(false);
@@ -264,6 +267,34 @@ const ServerCard = ({
       }
     } finally {
       setIsReinstalling(false);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    // Keep the menu open: the in-progress spinner on the menu item itself is
+    // the feedback, and the result lands on this card's badge without a toast
+    // interrupt. Only close on a hard failure (non-success response).
+    if (!canManage || isCheckingUpdate || !supportsReinstall) return;
+    setIsCheckingUpdate(true);
+    try {
+      const result = await apiPost<{ success: boolean; message?: string }>(
+        `/servers/${encodeURIComponent(server.name)}/check-update`,
+        {},
+      );
+      if (!result?.success) {
+        setShowMenu(false);
+        showToast(
+          result?.message || t('server.checkForUpdatesError') || 'Check failed',
+          'error',
+        );
+        return;
+      }
+      // The check runs in the background; keep the menu + spinner visible while
+      // the result returns via the server://update-available event. Clearing the
+      // spinner shortly after lets the badge (if any) take over as feedback.
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    } finally {
+      setIsCheckingUpdate(false);
     }
   };
 
@@ -857,15 +888,30 @@ const ServerCard = ({
                     <RefreshCw size={13} /> {t('server.reload')}
                   </button>
                 )}
+                {supportsReinstall && (
+                  <button
+                    onClick={handleCheckUpdate}
+                    disabled={isCheckingUpdate}
+                    className="flex items-center gap-2 w-full px-2.5 py-1.5 text-[13px] rounded-md hover:bg-[var(--hub-surface-hover)] text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ color: 'var(--hub-ink)' }}
+                  >
+                    {isCheckingUpdate ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={13} />
+                    )}{' '}
+                    {t('server.checkForUpdates') || 'Check for updates'}
+                  </button>
+                )}
                 {hasUpdate && updateInfo && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowMenu(false);
-                      if (!canManage || isReinstalling || !enabled) return;
+                      if (!canManage || isReinstalling) return;
                       setShowReinstallDialog(true);
                     }}
-                    disabled={isReinstalling || isToggling || !enabled}
+                    disabled={isReinstalling || isToggling}
                     className="flex items-center gap-2 w-full px-2.5 py-1.5 text-[13px] rounded-md hover:bg-[var(--hub-surface-hover)] text-left disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ color: 'var(--hub-accent, #3b82f6)' }}
                     title={
@@ -883,10 +929,10 @@ const ServerCard = ({
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowMenu(false);
-                      if (!canManage || isReinstalling || !enabled) return;
+                      if (!canManage || isReinstalling) return;
                       setShowReinstallDialog(true);
                     }}
-                    disabled={isReinstalling || isToggling || !enabled}
+                    disabled={isReinstalling || isToggling}
                     className="flex items-center gap-2 w-full px-2.5 py-1.5 text-[13px] rounded-md hover:bg-[var(--hub-surface-hover)] text-left disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ color: 'var(--hub-ink)' }}
                   >

@@ -1,6 +1,6 @@
 use crate::{
-    mcp::pool,
-    models::server::{ServerConfig, ServerInfo, ServerStatus},
+    mcp::{pool, progress},
+    models::server::{ServerConfig, ServerInfo, ServerStatus, ServerType},
     services::{mcp_manager, server_service, server_tool_config_service, runtime_env},
 };
 
@@ -195,21 +195,81 @@ pub async fn reinstall_server(name: String) -> Result<serde_json::Value, String>
     // Reconnect the server in the background - the npx/uvx re-download may
     // take a while and progress is reported via the `server://install-progress`
     // event, so we must not block the command response here.
-    if cfg.enabled {
-        // Mark as "just reinstalled" so the post-connect update check records
-        // the freshly-downloaded version as installed (and clears the badge)
-        // instead of re-notifying about the same version.
-        crate::mcp::progress::mark_reinstalled(&cfg.name);
-        let cfg_clone = cfg.clone();
-        tauri::async_runtime::spawn(async move {
-            pool::connect_server(&cfg_clone).await;
-        });
-    }
+    //
+    // We allow reinstall even for a disabled server so the user can pull a
+    // fresh package version without first enabling it. `connect_server`
+    // reconnects regardless of `enabled` (the flag only gates the *initial*
+    // startup connect, not an explicit reinstall); the server stays in its
+    // prior enabled/disabled state in the DB since we never touch it here.
+    // Mark as "just reinstalled" so the post-connect update check records
+    // the freshly-downloaded version as installed (and clears the badge)
+    // instead of re-notifying about the same version.
+    crate::mcp::progress::mark_reinstalled(&cfg.name);
+    let cfg_clone = cfg.clone();
+    tauri::async_runtime::spawn(async move {
+        pool::connect_server(&cfg_clone).await;
+    });
 
     Ok(serde_json::json!({
         "success": true,
         "cleared": cleared
     }))
+}
+
+/// Trigger an "update available" check for one server config. Shared by the
+/// batch (`check_stdio_updates`) and single (`check_server_update`) entry
+/// points so both reuse the connect-time logic in `progress::spawn_update_check`
+/// (extract package name → fetch registry latest → compare recorded version →
+/// emit `server://update-available`). The check itself runs in the background;
+/// this returns immediately.
+async fn run_update_check(cfg: &ServerConfig) {
+    let running_version = pool::get_entry_info(&cfg.name)
+        .await
+        .map(|(status, _)| status.server_version)
+        .unwrap_or(None);
+    progress::spawn_update_check(
+        cfg.name.clone(),
+        cfg.command.clone().unwrap_or_default(),
+        cfg.args.clone().unwrap_or_default(),
+        running_version,
+    );
+}
+
+/// Check all npx/uvx stdio servers for package updates. Fires the same
+/// best-effort background check that runs after a successful connect, so the
+/// result (and badge) flow back via `server://update-available` exactly as on
+/// connect. Returns the number of servers scheduled for a check.
+#[tauri::command]
+pub async fn check_stdio_updates() -> Result<serde_json::Value, String> {
+    let configs = server_service::list_all().await.map_err(|e| e.to_string())?;
+    let mut count = 0usize;
+    for cfg in configs {
+        // Only stdio servers backed by a package manager (npx/uvx) have a
+        // registry to check; plain local commands have no package version.
+        if cfg.server_type == ServerType::Stdio && progress::is_package_manager(&cfg.command) {
+            run_update_check(&cfg).await;
+            count += 1;
+        }
+    }
+    Ok(serde_json::json!({ "checked": count }))
+}
+
+/// Check a single server for package updates (npx/uvx stdio only). Mirrors the
+/// connect-time check; the result returns via `server://update-available`.
+#[tauri::command]
+pub async fn check_server_update(name: String) -> Result<serde_json::Value, String> {
+    let cfg = server_service::get_by_name(&name)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Server '{}' not found", name))?;
+    if cfg.server_type != ServerType::Stdio || !progress::is_package_manager(&cfg.command) {
+        return Err(format!(
+            "Server '{}' is not an npx/uvx stdio server; no package update to check",
+            name
+        ));
+    }
+    run_update_check(&cfg).await;
+    Ok(serde_json::json!({ "checked": true }))
 }
 
 #[tauri::command]

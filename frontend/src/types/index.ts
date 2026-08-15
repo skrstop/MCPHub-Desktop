@@ -81,9 +81,23 @@ export interface ChangelogUpdateInfo {
   hasUpdate: boolean;
   entries: ChangelogEntry[];
   totalUpdateCount: number;
-  changelogUrl: string;
-  allChangelogUrl: string;
-  source: 'mcphub-web' | 'npm-fallback' | 'disabled';
+  /** Link to the latest release's changelog (absent on transient states). */
+  changelogUrl?: string;
+  /** Link to the full changelog list (absent on transient states). */
+  allChangelogUrl?: string;
+  /** Where the info came from. Besides the API sources, the About dialog
+   *  locally uses transient states: 'checking' (check in flight), 'no-update'
+   *  (check finished, up to date), 'error' (check failed), and
+   *  'tauri-fallback' (constructed from the Tauri updater result without
+   *  structured release notes). */
+  source:
+    | 'mcphub-web'
+    | 'npm-fallback'
+    | 'disabled'
+    | 'checking'
+    | 'no-update'
+    | 'error'
+    | 'tauri-fallback';
 }
 
 // Cloud Server types (for MCPRouter API)

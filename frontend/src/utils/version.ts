@@ -23,6 +23,15 @@ const LATEST_JSON_URL = 'https://github.com/skrstop/MCPHub-Desktop/releases/late
 
 let cachedUpdate: Update | null = null;
 
+/** Last result of checkForAppUpdate, kept so the About dialog can render the
+ *  install button when auto-opened after the startup check without re-running
+ *  the check. Mirrors cachedUpdate (plus the Linux fallback, which isn't an
+ *  `Update` resource). */
+let cachedUpdateInfo: UpdateInfo | null = null;
+
+/** Return the last check result without any network activity. */
+export const peekCachedAppUpdate = (): UpdateInfo | null => cachedUpdateInfo;
+
 /**
  * Append an update-check event to the application log (the same log the Logs
  * page reads). Fire-and-forget: a logging failure must never break the update
@@ -71,12 +80,14 @@ export const checkForAppUpdate = async (
         'info',
         `[update] new version available: ${currentVersion} -> ${update.version} (autoUpdate=true)`,
       );
-      return {
+      const info: UpdateInfo = {
         version: update.version,
         notes: update.body,
         date: update.date,
         canAutoUpdate: true,
       };
+      cachedUpdateInfo = info;
+      return info;
     }
     // Tauri updater returned null — either up-to-date or platform not supported.
     // On Linux (deb/rpm), Tauri updater doesn't work, so we fall back to
@@ -84,6 +95,8 @@ export const checkForAppUpdate = async (
     const fallback = await checkFallbackUpdate();
     if (!fallback) {
       logUpdateEvent('info', `[update] already up to date (current=${currentVersion})`);
+    } else {
+      cachedUpdateInfo = fallback;
     }
     return fallback;
   } catch (error) {

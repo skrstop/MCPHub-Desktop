@@ -43,6 +43,7 @@ class AppErrorBoundary extends React.Component<
   }
 }
 import EmbeddingSyncAlertListener from './components/EmbeddingSyncAlertListener';
+import NativeMenuNavListener from './contexts/NativeMenuNavListener';
 import { getBasePath } from './utils/runtime';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
@@ -88,6 +89,7 @@ function App() {
               <RagDataProvider>
               <Router basename={basename}>
                 <EmbeddingSyncAlertListener />
+                <NativeMenuNavListener />
                 <Routes>
                   {/* 公共路由 */}
                   <Route

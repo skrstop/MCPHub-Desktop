@@ -28,6 +28,9 @@
     "fs:scope-home-recursive",
     "updater:default",
     "process:default",
-    "notification:default"
+    "notification:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
   ]
 }

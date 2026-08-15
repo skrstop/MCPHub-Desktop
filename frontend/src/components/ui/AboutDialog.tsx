@@ -10,8 +10,10 @@ import {
   cancelAppUpdate,
   checkForAppUpdate,
   installAppUpdate,
+  peekCachedAppUpdate,
   type UpdateInfo,
 } from '@/utils/version';
+import { openExternal } from '@/utils/externalLink';
 import { isTauri } from '@/utils/tauriClient';
 import Markdown from './Markdown';
 
@@ -64,8 +66,14 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
 
   const isInstalling = installPhase === 'downloading' || installPhase === 'installing';
 
+  // Mirror the parent's update info into local state, but only when it
+  // represents a detected update — otherwise this would clobber an in-flight
+  // or just-completed self-check triggered on open (the parent's "no-update"
+  // / null arriving late would overwrite the dialog's own fresh result).
   useEffect(() => {
-    setUpdateInfo(initialUpdateInfo ?? null);
+    if (initialUpdateInfo?.hasUpdate) {
+      setUpdateInfo(initialUpdateInfo);
+    }
   }, [initialUpdateInfo]);
 
   const checkForUpdates = async (force = false, source: 'about' | 'manual' = force ? 'manual' : 'about') => {
@@ -213,10 +221,32 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
     }
   };
 
+  // External links (release notes, official website, GitHub) must go through
+  // the shell opener — plain `<a target="_blank">` doesn't open the system
+  // browser from a Tauri 2 webview. preventDefault keeps the inner webview
+  // from also trying (and failing) to navigate.
+  const handleExternalClick = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
+    e.preventDefault();
+    openExternal(url);
+  };
+
+  // On open: if a new version was already detected (startup check found an
+  // update), show it directly without re-fetching. In every other case — no
+  // info yet, or a completed check that found nothing ("已是最新" / disabled /
+  // error) — automatically run a fresh check so entering About always gets a
+  // current answer when there's no update to show. Any entry point (auto-open,
+  // profile menu, tray/app-menu) follows the same rule; explicit refresh is
+  // still available via the "Check for Updates" button inside the dialog.
   useEffect(() => {
     if (isOpen) {
+      if (initialUpdateInfo?.hasUpdate) {
+        setUpdateInfo(initialUpdateInfo);
+        setTauriUpdate(peekCachedAppUpdate());
+        return;
+      }
       checkForUpdates(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
   const latestEntry = updateInfo?.entries[0] ?? null;
@@ -243,7 +273,6 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
           <div className="pr-8">
             <h3 className="hub-h1">{t('about.title')}</h3>
             <p className="hub-sub">{t('about.versionInfo', { version })}</p>
-            <p className="text-xs mt-1" style={{ color: 'var(--hub-ink-3)' }}>MCPHub Desktop</p>
           </div>
         </div>
 
@@ -322,6 +351,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                           rel="noopener noreferrer"
                           className="hub-icon-btn sm"
                           aria-label={t('about.viewReleaseNotes')}
+                          onClick={(e) => handleExternalClick(e, entry.changelogUrl)}
                         >
                           <ArrowUpRight className="h-3.5 w-3.5" />
                         </a>
@@ -469,6 +499,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                   target="_blank"
                   rel="noopener noreferrer"
                   className="hub-btn primary"
+                  onClick={(e) => handleExternalClick(e, tauriUpdate.downloadUrl || 'https://github.com/skrstop/MCPHub-Desktop/releases/latest')}
                 >
                   <Download className="h-4 w-4" />
                   {t('about.downloadManual')}
@@ -479,8 +510,19 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="hub-btn"
+                onClick={(e) => handleExternalClick(e, 'https://github.com/skrstop/MCPHub-Desktop/releases')}
               >
                 {t('about.viewReleaseNotes')}
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              </a>
+              <a
+                href="https://github.com/skrstop/MCPHub-Desktop"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hub-btn"
+                onClick={(e) => handleExternalClick(e, 'https://github.com/skrstop/MCPHub-Desktop')}
+              >
+                {t('about.officialWebsite')}
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </a>
               {latestEntry?.url && (
@@ -489,6 +531,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                   target="_blank"
                   rel="noopener noreferrer"
                   className="hub-btn ghost"
+                  onClick={(e) => handleExternalClick(e, latestEntry.url)}
                 >
                   {t('about.viewOnGitHub')}
                 </a>

@@ -95,6 +95,13 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     return { command: 'reload_server', args: { name: decodeURIComponent(segs[1]) } };
   if (segs[0] === 'servers' && segs[2] === 'reinstall' && m === 'POST')
     return { command: 'reinstall_server', args: { name: decodeURIComponent(segs[1]) } };
+  // Single-server package-update check (npx/uvx stdio). segs[2] === 'check-update'
+  // on a 3-segment path only (deeper paths like .../tools/toggle must not match).
+  if (segs[0] === 'servers' && segs.length === 3 && segs[2] === 'check-update' && m === 'POST')
+    return { command: 'check_server_update', args: { name: decodeURIComponent(segs[1]) } };
+  // Batch package-update check across all npx/uvx stdio servers.
+  if (p === 'servers/check-stdio-updates' && m === 'POST')
+    return { command: 'check_stdio_updates', args: {} };
   // Upstream OAuth disconnect (#984) — desktop has no upstream-OAuth token storage,
   // so this is a no-op stub. The UI button stays hidden (oauth.connected is never
   // populated by the Rust backend); the stub only guards against an unmapped-route error.

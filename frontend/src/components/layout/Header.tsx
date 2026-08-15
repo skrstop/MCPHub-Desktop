@@ -6,6 +6,7 @@ import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
 import { useEmbeddingSync } from '@/contexts/EmbeddingSyncContext';
+import { openExternal } from '@/utils/externalLink';
 
 interface HeaderProps {
   onToggleSidebar: () => void;
@@ -109,6 +110,10 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
           rel="noopener noreferrer"
           className="hub-icon-btn"
           aria-label="GitHub Repository"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal('https://github.com/skrstop/mcphub-desktop');
+          }}
         >
           <GitHubIcon className="h-4 w-4" />
         </a>
