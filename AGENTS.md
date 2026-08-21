@@ -1488,16 +1488,41 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `bfd153c` (origin/main，= `v1.0.30` tag) |
+| **当前已同步到 origin commit** | `2b10ae3` (origin/main，v1.0.30 tag 之后 2 个未发布提交) |
 | **对应 origin tag**            | `v1.0.30`（最新 tag，指向 `bfd153c`） |
 | **桌面端版本号**               | `1.0.30001` |
-| **同步执行日期**               | 2026-08-20              |
+| **同步执行日期**               | 2026-08-21              |
 
-> 下次同步时，使用 `bfd153c` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline bfd153c..HEAD`）。
+> 下次同步时，使用 `2b10ae3` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 2b10ae3..HEAD`）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-08-21：同步 `bfd153c` -> `2b10ae3`（2 个 commit，安全 + openapi 修复）
+
+origin 仍为 `v1.0.30`（`2b10ae3` = v1.0.30 tag 之后 2 个未发布提交，无新 tag）；桌面端版本号不变 `1.0.30001`（本轮无 Rust 源码改动、无版本号变更，仅子模块指针前进 + 文档登记）。
+
+`cd mcphub-origin && git --no-pager log --oneline bfd153c..2b10ae3` 共 2 个 commit（`51dc8d1` #1058 + `2b10ae3` #1059）；`git diff --stat bfd153c..2b10ae3 -- frontend/ locales/` 为空（两 commit 均不触及前端/locales，只改 Node 后端 `src/clients/openapi.ts` + `src/services/sseService.ts` 及其测试）。
+
+**已同步到 desktop（前端 / locales）**
+
+无。两 commit 均不触及 `frontend/` 或 `locales/`。
+
+**已镜像到 desktop（Rust 后端）**
+
+无。经逐项评估，两个 commit 在桌面端 Rust 架构下均无对应落点（详见「未同步」），不需要 Rust 镜像。
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `51dc8d1` | fix(openapi): expose header parameters in generated MCP input schema (#1058) | **不同步** | 上游修复其 TS `OpenAPIClient.generateInputSchema` 漏掉 `in: header` 参数的问题（只发 path/query/body，header 参数如 Authorization/X-API-Key 不进 inputSchema，模型无法填写）。桌面端 OpenAPI 工具生成**完全委托** `rmcp-openapi` crate（`openapi_transport.rs::list_tools` → `server.tool_collection.to_mcp_tools()`），桌面自身不生成 inputSchema。核查 crate 0.31.3 源码 `tool_generator.rs:1448/1547`：`ParameterIn::Header` 参数已收集进 `header_params` 并逐个 `properties.insert(...)` 加入 inputSchema（字段名加 `header_` 前缀），即 crate 早已暴露 header 参数——上游 #1058 修复的 bug 在 crate 实现中本就不存在。桌面端无 inputSchema 生成层，无可镜像落点。 |
+| `2b10ae3` | fix(security): require full containment for scoped bearer keys on group routes (GHSA-454m-4vm6-842f) (#1059) | **不同步**（架构上桌面端已免疫，详见分析） | 上游修复 `sseService.isBearerKeyAllowedForRequest` 对 servers/custom 作用域 bearer key 在 group 路由上的「any-overlap」漏洞：原逻辑 `groupServerNames.some(name => allowedServers.includes(name))`——只要 group 里有**一个** server 在 key 的 `allowedServers` 里就放行整个 group，导致 servers 作用域 key 可越权访问 group 内其他 server。改为 `every`（全包含）+ 空 group 拒绝。桌面端 Rust bearer key group 鉴权走**不同路径**：`get_allowed_servers`（http_server.rs:394）把 `accessType=servers` 的 key 展开成 `allowed_servers` HashSet，再在 group 路由（`dispatch_mcp`/`list_group_tools`/`call_group_tool`）对 group 的**每个 server**逐个 `allowed.contains(&s.name)` 过滤——即只暴露 key 能访问的那些 server，未授权的 server 被过滤掉（而非「放行整个 group」）。因此桌面端不存在「一个 member 命中就放行全 group」的越权：servers 作用域 key 在 group 路由上只能看到 `allowed_servers ∩ group.servers`，secret-server 永远不在结果里。架构语义不同（上游是「整组放行/拒绝」二元判断；桌面是「逐 server 过滤暴露子集」），#1059 的越权前提在桌面端不成立，无需镜像。空 group 场景：桌面端 `accessible.is_empty() && allowed_opt.is_some()` → 403，与上游修复后的「空 group 拒绝」一致。 |
+
+**同步后验证**：本轮仅子模块指针 `bfd153c -> 2b10ae3` + AGENTS.md §4.3/§4.4 登记，无 Rust/frontend/locales 源码改动。`cargo check` / `npm run build` 状态与上一轮（`968abae`）一致，无需重跑。子模块内部工作树干净（`main` 分支，HEAD = `2b10ae3`，零改动），符合 §6「禁止修改 mcphub-origin 原始源文件」约束。
+
+---
 
 #### 2026-08-20：同步 `0249c73` -> `bfd153c`（2 个 commit，跨入 v1.0.30）
 
