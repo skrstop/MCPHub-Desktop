@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 19;
+pub const TARGET_VERSION: i64 = 20;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -123,6 +123,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         17 => migrate_v17(pool).await,
         18 => migrate_v18(pool).await,
         19 => migrate_v19(pool).await,
+        20 => migrate_v20(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -894,5 +895,16 @@ async fn add_column_if_missing(
     } else {
         log::debug!("[db] column {}.{} already exists, skip", table, column);
     }
+    Ok(())
+}
+
+/// v19 → v20: servers 表添加 proxy 列（Proxychains4 配置 JSON）。
+///
+/// 上游 #1055 引入 proxy 配置的 round-trip（前端编辑服务器时原样带回，
+/// 避免无表单编辑器的字段被静默丢弃并触发无谓重连）。桌面端跟随：模型
+/// 加 `proxy` 字段、DB 持久化该 JSON。
+async fn migrate_v20(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(pool, "servers", "proxy", "TEXT").await?;
+    log::info!("[db] migration v20: added proxy column to servers");
     Ok(())
 }

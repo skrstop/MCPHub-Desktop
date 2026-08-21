@@ -805,6 +805,12 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   if (command === 'delete_server' || command === 'toggle_server' || command === 'reload_server') {
     return { success: true };
   }
+  // check_stdio_updates returns { checked } — expose the count at the top level
+  // (not nested under data) so the frontend can read result.checked directly.
+  if (command === 'check_stdio_updates') {
+    const r = result as { checked?: number } | null;
+    return { success: true, checked: (r?.checked as number) ?? 0 };
+  }
 
   // ── Activity log commands ─────────────────────────────────────────────────
   if (command === 'get_activity_available') {

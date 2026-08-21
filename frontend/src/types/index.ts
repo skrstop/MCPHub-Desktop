@@ -398,8 +398,9 @@ export interface ServerConfig {
   headers?: Record<string, string>;
   passthroughHeaders?: string[];
   enabled?: boolean;
-  // Per-server visibility for non-admin users. See issue #817. 'group' reserved.
+  // Per-server visibility for non-admin users.
   visibility?: 'private' | 'group' | 'public';
+  sharedWithUsers?: string[];
   enableKeepAlive?: boolean; // Enable remote health checks and automatic reconnect attempts
   keepAliveInterval?: number; // Health check and reconnect interval in milliseconds (default: 60000ms)
   perSessionClient?: boolean; // Create a dedicated upstream client per downstream session instead of sharing one connection (for stateful servers like Playwright)
@@ -555,13 +556,17 @@ export interface ServerFormData {
   env: EnvVar[];
   headers: EnvVar[];
   passthroughHeaders?: string;
-  // Visibility for non-admin users. See issue #817. 'group' is reserved.
+  // Visibility for non-admin users.
   visibility?: 'private' | 'group' | 'public';
+  sharedWithUsers?: string[];
   options?: {
     timeout?: number;
     resetTimeoutOnProgress?: boolean;
     maxTotalTimeout?: number;
   };
+  // Proxychains4 proxy configuration for STDIO servers (Linux/macOS only).
+  // Round-tripped from the stored config so an edit does not drop it.
+  proxy?: ProxychainsConfig;
   keepAlive?: {
     enabled?: boolean;
     interval?: number;

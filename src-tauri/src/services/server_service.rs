@@ -1,6 +1,6 @@
 use crate::{
     db,
-    models::server::{OpenApiConfig, ServerConfig, ServerOptions, ServerType},
+    models::server::{OpenApiConfig, ProxychainsConfig, ServerConfig, ServerOptions, ServerType},
 };
 use anyhow::{anyhow, Result};
 use sqlx::Row;
@@ -30,7 +30,7 @@ fn encode_server_type(t: &ServerType) -> &'static str {
 
 pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled
          FROM servers WHERE enabled = 1",
     )
     .fetch_all(db::pool())
@@ -40,7 +40,7 @@ pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
 
 pub async fn list_all() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled
          FROM servers ORDER BY name",
     )
     .fetch_all(db::pool())
@@ -50,7 +50,7 @@ pub async fn list_all() -> Result<Vec<ServerConfig>> {
 
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled
          FROM servers WHERE name = ?",
     )
     .bind(name)
@@ -80,11 +80,12 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     }
     validate_combination(cfg)?;
     let id = Uuid::new_v4().to_string();
-    let args = cfg.args.as_ref().map(|a| serde_json::to_string(a)).transpose()?;
-    let env = cfg.env.as_ref().map(|e| serde_json::to_string(e)).transpose()?;
-    let headers = cfg.headers.as_ref().map(|h| serde_json::to_string(h)).transpose()?;
-    let options = cfg.options.as_ref().map(|o| serde_json::to_string(o)).transpose()?;
-    let openapi = cfg.openapi.as_ref().map(|o| serde_json::to_string(o)).transpose()?;
+    let args = cfg.args.as_ref().map(serde_json::to_string).transpose()?;
+    let env = cfg.env.as_ref().map(serde_json::to_string).transpose()?;
+    let headers = cfg.headers.as_ref().map(serde_json::to_string).transpose()?;
+    let options = cfg.options.as_ref().map(serde_json::to_string).transpose()?;
+    let openapi = cfg.openapi.as_ref().map(serde_json::to_string).transpose()?;
+    let proxy = cfg.proxy.as_ref().map(serde_json::to_string).transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
@@ -92,8 +93,8 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     let idle_timeout_ms = cfg.idle_timeout_ms.unwrap_or(0) as i64;
 
     sqlx::query(
-        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&cfg.name)
@@ -109,6 +110,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(per_session_client)
     .bind(start_on_demand)
     .bind(idle_timeout_ms)
+    .bind(&proxy)
     .bind(enabled)
     .execute(db::pool())
     .await
@@ -131,11 +133,12 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
         return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
     }
     validate_combination(cfg)?;
-    let args = cfg.args.as_ref().map(|a| serde_json::to_string(a)).transpose()?;
-    let env = cfg.env.as_ref().map(|e| serde_json::to_string(e)).transpose()?;
-    let headers = cfg.headers.as_ref().map(|h| serde_json::to_string(h)).transpose()?;
-    let options = cfg.options.as_ref().map(|o| serde_json::to_string(o)).transpose()?;
-    let openapi = cfg.openapi.as_ref().map(|o| serde_json::to_string(o)).transpose()?;
+    let args = cfg.args.as_ref().map(serde_json::to_string).transpose()?;
+    let env = cfg.env.as_ref().map(serde_json::to_string).transpose()?;
+    let headers = cfg.headers.as_ref().map(serde_json::to_string).transpose()?;
+    let options = cfg.options.as_ref().map(serde_json::to_string).transpose()?;
+    let openapi = cfg.openapi.as_ref().map(serde_json::to_string).transpose()?;
+    let proxy = cfg.proxy.as_ref().map(serde_json::to_string).transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
@@ -144,7 +147,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
 
     sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
-         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, enabled=?, updated_at=datetime('now') WHERE name=?",
+         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
     .bind(&cfg.name)
     .bind(server_type)
@@ -159,6 +162,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(per_session_client)
     .bind(start_on_demand)
     .bind(idle_timeout_ms)
+    .bind(&proxy)
     .bind(enabled)
     .bind(name)
     .execute(db::pool())
@@ -216,6 +220,11 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         .as_deref()
         .map(serde_json::from_str)
         .transpose()?;
+    let proxy: Option<ProxychainsConfig> = r
+        .try_get::<Option<String>, _>("proxy")?
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     Ok(ServerConfig {
         id: r.try_get("id")?,
         name: r.try_get("name")?,
@@ -228,6 +237,7 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         headers,
         options,
         openapi,
+        proxy,
         per_session_client: Some(r.try_get::<i64, _>("per_session_client")? != 0),
         start_on_demand: Some(r.try_get::<i64, _>("start_on_demand")? != 0),
         idle_timeout_ms: {

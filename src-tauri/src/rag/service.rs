@@ -1167,6 +1167,7 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
             per_session_client: None,
             start_on_demand: None,
             idle_timeout_ms: None,
+            proxy: None,
             enabled: true,
         },
         status: ServerStatus {

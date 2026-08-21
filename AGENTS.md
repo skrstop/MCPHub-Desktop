@@ -219,8 +219,12 @@ services/ (业务逻辑 = 原 services/)
 **文件**：`frontend/src/components/ServerForm.tsx`
 
 - 使用 mcphub-origin 的 `hub-*` 设计系统样式（`hub-card`, `hub-btn`, `hub-icon-btn` 等）
-- **表单结构采用上游 #1034 的 3 分区布局**（2026-08-13 同步）：Section 1 Basic Info / Section 2 Connection / Section 3 Advanced Options（可折叠，`isAdvancedExpanded` state）。桌面端在此结构上定点保留差异（见下）。
-- **隐藏了可见性选择器**（Private/Group/Public）——桌面端默认所有服务器为公开。上游 #1034 把 visibility 选择器放进 Section 3 Advanced Options 折叠区；桌面端**删除该选择器块**，仅留 `{/* Visibility section hidden in desktop client - all servers are public by default */}` 注释。
+- **表单结构采用上游 #1034 的 3 分区布局**（2026-08-13 同步，#1055 增量 2026-08-20）：Section 1 Basic Info（#1055 改为 3 列网格：name 1 格 / description 2 格）/ Section 2 Connection / Section 3 Advanced Options（可折叠，`isAdvancedExpanded` state）。桌面端在此结构上定点保留差异（见下）。
+- **`+` 按钮统一 hub 样式**（#1055）：env/header/env 的 `+` 按钮从 `bg-gray-200 hover:bg-gray-300 ... btn-primary` 改为 `hub-btn primary !w-[30px] !h-[30px] !p-0 justify-center text-base font-bold`（4 处）。
+- **OAuth2 ↔ OpenID Connect 配置块顺序调整**（#1055）：OpenID Connect 块移到 OAuth2 块之前（与上游一致）。
+- **passthrough headers + OAuth 配置移入 Advanced 分区按 serverType 路由**（#1055）：从 openapi/sse 分支内移出，Advanced 分区内统一块——`serverType === 'openapi'` 透传 `openapi.passthroughHeaders`，其余用 `formData.passthroughHeaders`；OAuth 折叠块仅 `serverType !== 'openapi'` 渲染。
+- **不镜像 cookieSession UI**：上游 #1047 体系的 OpenAPI cookie 持久化 toggle，桌面 `rmcp-openapi` 传输无 cookie 落点，注释隐藏（`{/* Cookie Session Handling - hidden ... */}`）。
+- **隐藏了可见性选择器**（Private/Group/Public）——桌面端默认所有服务器为公开。上游 #1054 把 group 改为「共享给指定用户」+ 候选 UI；桌面端**删除整个 visibility 选择器块 + sharedWithUsers 候选 UI**，仅留 `{/* Visibility section hidden in desktop client - all servers are public by default */}` 注释。
 - 可见性默认值从 `private` 改为 `public`
 - 保留桌面端新增的 OAuth2 完整配置（`oauth2TokenUrl`, `oauth2ClientId`, `oauth2ClientSecret`）
 - `getInitialServerType` 显式返回类型 `: 'stdio' | 'sse' | 'streamable-http' | 'openapi'` 并跳过 `builtin`（ServerForm 仅用于自定义 server）
@@ -628,7 +632,7 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 
 **版本号同步**
 
-四个版本源须保持一致（当前 `1.0.27001`）：
+四个版本源须保持一致（当前 `1.0.30001`）：
 
 - `src-tauri/tauri.conf.json`（应用版本，也是 `import.meta.env.PACKAGE_VERSION` 的来源——`vite.config.ts` 从此注入）
 - `src-tauri/Cargo.toml`
@@ -788,6 +792,10 @@ async fn migrate_v{N}(pool: &SqlitePool) -> Result<()> { ... }
 | v4   | `migrate_v4` | `0004_default_admin.sql`     | 默认 admin 用户                                                                                                              |
 | v5   | `migrate_v5` | `0005_default_skip_auth.sql` | 默认免登录                                                                                                                   |
 | v6   | `migrate_v6` | `0006_openapi_column.sql`    | servers 表添加 openapi 列                                                                                                    |
+| v7-v19 | `migrate_v7..v19` | （v7/v8/v13/v20 有对应 sql，其余无） | 活动日志 source_ip、per_session_client、start_on_demand/idle_timeout_ms、RAG 权重/端口默认值修正、skills 等（详见 `migration.rs` 源码） |
+| v20  | `migrate_v20` | `0020_server_proxy_column.sql` | servers 表添加 `proxy` 列（Proxychains4 配置 JSON，上游 #1055 proxy round-trip 落点）                                       |
+
+> 注：§3.5.5 的版本映射表为早期快照（仅到 v6），实际 `TARGET_VERSION` 已随历次镜像推进至 20。新增迁移以 `migration.rs` 源码与 `pub const TARGET_VERSION` 为准，本表仅补登 v20（本次同步引入）。
 
 ##### 新增迁移步骤（MUST FOLLOW）
 
@@ -1341,6 +1349,41 @@ PY
 - `content_path_for` 兼容两种命名，旧/新文档都能正确定位。
 - 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过；`npm run build` 通过。
 
+### 3.11 编辑服务器避免无谓重连 + proxy 持久化（origin #1055 镜像）
+
+> 镜像 origin `bfd153c`（PR #1055，= `v1.0.30` tag）。编辑服务器时，若只改了非连接相关字段（如 description），不再杀掉实时 MCP 连接 / 重启 stdio 子进程；同时把 `proxy`（Proxychains4）配置真正持久化，使前端 round-trip 生效。
+
+#### 3.11.1 连接相关字段比对（`update_server` 快路径）
+- **文件**：`src-tauri/src/commands/servers.rs::update_server`
+- 原 `update_server` 无条件 `disconnect_server` + 后台 `connect_server` —— 改个 description 也会断连重启。
+- 改为：先 `server_service::get_by_name(&name)` 取既有配置 → `has_connection_relevant_change(prev, next)` 比对 → 无连接相关变更时仅 `server_service::update` 持久化 + 保留实时连接（不 spawn 重连），日志 `[{}] update_server: no connection-relevant change, kept live runtime`；有变更或 `enabled` 改变才 `disconnect_server(&name)` + 后台 spawn 重连。
+- `starting` 状态按 `connection_relevant_changed` 派生（无变更时为 false）。
+- **rename 仍天然覆盖**：上游 #1055 另需 `closeServer(name)`（旧名）是因为其 `addOrUpdateServer` 按新名 close 才漏掉旧名进程；桌面端 `update_server` 开头就对旧名 `disconnect_server`，不存在该泄漏。
+- **`enabled` 故意保留在比对内**：通过 `update_server` 改 enabled（true→false）应断连，false→true 应重连，与历史行为一致（独立 `toggle_server` 走 `mcp_manager`，不受影响）。
+
+#### 3.11.2 `has_connection_relevant_change` 实现
+- 序列化整个 `ServerConfig` 为 JSON（`#[serde(rename_all="camelCase")]`）→ 剔除访问/元数据字段 `id`/`name`/`description`（visibility/owner/sharedWithUsers 桌面端 Rust 模型本就没有）→ 默认请求超时 `60000` 视为「未设置」（与上游 `toConnectionRelevantConfig` 一致：显式 60000 与 absent 比对为相等）→ `strip_nulls` 去掉 null（unset 与 null 比对为相等）→ 深比对两 JSON。
+- 留在比对内的连接相关字段：`type`/`url`/`command`/`args`/`env`/`headers`/`options`/`openapi`/`perSessionClient`/`startOnDemand`/`idleTimeoutMs`/`proxy`/`enableKeepAlive`/`keepAliveInterval`/`enabled`。
+
+#### 3.11.3 proxy 持久化（使前端 round-trip 生效）
+- **背景**：上游 #1055 前端 `serverFormPayload` 引入 `config.proxy = formData.proxy` round-trip（无表单编辑器，编辑任何字段都原样带回，避免丢字段触发重连）。但桌面端 Rust `ServerConfig` 此前无 `proxy` 字段，serde 默默丢弃前端发来的 `proxy` —— round-trip 名存实亡。
+- **模型**：`src-tauri/src/models/server.rs` 新增 `ProxychainsConfig`（`enabled`/`type`(rename `proxy_type`)/`host`/`port`/`username`/`password`/`config_path`，camelCase）+ `ServerConfig.proxy: Option<ProxychainsConfig>`。
+- **DB**：`db/migration.rs` `migrate_v20`（`add_column_if_missing servers proxy TEXT`，幂等）+ `TARGET_VERSION` 19 → 20 + `apply_migration` 加 `20 => migrate_v20`。配套 `migrations/0020_server_proxy_column.sql`。
+- **持久化**：`services/server_service.rs` 3 个 SELECT 列清单 + INSERT/UPDATE bind + `map_row` 读取 `proxy`（serde_json from_str）。
+- **字面量补齐**：`services/settings_import.rs` + `rag/service.rs` builtin 的 `ServerConfig` 补 `proxy: None`。
+- ⚠️ **运行时未消费**：桌面端 `mcp/stdio_transport.rs` 暂未 spawn proxychains（`grep proxy` 无命中），`proxy` 仅作配置存储 + round-trip，不实际路由流量。待后续 runtime 接入 proxychains 时落地。
+
+#### 3.11.4 边界
+- 不影响 `add_server`/`reload_server`/`reinstall_server`（仍各自后台 spawn 连接）。
+- `list_servers` 从 DB 重读 config，故仅改 description 的编辑在前端立即反映，无需重连。
+- 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0，11m45s）。
+
+#### 3.11.5 手动验证（计划）
+- 配一个已连接的 stdio server，编辑仅改 description 保存 → 状态不应变回 starting/connecting，子进程不重启，连接保持。
+- 编辑改 command → 应断开重连（旧进程关闭、新进程起）。
+- 编辑改 args（仅 stdio）→ 应重连。
+- 配一个带 `proxy` 的 server（API/导入 JSON 注入），编辑仅改 description 保存 → DB 中 `proxy` 列值不变（round-trip 生效），不触发重连。
+
 ---
 
 ---
@@ -1445,16 +1488,103 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `a8ace62` (origin/main，`v1.0.28` tag 之后 4 个未发布提交，无新 tag) |
-| **对应 origin tag**            | `v1.0.28`（最新 tag，指向 `98d51ce`） |
-| **桌面端版本号**               | `1.0.28002` |
-| **同步执行日期**               | 2026-08-14              |
+| **当前已同步到 origin commit** | `bfd153c` (origin/main，= `v1.0.30` tag) |
+| **对应 origin tag**            | `v1.0.30`（最新 tag，指向 `bfd153c`） |
+| **桌面端版本号**               | `1.0.30001` |
+| **同步执行日期**               | 2026-08-20              |
 
-> 下次同步时，使用 `a8ace62` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline a8ace62..HEAD`）。
+> 下次同步时，使用 `bfd153c` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline bfd153c..HEAD`）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
+
+#### 2026-08-20：同步 `0249c73` -> `bfd153c`（2 个 commit，跨入 v1.0.30）
+
+origin 从 `v1.0.29` 跨入 `v1.0.30`（`bfd153c` 精确指向 `v1.0.30` tag）；桌面端版本 `1.0.29001` -> `1.0.30001`。
+
+`cd mcphub-origin && git --no-pager log --oneline 0249c73..bfd153c` 共 2 个 commit（`244847e` #1054 + `bfd153c` #1055）；`git diff --stat 0249c73..bfd153c -- frontend/ locales/` 涉及 `ServerForm.tsx`（#1054+#1055）、`Button.tsx`/`EmbeddingSyncContext.tsx`/`serverFormPayload.ts`/`types/index.ts`/`serverVisibility.ts`/`tsconfig.json`（#1055）+ 4 个 locales（#1054），以及 Node 后端 `serverController.ts`/`mcpService.ts`/`dataService.ts`/`ServerDao*`/`ServerRepository.ts`/`smartRoutingService.ts`/`serverConfigPersistence.ts`/`migration.ts`/`routes/index.ts` + `db/entities/Server.ts`（#1054/#1055，评估镜像）。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `244847e` | feat: Implement group visibility and shared user functionality for servers (#1054) | 前端类型对齐（`types/index.ts`：`ServerConfig`/`ServerFormData`/`Server` 加 `sharedWithUsers?: string[]`，visibility 注释从「group 预留」改为「group = 指定用户共享」）。locales en/zh/fr/tr 各补齐 `visibility*` + `share*` 共 14 键（zh/en 更新 8 个旧键 + 新增 6 键；fr/tr 新增全 14 键），`group` 语义从「预留/分组」改为「共享给指定用户」。**但 `ServerForm` 的 visibility 选择器块、`sharedWithUsers` 候选 UI、`apiGet('/servers/:name/share-candidates')` 调用均不镜像**——桌面端隐藏可见性（所有 server 默认公开）、单用户免登录、Rust 无 share-candidates 端点，故前端只对齐类型/翻译（dormant），UI 不引入。 |
+| `bfd153c` | fix: avoid unnecessary runtime reloads when editing a server (#1055) | 前端 3 个自定义文件 + 3 个基线一致文件手动合并：① `ServerForm.tsx`（⚠️ 自定义文件手动合并，保留 3 处桌面差异：`getInitialServerType` 跳过 `builtin`、visibility 默认 `public`、删除 visibility 选择器块；同步上游 #1055 的 Basic Info 3 列网格（name 1 格 / description 2 格）、OAuth2↔OpenID Connect 配置块顺序调整（OpenID Connect 在前）、`+` 按钮统一改 `hub-btn primary`、passthrough headers + OAuth 配置从 openapi/sse 分支移入 Advanced 分区按 `serverType` 路由（openapi 透传 `openapi.passthroughHeaders`，其余用 `formData.passthroughHeaders`）；**不镜像 cookieSession UI**——桌面 `rmcp-openapi` 传输无 cookie 持久化，toggle 为 no-op，注释隐藏）；② `serverFormPayload.ts`（⚠️ 自定义文件手动合并：`buildOptions` timeout 改为始终回显 `typeof options.timeout === 'number'` 而非 `&& !== 60000`（避免触发后端连接变更误判）；`config.proxy = formData.proxy` round-trip；保留桌面差异——不发送 `visibility`/`sharedWithUsers`，perSessionClient/startOnDemand 按 serverType 分支）；③ `types/index.ts`（⚠️ 自定义文件：`ServerConfig` 加 `startOnDemand`/`idleTimeoutMs` 注释更新 + `sharedWithUsers`；`ServerFormData` 加 `sharedWithUsers` + `proxy?: ProxychainsConfig`）；④ `Button.tsx`（与基线一致，直接复制新版本：`onClick` 类型放宽为 `void | Promise<void>`，handleClick 检测 Promise 自动 setInternalLoading）；⑤ `EmbeddingSyncContext.tsx`（与基线一致，直接复制新版本：`const progress = data.progress` 收窄闭包持有，避免 TS narrowing 在 setTimeout 内丢失）；⑥ `serverVisibility.ts`（与基线一致，直接复制：group fallback `Group` -> `Shared`、`getServerVisibilityOptions` defaultValue `Group` -> `Shared`）。 |
+
+**已镜像到 desktop（Rust 后端）**
+
+| 来源 commit | 说明 | desktop 镜像方式 |
+| ----------- | ---- | ---------------- |
+| `bfd153c` | fix: avoid unnecessary runtime reloads when editing a server (#1055) | `commands/servers.rs::update_server` 重写为镜像上游 `hasConnectionRelevantChange`：先 `server_service::get_by_name(&name)` 取既有配置 -> 比对连接相关子集（序列化整个 `ServerConfig` 为 JSON 后剔除 `id`/`name`/`description` 等访问/元数据字段 + 默认超时 60000 视为未设置 + `strip_nulls` 归一）-> 无连接相关变更时仅持久化 + 保留实时连接（`pool::connect_server` 不触发），有变更或 enabled 改变才 `disconnect_server` + 后台 spawn 重连。`starting` 状态按 `connection_relevant_changed` 派生。rename 仍由开头 `disconnect_server(&name)`（旧名）天然覆盖（上游 #1055 另需 `closeServer(name)` 是因其 `addOrUpdateServer` 按新名 close 才漏，桌面无此问题）。 |
+| `bfd153c`（proxy round-trip 部分） | `ServerConfig` 新增 `proxy: Option<ProxychainsConfig>` 字段（`models/server.rs` 新增 `ProxychainsConfig` 结构体，camelCase 序列化，`type` rename 为 `proxy_type`）；`db/migration.rs` `migrate_v20`（`add_column_if_missing servers proxy TEXT`，幂等）+ `TARGET_VERSION` 19 -> 20 + `apply_migration` 加 `20 => migrate_v20`；`services/server_service.rs` 3 个 SELECT 列清单 + INSERT/UPDATE bind + `map_row` 读取 `proxy`；`services/settings_import.rs` + `rag/service.rs` builtin 的 `ServerConfig` 字面量补 `proxy: None`。使前端 `config.proxy` round-trip 真正生效（此前 serde 默默丢弃该字段，编辑任何字段都会丢 proxy 触发重连）。 |
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `244847e`（后端部分） | `serverController.ts`（`getServerShareCandidates` 端点 + `isAccessOnlyServerUpdate`）/`dataService.ts`（group 可见性过滤）/`ServerDao*`/`ServerRepository.ts`（`sharedWithUsers` 列与查询）/`mcpService.ts`（`getVisibleServerInfos` 按用户过滤）/`smartRoutingService.ts`/`db/entities/Server.ts`（`sharedWithUsers` 列）/`migration.ts`/`routes/index.ts` | **不同步** | 桌面端 Rust 无 `visibility`/`owner`/`sharedWithUsers` 概念（`server_service.rs` 无这些列）、单用户免登录架构（`SessionState` 始终 admin/None）、前端已隐藏可见性 UI 且不发送 visibility/sharedWithUsers。整套按用户过滤可见性 + share-candidates 端点属多用户特性，桌面端无对应架构。前端类型字段（`sharedWithUsers`）与 14 个 locale 键已对齐（dormant），待将来实现多用户时落地。 |
+| `bfd153c`（后端测试部分） | `tests/controllers/serverController.test.ts`（+298）/`tests/frontend/serverFormPayload.test.ts`/`serverLocales.test.ts`/`serverVisibility.test.ts` | **不同步** | 纯 Node/TS 测试；桌面端 Rust 无对应单测基建，#1055 的 Rust 镜像已通过 `cargo check` 验证编译。 |
+| `bfd153c`（`tsconfig.json`） | 移除 `ignoreDeprecations: "6.0"`、空白调整 | **不同步** | 桌面端 `tsconfig.json` 在 2026-08-04 同步（§记忆 dep-upgrade）时已主动加 `baseUrl`/移除 `ignoreDeprecations`，与上游目标一致但已本地化，无改动需要。 |
+| cookieSession（#1047 体系，`ServerForm.tsx` 上游块） | OpenAPI Set-Cookie 跨调用按下游 session 持久化 | **不同步** | 桌面端 `mcp/openapi_transport.rs` 经 `rmcp-openapi` crate，无 cookie 持久化注入点；2026-08-17 同步 #1047 时已决策「架构分歧无法镜像」。本次 `ServerForm` 合并保留 `cookieSession` 注释隐藏（toggle 无后端落点，为 no-op），不引入 UI。 |
+
+**同步后验证**：`cd frontend && npm run build` 通过（1.61s）；`cd src-tauri && ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0，11m45s，无 error/warning）。`npx tsc --noEmit` 错误数 27 -> 21（新 `Button.tsx` async onClick + `EmbeddingSyncContext.tsx` narrowing 修复消解 6 个既有错误，无新增；`ServersPage.tsx:36` 的 `handleServerVisibilityChange` 死引用为同步前既有，ServerCard visibility UI 在桌面端不渲染故运行时无影响）。桌面端自定义文件经 `diff -w` 核对：`ServerForm.tsx` 与 origin 仅余 3 处桌面差异（getInitialServerType builtin 跳过 / visibility 默认 public / visibility 选择器块删除）+ 故意保留的 cookieSession/visibility UI 删除；`serverFormPayload.ts`/`types/index.ts` 保留桌面端 perSessionClient/startOnDemand 分支与不发送 visibility 的差异。版本号已同步：`package.json` / `frontend/package.json` / `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml` / `Cargo.lock` 均已 `1.0.29001` -> `1.0.30001`；changelog `doc/upgrade/1.0.29001.md` -> `1.0.30001.md`。如需对 Cargo.lock 做正式复核，用 asdf/rustup cargo 1.96.0 + `ORT_SKIP_DOWNLOAD=1` + 本地代理 127.0.0.1:7890（cargo 不在 PATH）。
+
+---
+
+#### 2026-08-18：同步 `9fb73dd` -> `0249c73`（2 个 commit）
+
+origin 仍为 `v1.0.29`（`0249c73` = v1.0.29 tag 之后 2 个未发布提交，无新 tag）；桌面端版本号不变 `1.0.29001`（与 2026-08-17 同步共用同一待发布版本，上次同步的改动当时未提交，本次一并提供）。
+
+`cd mcphub-origin && git --no-pager log --oneline 9fb73dd..0249c73` 共 2 个 commit（`eabde16` #1052 + `0249c73` #1053）；`git diff --stat 9fb73dd..0249c73 -- frontend/ locales/` 涉及 `SettingsContext.tsx`/`SettingsPage.tsx`/`configService.ts`（#1053）+ 4 个 locales。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `0249c73` | feat(auth): make Better Auth base URL configurable in settings (#1053) | 前端 3 个自定义文件手动合并：`SettingsContext.tsx`（`BetterAuthConfig` 接口 + `getDefaultBetterAuthConfig` + `normalizeBetterAuthConfig` + `mergeBetterAuthConfig` 均加 `baseUrl`，默认 `''`）；`SettingsPage.tsx`（`tempBetterAuthConfig` state/初始值/useEffect 播种/`handleBetterAuthTextChange` key 联合类型/`handleSaveBetterAuthConfig` 差异检测与 `updates.baseUrl` 均加 `baseUrl`；UI 在「Enable Better Auth」开关卡与「Auth base path」卡片之间插入 Base URL 输入框，与上游位置一致）；`configService.ts`（顶层 `BetterAuthConfig` 接口加 `baseUrl?: string`，与上游改动点一致；`SystemConfig.auth.betterAuth` 嵌套内联接口上游未改，桌面端保持一致不改）。locales：en/zh/fr/tr 各加 `settings.betterAuthBaseUrl` + `betterAuthBaseUrlDescription` 2 键（用上游翻译，插在 `enableBetterAuthDescription` 与 `betterAuthBasePath` 之间，与上游顺序一致）。桌面端 Better Auth 区块在 Tauri 模式整段隐藏（`!isTauri()` 守卫保留），字段与翻译先行对齐，web 模式直接生效。 |
+
+**已镜像到 desktop（Rust 后端）**
+
+无。#1053 的后端改动（`src/betterAuth.ts`/`betterAuthConfig.ts`/`serverController.ts`）属 Node Better-Auth 社交登录体系，桌面端 Better Auth 集成在 §7 待办（未实现），Rust 侧无对应落点；`update_settings` 对未知 config 字段的透传由 `config_service::update` 深合并 JSON 兜底，前端发出的 `auth.betterAuth.baseUrl` 会被原样持久化、不丢失。
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `0249c73`（后端部分） | `src/betterAuth.ts`/`betterAuthConfig.ts`/`serverController.ts` + 3 个 Node 测试文件（#1053 后端） | **不同步** | Node Better-Auth 运行时配置解析（`BETTER_AUTH_URL` 环境变量优先、base URL 拼 redirect URI）；桌面端无 Better Auth 服务（§7 待办），无对应架构；前端 `baseUrl` 字段经 `config_service::update` 深合并持久化，不丢字段。 |
+| `eabde16` | chore: align license metadata with Apache-2.0 (#1052) | **不同步** | 仅改 origin `package.json` license 字段 + `docs/api-reference/openapi.json`；桌面端独立 npm 依赖图（4.1 策略 4），license 元数据非本仓库同步范围。 |
+
+**同步后验证**：`cd frontend && npm run build` 通过；locales 4 文件均通过 `JSON.parse` 校验，runtime* 键未受影响；无 Rust 源码改动（`cargo check` 无需重跑，版本号维持 1.0.29001 与上次同步一致）。
+
+---
+
+#### 2026-08-17：同步 `a8ace62` -> `9fb73dd`（4 个 commit）
+
+origin 从 `v1.0.28` 系列跨入 `v1.0.29`（`9fb73dd` 精确指向 `v1.0.29` tag）；桌面端版本 `1.0.28002` -> `1.0.29001`。
+
+`cd mcphub-origin && git --no-pager log --oneline a8ace62..9fb73dd` 共 4 个 commit（`3723946` #1046 + `a1bb974` #1047 + `8bb8334` #1048 + `9fb73dd` #1049 docs）；`git diff --stat a8ace62..9fb73dd -- frontend/ locales/` 非空（#1047 触及 origin `frontend/` 与各 `locales/`）。
+
+**已同步到 desktop（前端 / locales）**
+
+无。桌面 `frontend/` 为自研独立前端，不复用 origin `frontend/`；origin #1047 的前端改动属上游 TS ServerForm/locales，桌面无对应文件，不直接搬运。
+
+**已镜像到 desktop（Rust 后端）**
+
+无。本次 4 个 origin commit 均未镜像到 Rust：#1046/#1047/#1048 为 TS MCP-SDK / axios 特定实现，桌面 OpenAPI 走 `rmcp-openapi` crate、MCP 传输层无 OAuth provider，架构分歧无可镜像落点（详见「未同步」）；#1049 为纯 README 文档。
+
+**未同步（经评估无需 / 无法同步）**
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `3723946` | fix(oauth): restore 401 auto-discovery for URL-only Streamable HTTP servers (#1046) | **不同步** | 上游为 TS MCP SDK 的 `createOAuthProvider`（`authProvider` 挂载 → SDK 拦截 401 挑战做 OAuth 发现）。桌面端 MCP 传输层（`mcp/http_transport.rs`、`sse_transport.rs`）无 OAuth provider 实现，`src-tauri/src` 全局无 oauth/cookie 相关代码，无可镜像落点。 |
+| `a1bb974` | feat(openapi): persist Set-Cookie across calls per downstream session (#1047) | **不同步** | API 调用路径走 `rmcp-openapi` crate，cookie 持久化由该 crate 决定，桌面无法在外层注入按 sessionId 隔离的 CookieJar；spec 拉取路径用裸 `reqwest::Client::new()`，无登录态流程，不涉及 Set-Cookie 持久化。架构分歧，无法直接镜像。 |
+| `8bb8334` | fix(openapi): authenticate spec document download with configured credentials (#1048) | **不同步** | 上游把 spec 下载改走带 `setupSecurity` 凭据 + `maxRedirects:0` + SSRF 校验的 `httpClient`，属 TS axios + 上游自有 SSRF/安全方案体系。桌面 `openapi_transport.rs::fetch_spec` 用裸 `reqwest::Client::new()` 只发 `config.headers`，确有同源隐患（spec URL 需鉴权时拉不到），但完整移植需引入 cookie/OAuth2/SSRF 一套（与上游 `utils/ssrf.ts`、`setupSecurity` 对应的桌面实现尚无），属 feature 级工作而非 fix 镜像。本轮不做，留作独立任务评估；如需缓解，最小补丁是让 `fetch_spec` 在拉 spec 时也注入 `OpenApiSecurity` 凭据（ApiKey cookie / OAuth2 token）。 |
+| `9fb73dd` | docs: fix broken star history chart (#1049) | **不同步** | 纯 README 文档，对桌面构建无影响。 |
+
+**同步后验证**：本次仅版本号 + 子模块指针 + 文档同步，无 Rust 源码改动。`src-tauri/Cargo.toml`/`Cargo.lock` 仅 `mcphub` 包 `version` 行 `1.0.28002`->`1.0.29001`（元数据，不影响编译）。版本号已同步：`package.json` / `frontend/package.json` / `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml` / `Cargo.lock` 均已 `1.0.28002` -> `1.0.29001`；changelog `doc/upgrade/1.0.28002.md` -> `1.0.29001.md`（内容回退为桌面端自有功能/修复，撤去先前误加的 #1046/#1047/#1048「镜像上游」条目——三者未实际镜像）。如需对 Cargo.lock 做正式 `cargo check` 复核，用 asdf/rustup cargo 1.96.0 + `ORT_SKIP_DOWNLOAD=1` 离线执行（详见本地构建记忆：本地代理 127.0.0.1:7890、cargo 不在 PATH）。
+
+---
 
 #### 2026-08-14：同步 `0e8fed0` -> `a8ace62`（2 个 commit）
 
@@ -1732,9 +1862,10 @@ npm run build
 - [X]  更新检查日志（`log_event` Tauri command 写入 `app_log`，前端 `[update]` 全流程日志：检查/新版本/已最新/失败/安装；日志页按来源 `update` 可过滤；详见 3.4.7）
 - [X]  release notes Markdown 渲染（`Markdown` 组件 react-markdown+remark-gfm；notes 即 `doc/upgrade/{version}.md` 全文；详见 3.4.7）
 - [X]  安装进度可视化（下载百分比进度条 + 已下载/总字节 + 实时下载速度 EMA；安装阶段 indeterminate spinner；按钮文案随阶段切换；详见 3.4.8）
-- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.27001；详见 3.4.7）
+- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.30001；详见 3.4.7）
 - [X]  stdio 服务器按需启动（startOnDemand：跳过启动连接、首次工具调用懒建进程、空闲超时自动关闭、缓存工具保留；详见 3.8）
 - [X]  stdio 连接错误包含上游 stderr（`stderr_tail` 滚动缓存拼接进 handshake 失败 error；详见 3.9）
+- [X]  编辑服务器避免无谓重连 + proxy 持久化（镜像上游 #1055：`update_server` 比对连接相关字段，仅访问/元数据变更时保留实时连接；`ServerConfig.proxy` + DB v20 持久化使前端 round-trip 生效；详见 3.11）
 
 ### 待办
 
