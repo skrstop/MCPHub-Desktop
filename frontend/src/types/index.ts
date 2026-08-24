@@ -260,6 +260,17 @@ export interface RagDoc {
   /** Number of chunks indexed (0 if indexed before this field existed). */
   chunkCount?: number;
   fileType?: string;
+  /** Import method: "symlink" | "copy" | "" (legacy). */
+  method?: string;
+  /** Original imported file path (empty for legacy copy docs). */
+  originalPath?: string;
+  /** True iff the recorded originalPath is missing on disk (both symlink +
+   *  copy count — the ⚠️ badge + auto-update skip apply to both). */
+  lostOriginal?: boolean;
+  /** True iff the doc's content is readable right now (symlink = original
+   *  exists; copy = the rag/files copy exists). View/open-location are gated
+   *  on this — a copy doc whose original vanished still has its copy. */
+  contentAvailable?: boolean;
 }
 
 // Document metadata for the list view (no content).
@@ -277,8 +288,47 @@ export interface RagDocInfo {
   version: number;
   /** The actual on-disk filename (uuid for uploads, meta.name for
    *  rag_file_create) — shown under the display name so the user can match the
-   *  file when its folder is opened (reveal-in-file-manager). */
+   *  file when its folder is opened (reveal-in-file-manager). Empty for
+   *  "symlink" docs (no copied file). */
   fileName: string;
+  /** Import method: "symlink" | "copy" | "" (legacy). */
+  method?: string;
+  /** Original imported file path (empty for legacy copy docs). */
+  originalPath?: string;
+  /** MD5 (hex) of the source content captured at import time. */
+  md5?: string;
+  /** True iff the recorded originalPath is missing on disk (both symlink +
+   *  copy count — the ⚠️ badge + auto-update skip apply to both). */
+  lostOriginal?: boolean;
+  /** True iff the doc's content is readable right now (symlink = original
+   *  exists; copy = the rag/files copy exists). View/open-location are gated
+   *  on this — a copy doc whose original vanished still has its copy. */
+  contentAvailable?: boolean;
+}
+
+/** Single-doc update check result (drives the per-row UpdateDialog branches). */
+export interface RagUpdateCheck {
+  /** "symlink" | "copy" | "" (legacy). */
+  method: string;
+  /** False for legacy docs that predate originalPath. */
+  hasOriginalPath: boolean;
+  /** True iff the recorded originalPath exists on disk now. */
+  originalExists: boolean;
+  /** False for legacy docs that predate md5. */
+  hasMd5: boolean;
+  /** True iff source exists AND its current md5 differs from the stored md5
+   *  (or there's no stored md5 -> treat as "has update" for legacy). */
+  originalChanged: boolean;
+  /** True iff symlink method + originalPath missing (UI: manual-upload only). */
+  lostOriginal: boolean;
+}
+
+/** Batch-update preview counts (shown in the confirm dialog). */
+export interface BatchPreview {
+  total: number;
+  toUpdate: number;
+  skipped: number;
+  lost: number;
 }
 
 // RAG search settings: weights applied to hybrid search scoring.
@@ -364,6 +414,23 @@ export interface RagUploadResult {
 export interface RagTagStat {
   tag: string;
   fileCount: number;
+}
+
+// A page of tag-search results from the backend paginated query.
+export interface RagTagPage {
+  items: RagTagStat[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+// A page of doc-search results from the backend paginated query (the file
+// list's toolbar search / tag filter).
+export interface RagDocPage {
+  items: RagDocInfo[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 // A file picked from the OS file dialog (by path) — the backend reads bytes
@@ -1018,4 +1085,42 @@ export interface GroupCost {
   totalCount: number;
   direct: { exposed: number; gross: number };
   smartRouting: SmartRoutingCost | null;
+}
+
+// ── Backend paginated search result pages (SQL-level LIMIT/OFFSET) ──
+
+export interface ServerPage {
+  items: Server[];
+  total: number;
+  /** 1-based for servers (matches the dashboard list). */
+  page: number;
+  pageSize: number;
+}
+
+export interface GroupPage {
+  items: Group[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface PromptPage {
+  items: BuiltinPrompt[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface ResourcePage {
+  items: BuiltinResource[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface SkillPage {
+  items: Skill[];
+  total: number;
+  page: number;
+  pageSize: number;
 }

@@ -1386,6 +1386,68 @@ PY
 
 ---
 
+### 3.12 RAG 文件导入方式（软链接 / 文件拷贝）+ md5 更新检测 + 批量更新（桌面端独有）
+
+> RAG 文档导入支持选择「软链接」（默认，只记 `original_path` 不拷贝实体）或「文件拷贝」（复制到 `rag/files`），并加 md5 内容指纹做更新检测 + 单条/批量更新流程。详见 `doc/rag_import_method_20260821.md`。
+
+#### 3.12.1 数据模型（DocMeta + 序列化模型）
+- **文件**：`src-tauri/src/rag/service.rs` `DocMeta` 加 `#[serde(default)] method: Option<String>`（`"symlink"`/`"copy"`，None=老版本/拷贝兜底）、`original_path: Option<String>`、`md5: Option<String>`。字段进 meta JSON，**不进 DB 列**（RAG 文档不进 DB 表），无需迁移。
+- **文件**：`src-tauri/src/models/rag.rs` `RagDocInfo`/`RagDoc` 加 `method`/`original_path`/`md5`/`lost_original`/`content_available`（camelCase，`#[serde(default)]`）；新增 `RagUpdateCheck`（method/hasOriginalPath/originalExists/hasMd5/originalChanged/lostOriginal）+ `BatchPreview`（total/toUpdate/skipped/lost）。`lost_original`（两种 method 都算丢失：`has_original_path && !original_exists`，用于 ⚠️ 徽章 + 批量跳过）；`content_available`（内容现在是否可读：symlink=原始存在、copy=拷贝存在，**决定查看/打开置灰**--copy 原始丢失但拷贝在 -> 查看仍可用，仅无法自动更新）。
+- **依赖**：`src-tauri/Cargo.toml` 加 `md-5 = "0.10"`；新增 `compute_md5(bytes)`/`md5_of_file(path)`/`classify_original(meta) -> RagUpdateCheck` helper（集中三条老版本兼容规则：无 method→copy、无 original_path→hasOriginalPath=false、无 md5→originalChanged=true if exists）。
+
+#### 3.12.2 上传 / 导入方式
+- **文件**：`src-tauri/src/commands/rag.rs` `upload_rag_doc(app, file_path, tags, method: Option<String>)`（`method` 缺省默认 `"symlink"`）。
+- `upload_one_path`/`upload_one_path_inner` 增 `method` 入参：**symlink** 不 `std::fs::write` 拷贝、直接用读到的 raw 走 `reindex_doc`、meta 记 `method=Some("symlink")`/`original_path`/`md5`、不落 `{id}.{ext}`；**copy** 维持现状并补记 `original_path`/`md5`。
+- `write_doc_and_index` 签名增 `method`/`original_path`/`md5`（`write_content = method != "symlink"`）；`rag_file_create`（无源文件）记 `method=copy`/`md5`/无 original_path。
+- `list_docs`/`get_doc`：symlink 的 `file_name` 为空、content 从 `original_path` 读；计算 `lost_original = has_original_path && !original_exists` + `content_available`（symlink=原始存在；copy=拷贝存在）。
+
+#### 3.12.3 删除 / 打开 / 查看 / 丢失检测
+- `delete_doc`：读 meta，**symlink 跳过删 content 候选**（只删 meta + 向量 + tag stats，原始文件不动）；copy 维持现状（删 content + meta + 向量）。
+- `open_file_location`：symlink 且 `original_path` 存在 → `reveal_in_file_manager(original_path)`；不存在 → `Err("original file does not exist")`；copy → reveal `rag/files` 拷贝。
+- `get_doc`：symlink 从 `original_path` 读（lost 返回空 content）；`reindex_all`：symlink 从 `original_path` 读、丢失则跳过。
+- `update_doc`（rag_file_update 工具）：⚠️ **symlink 只读**--`content.is_some()` 时直接 Err（防 MCP 工具覆盖用户原始文件）；丢失 symlink 的 tag-only 更新跳过重索引（防空内容清空向量，chunks 保留旧 tags）；copy 文档 content 变更时刷新 `meta.md5`。
+
+#### 3.12.4 单条更新弹框逻辑
+- 新增 `update_doc_from_original(app, id)`（`mode="original"`：从 `meta.original_path` 读字节重新索引 + 刷新 md5 + copy 重写拷贝文件 + version+1；无 original_path / 源丢失 → Err）。
+- `update_doc_from_file`（`mode="file"` 手传）：读新 file_path，**记新 `original_path=Some(file_path)` + `md5`**（兼容老版本「新上传需记原始地址」）；method 沿用 meta，老版本 method=None 补 `Some("copy")`。
+- 新增命令 `check_rag_update(app, id) -> RagUpdateCheck`（调 `classify_original`，供前端弹框分支）。
+
+#### 3.12.5 批量更新异步任务
+- 新增 `preview_batch_update(app) -> BatchPreview`（同步快速扫描分类统计，供前端确认框）。
+- 新增 `batch_update_rag_docs(app)`：`tauri::async_runtime::spawn` 后台 `run_batch_update`——逐条 `classify_original`，changed 则 `update_doc_from_original` 重新索引，lost / 无 original_path 跳过。
+- `static BATCH_UPDATE_RUNNING: AtomicBool` CAS 守卫（已 running 时再触发 no-op，前端按钮再点只重开弹框）；spawn task 内 RAII guard（Drop 复位，panic 也恢复）+ Err 分支发 `phase="error"` 事件（前端清 running 并显示失败态，**不是** done--避免失败显示绿色完成）。
+- 发 `rag://batch-update-progress` 事件 `{ current, total, name, phase: "checking"|"reindexing"|"done" }`（char 级子进度复用 `rag://upload-progress`）。
+- 命令注册 `lib.rs`：`check_rag_update`/`preview_batch_update`/`batch_update_rag_docs`；`upload_rag_doc` 加 `method`；`update_rag_doc` 改 `mode`/`file_path`。
+
+#### 3.12.6 前端
+- `types/index.ts`：`RagDoc`/`RagDocInfo` 加 `method?`/`originalPath?`/`md5?`/`lostOriginal?`；新增 `RagUpdateCheck`/`BatchPreview`。
+- `ragService.ts`：`uploadRagDoc(filePath, tags, method)`；`updateRagDoc(id, {mode, filePath?})`；新增 `checkRagUpdate`/`previewBatchUpdate`/`batchUpdateRagDocs`。
+- `tauriClient.ts`：新增 `/rag/docs/check-update`/`/rag/docs/batch-preview`/`/rag/docs/batch-update` 路由；`/rag/docs/upload` 带 `method`；`/rag/docs/update` 改 `{id, mode, filePath}`。
+- `useRagData.tsx`：`upload(files, tags, method)`；`updateDoc(id, name, {mode, filePath})`；新增 `checkUpdate`/`getBatchPreview`/`batchUpdate`/`batchUpdateRunning`/`batchProgress`；监听 `rag://batch-update-progress`（done 时清 running + refetch）。
+- `RagPage.tsx`：
+  - 上传弹窗 `UploadDialog`：导入方式**分段切换**（仿 skill InstallDialog toggle，非 radio）+ `RagMethodHelpIcon`（悬浮/点击 popover）**标题+帮助+切换器同行**；默认 `symlink`。
+  - 列表行：method 徽章（`Link2`/`Copy`，hover 原始地址）+ `lostOriginal` ⚠️「原始丢失」标记；**仅「查看」「打开文件夹」按钮置灰**（`hub-icon-btn:disabled` CSS 已补），分片/更新/向量不受影响。
+  - 单条更新 `UpdateDialog`：调 `checkUpdate` 后按分支渲染（丢失→手动上传为主按钮；有更新→「从原始」+「手动上传」；无更新→提示+手动上传；老版本无 original_path→仅手动上传+兼容提示）；`runUpdateAction` 调 `updateDoc(mode)`。
+  - 头部右上「批量更新」按钮：未运行调 `getBatchPreview` 弹 `BatchUpdateConfirmDialog`（2×2 统计）→ 确认后 `batchUpdate` 启动后台；运行中文字变「查看进度」+ spinner → 重开进度弹框；`BatchUpdateDialog` 用**上传同款双进度条**（文件进度 + 向量进度），可关闭（不中断后台）。
+  - `TagSearchSelect`：标签**可搜索的多选下拉框**（输入过滤 + 复选 + 已选 chip + 清除），多选 OR 与文件名搜索 AND 联合；选项列表 `maxHeight:200` + `overscrollBehavior:contain`。
+  - 「文档上传」文案统一改「文档导入」（按钮/弹框标题/确认/失败/进度）。
+- `index.css`：补 `.hub-icon-btn:disabled`（`opacity:0.45`/`cursor:not-allowed`）+ `:disabled:hover` 还原。
+
+#### 3.12.7 边界 / 兼容
+- 旧 `.meta` 无 `method`/`original_path`/`md5` → `#[serde(default)]` 兼容；`classify_original` 对「无 md5→有更新」「无 original_path→走手传兼容分支」先于一切判断；单条手动上传后**必须回写 original_path+md5**，否则下次仍是老版本语义。
+- 软链接文档在 `rag/files/` 下**无实体文件**（只存 meta），上传/索引/查看直接从 `original_path` 读字节。
+- 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过（md-5 v0.10.6）；`npm run build` 通过。
+- 版本：`1.0.30001 → 1.0.30002`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json / Cargo.lock）。
+
+#### 3.12.8 并发与原子性（六轮复核加固）
+- **META_LOCK 顺序锁**：`static META_LOCK: OnceLock<Mutex<()>>` + `meta_lock()` helper。`update_doc_from_original`/`update_doc_from_file`/`update_doc`(rag_file_update)/`delete_doc`/`set_doc_tags` 全程持锁，串行化 meta 读-改-写，根治「批量+单条更新交错写」「批量+删除已删文档复活」两个竞争。**锁序恒为 meta -> runtime**（持 META 后再 await reindex_doc/runtime lock），严禁反向（ABBA 死锁）。
+- **`write_meta_atomic(meta_path, &meta)`**：写 `{id}.meta.tmp` + rename 原子替换；崩溃/抢占不可能留下半截 JSON。`.meta.tmp` 扩展名为 tmp，所有扫描器（按 `ext=="meta"` 过滤）天然跳过。`write_doc_and_index`/`update_doc`/`set_doc_tags`/`reindex_all` 的 meta 写全部走此函数。
+- **`list_docs` skip 语义**：坏/半截 meta 跳过（`let Ok(..) else { continue }`），与 `recompute_tag_stats`/`run_batch_update`/`preview_batch_update`/`reindex_all`/`find_doc_ids_by_name` 全部扫描器一致--一条坏 meta 不再拖垮整个列表（曾因 `?` 传播导致全列表清空）。
+- **批量进度 error phase**：`rag://batch-update-progress` 的 phase 增加 `"error"`（任务早期失败）；前端 useRagData 接受并清 running（不 refetch），BatchUpdateDialog 渲染 ⚠️ 失败态。
+- **i18n**：`batchUpdateFailed`/`contentUnavailableView`/`contentUnavailableOpen` 三个新键（4 语言，rag keys=179）。「查看/打开」置灰 tooltip 用通用文案（覆盖 symlink 原始丢失与 copy 拷贝丢失两种成因）。
+
+---
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录

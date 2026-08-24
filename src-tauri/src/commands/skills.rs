@@ -5,7 +5,7 @@
 //! - 2.4–2.6 commands added later; see `doc/agent_20260724.md` §3.8.
 
 use crate::{
-    models::skill::{ExportResultItem, ImportItem, ImportSummary, Skill, SkillAgent, ScannedSkill},
+    models::skill::{ExportResultItem, ImportItem, ImportSummary, Skill, SkillAgent, ScannedSkill, SkillPage},
     services::skill_service,
 };
 use tauri::AppHandle;
@@ -47,6 +47,21 @@ pub async fn scan_skills_for_import(app: AppHandle) -> Result<Vec<ScannedSkill>,
 #[tauri::command]
 pub async fn list_skills(app: AppHandle) -> Result<Vec<Skill>, String> {
     skill_service::list_library(&app).await.map_err(|e| e.to_string())
+}
+
+/// Paginated library-skill search for the Skills page's toolbar:
+/// `search_key` (dir_name/name/description substring, empty = all),
+/// status='ok', `ORDER BY dir_name`. `page` is 0-based.
+#[tauri::command]
+pub async fn search_skills(
+    app: AppHandle,
+    search_key: String,
+    page: u32,
+    page_size: u32,
+) -> Result<SkillPage, String> {
+    skill_service::search_library_paged(&app, &search_key, page, page_size)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Get a single skill (with its exports) by id. Errors if not found or its

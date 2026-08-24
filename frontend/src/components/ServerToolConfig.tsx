@@ -503,7 +503,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
             onChange={(e) => setServerSearch(e.target.value)}
             className="flex-1 bg-transparent outline-none text-[13px]"
             style={{ color: 'var(--hub-ink)' }}
-            placeholder={t('market.searchPlaceholder') || 'Search…'}
+            placeholder={t('server.searchPlaceholder') || 'Search…'}
           />
           {serverSearch && (
             <button type="button" onClick={() => setServerSearch('')} className="hub-icon-btn sm">

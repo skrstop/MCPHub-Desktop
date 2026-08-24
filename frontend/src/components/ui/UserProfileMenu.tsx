@@ -15,10 +15,12 @@ interface UserProfileMenuProps {
 const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { auth, logout } = useAuth();
+  const { auth, logout, exitGuestMode } = useAuth();
   const { showUpdateBadge, openAbout } = useUpdateCheck();
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const isGuest = auth.skipAuth === true;
 
   // Close the menu when clicking outside
   useEffect(() => {
@@ -40,10 +42,16 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed }) => {
   };
 
   const handleLogoutClick = () => {
+    if (isGuest) {
+      // Guest mode exit: disable skipAuth server-side, skip the Better Auth
+      // sign-out HTTP call (no backing server in the desktop app → would
+      // fail with ECONNREFUSED). Navigate to /login after state clears.
+      exitGuestMode().finally(() => navigate('/login'));
+      return;
+    }
     logout();
     navigate('/login');
   };
-
   const handleAboutClick = () => {
     openAbout();
     setIsOpen(false);
@@ -100,7 +108,7 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed }) => {
             className="flex items-center w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
           >
             <LogOut className="h-4 w-4 mr-2" />
-            {t('app.logout')}
+            {isGuest ? t('app.exitGuestMode') : t('app.logout')}
           </button>
         </div>
       )}

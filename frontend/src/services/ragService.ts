@@ -8,8 +8,12 @@ import {
   RagSearchResult,
   RagStatus,
   RagTagStat,
+  RagTagPage,
+  RagDocPage,
   RagModelLimits,
   RagModelInfo,
+  RagUpdateCheck,
+  BatchPreview,
   ApiResponse,
 } from '@/types';
 
@@ -61,29 +65,92 @@ export const pickRagFiles = async (): Promise<RagPickedFile[]> => {
 };
 
 /**
+ * Open the OS folder picker, scan the folder's immediate (non-recursive) file
+ * children, and return them as import candidates — same shape as pickRagFiles
+ * so the rest of the upload pipeline (per-file upload + progress) is identical.
+ * Hidden files + sub-directories are skipped by the backend.
+ */
+export const pickRagFolder = async (): Promise<RagPickedFile[]> => {
+  const response: ApiResponse<RagPickedFile[]> = await apiPost('/rag/docs/pick-folder', {});
+  if (!response.success) throw new Error(response.message || 'Failed to pick folder');
+  return response.data || [];
+};
+
+/**
  * Upload a single plain-text document by disk path. The backend reads the
  * bytes from disk, detects + converts the encoding to UTF-8, then chunks +
  * embeds + indexes. The frontend loops over the picked paths, calling this
- * once per file for per-file progress.
+ * once per file for per-file progress. `method` selects the import method:
+ * "symlink" (default — record original_path, no copy) or "copy".
  */
-export const uploadRagDoc = async (filePath: string, tags: string[] = []): Promise<void> => {
-  const response: ApiResponse = await apiPost('/rag/docs/upload', { filePath, tags });
+export const uploadRagDoc = async (
+  filePath: string,
+  tags: string[] = [],
+  method: 'symlink' | 'copy' = 'symlink',
+): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/docs/upload', { filePath, tags, method });
   if (!response.success) throw new Error(response.message || 'Failed to upload RAG doc');
 };
 
-/** Delete a document: removes its files + vector DB records. */
+/** Delete a document: removes its files + vector DB records. For "symlink"
+ *  docs the original file is left untouched (only meta + vectors removed). */
 export const deleteRagDoc = async (id: string): Promise<void> => {
   const response: ApiResponse = await apiPost('/rag/docs/delete', { id });
   if (!response.success) throw new Error(response.message || 'Failed to delete RAG doc');
 };
 
-/** Update an existing document in place: pick a new file, overwrite its content
- *  + meta (id preserved, tags preserved) + re-embed its vectors. Returns the
- *  new chunk count. Requires RAG enabled (re-embeds). */
-export const updateRagDoc = async (id: string, filePath: string): Promise<number> => {
-  const response: ApiResponse<number> = await apiPost('/rag/docs/update', { id, filePath });
+/** Update an existing document in place.
+ *  - mode='original': re-read the recorded original_path + re-index (the "from
+ *    original" button). filePath is ignored.
+ *  - mode='file': read a freshly-picked filePath + overwrite (the "manual
+ *    upload" button). The new file becomes the recorded original_path.
+ *  Returns the new chunk count. Requires RAG enabled (re-embeds). */
+export const updateRagDoc = async (
+  id: string,
+  opts: { mode: 'original' | 'file'; filePath?: string },
+): Promise<number> => {
+  const response: ApiResponse<number> = await apiPost('/rag/docs/update', {
+    id,
+    mode: opts.mode,
+    filePath: opts.filePath ?? '',
+  });
   if (!response.success) throw new Error(response.message || 'Failed to update RAG doc');
   return response.data ?? 0;
+};
+
+/** Single-doc update check: classify the recorded original's state (lost /
+ *  changed / no-change / legacy-no-path) so the UpdateDialog renders the right
+ *  branch. Cheap (one md5 of the source, no embedding). */
+export const checkRagUpdate = async (id: string): Promise<RagUpdateCheck> => {
+  const response: ApiResponse<RagUpdateCheck> = await apiPost('/rag/docs/check-update', { id });
+  if (!response.success) throw new Error(response.message || 'Failed to check RAG update');
+  return (
+    response.data ?? {
+      method: '',
+      hasOriginalPath: false,
+      originalExists: false,
+      hasMd5: false,
+      originalChanged: false,
+      lostOriginal: false,
+    }
+  );
+};
+
+/** Batch-update preview: aggregate counts (total / toUpdate / skipped / lost)
+ *  over all docs, shown in the confirm dialog before the expensive re-index
+ *  pass runs. No embedding. */
+export const previewBatchUpdate = async (): Promise<BatchPreview> => {
+  const response: ApiResponse<BatchPreview> = await apiPost('/rag/docs/batch-preview', {});
+  if (!response.success) throw new Error(response.message || 'Failed to preview batch update');
+  return response.data ?? { total: 0, toUpdate: 0, skipped: 0, lost: 0 };
+};
+
+/** Run the batch update in the background: re-index every doc whose source
+ *  changed. Returns immediately; progress arrives via the
+ *  `rag://batch-update-progress` event. Guarded against double triggers. */
+export const batchUpdateRagDocs = async (): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/docs/batch-update', {});
+  if (!response.success) throw new Error(response.message || 'Failed to start batch update');
 };
 
 /** Set the absolute tag list for a document (re-indexes its chunks). */
@@ -99,11 +166,50 @@ export const searchRagDocs = async (query: string, tags: string[] = []): Promise
   return response.data || [];
 };
 
-/** List/search distinct tags in the RAG library. Empty `searchKey` returns all. */
+/** List/search distinct tags in the RAG library. Empty `searchKey` returns all.
+ *  Unbounded — kept for the MCP tool / legacy callers; the UI dropdowns use
+ *  `ragTagSearchPaged` instead. */
 export const ragTagSearch = async (searchKey: string[] = []): Promise<RagTagStat[]> => {
   const response: ApiResponse<RagTagStat[]> = await apiPost('/rag/tags/search', { searchKey });
   if (!response.success) throw new Error(response.message || 'Failed to search RAG tags');
   return response.data || [];
+};
+
+/** Paginated tag search backing the searchable dropdowns. `page` is 0-based.
+ *  Returns one page of items + the total matching count so the UI can load
+ *  more pages / stop fetching. */
+export const ragTagSearchPaged = async (
+  searchKey: string,
+  page: number,
+  pageSize: number,
+): Promise<RagTagPage> => {
+  const response: ApiResponse<RagTagPage> = await apiPost('/rag/tags/search-paged', {
+    searchKey,
+    page,
+    pageSize,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to search RAG tags');
+  return response.data ?? { items: [], total: 0, page, pageSize };
+};
+
+/** Paginated document search backing the file list's toolbar (name substring +
+ *  ANY-match tag filter), executed in SQL over the rag_docs mirror table.
+ *  `page` is 0-based; returns one page of enriched RagDocInfo + the total
+ *  matching count so the UI can load more pages / stop fetching. */
+export const ragDocSearchPaged = async (
+  searchKey: string,
+  tags: string[],
+  page: number,
+  pageSize: number,
+): Promise<RagDocPage> => {
+  const response: ApiResponse<RagDocPage> = await apiPost('/rag/docs/search-paged', {
+    searchKey,
+    tags,
+    page,
+    pageSize,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to search RAG docs');
+  return response.data ?? { items: [], total: 0, page, pageSize };
 };
 
 /** Get RAG search settings (weights + max results). */

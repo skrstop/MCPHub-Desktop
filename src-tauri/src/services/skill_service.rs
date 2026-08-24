@@ -541,6 +541,84 @@ async fn verified_exports_by_skill() -> Result<HashMap<String, Vec<SkillExport>>
 /// a filesystem check, not DB state, so a skill whose file the user deleted
 /// no longer shows. exports come from verified_exports_by_skill (DB-tracked
 /// installs, FS-verified), keyed by skill id.
+/// Paginated library-skill search: case-insensitive substring on
+/// dir_name/name/description (empty = all), `status='ok'`, `ORDER BY dir_name`
+/// — same row policy as `list_library` (FS-verified library copy + verified
+/// exports). The FS-existence filter can't live in SQL, so pagination is done
+/// in Rust after the SQL prefilter (skills tables are small); `page` is 0-based.
+pub async fn search_library_paged(
+    app: &AppHandle,
+    search_key: &str,
+    page: u32,
+    page_size: u32,
+) -> Result<SkillPage> {
+    let lib = library_dir(app)?;
+    let exports_by_skill = verified_exports_by_skill().await?;
+    let page = page.min(10_000);
+    let page_size = page_size.clamp(1, 200) as usize;
+    let key = search_key.trim().to_lowercase();
+
+    let rows = if key.is_empty() {
+        sqlx::query(
+            "SELECT id, dir_name, name, description, source_agent, source_path, created_at \
+             FROM skills WHERE status='ok' ORDER BY dir_name",
+        )
+        .fetch_all(db::pool())
+        .await?
+    } else {
+        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        sqlx::query(
+            "SELECT id, dir_name, name, description, source_agent, source_path, created_at \
+             FROM skills WHERE status='ok' AND \
+             (LOWER(dir_name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(name, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\') \
+             ORDER BY dir_name",
+        )
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .fetch_all(db::pool())
+        .await?
+    };
+
+    // Same FS + exports policy as list_library; collect the full filtered list
+    // so `total` is accurate, then slice the page in Rust.
+    let mut all: Vec<Skill> = rows
+        .iter()
+        .filter_map(|r| {
+            let dir_name: String = r.try_get("dir_name").ok()?;
+            if !lib.join(&dir_name).exists() {
+                return None;
+            }
+            let id: String = r.try_get("id").ok()?;
+            let exports = exports_by_skill.get(&id).cloned().unwrap_or_default();
+            Some(Ok(Skill {
+                exports,
+                id,
+                dir_name,
+                name: r.try_get("name").ok().flatten(),
+                description: r.try_get("description").ok().flatten(),
+                source_agent: r.try_get("source_agent").ok().flatten(),
+                source_path: r.try_get("source_path").ok().flatten(),
+                created_at: r.try_get("created_at").ok().flatten(),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total = all.len() as u64;
+    let start = (page as usize) * page_size;
+    if start >= all.len() {
+        all.clear();
+    } else {
+        all.drain(..start);
+        all.truncate(page_size);
+    }
+    Ok(SkillPage {
+        items: all,
+        total,
+        page,
+        page_size: page_size as u32,
+    })
+}
+
 pub async fn list_library(app: &AppHandle) -> Result<Vec<Skill>> {
     let lib = library_dir(app)?;
     let exports_by_skill = verified_exports_by_skill().await?;

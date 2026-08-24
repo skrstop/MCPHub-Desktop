@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { AuthState } from '../types';
 import * as authService from '../services/authService';
 import { getPublicConfig } from '../services/configService';
+import { apiPut } from '../utils/fetchInterceptor';
 
 // Initial auth state
 const initialState: AuthState = {
@@ -20,12 +21,21 @@ const AuthContext = createContext<{
   ) => Promise<{ success: boolean; isUsingDefaultPassword?: boolean; message?: string }>;
   register: (username: string, password: string, isAdmin?: boolean) => Promise<boolean>;
   logout: () => void;
+  /** Exit guest mode: disable `skipAuth` server-side so the dashboard requires
+   *  login again. No-op outside guest mode (falls back to normal `logout`).
+   *  `skipServerUpdate`: skip the `PUT /system-config { routing:{skipAuth:false} }`
+   *  call — use when the caller has already persisted that change (e.g. the
+   *  Settings page toggle writes via `updateRoutingConfig` first). Either way
+   *  local auth state is cleared (without a Better Auth `signOut()` HTTP call,
+   *  which has no backing server in the desktop app). */
+  exitGuestMode: (opts?: { skipServerUpdate?: boolean }) => Promise<void>;
   reloadAuth: () => Promise<void>;
 }>({
   auth: initialState,
   login: async () => ({ success: false }),
   register: async () => false,
   logout: () => {},
+  exitGuestMode: async () => {},
   reloadAuth: async () => {},
 });
 
@@ -214,8 +224,35 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     });
   };
 
+  // Exit guest mode: disable `skipAuth` on the server so the dashboard
+  // requires a real login again, then clear local auth state. In guest mode
+  // there's no Better Auth HTTP session (and no backing server in the desktop
+  // app), so we skip the `signOut()` call that would otherwise hit
+  // `/api/auth/better/sign-out` and fail with ECONNREFUSED.
+  //
+  // `skipServerUpdate`: skip the PUT /system-config call (caller already did it).
+  const exitGuestMode = useCallback(
+    async (opts?: { skipServerUpdate?: boolean }): Promise<void> => {
+      if (!opts?.skipServerUpdate) {
+        try {
+          await apiPut('/system-config', { routing: { skipAuth: false } });
+        } catch (error) {
+          console.debug('Failed to disable skipAuth on exit', { error });
+        }
+      }
+      await authService.logout({ skipBetterAuthSignOut: true });
+      setAuth({
+        ...initialState,
+        loading: false,
+      });
+    },
+    [],
+  );
+
   return (
-    <AuthContext.Provider value={{ auth, login, register, logout, reloadAuth: loadUser }}>
+    <AuthContext.Provider
+      value={{ auth, login, register, logout, exitGuestMode, reloadAuth: loadUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

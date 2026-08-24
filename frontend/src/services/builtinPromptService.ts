@@ -1,4 +1,4 @@
-import { BuiltinPrompt, ApiResponse } from '@/types';
+import { BuiltinPrompt, ApiResponse, PromptPage } from '@/types';
 import { apiGet, apiPost, apiPut, apiDelete } from '../utils/fetchInterceptor';
 
 /**
@@ -58,4 +58,24 @@ export const deleteBuiltinPrompt = async (id: string): Promise<void> => {
   if (!response.success) {
     throw new Error(response.message || 'Failed to delete built-in prompt');
   }
+};
+
+/**
+ * Paginated builtin-prompt search (SQL-level LIKE + LIMIT/OFFSET). `page` is
+ * 0-based. `filter`: 'all' | 'active' | 'inactive'.
+ */
+export const searchBuiltinPrompts = async (
+  searchKey: string,
+  filter: string,
+  page: number,
+  pageSize: number,
+): Promise<PromptPage> => {
+  const response: ApiResponse<PromptPage> = await apiPost('/prompts/search', {
+    searchKey,
+    filter,
+    page,
+    pageSize,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to search prompts');
+  return response.data ?? { items: [], total: 0, page, pageSize };
 };

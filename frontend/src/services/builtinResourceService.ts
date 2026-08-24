@@ -1,4 +1,4 @@
-import { BuiltinResource, ApiResponse } from '@/types';
+import { BuiltinResource, ApiResponse, ResourcePage } from '@/types';
 import { apiGet, apiPost, apiPut, apiDelete } from '../utils/fetchInterceptor';
 
 /**
@@ -58,4 +58,24 @@ export const deleteBuiltinResource = async (id: string): Promise<void> => {
   if (!response.success) {
     throw new Error(response.message || 'Failed to delete built-in resource');
   }
+};
+
+/**
+ * Paginated builtin-resource search (SQL-level LIKE + LIMIT/OFFSET). `page` is
+ * 0-based. `filter`: 'all' | 'active' | 'inactive'.
+ */
+export const searchBuiltinResources = async (
+  searchKey: string,
+  filter: string,
+  page: number,
+  pageSize: number,
+): Promise<ResourcePage> => {
+  const response: ApiResponse<ResourcePage> = await apiPost('/resources/search', {
+    searchKey,
+    filter,
+    page,
+    pageSize,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to search resources');
+  return response.data ?? { items: [], total: 0, page, pageSize };
 };

@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Upload,
@@ -21,18 +22,85 @@ import {
   Plus,
   Minus,
   RefreshCw,
+  Link2,
+  Copy as CopyIcon,
+  HelpCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
+import Pagination from '@/components/ui/Pagination';
 import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
 import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
-import { getRagTools } from '@/services/ragService';
-import { RagDoc, RagDocInfo, RagModelInfo, RagPickedFile, RagSettings } from '@/types';
+import { getRagTools, ragDocSearchPaged, ragTagSearchPaged } from '@/services/ragService';
+import { RagDoc, RagDocInfo, RagModelInfo, RagPickedFile, RagSettings, RagTagStat } from '@/types';
 
 const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
+
+// ─── 导入方式（软链接 / 文件拷贝）—— 已接真实后端 ───
+// 阶段 0 UI 预览已完成并定稿，mock 开关置 false 后所有交互走真实后端。
+// 详见 doc/rag_import_method_20260821.md。保留 `MockDocInfo`/`MockUpdateCheck`/
+// `BatchProgress` 类型别名以复用阶段 0 的 dialog 组件签名（这些类型与真实后端
+// 类型 RagDocInfo/RagUpdateCheck 一致或为其超集）。
+const MOCK_IMPORT_METHOD: boolean = false;
+
+type MockMethod = 'symlink' | 'copy';
+
+// 真实 RagDocInfo 已含 method/originalPath/md5/lostOriginal（types/index.ts）。
+// 这里仅保留一个供 dialog 组件签名使用的类型别名（阶段 0 遗留，无运行时影响）。
+type MockDocInfo = RagDocInfo;
+
+// 真实 RagUpdateCheck 已含 lostOriginal；保留别名供 UpdateDialog 复用。
+type MockUpdateCheck = RagUpdateCheck;
+
+type BatchProgress = {
+  current: number;
+  total: number;
+  name: string;
+  phase: 'checking' | 'reindexing' | 'done' | 'error';
+};
+
+// 假数据仅在 MOCK_IMPORT_METHOD=true（UI 预览）时使用；接后端后置 false，
+// 真实数据走 useRagData().ragDocs。保留常量以便后续再开预览，不再渲染。
+const MOCK_DOCS: MockDocInfo[] = [];
+
+// 导入方式帮助按钮（悬浮/点击 popover 解释软链接 vs 文件拷贝），仿 SkillsPage MethodHelpIcon。
+const RagMethodHelpIcon: React.FC = () => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setOpen(false), 150); };
+  const handleEnter = () => { cancelClose(); setOpen(true); };
+  const handleLeave = () => { scheduleClose(); };
+  const handleClick = (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); cancelClose(); setOpen(true); };
+  useEffect(() => () => cancelClose(), []);
+  return (
+    <span className="relative inline-flex">
+      <button type="button" onClick={handleClick} onMouseEnter={handleEnter} onMouseLeave={handleLeave}
+        className="hub-icon-btn sm" title={t('pages.rag.importMethodHelp', '查看导入方式说明')} style={{ color: 'var(--hub-ink-3)' }}>
+        <HelpCircle size={13} />
+      </button>
+      {open && (
+        <div className="absolute z-50 left-0 top-full mt-1 w-[300px] text-[12px] space-y-1.5 shadow-lg"
+          style={{ padding: '10px 12px', background: 'var(--hub-surface)', border: '1px solid var(--hub-line)', borderRadius: 8, color: 'var(--hub-ink-2)' }}
+          onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+          <div className="flex items-start gap-1.5">
+            <Link2 size={12} className="mt-0.5 flex-shrink-0" style={{ color: 'var(--hub-accent)' }} />
+            <div><span className="font-medium" style={{ color: 'var(--hub-ink)' }}>{t('pages.rag.symlink', '软链接')}:</span> {t('pages.rag.symlinkHelp', '只记录文件原始地址，不拷贝实体文件；原始文件修改后可通过更新同步向量，删除不会动原始文件。')}</div>
+          </div>
+          <div className="flex items-start gap-1.5">
+            <CopyIcon size={12} className="mt-0.5 flex-shrink-0" style={{ color: 'var(--hub-accent)' }} />
+            <div><span className="font-medium" style={{ color: 'var(--hub-ink)' }}>{t('pages.rag.fileCopy', '文件拷贝')}:</span> {t('pages.rag.fileCopyHelp', '将文件复制一份到 RAG 目录，修改原始文件不影响已导入内容；删除会同时删除拷贝。')}</div>
+          </div>
+        </div>
+      )}
+    </span>
+  );
 };
 
 const RagPage: React.FC = () => {
@@ -80,7 +148,13 @@ const RagPage: React.FC = () => {
     search,
     setTags,
     pickFiles,
+    pickFolder,
     updateSettings,
+    checkUpdate,
+    getBatchPreview,
+    batchUpdate,
+    batchUpdateRunning,
+    batchProgress,
   } = useRagData();
 
   const [showUpload, setShowUpload] = useState(false);
@@ -90,12 +164,29 @@ const RagPage: React.FC = () => {
   const [pickedFiles, setPickedFiles] = useState<RagPickedFile[]>([]);
   const [uploadTags, setUploadTags] = useState<string[]>([]);
   const [fileNameSearch, setFileNameSearch] = useState('');
+  const [selectedTagFilter, setSelectedTagFilter] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBatchTags, setShowBatchTags] = useState(false);
   const [batchMode, setBatchMode] = useState<'add' | 'remove'>('add');
   const [showTools, setShowTools] = useState(false);
   const [showBatchDelete, setShowBatchDelete] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
+
+  // ── 导入方式 state（接真实后端） ──
+  const [uploadMethod, setUploadMethod] = useState<MockMethod>('symlink'); // 默认软链接（需求1）
+  const [updateTarget, setUpdateTarget] = useState<MockDocInfo | null>(null); // 单条更新弹框目标
+  const [updateCheck, setUpdateCheck] = useState<MockUpdateCheck | null>(null); // 检查原始文件结果
+  const [updateChecking, setUpdateChecking] = useState(false); // 检查中
+  const [updateActionPhase, setUpdateActionPhase] = useState<'idle' | 'reindexing' | 'done' | 'error'>('idle'); // 执行更新阶段
+  const [showBatchUpdateDialog, setShowBatchUpdateDialog] = useState(false); // 进度弹框（可关闭）
+  const [batchConfirm, setBatchConfirm] = useState<BatchPreview | null>(null); // 批量更新前置确认弹框
+  const [batchConfirmChecking, setBatchConfirmChecking] = useState(false); // 确认弹框「预扫描」中
+
+  // mock 列表：开启 mock 时用 MOCK_DOCS，否则用真实 ragDocs。
+  const docs: MockDocInfo[] = MOCK_IMPORT_METHOD ? MOCK_DOCS : (ragDocs as MockDocInfo[]);
+
+  // 批量更新运行状态来自 useRagData（监听 rag://batch-update-progress 事件）。
+  const batchProgressTyped = batchProgress as unknown as BatchProgress | null;
 
   // disabled = OFF (default) OR initializing OR switching model. The switch
   // itself stays interactive (so the user can cancel a slow init by toggling
@@ -130,6 +221,19 @@ const RagPage: React.FC = () => {
     });
   };
 
+  // Pick a folder: backend scans its immediate file children (non-recursive),
+  // returns the same shape as handlePick so the merge/dedup + upload loop are
+  // identical to multi-file import.
+  const handlePickFolder = async () => {
+    const picked = await pickFolder();
+    if (picked.length === 0) return;
+    setPickedFiles((prev) => {
+      const existing = new Set(prev.map((f) => f.path));
+      const fresh = picked.filter((f) => !existing.has(f.path));
+      return [...prev, ...fresh];
+    });
+  };
+
   const removeFile = (idx: number) => {
     setPickedFiles((prev) => prev.filter((_, i) => i !== idx));
   };
@@ -139,7 +243,7 @@ const RagPage: React.FC = () => {
       showToast(t('pages.rag.noFileSelected'), 'error');
       return;
     }
-    const { success, failed } = await upload(pickedFiles, uploadTags);
+    const { success, failed } = await upload(pickedFiles, uploadTags, uploadMethod);
     // Only claim success when nothing failed - per-file errors are already
     // toasted inside upload. Showing a green "success" while files actually
     // failed (and thus aren't in the list) was misleading.
@@ -162,6 +266,8 @@ const RagPage: React.FC = () => {
       showToast(t('pages.rag.tagPlaceholder'), 'error');
       return;
     }
+    // Use the full hook list (`ragDocs`) so batch ops work across pages —
+    // selectedIds can contain docs from pages other than the current one.
     for (const doc of ragDocs.filter((d) => selectedIds.has(d.id))) {
       const set = new Set(doc.tags || []);
       if (batchMode === 'add') cleaned.forEach((x) => set.add(x));
@@ -200,43 +306,197 @@ const RagPage: React.FC = () => {
   };
 
   const handleOpenFolder = async (doc: RagDocInfo) => {
+    // 软链接/拷贝打开地址，原始丢失时后端会报错（open_file_location 对 symlink
+    // 找不到原始文件时返回 Err）。这里只兜底提示；真实打开由后端 reveal 处理。
     try {
       await openLocation(doc.id);
     } catch (err) {
-      showToast(t('pages.rag.openFolderNotReady'), 'error');
+      showToast(err instanceof Error ? err.message : t('pages.rag.openFolderNotReady'), 'error');
     }
   };
 
-  // Update an existing document in place: open the OS file picker, then
-  // overwrite the doc's content + meta + vectors with the picked file (id +
-  // tags preserved). Drives the upload-progress overlay (file-level 1/1 +
-  // char-level from reindex_doc) the same way `upload` does, so the user sees
-  // both progress bars. `updatingId` drives the row's update-button spinner.
-  // Requires RAG enabled; the button is disabled when RAG is off.
+  // 查看按钮：走真实 getRagDoc（useRagData.view）。contentAvailable=false 的文档
+  // 按钮已置灰（symlink 原始丢失 / copy 拷贝被外部删除），此处兜底保护。
+  const handleView = (doc: RagDocInfo) => {
+    if (doc.contentAvailable === false) {
+      showToast(t('pages.rag.contentUnavailableView', '无法读取文档内容'), 'error');
+      return;
+    }
+    view(doc.id);
+  };
+
+  // 单条「更新」：弹出 UpdateDialog（先检查原始文件，再按分支执行），不再直接弹 OS picker。
   const [updatingId, setUpdatingId] = useState<string | null>(null);
-  const handleUpdate = async (doc: RagDocInfo) => {
-    const picked = await pickFiles();
-    if (picked.length === 0) return;
+  const handleUpdate = (doc: RagDocInfo) => {
+    setUpdateTarget(doc as MockDocInfo);
+    setUpdateCheck(null);
+    setUpdateChecking(false);
+    setUpdateActionPhase('idle');
+    // 自动触发「检查原始文件」
+    void runUpdateCheck(doc.id);
+  };
+
+  // 「检查原始文件」：调后端 check_rag_update（读 meta + md5 比对源文件）。
+  const runUpdateCheck = async (id: string) => {
+    setUpdateChecking(true);
+    setUpdateCheck(null);
+    try {
+      const result = await checkUpdate(id);
+      setUpdateCheck(result);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.updateFailed', '更新文档失败'), 'error');
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
+
+  // 执行更新（从原始 / 手动上传）：调后端 update_rag_doc，复用上传进度浮层。
+  const runUpdateAction = async (doc: MockDocInfo, mode: 'original' | 'file') => {
+    setUpdateActionPhase('reindexing');
     setUpdatingId(doc.id);
     try {
-      await updateDoc(doc.id, picked[0].path, doc.name);
-      showToast(t('pages.rag.updateDone'), 'success');
+      if (mode === 'original') {
+        await updateDoc(doc.id, doc.name, { mode: 'original' });
+      } else {
+        const picked = await pickFiles();
+        if (picked.length === 0) {
+          setUpdateActionPhase('idle');
+          setUpdatingId(null);
+          return;
+        }
+        await updateDoc(doc.id, picked[0].name, { mode: 'file', filePath: picked[0].path });
+      }
+      setUpdateActionPhase('done');
+      showToast(t('pages.rag.updateDone', '文档已更新'), 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : t('pages.rag.updateFailed'), 'error');
+      setUpdateActionPhase('error');
+      showToast(err instanceof Error ? err.message : t('pages.rag.updateFailed', '更新文档失败'), 'error');
     } finally {
       setUpdatingId(null);
     }
   };
 
-  // Fuzzy filename search (client-side, case-insensitive).
+  // 列表右上「批量文件更新」：先调后端 preview_batch_update 弹确认框（展示统计），
+  // 用户确认后再调 batch_update_rag_docs 启动后台任务。
+  const handleBatchUpdate = () => {
+    // 已 running 时再点 → 只重开进度弹框，不重启任务（需求6）
+    if (batchUpdateRunning) {
+      setShowBatchUpdateDialog(true);
+      return;
+    }
+    setBatchConfirmChecking(true);
+    setBatchConfirm(null);
+    void (async () => {
+      try {
+        const preview = await getBatchPreview();
+        setBatchConfirm(preview);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : t('pages.rag.batchUpdate', '批量更新'), 'error');
+      } finally {
+        setBatchConfirmChecking(false);
+      }
+    })();
+  };
+
+  // 用户在确认框点「开始更新」后真正启动后台任务。
+  const startBatchUpdate = async () => {
+    setBatchConfirm(null);
+    setShowBatchUpdateDialog(true);
+    try {
+      await batchUpdate();
+    } catch (err) {
+      setShowBatchUpdateDialog(false);
+      showToast(err instanceof Error ? err.message : t('pages.rag.batchUpdate', '批量更新'), 'error');
+    }
+  };
+
+  // ── 文件列表后端分页 ──
+  // 列表始终走后端 SQL 分页（`ragDocSearchPaged`：name LIKE + 标签 ANY 过滤，
+  // uploaded_at DESC，LIMIT/OFFSET，total 同步返回）。防抖 250ms + reqId 竞态守卫
+  // （同标签下拉模式）。搜索词/标签/页码/每页数任一变化都重取当前页。后端 page 0-based，
+  // UI page 1-based，调用时传 `page - 1`。
+  const [pageDocs, setPageDocs] = useState<RagDocInfo[]>([]);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [docPage, setDocPage] = useState(1);
+  const [docPageSize, setDocPageSize] = useState(10);
+  const docReqId = useRef(0);
+
+  const searchKey = fileNameSearch.trim();
+  // 标签集合的稳定序列化（排序后拼接），用作 effect 依赖以监听标签变化。
+  const searchTagsKey = useMemo(
+    () => [...selectedTagFilter].sort().join(''),
+    [selectedTagFilter],
+  );
+
+  useEffect(() => {
+    const id = ++docReqId.current;
+    setPageLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await ragDocSearchPaged(
+          searchKey,
+          selectedTagFilter.size > 0 ? [...selectedTagFilter] : [],
+          docPage - 1,
+          docPageSize,
+        );
+        if (id !== docReqId.current) return;
+        setPageDocs(res.items);
+        setPageTotal(res.total);
+      } catch {
+        if (id !== docReqId.current) return;
+        setPageDocs([]);
+        setPageTotal(0);
+      } finally {
+        if (id === docReqId.current) setPageLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchKey, searchTagsKey, docPage, docPageSize]);
+
+  // 过滤条件变化 → 回到第一页（避免停在越界的页码）。每页数变化单独处理。
+  useEffect(() => {
+    setDocPage(1);
+  }, [searchKey, searchTagsKey]);
+  const handleDocPageSizeChange = (next: number) => {
+    setDocPageSize(next);
+    setDocPage(1);
+  };
+
+  // mock 模式用客户端过滤，真实模式用后端分页结果。
   const filteredDocs = useMemo(() => {
     const q = fileNameSearch.trim().toLowerCase();
-    if (!q) return ragDocs;
-    return ragDocs.filter((d) => d.name.toLowerCase().includes(q));
-  }, [ragDocs, fileNameSearch]);
+    const tags = selectedTagFilter;
+    return docs.filter((d) => {
+      const nameOk = !q || d.name.toLowerCase().includes(q);
+      const tagOk = tags.size === 0 || (d.tags || []).some((t) => tags.has(t));
+      return nameOk && tagOk;
+    });
+  }, [docs, fileNameSearch, selectedTagFilter]);
+  const visibleDocs: RagDocInfo[] = MOCK_IMPORT_METHOD ? (filteredDocs as RagDocInfo[]) : pageDocs;
 
-  // Names already in the library — to warn about overwrites in the upload dialog.
-  const existingNames = useMemo(() => new Set(ragDocs.map((d) => d.name)), [ragDocs]);
+  const totalPages = Math.max(1, Math.ceil(pageTotal / docPageSize));
+  const safePage = Math.min(docPage, totalPages);
+  useEffect(() => {
+    if (safePage !== docPage) setDocPage(safePage);
+  }, [safePage, docPage]);
+  const docPagination = {
+    page: safePage,
+    limit: docPageSize,
+    total: pageTotal,
+    totalPages,
+  };
+
+  // Paths already imported — uploads record `originalPath`, so a file already
+  // in the library (by path, not name) is flagged in the upload dialog. Name
+  // collisions are NOT flagged: uploads never overwrite (fresh uuid per file),
+  // same-named docs coexist as separate documents. Uses the full hook list
+  // (`ragDocs`) so the flag works across pages, not just the current page.
+  const existingPaths = useMemo(
+    () => new Set(ragDocs.map((d) => (d as MockDocInfo).originalPath || '').filter(Boolean)),
+    [ragDocs],
+  );
 
   return (
     <>
@@ -296,13 +556,27 @@ const RagPage: React.FC = () => {
           <button onClick={() => setShowUpload(true)} className="hub-btn primary" disabled={disabled}>
             <Upload size={13} /> {t('pages.rag.upload')}
           </button>
+          {/* 批量文件更新按钮（需求6）——运行时文字变「查看进度」+ loading，点它开/重开进度弹框 */}
+          <button
+            onClick={() => (batchUpdateRunning ? setShowBatchUpdateDialog(true) : handleBatchUpdate())}
+            className="hub-btn primary"
+            disabled={disabled}
+            title={
+              batchUpdateRunning
+                ? t('pages.rag.batchViewProgressHint', '查看批量更新进度')
+                : t('pages.rag.batchUpdateHint', '扫描全部文档，对有更新的自动从原始文件重新索引')
+            }
+          >
+            {batchUpdateRunning ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {batchUpdateRunning ? t('pages.rag.batchViewProgress', '查看进度') : t('pages.rag.batchUpdate', '批量更新')}
+          </button>
           <button onClick={() => setShowSettings(true)} className="hub-btn" disabled={disabled}>
             <SlidersHorizontal size={13} /> {t('pages.rag.searchSettings')}
           </button>
         </div>
       </div>
 
-      {/* Toolbar: filename fuzzy search */}
+      {/* Toolbar: filename fuzzy search + tag multi-select search */}
       <div className="flex items-center gap-2 mb-4" style={{ pointerEvents: 'auto' }}>
         <div
           className="hub-card flex items-center gap-2 px-2.5 flex-1"
@@ -321,6 +595,17 @@ const RagPage: React.FC = () => {
               <X size={11} />
             </button>
           )}
+        </div>
+        {/* 标签搜索：可搜索 + 分页查询后端的多选下拉框 */}
+        <TagSearchSelect
+          selected={selectedTagFilter}
+          onChange={setSelectedTagFilter}
+          placeholder={t('pages.rag.tagSearchPlaceholder', '按标签筛选…')}
+        />
+        <div className="ml-auto flex items-center gap-2">
+          <span className="hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+            {docPagination.total}
+          </span>
         </div>
         {selectedIds.size > 0 && (
           <div className="flex items-center gap-2">
@@ -361,10 +646,13 @@ const RagPage: React.FC = () => {
           </div>
         )}
       </div>
-      {filteredDocs.length === 0 ? (
+      {visibleDocs.length === 0 ? (
         <div className="hub-card p-10 text-center" style={{ color: 'var(--hub-ink-3)' }}>
           <FileText size={20} className="mx-auto mb-2" />
-          <div>{ragDocs.length === 0 ? t('pages.rag.empty') : t('pages.rag.noResults')}</div>
+          {pageLoading ? (
+            <Loader2 size={16} className="mx-auto mb-2 animate-spin" />
+          ) : null}
+          <div>{docPagination.total === 0 ? t('pages.rag.empty') : t('pages.rag.noResults')}</div>
         </div>
       ) : (
         <div className="hub-card overflow-hidden">
@@ -384,8 +672,14 @@ const RagPage: React.FC = () => {
             <span style={{ width: 160 }}>{t('pages.rag.columnTime')}</span>
             <span style={{ width: 170 }} />
           </div>
-          {filteredDocs.map((doc, idx) => {
+          {visibleDocs.map((doc, idx) => {
             const checked = selectedIds.has(doc.id);
+            const mDoc = doc as MockDocInfo;
+            const lost = !!mDoc.lostOriginal;
+            // contentAvailable gates the view/open-location buttons (copy docs
+            // whose original vanished still have their copy -> view works).
+            // lost gates only the ⚠️ badge + (via the update dialog) auto-update.
+            const noContent = mDoc.contentAvailable === false;
             return (
             <div
               key={doc.id}
@@ -417,6 +711,32 @@ const RagPage: React.FC = () => {
                   {doc.version > 1 && (
                     <span className="hub-tag flex-shrink-0" title={t('pages.rag.versionTitle', { v: doc.version })} style={{ fontSize: 10 }}>
                       v{doc.version}
+                    </span>
+                  )}
+                  {/* 导入方式徽章（软链接 Link / 文件拷贝 Copy），hover 显示原始地址（需求3徽章） */}
+                  {mDoc.method && (
+                    <span
+                      className="hub-tag flex-shrink-0 inline-flex items-center gap-0.5"
+                      title={
+                        mDoc.method === 'symlink'
+                          ? t('pages.rag.methodSymlinkTip', '软链接 · 原始地址：{{path}}', { path: mDoc.originalPath || '-' })
+                          : t('pages.rag.methodFileCopyTip', '文件拷贝 · 原始地址：{{path}}', { path: mDoc.originalPath || '-' })
+                      }
+                      style={{ fontSize: 10, color: 'var(--hub-ink-3)' }}
+                    >
+                      {mDoc.method === 'symlink' ? <Link2 size={10} /> : <CopyIcon size={10} />}
+                      {mDoc.method === 'symlink' ? t('pages.rag.methodSymlink', '软链接') : t('pages.rag.methodFileCopy', '拷贝')}
+                    </span>
+                  )}
+                  {/* 原始文件丢失标记 —— 不影响查看/分片/向量，仅无法自动更新 */}
+                  {lost && (
+                    <span
+                      className="flex-shrink-0 inline-flex items-center gap-0.5"
+                      title={t('pages.rag.originalLost', '原始文件不存在，无法自动更新（可手动上传覆盖）')}
+                      style={{ color: 'var(--hub-err)', fontSize: 10 }}
+                    >
+                      <AlertTriangle size={11} />
+                      {t('pages.rag.originalLostTag', '原始丢失')}
                     </span>
                   )}
                 </div>
@@ -451,9 +771,9 @@ const RagPage: React.FC = () => {
               <div className="flex items-center gap-1" style={{ width: 170 }}>
                 <button
                   className="hub-icon-btn sm"
-                  onClick={() => view(doc.id)}
-                  title={t('pages.rag.view')}
-                  disabled={disabled}
+                  onClick={() => handleView(doc)}
+                  title={noContent ? t('pages.rag.contentUnavailableView', '无法读取文档内容') : t('pages.rag.view')}
+                  disabled={disabled || noContent}
                 >
                   {viewLoading ? <Loader2 size={13} className="animate-spin" /> : <Eye size={13} />}
                 </button>
@@ -476,8 +796,8 @@ const RagPage: React.FC = () => {
                 <button
                   className="hub-icon-btn sm"
                   onClick={() => handleOpenFolder(doc)}
-                  title={t('pages.rag.openFolder')}
-                  disabled={disabled}
+                  title={noContent ? t('pages.rag.contentUnavailableOpen', '无法打开文件位置') : t('pages.rag.openFolder')}
+                  disabled={disabled || noContent}
                 >
                   <FolderOpen size={13} />
                 </button>
@@ -494,6 +814,42 @@ const RagPage: React.FC = () => {
             </div>
           );
           })}
+          {/* 分页页脚：显示区间 + 翻页 + 每页数（与其他列表页一致） */}
+          <div className="flex items-center mt-2 text-[12px]" style={{ color: 'var(--hub-ink-3)', borderTop: '1px solid var(--hub-line-2)', padding: '8px 16px' }}>
+            <div className="flex-[2]">
+              {t('common.showing', {
+                start: docPagination.total === 0 ? 0 : (docPagination.page - 1) * docPagination.limit + 1,
+                end: Math.min(docPagination.page * docPagination.limit, docPagination.total),
+                total: docPagination.total,
+              })}
+            </div>
+            <div className="flex-[4] flex justify-center">
+              {docPagination.totalPages > 1 && (
+                <Pagination
+                  currentPage={docPagination.page}
+                  totalPages={docPagination.totalPages}
+                  onPageChange={setDocPage}
+                  disabled={pageLoading}
+                />
+              )}
+            </div>
+            <div className="flex-[2] flex items-center justify-end gap-2">
+              <label htmlFor="ragPerPage">{t('common.itemsPerPage')}:</label>
+              <select
+                id="ragPerPage"
+                value={docPageSize}
+                onChange={(e) => handleDocPageSizeChange(Number(e.target.value))}
+                disabled={pageLoading}
+                className="hub-input"
+                style={{ height: 26, width: 70, padding: '0 6px', fontSize: 12 }}
+              >
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+            </div>
+          </div>
         </div>
       )}
 
@@ -506,12 +862,55 @@ const RagPage: React.FC = () => {
             setUploadTags([]);
           }}
           pickedFiles={pickedFiles}
-          existingNames={existingNames}
+          existingPaths={existingPaths}
           onPick={handlePick}
+          onPickFolder={handlePickFolder}
           onRemoveFile={removeFile}
           onConfirm={handleUploadConfirm}
           tags={uploadTags}
           onTagsChange={setUploadTags}
+          method={uploadMethod}
+          onMethodChange={setUploadMethod}
+        />
+      )}
+
+      {/* 单条更新弹框（需求5：软链接/拷贝/老版本/丢失分支） */}
+      {updateTarget && (
+        <UpdateDialog
+          doc={updateTarget}
+          check={updateCheck}
+          checking={updateChecking}
+          actionPhase={updateActionPhase}
+          onRetryCheck={() => runUpdateCheck(updateTarget.id)}
+          onFromOriginal={() => runUpdateAction(updateTarget, 'original')}
+          onManualUpload={async () => {
+            await runUpdateAction(updateTarget, 'file');
+          }}
+          onClose={() => {
+            setUpdateTarget(null);
+            setUpdateCheck(null);
+            setUpdateChecking(false);
+            setUpdateActionPhase('idle');
+          }}
+        />
+      )}
+
+      {/* 批量更新前置确认弹框（展示文件更新数量等信息，用户确认后再执行） */}
+      {(batchConfirmChecking || batchConfirm) && (
+        <BatchUpdateConfirmDialog
+          preview={batchConfirm}
+          checking={batchConfirmChecking}
+          onCancel={() => { setBatchConfirm(null); setBatchConfirmChecking(false); }}
+          onConfirm={startBatchUpdate}
+        />
+      )}
+
+      {/* 批量更新进度弹框（需求6：可关闭，再点按钮重开；上传同款双进度条） */}
+      {showBatchUpdateDialog && batchProgressTyped && (
+        <BatchUpdateDialog
+          progress={batchProgressTyped}
+          charProgress={charProgress}
+          onClose={() => setShowBatchUpdateDialog(false)}
         />
       )}
 
@@ -1083,14 +1482,19 @@ const formatEta = (secs: number): string => {
 const UploadDialog: React.FC<{
   onClose: () => void;
   pickedFiles: RagPickedFile[];
-  existingNames: Set<string>;
+  existingPaths: Set<string>;
   onPick: () => void;
+  onPickFolder: () => void;
   onRemoveFile: (idx: number) => void;
   onConfirm: () => void;
   tags: string[];
   onTagsChange: (tags: string[]) => void;
-}> = ({ onClose, pickedFiles, existingNames, onPick, onRemoveFile, onConfirm, tags, onTagsChange }) => {
+  // 导入方式（软链接/文件拷贝）。
+  method?: MockMethod;
+  onMethodChange?: (m: MockMethod) => void;
+}> = ({ onClose, pickedFiles, existingPaths, onPick, onPickFolder, onRemoveFile, onConfirm, tags, onTagsChange, method, onMethodChange }) => {
   const { t } = useTranslation();
+  const showMethod = method !== undefined && onMethodChange !== undefined;
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-lg w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
@@ -1104,15 +1508,70 @@ const UploadDialog: React.FC<{
           <p className="text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
             {t('pages.rag.uploadHint')}
           </p>
+          {/* 导入方式选择（软链接 / 文件拷贝）+ 帮助按钮（需求1）——仿 skill 安装的分段切换样式，标题与选择同行 */}
+          {showMethod && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+                {t('pages.rag.importMethod', '导入方式')}
+              </label>
+              <RagMethodHelpIcon />
+              <div
+                className="inline-flex items-center rounded-md"
+                style={{ border: '1px solid var(--hub-line)', background: 'var(--hub-bg-2)' }}
+              >
+                <button
+                  type="button"
+                  onClick={() => onMethodChange!('symlink')}
+                  title={t('pages.rag.symlink', '软链接')}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] transition-colors"
+                  style={{
+                    borderRadius: 5,
+                    background: method === 'symlink' ? 'var(--hub-surface)' : 'transparent',
+                    color: method === 'symlink' ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontWeight: method === 'symlink' ? 600 : 400,
+                  }}
+                >
+                  <Link2 size={12} />
+                  {t('pages.rag.symlink', '软链接')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onMethodChange!('copy')}
+                  title={t('pages.rag.fileCopy', '文件拷贝')}
+                  className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] transition-colors"
+                  style={{
+                    borderRadius: 5,
+                    background: method === 'copy' ? 'var(--hub-surface)' : 'transparent',
+                    color: method === 'copy' ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontWeight: method === 'copy' ? 600 : 400,
+                  }}
+                >
+                  <CopyIcon size={12} />
+                  {t('pages.rag.fileCopy', '文件拷贝')}
+                </button>
+              </div>
+            </div>
+          )}
           {/* OS file picker (Tauri dialog) — backend reads from disk by path,
-              no bytes/base64 over IPC. */}
-          <button type="button" onClick={onPick} className="hub-btn">
-            <Upload size={13} /> {t('pages.rag.uploadSelect')}
-          </button>
+              no bytes/base64 over IPC. Two entry points: multi-file pick +
+              folder pick (scans the folder's immediate file children). Both
+              append to the same list and share the upload pipeline. */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button type="button" onClick={onPick} className="hub-btn">
+              <Upload size={13} /> {t('pages.rag.uploadSelect')}
+            </button>
+            <button type="button" onClick={onPickFolder} className="hub-btn" title={t('pages.rag.uploadSelectFolderHint', '选择文件夹，自动导入其下的一级文件')}>
+              <FolderOpen size={13} /> {t('pages.rag.uploadSelectFolder', '选择文件夹')}
+            </button>
+          </div>
           {pickedFiles.length > 0 && (
             <div className="space-y-1">
               {pickedFiles.map((file, idx) => {
-                const exists = existingNames.has(file.name);
+                const exists = existingPaths.has(file.path);
                 return (
                 <div
                   key={`${file.path}-${idx}`}
@@ -1127,7 +1586,7 @@ const UploadDialog: React.FC<{
                       </span>
                       {exists && (
                         <span className="text-[11px]" style={{ color: 'var(--hub-err)' }}>
-                          {t('pages.rag.nameExists')}
+                          {t('pages.rag.pathExists')}
                         </span>
                       )}
                     </div>
@@ -1679,25 +2138,195 @@ const ToolsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   );
 };
 
-/** Reusable tag editor: chips with remove + an add input (Enter or comma). */
+/** Position for a portal-rendered (fixed) dropdown anchored to an element. */
+interface AnchoredPos {
+  /** viewport top for the dropdown's top edge (bottom placement). */
+  top?: number;
+  /** CSS `bottom` value for the dropdown's bottom edge (top placement). */
+  bottom?: number;
+  left: number;
+  width: number;
+  placement: 'bottom' | 'top';
+}
+
+/**
+ * Fixed positioning for dropdowns rendered via createPortal to document.body.
+ * Dialog bodies use overflow-y-auto, which clips absolutely-positioned
+ * children (the original "tag dropdown hidden in the import dialog" bug);
+ * portalling to body + fixed coords escapes any scroll container. Recomputes
+ * on open, scroll (any ancestor, including the dialog body), and resize.
+ * Flips above the anchor (anchored by its bottom edge, so short lists hug
+ * the input) when there isn't room below.
+ */
+const useAnchoredPos = (
+  anchorRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  maxHeight: number,
+  gap = 4
+): AnchoredPos | null => {
+  const [pos, setPos] = useState<AnchoredPos | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const measure = () => {
+      const el = anchorRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const below = vh - r.bottom;
+      // Flip above only when the space below is clearly too short AND there
+      // is more room above.
+      const placement: 'bottom' | 'top' = below >= Math.min(maxHeight, 160) || below >= r.top ? 'bottom' : 'top';
+      setPos({
+        left: r.left,
+        width: r.width,
+        placement,
+        top: placement === 'bottom' ? r.bottom + gap : undefined,
+        bottom: placement === 'top' ? vh - r.top + gap : undefined,
+      });
+    };
+    measure();
+    // capture: catch scrolls of any ancestor (dialog body) on the way down.
+    document.addEventListener('scroll', measure, true);
+    window.addEventListener('resize', measure);
+    return () => {
+      document.removeEventListener('scroll', measure, true);
+      window.removeEventListener('resize', measure);
+    };
+  }, [open, maxHeight, gap, anchorRef]);
+
+  return pos;
+};
+
+/** Reusable tag editor: chips with remove + a searchable, paginated dropdown
+ *  that queries the backend (so picking from a large tag library never shows
+ *  the wrong tag). Typing searches the backend (debounced); scrolling to the
+ *  bottom loads the next page. A brand-new tag can still be typed + Enter'd
+ *  even if it isn't in the library yet. */
 const TagEditor: React.FC<{ tags: string[]; onChange: (tags: string[]) => void }> = ({
   tags,
   onChange,
 }) => {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState('');
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [items, setItems] = useState<RagTagStat[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  // Portal-rendered dropdown lives at document.body, so the outside-click
+  // check must include it (contains() only sees the DOM subtree).
+  const menuRef = useRef<HTMLDivElement>(null);
+  const reqId = useRef(0);
+  const PAGE_SIZE = 50;
+  // max dropdown height: 220px list + ~34px "add new" row ≈ 254. Anchor to the
+  // WRAPPER (chips row + input, i.e. the full tag editor row) so the dropdown
+  // spans the tag bar's full width instead of just the trailing input box.
+  const pos = useAnchoredPos(wrapRef, open, 254);
 
-  const commit = () => {
-    const parts = draft
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0 && !tags.includes(s));
-    if (parts.length > 0) onChange([...tags, ...parts]);
-    setDraft('');
+  // Debounced backend search. Resets the list whenever the query changes.
+  useEffect(() => {
+    if (!open) return;
+    const id = ++reqId.current;
+    setLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await ragTagSearchPaged(query.trim(), 0, PAGE_SIZE);
+        if (id !== reqId.current) return; // a newer request superseded us
+        setItems(res.items);
+        setTotal(res.total);
+        setPage(0);
+      } catch {
+        if (id === reqId.current) {
+          setItems([]);
+          setTotal(0);
+          setPage(0);
+        }
+      } finally {
+        if (id === reqId.current) setLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [open, query]);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      const inside = (wrapRef.current && wrapRef.current.contains(t)) || (menuRef.current && menuRef.current.contains(t));
+      if (!inside) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const hasMore = items.length < total;
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    const id = ++reqId.current;
+    setLoadingMore(true);
+    const next = page + 1;
+    try {
+      const res = await ragTagSearchPaged(query.trim(), next, PAGE_SIZE);
+      if (id !== reqId.current) return;
+      setItems((prev) => {
+        const seen = new Set(prev.map((p) => p.tag));
+        const merged = [...prev];
+        for (const it of res.items) if (!seen.has(it.tag)) merged.push(it);
+        return merged;
+      });
+      setTotal(res.total);
+      setPage(next);
+    } catch {
+      // ignore — user can scroll again to retry
+    } finally {
+      if (id === reqId.current) setLoadingMore(false);
+    }
+  }, [loadingMore, hasMore, page, query]);
+
+  const onListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 24) loadMore();
   };
 
+  // Case-insensitive check: a tag already attached (any spelling) is filtered
+  // out of the dropdown and can't be re-added.
+  const hasTagCI = (v: string) => tags.some((x) => x.toLowerCase() === v.toLowerCase());
+
+  const add = (tag: string) => {
+    const v = tag.trim();
+    if (!v || hasTagCI(v)) return;
+    onChange([...tags, v]);
+    setQuery('');
+  };
+
+  const remove = (tag: string) => onChange(tags.filter((x) => x !== tag));
+
+  const commitDraft = () => {
+    const parts = query
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && !hasTagCI(s));
+    if (parts.length > 0) onChange([...tags, ...parts]);
+    setQuery('');
+  };
+
+  // Exact-match (case-insensitive) against the LIBRARY items for the "add new
+  // tag" row; the list itself additionally hides tags already attached.
+  const exactInList = items.some((it) => it.tag.toLowerCase() === query.trim().toLowerCase());
+  // Dropdown list: hide tags already on this doc (they're shown as chips above).
+  const selectableItems = items.filter((it) => !hasTagCI(it.tag));
+
   return (
-    <div className="flex items-center gap-1.5 flex-wrap" style={{ minHeight: 30 }}>
+    <div className="flex items-center gap-1.5 flex-wrap" ref={wrapRef} style={{ minHeight: 30 }}>
       {tags.map((tag) => (
         <span
           key={tag}
@@ -1707,7 +2336,7 @@ const TagEditor: React.FC<{ tags: string[]; onChange: (tags: string[]) => void }
           {tag}
           <button
             type="button"
-            onClick={() => onChange(tags.filter((x) => x !== tag))}
+            onClick={() => remove(tag)}
             className="inline-flex"
             style={{ lineHeight: 1 }}
             title={t('pages.rag.removeFile')}
@@ -1716,21 +2345,123 @@ const TagEditor: React.FC<{ tags: string[]; onChange: (tags: string[]) => void }
           </button>
         </span>
       ))}
-      <input
-        type="text"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ',') {
-            e.preventDefault();
-            commit();
-          }
-        }}
-        onBlur={commit}
-        placeholder={t('pages.rag.tagPlaceholder')}
-        className="flex-1 min-w-[120px] bg-transparent outline-none text-[12.5px]"
-        style={{ color: 'var(--hub-ink)', minWidth: 120 }}
-      />
+      <div className="relative flex-1" style={{ minWidth: 120 }}>
+        <input
+          type="text"
+          value={query}
+          onFocus={() => setOpen(true)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ',') {
+              e.preventDefault();
+              commitDraft();
+            } else if (e.key === 'Backspace' && query === '' && tags.length > 0) {
+              remove(tags[tags.length - 1]);
+            }
+          }}
+          onBlur={() => {
+            // Defer so a click on a dropdown item registers first.
+            setTimeout(() => setOpen(false), 150);
+            commitDraft();
+          }}
+          placeholder={t('pages.rag.tagPlaceholder')}
+          className="w-full bg-transparent outline-none text-[12.5px]"
+          style={{ color: 'var(--hub-ink)' }}
+        />
+        {open && pos && createPortal(
+          <div
+            ref={menuRef}
+            className="fixed z-[60] rounded-lg shadow-2xl border overflow-hidden"
+            style={{
+              top: pos.top,
+              bottom: pos.bottom,
+              left: pos.left,
+              width: pos.width,
+              background: 'var(--hub-surface)',
+              borderColor: 'var(--hub-line-2)',
+              maxHeight: pos.placement === 'top' ? 254 : undefined,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            <div
+              ref={listRef}
+              onScroll={onListScroll}
+              className="overflow-y-auto"
+              style={{ maxHeight: 220, overscrollBehavior: 'contain' }}
+            >
+              {loading ? (
+                <div className="flex items-center justify-center gap-1.5 text-[12px]" style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}>
+                  <Loader2 size={12} className="animate-spin" />
+                  {t('pages.rag.tagSearchLoading', '搜索中…')}
+                </div>
+              ) : selectableItems.length === 0 ? (
+                <div className="text-[12px] text-center" style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}>
+                  {query.trim()
+                    ? t('pages.rag.tagSearchEmpty', '无匹配标签')
+                    : t('pages.rag.tagSearchEmptyAll', '暂无标签')}
+                </div>
+              ) : (
+                selectableItems.map((it) => {
+                  const checked = tags.includes(it.tag);
+                  return (
+                    <button
+                      key={it.tag}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => (checked ? remove(it.tag) : add(it.tag))}
+                      className="flex items-center gap-2 w-full text-left"
+                      style={{ padding: '6px 10px', background: checked ? 'var(--hub-surface)' : 'transparent', border: 'none', cursor: 'pointer' }}
+                    >
+                      <span
+                        style={{
+                          width: 14, height: 14, borderRadius: 3, flexShrink: 0,
+                          border: '1px solid var(--hub-line)',
+                          background: checked ? 'var(--hub-accent)' : 'transparent',
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                      >
+                        {checked && <Check size={10} style={{ color: '#fff' }} />}
+                      </span>
+                      <span className="truncate text-[12.5px] flex-1" style={{ color: 'var(--hub-ink)' }}>{it.tag}</span>
+                      <span className="text-[10.5px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>{it.fileCount}</span>
+                    </button>
+                  );
+                })
+              )}
+              {!loading && hasMore && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={loadMore}
+                  className="flex items-center justify-center gap-1.5 w-full text-[11.5px]"
+                  style={{ padding: '8px 0', color: 'var(--hub-ink-3)', border: 'none', cursor: 'pointer', borderTop: '1px solid var(--hub-line)' }}
+                >
+                  {loadingMore ? <Loader2 size={11} className="animate-spin" /> : <ChevronDown size={11} />}
+                  {loadingMore ? t('pages.rag.tagSearchLoadingMore', '加载中…') : t('pages.rag.tagSearchLoadMore', '加载更多')}
+                </button>
+              )}
+            </div>
+            {/* Offer the typed string as a brand-new tag (not in library yet). */}
+            {query.trim() && !exactInList && !hasTagCI(query.trim()) && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => add(query.trim())}
+                className="flex items-center gap-2 w-full text-left"
+                style={{ padding: '7px 10px', borderTop: '1px solid var(--hub-line)', color: 'var(--hub-accent)', border: 'none', cursor: 'pointer', background: 'transparent' }}
+              >
+                <Plus size={12} />
+                <span className="text-[12.5px]">{t('pages.rag.tagAddNew', '添加 "{{tag}}"', { tag: query.trim() })}</span>
+              </button>
+            )}
+          </div>,
+          document.body
+        )}
+      </div>
     </div>
   );
 };
@@ -1961,8 +2692,565 @@ const BatchTagsDialog: React.FC<{
             {t('pages.rag.cancel')}
           </button>
           <button onClick={handleConfirm} className="hub-btn primary" disabled={busy || tags.length === 0}>
-            {busy ? <Loader2 size={13} className="animate-spin" /> : <Tag size={13} />} {t('pages.rag.saveTags')}
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Tag size={13} />}{' '}
+            {mode === 'add' ? t('pages.rag.saveTags') : t('pages.rag.removeTags')}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 单条更新弹框（需求5：软链接/拷贝/老版本/丢失分支） ──
+const UpdateDialog: React.FC<{
+  doc: MockDocInfo;
+  check: MockUpdateCheck | null;
+  checking: boolean;
+  actionPhase: 'idle' | 'reindexing' | 'done' | 'error';
+  onRetryCheck: () => void;
+  onFromOriginal: () => void;
+  onManualUpload: () => Promise<void>;
+  onClose: () => void;
+}> = ({ doc, check, checking, actionPhase, onRetryCheck, onFromOriginal, onManualUpload, onClose }) => {
+  const { t } = useTranslation();
+  const method = check?.method ?? (doc.method || 'copy');
+  const reindexing = actionPhase === 'reindexing';
+  const done = actionPhase === 'done';
+
+  // 检查完成后的分支判定：
+  //  - 原始丢失（hasOriginalPath && !originalExists，或 lostOriginal）→ 提示 + 强制手动上传
+  //  - 原始存在有更新 → 「从原始文件更新」+「手动上传」次按钮
+  //  - 原始存在无更新 → 「无更新」+「手动上传」次按钮
+  //  - 无 original_path（老版本）→ 仅「手动上传」+ 兼容提示
+  const lostOriginal = check ? check.lostOriginal : !!doc.lostOriginal;
+  const originalLost = lostOriginal || (check?.hasOriginalPath && !check.originalExists);
+  const noOriginalPath = check ? !check.hasOriginalPath : !doc.originalPath;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+            {t('pages.rag.updateDialogTitle', '更新文档')}
+          </h2>
+          <button onClick={onClose} className="hub-icon-btn sm" disabled={reindexing}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          {/* 文档信息 */}
+          <div className="hub-card flex items-center gap-2" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
+            <FileText size={14} style={{ color: 'var(--hub-ink-3)' }} />
+            <span className="truncate text-[13px]" style={{ color: 'var(--hub-ink)' }} title={doc.name}>{doc.name}</span>
+            <span className="hub-tag flex-shrink-0" style={{ fontSize: 10 }}>
+              {method === 'symlink' ? (
+                <span className="inline-flex items-center gap-0.5"><Link2 size={9} />{t('pages.rag.methodSymlink', '软链接')}</span>
+              ) : (
+                <span className="inline-flex items-center gap-0.5"><CopyIcon size={9} />{t('pages.rag.methodFileCopy', '拷贝')}</span>
+              )}
+            </span>
+          </div>
+          {doc.originalPath && (
+            <div className="hub-mono text-[11px] truncate" style={{ color: 'var(--hub-ink-3)' }} title={doc.originalPath}>
+              {t('pages.rag.originalPath', '原始地址')}: {doc.originalPath}
+            </div>
+          )}
+
+          {/* 检查中 */}
+          {checking && (
+            <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+              {t('pages.rag.updateChecking', '正在检查原始文件…')}
+            </div>
+          )}
+
+          {/* 原始文件不存在（软链接/拷贝丢失）→ 不禁用，提示 + 强制手动上传（需求更正：丢失仅无法自动更新） */}
+          {!checking && originalLost && (
+            <div className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--hub-err)' }}>
+              <AlertTriangle size={15} className="mt-0.5 flex-shrink-0" />
+              <div>{t('pages.rag.updateOriginalLost', '原始文件不存在，无法从原始文件更新。可手动上传文件覆盖。')}</div>
+            </div>
+          )}
+
+          {/* 原始存在有更新 */}
+          {!checking && check?.originalExists && check.originalChanged && (
+            <div className="space-y-2">
+              <div className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+                <RefreshCw size={14} className="mt-0.5 flex-shrink-0" style={{ color: 'var(--hub-accent)' }} />
+                <div>{t('pages.rag.updateOriginalChanged', '检测到原始文件有更新，可从原始文件一键更新。')}</div>
+              </div>
+            </div>
+          )}
+
+          {/* 原始存在无更新 */}
+          {!checking && check?.originalExists && !check.originalChanged && (
+            <div className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
+              <Check size={14} className="mt-0.5 flex-shrink-0" />
+              <div>{t('pages.rag.updateNoChange', '原始文件无更新。仍可手动上传文件覆盖。')}</div>
+            </div>
+          )}
+
+          {/* 老版本无 original_path（拷贝）→ 手动上传兼容分支 */}
+          {!checking && !check?.originalExists && noOriginalPath && (
+            <div className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+              <Info size={14} className="mt-0.5 flex-shrink-0" />
+              <div>
+                {t('pages.rag.updateManualUploadLegacyHint', '该文档为老版本（无原始地址记录），请手动选择文件更新。新文件将记录原始地址以便后续更新检测。')}
+              </div>
+            </div>
+          )}
+
+          {/* 执行更新进度（reindexing / done） */}
+          {reindexing && (
+            <div className="space-y-2" style={{ marginTop: 4 }}>
+              <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+                <Loader2 size={14} className="animate-spin" /> {t('pages.rag.updatingFile', { name: doc.name })}
+              </div>
+              <div style={{ height: 6, borderRadius: 3, background: 'var(--hub-line)', overflow: 'hidden' }}>
+                <div style={{ width: '60%', height: '100%', background: 'var(--hub-ink)', transition: 'width 0.2s' }} />
+              </div>
+            </div>
+          )}
+          {done && (
+            <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-accent)' }}>
+              <Check size={14} /> {t('pages.rag.updateDone', '文档已更新')}
+            </div>
+          )}
+        </div>
+
+        {/* 底部按钮区：按分支渲染 */}
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          {reindexing || done ? (
+            <button onClick={onClose} className="hub-btn">{t('pages.rag.close', '关闭')}</button>
+          ) : (
+            <>
+              <button onClick={onClose} className="hub-btn" disabled={reindexing}>
+                {t('pages.rag.cancel')}
+              </button>
+              {/* 原始存在 → 「从原始文件更新」（软链接/拷贝通用）；丢失/无 original_path 则不显示此按钮 */}
+              {check?.originalExists && (
+                <button onClick={onFromOriginal} className="hub-btn primary" disabled={reindexing || checking}>
+                  <RefreshCw size={13} /> {t('pages.rag.updateFromOriginal', '从原始文件更新')}
+                </button>
+              )}
+              {/* 手动上传：原始丢失或老版本无 original_path 时为主按钮，否则为次按钮 */}
+              <button
+                onClick={onManualUpload}
+                className={originalLost || noOriginalPath ? 'hub-btn primary' : 'hub-btn'}
+                disabled={reindexing || checking}
+              >
+                <Upload size={13} /> {t('pages.rag.updateManualUpload', '手动上传文件更新')}
+              </button>
+              {!checking && (
+                <button onClick={onRetryCheck} className="hub-icon-btn sm" title={t('pages.rag.updateRecheck', '重新检查')}>
+                  <RefreshCw size={12} />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 标签搜索——可搜索 + 分页查询后端的多选下拉框（输入过滤 + 复选 + 已选 chip + 滚动加载更多） ──
+const TagSearchSelect: React.FC<{
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+  placeholder: string;
+}> = ({ selected, onChange, placeholder }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [items, setItems] = useState<RagTagStat[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const reqId = useRef(0);
+  const PAGE_SIZE = 50;
+  // max dropdown height: search 38 + chips ~40 + list 200 + load-more 32 ≈ 310
+  const pos = useAnchoredPos(wrapRef, open, 310);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = ++reqId.current;
+    setLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await ragTagSearchPaged(query.trim(), 0, PAGE_SIZE);
+        if (id !== reqId.current) return;
+        setItems(res.items);
+        setTotal(res.total);
+        setPage(0);
+      } catch {
+        if (id === reqId.current) {
+          setItems([]);
+          setTotal(0);
+          setPage(0);
+        }
+      } finally {
+        if (id === reqId.current) setLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [open, query]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      const inside = (wrapRef.current && wrapRef.current.contains(t)) || (menuRef.current && menuRef.current.contains(t));
+      if (!inside) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const toggle = (tag: string) => {
+    const next = new Set(selected);
+    if (next.has(tag)) next.delete(tag);
+    else next.add(tag);
+    onChange(next);
+  };
+
+  const hasMore = items.length < total;
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    const id = ++reqId.current;
+    setLoadingMore(true);
+    const next = page + 1;
+    try {
+      const res = await ragTagSearchPaged(query.trim(), next, PAGE_SIZE);
+      if (id !== reqId.current) return;
+      setItems((prev) => {
+        const seen = new Set(prev.map((p) => p.tag));
+        const merged = [...prev];
+        for (const it of res.items) if (!seen.has(it.tag)) merged.push(it);
+        return merged;
+      });
+      setTotal(res.total);
+      setPage(next);
+    } catch {
+      // ignore
+    } finally {
+      if (id === reqId.current) setLoadingMore(false);
+    }
+  }, [loadingMore, hasMore, page, query]);
+
+  const onListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 24) loadMore();
+  };
+
+  const selectedList = Array.from(selected);
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="hub-card flex items-center gap-1.5"
+        style={{
+          height: 30,
+          background: 'var(--hub-surface)',
+          padding: '0 8px',
+          minWidth: 240,
+          cursor: 'pointer',
+          borderColor: open ? 'var(--hub-accent)' : undefined,
+        }}
+      >
+        <Tag size={13} style={{ color: 'var(--hub-ink-3)' }} />
+        <span className="truncate text-[13px]" style={{ color: selectedList.length > 0 ? 'var(--hub-ink)' : 'var(--hub-ink-3)' }}>
+          {selectedList.length > 0
+            ? t('pages.rag.tagSearchCount', '{{count}} 个标签', { count: selectedList.length })
+            : placeholder}
+        </span>
+        <ChevronDown size={12} style={{ marginLeft: 'auto', color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+      </button>
+
+      {open && pos && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[60] rounded-lg shadow-2xl border overflow-hidden"
+          style={{
+            top: pos.top,
+            bottom: pos.bottom,
+            left: pos.left,
+            width: Math.max(pos.width, 220),
+            background: 'var(--hub-surface)',
+            borderColor: 'var(--hub-line-2)',
+            maxHeight: pos.placement === 'top' ? 310 : undefined,
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          {/* 搜索输入 */}
+          <div className="flex items-center gap-1.5 px-2.5" style={{ padding: '8px 10px', borderBottom: '1px solid var(--hub-line)' }}>
+            <Search size={12} style={{ color: 'var(--hub-ink-3)' }} />
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t('pages.rag.tagSearchInputPlaceholder', '搜索标签…')}
+              className="flex-1 bg-transparent outline-none text-[12.5px]"
+              style={{ color: 'var(--hub-ink)' }}
+            />
+            {query && (
+              <button onClick={() => setQuery('')} className="hub-icon-btn sm">
+                <X size={10} />
+              </button>
+            )}
+          </div>
+          {/* 已选 chips */}
+          {selectedList.length > 0 && (
+            <div className="flex flex-wrap gap-1" style={{ padding: '8px 10px', borderBottom: '1px solid var(--hub-line)' }}>
+              {selectedList.map((tag) => (
+                <span
+                  key={tag}
+                  className="hub-tag inline-flex items-center gap-1"
+                  style={{ fontSize: 11, padding: '2px 6px', cursor: 'pointer' }}
+                  onClick={() => toggle(tag)}
+                >
+                  {tag}
+                  <X size={10} />
+                </span>
+              ))}
+              <button
+                type="button"
+                onClick={() => onChange(new Set())}
+                className="text-[11px]"
+                style={{ color: 'var(--hub-ink-3)' }}
+              >
+                {t('pages.rag.tagSearchClear', '清除')}
+              </button>
+            </div>
+          )}
+          {/* 选项列表 —— 后端分页查询，滚动到底自动加载下一页 */}
+          <div className="overflow-y-auto" style={{ maxHeight: 200, overscrollBehavior: 'contain' }} onScroll={onListScroll}>
+            {loading ? (
+              <div className="flex items-center justify-center gap-1.5 text-[12px]" style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}>
+                <Loader2 size={12} className="animate-spin" />
+                {t('pages.rag.tagSearchLoading', '搜索中…')}
+              </div>
+            ) : items.length === 0 ? (
+              <div className="text-[12px] text-center" style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}>
+                {query.trim()
+                  ? t('pages.rag.tagSearchEmpty', '无匹配标签')
+                  : t('pages.rag.tagSearchEmptyAll', '暂无标签')}
+              </div>
+            ) : (
+              items.map((it) => {
+                const checked = selected.has(it.tag);
+                return (
+                  <button
+                    key={it.tag}
+                    type="button"
+                    onClick={() => toggle(it.tag)}
+                    className="flex items-center gap-2 w-full text-left"
+                    style={{ padding: '6px 10px', background: checked ? 'var(--hub-surface)' : 'transparent', border: 'none', cursor: 'pointer' }}
+                  >
+                    <span
+                      style={{
+                        width: 14, height: 14, borderRadius: 3, flexShrink: 0,
+                        border: '1px solid var(--hub-line)',
+                        background: checked ? 'var(--hub-accent)' : 'transparent',
+                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      }}
+                    >
+                      {checked && <Check size={10} style={{ color: '#fff' }} />}
+                    </span>
+                    <span className="truncate text-[12.5px] flex-1" style={{ color: 'var(--hub-ink)' }}>{it.tag}</span>
+                    <span className="text-[10.5px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>{it.fileCount}</span>
+                  </button>
+                );
+              })
+            )}
+            {!loading && hasMore && (
+              <button
+                type="button"
+                onClick={loadMore}
+                className="flex items-center justify-center gap-1.5 w-full text-[11.5px]"
+                style={{ padding: '8px 0', color: 'var(--hub-ink-3)', border: 'none', cursor: 'pointer', borderTop: '1px solid var(--hub-line)' }}
+              >
+                {loadingMore ? <Loader2 size={11} className="animate-spin" /> : <ChevronDown size={11} />}
+                {loadingMore ? t('pages.rag.tagSearchLoadingMore', '加载中…') : t('pages.rag.tagSearchLoadMore', '加载更多')}
+              </button>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+};
+
+// ── 批量更新前置确认弹框（预扫描后展示文件更新数量等信息，用户确认后再执行） ──
+const BatchUpdateConfirmDialog: React.FC<{
+  preview: BatchPreview | null;
+  checking: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}> = ({ preview, checking, onCancel, onConfirm }) => {
+  const { t } = useTranslation();
+  const none = preview !== null && preview.toUpdate === 0;
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border border-gray-100 dark:border-gray-700">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+            {t('pages.rag.batchUpdate', '批量更新')}
+          </h2>
+          <button onClick={onCancel} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="p-5 space-y-3">
+          {checking ? (
+            <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+              {t('pages.rag.batchScanChecking', '正在扫描文档更新状态…')}
+            </div>
+          ) : preview && (
+            <>
+              <p className="text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+                {t('pages.rag.batchConfirmSummary', '将扫描全部文档并自动重新索引有更新的文件。以下是预扫描结果：')}
+              </p>
+              <div className="grid grid-cols-2 gap-2 text-[12px]">
+                <div className="hub-card flex items-center justify-between" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
+                  <span style={{ color: 'var(--hub-ink-3)' }}>{t('pages.rag.batchScanTotal', '文档总数')}</span>
+                  <span className="hub-mono" style={{ color: 'var(--hub-ink)' }}>{preview.total}</span>
+                </div>
+                <div className="hub-card flex items-center justify-between" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
+                  <span style={{ color: 'var(--hub-ink-3)' }}>{t('pages.rag.batchScanToUpdate', '待更新')}</span>
+                  <span className="hub-mono" style={{ color: 'var(--hub-accent)' }}>{preview.toUpdate}</span>
+                </div>
+                <div className="hub-card flex items-center justify-between" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
+                  <span style={{ color: 'var(--hub-ink-3)' }}>{t('pages.rag.batchScanSkipped', '无需更新')}</span>
+                  <span className="hub-mono" style={{ color: 'var(--hub-ink-3)' }}>{preview.skipped}</span>
+                </div>
+                <div className="hub-card flex items-center justify-between" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
+                  <span style={{ color: 'var(--hub-ink-3)' }}>{t('pages.rag.batchScanLost', '原始丢失')}</span>
+                  <span className="hub-mono" style={{ color: preview.lost > 0 ? 'var(--hub-err)' : 'var(--hub-ink-3)' }}>{preview.lost}</span>
+                </div>
+              </div>
+              {none && (
+                <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+                  <Check size={13} /> {t('pages.rag.batchScanNone', '没有需要更新的文档。')}
+                </div>
+              )}
+              {preview.lost > 0 && (
+                <div className="flex items-start gap-2 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+                  <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" style={{ color: 'var(--hub-err)' }} />
+                  <div>{t('pages.rag.batchScanLostHint', '{{lost}} 个文档原始文件丢失，将跳过自动更新（可单独手动上传覆盖）。', { lost: preview.lost })}</div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          <button onClick={onCancel} className="hub-btn">
+            {t('pages.rag.cancel')}
+          </button>
+          <button onClick={onConfirm} className="hub-btn primary" disabled={checking || none}>
+            {!checking && none ? <Check size={13} /> : <RefreshCw size={13} />}
+            {t('pages.rag.batchConfirmStart', '开始更新')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 批量更新进度弹框（需求6：可关闭，再点按钮重开；使用上传浮层同款样式，只显示文件进度 + 向量进度，不逐条列出） ──
+// 向量进度条复用 charProgress（rag://upload-progress 事件，reindex_doc 内发出），
+// 与上传浮层同范式：按 name 匹配当前文档，用 charsDone/charsTotal 算百分比。
+const BatchUpdateDialog: React.FC<{
+  progress: BatchProgress;
+  charProgress: { name: string; charsDone: number; charsTotal: number } | null;
+  onClose: () => void;
+}> = ({ progress, charProgress, onClose }) => {
+  const { t } = useTranslation();
+  const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+  const done = progress.phase === 'done' && progress.current >= progress.total;
+  const errored = progress.phase === 'error';
+  const reindexing = progress.phase === 'reindexing';
+  // 向量进度：charProgress 与当前文档 name 匹配时取 charsDone/charsTotal。
+  const matches = charProgress && charProgress.name === progress.name;
+  const charsDone = matches ? charProgress!.charsDone : 0;
+  const charsTotal = matches ? charProgress!.charsTotal : 0;
+  const docPct = charsTotal > 0 ? Math.min(100, Math.round((charsDone / charsTotal) * 100)) : 0;
+  return (
+    <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+      <div
+        className="hub-card w-full max-w-sm p-6 flex flex-col items-center gap-4 shadow-2xl relative"
+        style={{ background: 'var(--hub-surface)' }}
+      >
+        {/* 关闭按钮：只关弹框，不中断后台任务 */}
+        <button
+          onClick={onClose}
+          className="hub-icon-btn sm"
+          style={{ position: 'absolute', top: 8, right: 8 }}
+          title={t('pages.rag.batchCloseDialog', '关闭（后台任务继续运行）')}
+        >
+          <X size={14} />
+        </button>
+        {errored ? (
+          <AlertTriangle size={22} style={{ color: 'var(--hub-err)' }} />
+        ) : done ? (
+          <Check size={22} style={{ color: 'var(--hub-accent)' }} />
+        ) : (
+          <Loader2 size={22} className="animate-spin" style={{ color: 'var(--hub-ink-2)' }} />
+        )}
+        <div className="text-[13px] text-center" style={{ color: errored ? 'var(--hub-err)' : 'var(--hub-ink)' }}>
+          {errored
+            ? t('pages.rag.batchUpdateFailed', '批量更新失败，请查看日志')
+            : done
+            ? t('pages.rag.batchUpdateDone', '批量更新完成')
+            : reindexing
+            ? t('pages.rag.reindexingFile', { current: progress.current + 1, total: progress.total, name: progress.name })
+            : progress.name
+            ? t('pages.rag.batchCheckingFile', { name: progress.name })
+            : t('pages.rag.batchProgressTitle', '批量更新进度')}
+        </div>
+        {/* 文件进度条（current/total）——同上传浮层文件级进度样式 */}
+        <div className="w-full" style={{ height: 6, borderRadius: 3, background: 'var(--hub-line)', overflow: 'hidden' }}>
+          <div
+            style={{ width: `${pct}%`, height: '100%', background: 'var(--hub-ink)', transition: 'width 0.2s ease' }}
+          />
+        </div>
+        <div className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+          {progress.current}/{progress.total}
+        </div>
+        {/* 向量进度条（当前文档 char 级子进度，复用 charProgress）——同上传浮层单文档进度样式 */}
+        {reindexing && (
+          <div className="w-full flex flex-col gap-1" style={{ marginTop: 2 }}>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.docProgress', '单文档进度')}
+              </span>
+              <span className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {docPct}%
+              </span>
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: 'var(--hub-line)', overflow: 'hidden' }}>
+              <div
+                style={{ width: `${docPct}%`, height: '100%', background: 'var(--hub-accent, var(--hub-ink))', transition: 'width 0.15s ease' }}
+              />
+            </div>
+            <div className="hub-mono text-[10px]" style={{ color: 'var(--hub-ink-3)' }}>
+              {charsTotal > 0
+                ? `${charsDone.toLocaleString()} / ${charsTotal.toLocaleString()} ${t('pages.rag.chars', '字符')}`
+                : t('pages.rag.docProgressPreparing', '准备中…')}
+            </div>
+          </div>
+        )}
+        <div className="text-[11px] text-center" style={{ color: 'var(--hub-ink-3)' }}>
+          {t('pages.rag.batchCloseHint', '关闭弹框不会中断后台任务，可点击「查看进度」重新打开。')}
         </div>
       </div>
     </div>

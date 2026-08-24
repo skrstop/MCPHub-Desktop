@@ -42,3 +42,13 @@ pub struct BuiltinPromptPayload {
 fn default_enabled() -> bool {
     true
 }
+
+/// A page of builtin-prompt search results. `page` is 0-based.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPage {
+    pub items: Vec<BuiltinPrompt>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}

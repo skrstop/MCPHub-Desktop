@@ -1,5 +1,5 @@
 use crate::{
-    models::resource::{BuiltinResource, BuiltinResourcePayload},
+    models::resource::{BuiltinResource, BuiltinResourcePayload, ResourcePage},
     services::resource_service,
 };
 
@@ -38,6 +38,21 @@ pub async fn update_builtin_resource(
 #[tauri::command]
 pub async fn delete_builtin_resource(id: String) -> Result<bool, String> {
     resource_service::delete(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Paginated builtin-resource search for the Resources page's toolbar:
+/// `search_key` (uri/name/description substring, empty = all) + `filter`
+/// ("all" | "active" | "inactive"), SQL-level LIMIT/OFFSET. `page` is 0-based.
+#[tauri::command]
+pub async fn search_builtin_resources(
+    search_key: String,
+    filter: String,
+    page: u32,
+    page_size: u32,
+) -> Result<ResourcePage, String> {
+    resource_service::search_paged(&search_key, &filter, page, page_size)
         .await
         .map_err(|e| e.to_string())
 }

@@ -120,16 +120,27 @@ export const changePassword = async (
   }
 };
 
-// Logout user
-export const logout = async (): Promise<void> => {
+// Logout user.
+//
+// `skipBetterAuthSignOut`: skip the Better Auth client `signOut()` call. In
+// guest mode (skipAuth) the desktop app has no backing HTTP server for
+// `/api/auth/better/sign-out`, so that call fails with ECONNREFUSED and spams
+// the vite proxy log. Guest exit doesn't have a Better Auth session to tear
+// down anyway — we just disable skipAuth server-side and clear local state —
+// so the Better Auth call is unnecessary there.
+export const logout = async (opts?: {
+  skipBetterAuthSignOut?: boolean;
+}): Promise<void> => {
   try {
     await apiPost<AuthResponse>('/auth/logout');
   } catch (error) {
     console.debug('Logout API call failed', { error });
   } finally {
     removeToken();
-    authClient.signOut().catch((signOutError) => {
-      console.debug('Better Auth sign out failed', { error: signOutError });
-    });
+    if (!opts?.skipBetterAuthSignOut) {
+      authClient.signOut().catch((signOutError) => {
+        console.debug('Better Auth sign out failed', { error: signOutError });
+      });
+    }
   }
 };

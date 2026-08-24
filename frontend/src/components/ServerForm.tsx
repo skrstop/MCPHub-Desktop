@@ -292,7 +292,7 @@ const ServerForm = ({
         {/* ─── Section 1: Basic Info ─── */}
         <div className="mb-5">
           <h3 className="text-sm font-semibold text-[var(--hub-ink)] mb-3 pb-2 border-b border-gray-200 dark:border-gray-700">
-            {t('server.sectionBasicInfo', 'Basic Info')}
+            {t('server.sectionBasicInfo')}
           </h3>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
@@ -332,7 +332,7 @@ const ServerForm = ({
         {/* ─── Section 2: Connection ─── */}
         <div className="mb-5">
           <h3 className="text-sm font-semibold text-[var(--hub-ink)] mb-3 pb-2 border-b border-gray-200 dark:border-gray-700">
-            {t('server.sectionConnection', 'Connection')}
+            {t('server.sectionConnection')}
           </h3>
 
           <div className="mb-4">
@@ -1057,7 +1057,7 @@ const ServerForm = ({
             onClick={() => setIsAdvancedExpanded(!isAdvancedExpanded)}
           >
             <h3 className="text-sm font-semibold text-[var(--hub-ink)]">
-              {t('server.sectionAdvanced', 'Advanced Options')}
+              {t('server.sectionAdvanced')}
             </h3>
             <span className="text-gray-500 text-sm">{isAdvancedExpanded ? '▼' : '▶'}</span>
           </div>

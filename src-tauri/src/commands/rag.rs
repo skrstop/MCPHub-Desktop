@@ -3,7 +3,10 @@
 
 use tauri::AppHandle;
 
-use crate::models::rag::{RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus, RagTagStat};
+use crate::models::rag::{
+    BatchPreview, RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus,
+    RagTagPage, RagTagStat, RagUpdateCheck,
+};
 use crate::rag::service;
 
 #[tauri::command]
@@ -43,24 +46,92 @@ pub async fn pick_rag_files(app: AppHandle) -> Result<Vec<RagPickedFile>, String
     Ok(service::pick_files(&app))
 }
 
+/// Open the OS folder picker, scan the folder's immediate (non-recursive) file
+/// children, and return them as import candidates. Hidden files + sub-directories
+/// are skipped. Same return shape as `pick_rag_files` so the upload pipeline is
+/// identical to multi-file import.
+#[tauri::command]
+pub async fn pick_rag_folder(app: AppHandle) -> Result<Vec<RagPickedFile>, String> {
+    Ok(service::pick_folder(&app))
+}
+
 /// Read + decode-to-UTF-8 + chunk + embed + index a single file (by disk
 /// path). The frontend loops over the picked paths, calling this once per
-/// file so it can show per-file upload progress.
+/// file so it can show per-file upload progress. `method` selects the import
+/// method: "symlink" (default — record original_path, no copy) or "copy"
+/// (copy bytes into rag/files). `None` defaults to "symlink" to match the
+/// UI default.
 #[tauri::command]
-pub async fn upload_rag_doc(app: AppHandle, file_path: String, tags: Vec<String>) -> Result<(), String> {
-    service::upload_one_path(&app, &file_path, tags)
+pub async fn upload_rag_doc(
+    app: AppHandle,
+    file_path: String,
+    tags: Vec<String>,
+    method: Option<String>,
+) -> Result<(), String> {
+    service::upload_one_path(&app, &file_path, tags, method)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Update an existing document in place: pick a new file, overwrite the
-/// document's on-disk content + meta (id preserved) + vector chunks. Returns
-/// the new chunk count. Requires RAG enabled (the new content is re-embedded).
+/// Update an existing document in place. `mode`:
+/// - `"original"`: re-read the recorded `original_path` and re-index its
+///   current content (the "from original" button). `file_path` is ignored.
+/// - `"file"`: read a freshly-picked `file_path` and overwrite (the "manual
+///   upload" button). The new file becomes the recorded original_path + its
+///   md5 is stored, so future update detection works (this is the legacy-compat
+///   path for old docs that had no original_path).
+/// Returns the new chunk count. Requires RAG enabled.
 #[tauri::command]
-pub async fn update_rag_doc(app: AppHandle, id: String, file_path: String) -> Result<u32, String> {
-    service::update_doc_from_file(&app, &id, &file_path)
+pub async fn update_rag_doc(
+    app: AppHandle,
+    id: String,
+    mode: String,
+    file_path: Option<String>,
+) -> Result<u32, String> {
+    if mode == "original" {
+        service::update_doc_from_original(&app, &id)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        let fp = file_path.unwrap_or_default();
+        if fp.is_empty() {
+            return Err("file_path is required for manual-upload update".to_string());
+        }
+        service::update_doc_from_file(&app, &id, &fp)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Single-doc update check: classify the recorded original's state so the
+/// per-row UpdateDialog can render the right branch (lost / changed /
+/// no-change / legacy-no-path). Cheap (one md5 of the source, no embedding).
+#[tauri::command]
+pub async fn check_rag_update(app: AppHandle, id: String) -> Result<RagUpdateCheck, String> {
+    service::check_rag_update(&app, &id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Batch-update preview: aggregate counts (total / to_update / skipped / lost)
+/// over all docs, shown in the confirm dialog before the expensive re-index
+/// pass runs. No embedding, no progress events.
+#[tauri::command]
+pub async fn preview_batch_update(app: AppHandle) -> Result<BatchPreview, String> {
+    service::preview_batch_update(&app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Run the batch update in the background: re-index every doc whose source
+/// changed (md5 differs, or legacy no-md5 treated as changed). Emits
+/// `rag://batch-update-progress` per doc. Lost/legacy docs are skipped.
+/// Returns immediately; work runs on a spawned task. Guarded against double
+/// triggers (a second call while one is running is a no-op).
+#[tauri::command]
+pub async fn batch_update_rag_docs(app: AppHandle) -> Result<(), String> {
+    service::batch_update_rag_docs(app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -79,6 +150,37 @@ pub async fn rag_search_command(query: String, tags: Vec<String>) -> Result<Vec<
 #[tauri::command]
 pub async fn rag_tag_search(search_key: Vec<String>) -> Result<Vec<RagTagStat>, String> {
     service::list_tags(search_key).await.map_err(|e| e.to_string())
+}
+
+/// Paginated tag search for the frontend's searchable dropdowns. Returns one
+/// page of tags (SQL-level LIKE + LIMIT/OFFSET) + the total matching count,
+/// so the UI can fetch more pages on demand. `page` is 0-based.
+#[tauri::command]
+pub async fn rag_tag_search_paged(
+    search_key: String,
+    page: u32,
+    page_size: u32,
+) -> Result<RagTagPage, String> {
+    service::list_tags_paged(search_key, page, page_size)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Paginated RAG document search for the file list's toolbar: `search_key` is
+/// a case-insensitive substring on the doc name (empty = all), `tags` is an
+/// ANY-match tag filter. Returns one page of `RagDocInfo` (enriched from the
+/// `.meta` files) + the total matching count. `page` is 0-based.
+#[tauri::command]
+pub async fn rag_doc_search_paged(
+    app: AppHandle,
+    search_key: String,
+    tags: Vec<String>,
+    page: u32,
+    page_size: u32,
+) -> Result<crate::models::rag::RagDocPage, String> {
+    service::search_docs_paged(&app, search_key, tags, page, page_size)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -23,7 +23,6 @@ import {
 } from 'lucide-react';
 import Pagination from '@/components/ui/Pagination';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
-import { selectItemPage } from '@/utils/listFilters';
 import {
   scanSkillsForImport,
   scanFolderForSkills,
@@ -35,6 +34,7 @@ import {
   createSkillAgent,
   deleteSkillAgent,
 } from '@/services/skillService';
+import { searchSkills } from '@/services/skillService';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Method help icon (?): click to toggle a popover explaining the difference
@@ -1698,27 +1698,48 @@ const SkillsPage: React.FC = () => {
 
   const isAdmin = auth.user?.isAdmin;
 
-  // Sort by dir_name, then filter + paginate client-side (selectItemPage
-  // filters/searches but does NOT sort — see utils/listFilters.ts).
-  const sortedSkills = useMemo(
-    () => [...skills].sort((a, b) => a.dirName.localeCompare(b.dirName)),
-    [skills],
-  );
-
-  const { items: visibleSkills, pagination } = useMemo(
-    () =>
-      selectItemPage(sortedSkills, 'all', search, page, pageSize, {
-        haystack: (s) => s.dirName + ' ' + s.name + ' ' + s.description,
-        isEnabled: () => true,
-      }),
-    [sortedSkills, search, page, pageSize],
-  );
+  // ── 搜索/分页后端化 ──（同 PromptsPage/ResourcesPage：SQL LIKE + ORDER BY
+  // dir_name + LIMIT/OFFSET，空搜索=后端全量分页；FS 存在性过滤在后端）
+  const [pageItems, setPageItems] = useState<Skill[]>([]);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [pageLoading, setPageLoading] = useState(false);
+  const reqIdRef = useRef(0);
 
   useEffect(() => {
-    if (pagination.page !== page) {
-      setPage(pagination.page);
-    }
-  }, [pagination.page, page]);
+    const id = ++reqIdRef.current;
+    setPageLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        // backend page is 0-based; the UI's `page` is 1-based
+        const res = await searchSkills(search.trim(), page - 1, pageSize);
+        if (id !== reqIdRef.current) return;
+        setPageItems(res.items);
+        setPageTotal(res.total);
+      } catch {
+        if (id !== reqIdRef.current) return;
+        setPageItems([]);
+        setPageTotal(0);
+      } finally {
+        if (id === reqIdRef.current) setPageLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [search, page, pageSize, skills]);
+
+  const visibleSkills = pageItems;
+  const totalPages = Math.max(1, Math.ceil(pageTotal / pageSize));
+  const safePage = Math.min(page, totalPages);
+  useEffect(() => {
+    if (safePage !== page) setPage(safePage);
+  }, [safePage, page]);
+  const pagination = {
+    page: safePage,
+    limit: pageSize,
+    total: pageTotal,
+    totalPages,
+    hasNextPage: safePage < totalPages,
+    hasPrevPage: safePage > 1,
+  };
 
   // existingDirNames removed: "already imported" is now a filesystem check
   // (ScannedSkill.alreadyImported, set by the backend scanning the library dir),

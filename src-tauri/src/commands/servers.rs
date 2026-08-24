@@ -1,6 +1,6 @@
 use crate::{
     mcp::{pool, progress},
-    models::server::{ServerConfig, ServerInfo, ServerStatus, ServerType},
+    models::server::{ServerConfig, ServerInfo, ServerPage, ServerStatus, ServerType},
     services::{mcp_manager, server_service, server_tool_config_service, runtime_env},
 };
 
@@ -37,6 +37,136 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
         result.push(info);
     }
     Ok(result)
+}
+
+/// Paginated server search for the dashboard list. SQL does the name/description
+/// substring prefilter (`ORDER BY name` served by the UNIQUE index); runtime-only
+/// fields (connection status, live tool names) are merged in Rust for the
+/// candidates. The search haystack keeps the previous client-side behavior:
+/// name + description + tool names.
+///
+/// `search` empty = match all. `type_filter`: "custom" (exclude builtin) |
+/// "builtin" (only builtin) | "all". `status_filter`: "all" | "online" |
+/// "issues" | "disabled" — these depend on runtime state, applied in Rust.
+/// `page` is 1-based (matches the dashboard's pagination).
+#[tauri::command]
+pub async fn search_servers(
+    search: String,
+    type_filter: String,
+    status_filter: String,
+    page: u32,
+    page_size: u32,
+) -> Result<ServerPage, String> {
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 200);
+    let key = search.trim().to_lowercase();
+
+    // SQL prefilter on name/description (indexed ORDER BY; LIKE on the two
+    // persisted searchable fields). Tool-name matching is added below.
+    let mut candidates = server_service::search_configs(&search)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut matched_names: std::collections::HashSet<String> =
+        candidates.iter().map(|c| c.name.clone()).collect();
+
+    // Tool-name fallback: tools live only in the runtime pool, so when a query
+    // is active, additionally scan the full list's tool names and merge servers
+    // not already matched (preserves the previous client-side haystack).
+    if !key.is_empty() {
+        let all = server_service::list_all().await.map_err(|e| e.to_string())?;
+        for cfg in all {
+            if matched_names.contains(&cfg.name) {
+                continue;
+            }
+            let tool_match = pool::get_entry_info(&cfg.name)
+                .await
+                .map(|(_, tools)| tools.iter().any(|t| t.name.to_lowercase().contains(&key)))
+                .unwrap_or(false);
+            if tool_match {
+                matched_names.insert(cfg.name.clone());
+                candidates.push(cfg);
+            }
+        }
+        candidates.sort_by_key(|c| c.name.to_lowercase());
+    }
+
+    // Enrich candidates with runtime status + filtered tools (same as list_servers).
+    let mut infos: Vec<ServerInfo> = Vec::with_capacity(candidates.len());
+    for cfg in candidates {
+        let (status, tools) = pool::get_entry_info(&cfg.name).await.unwrap_or_else(|| (
+            ServerStatus {
+                name: cfg.name.clone(),
+                connected: false,
+                starting: false,
+                start_on_demand: cfg.start_on_demand.unwrap_or(false),
+                tool_count: 0,
+                error: None,
+                last_connected: None,
+                server_version: None,
+            },
+            vec![],
+        ));
+        let tools = server_tool_config_service::apply_tool_filters(&cfg.name, tools)
+            .await
+            .unwrap_or_default();
+        infos.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() });
+    }
+
+    // Builtin virtual server (RAG): include when the tab asks for it and the
+    // query matches its name or tool names (or the query is empty).
+    let include_builtin = match type_filter.as_str() {
+        "builtin" => true,
+        "custom" => false,
+        _ => true, // "all"
+    };
+    if include_builtin {
+        if let Some(info) = crate::rag::service::builtin_server_info().await {
+            let matches_query = key.is_empty()
+                || info.config.name.to_lowercase().contains(&key)
+                || info.tools.iter().any(|t| t.name.to_lowercase().contains(&key));
+            if matches_query {
+                infos.push(info);
+            }
+        }
+    }
+
+    // Type filter: drop builtin rows for the "custom" tab (real DB rows are
+    // never builtin, but be explicit), keep only builtin for "builtin".
+    let infos: Vec<ServerInfo> = infos
+        .into_iter()
+        .filter(|i| match type_filter.as_str() {
+            "builtin" => i.config.server_type == ServerType::Builtin,
+            "custom" => i.config.server_type != ServerType::Builtin,
+            _ => true,
+        })
+        .collect();
+
+    // Status filter (runtime state, applied in Rust before pagination so the
+    // total is correct). Semantics mirror getServerFilterCounts in the frontend:
+    // online = connected; disabled = enabled=false; issues = the rest.
+    let filtered: Vec<ServerInfo> = infos
+        .into_iter()
+        .filter(|i| match status_filter.as_str() {
+            "online" => i.status.connected,
+            "disabled" => !i.config.enabled,
+            "issues" => !i.status.connected && i.config.enabled,
+            _ => true,
+        })
+        .collect();
+
+    let total = filtered.len() as u64;
+    let start = ((page as usize) - 1) * page_size as usize;
+    let items = if start >= filtered.len() {
+        Vec::new()
+    } else {
+        filtered[start..(start + page_size as usize).min(filtered.len())].to_vec()
+    };
+    Ok(ServerPage {
+        items,
+        total,
+        page,
+        page_size,
+    })
 }
 
 #[tauri::command]

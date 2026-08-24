@@ -111,9 +111,39 @@ pub struct RagDocInfo {
     /// rag_file_create docs. Surfaced so the UI can show it under the display
     /// name: when the user opens the file's folder (reveal-in-file-manager),
     /// they can match the selected/visible file to this name even when it
-    /// differs from the display name.
+    /// differs from the display name. Empty string for "symlink" docs (no
+    /// copied file — the content lives at `original_path`).
     #[serde(default)]
     pub file_name: String,
+    /// Import method: "symlink" | "copy". `None`/empty for legacy docs (pre-
+    /// feature) — treated as "copy" by the frontend.
+    #[serde(default)]
+    pub method: String,
+    /// Absolute path of the original imported file. Surfaced so the list can
+    /// show the method badge tooltip + so "open original location" works.
+    #[serde(default)]
+    pub original_path: String,
+    /// MD5 (hex) of the source content captured at import time. Surfaced for
+    /// completeness / debugging.
+    #[serde(default)]
+    pub md5: String,
+    /// True iff the doc has a recorded `original_path` that does NOT exist on
+    /// disk now (the source was moved/deleted). Applies to both "symlink"
+    /// (no content copy — content unreadable) and "copy" (copy still in
+    /// rag/files — content readable, but update-detection source is gone).
+    /// The UI uses this for the ⚠️ badge + to disable the auto-update path;
+    /// view/open-location disabling is gated on `content_available` (copy
+    /// docs with a missing source still have their copy, so view works).
+    #[serde(default)]
+    pub lost_original: bool,
+    /// True iff the doc's content is readable right now. "copy" docs are
+    /// always content-available (the copy lives in rag/files). "symlink"
+    /// docs are content-available iff `original_path` exists. The UI greys
+    /// "view" + "open location" only when this is false (not merely on
+    /// `lost_original`), so a copy doc whose original vanished still lets
+    /// the user view its imported copy.
+    #[serde(default)]
+    pub content_available: bool,
 }
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +159,23 @@ pub struct RagDoc {
     pub chunk_count: u32,
     #[serde(default)]
     pub file_type: String,
+    /// Import method ("symlink"|"copy"|"" legacy) — same semantics as
+    /// `RagDocInfo.method`.
+    #[serde(default)]
+    pub method: String,
+    /// Original imported file path (empty for legacy copy docs).
+    #[serde(default)]
+    pub original_path: String,
+    /// True iff the recorded original_path is missing on disk (both symlink +
+    /// copy count; see `RagDocInfo.lost_original`).
+    #[serde(default)]
+    pub lost_original: bool,
+    /// True iff the doc's content is readable right now (symlink = original
+    /// exists; copy = the rag/files copy exists). View/open-location are gated
+    /// on this, NOT on `lost_original` — a copy doc whose original vanished
+    /// still has its copy, so view works.
+    #[serde(default)]
+    pub content_available: bool,
 }
 
 /// A search result fragment.
@@ -157,6 +204,31 @@ pub struct RagChunk {
 pub struct RagTagStat {
     pub tag: String,
     pub file_count: u32,
+}
+
+/// A page of tag-search results: the items on the current page + the total
+/// number of matching tags (so the frontend knows whether more pages exist).
+/// `page` is 0-based; `page_size` is the per-page cap actually applied.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagTagPage {
+    pub items: Vec<RagTagStat>,
+    /// Total matching tags across all pages (NOT just this page).
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+/// A page of doc-search results (mirrors `RagTagPage` for the file list).
+/// `page` is 0-based; `page_size` is the per-page cap actually applied.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagDocPage {
+    pub items: Vec<RagDocInfo>,
+    /// Total matching docs across all pages (NOT just this page).
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
 }
 
 /// A file picked from the OS file dialog (by path) — the backend reads bytes
@@ -189,4 +261,43 @@ pub struct RagStatus {
     /// true until `reindex_all` completes. Cleared on disable.
     #[serde(default)]
     pub needs_reindex: bool,
+}
+
+/// Single-doc update check result (drives the per-row UpdateDialog branches):
+/// does the original file exist, and if so has it changed vs the stored md5?
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagUpdateCheck {
+    /// "symlink" | "copy" | "" (legacy)
+    pub method: String,
+    /// False for legacy docs that predate `original_path` (no recorded source).
+    pub has_original_path: bool,
+    /// True iff the recorded original_path exists on disk right now.
+    pub original_exists: bool,
+    /// False for legacy docs that predate `md5` (no stored hash).
+    pub has_md5: bool,
+    /// True iff the source exists AND its current md5 differs from the stored
+    /// md5 (or there's no stored md5 -> treat as "has update" for legacy).
+    pub original_changed: bool,
+    /// True iff symlink method + original_path missing (UI: only manual-upload
+    /// is offered).
+    pub lost_original: bool,
+}
+
+/// Batch-update preview: classification counts over all docs, shown in the
+/// confirm dialog before the user starts the (expensive) async re-index pass.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPreview {
+    /// Total docs scanned.
+    pub total: u32,
+    /// Docs whose source exists + md5 changed (or legacy no-md5) -> will be
+    /// re-indexed.
+    pub to_update: u32,
+    /// Docs with no change, or legacy docs with no recorded original_path
+    /// (can't auto-update, left to single-doc manual upload).
+    pub skipped: u32,
+    /// Docs whose original_path is missing on disk (skipped; user can manually
+    /// upload to overwrite).
+    pub lost: u32,
 }

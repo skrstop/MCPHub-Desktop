@@ -1,5 +1,5 @@
 use crate::{
-    models::prompt::{BuiltinPrompt, BuiltinPromptPayload},
+    models::prompt::{BuiltinPrompt, BuiltinPromptPayload, PromptPage},
     services::prompt_service,
 };
 
@@ -57,4 +57,19 @@ pub async fn call_builtin_prompt(
     }
 
     Ok(prompt_service::render_template(&prompt.template, &args))
+}
+
+/// Paginated builtin-prompt search for the Prompts page's toolbar:
+/// `search_key` (name/title/description substring, empty = all) + `filter`
+/// ("all" | "active" | "inactive"), SQL-level LIMIT/OFFSET. `page` is 0-based.
+#[tauri::command]
+pub async fn search_builtin_prompts(
+    search_key: String,
+    filter: String,
+    page: u32,
+    page_size: u32,
+) -> Result<PromptPage, String> {
+    prompt_service::search_paged(&search_key, &filter, page, page_size)
+        .await
+        .map_err(|e| e.to_string())
 }

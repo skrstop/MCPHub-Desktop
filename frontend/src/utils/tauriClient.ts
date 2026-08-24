@@ -102,6 +102,21 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   // Batch package-update check across all npx/uvx stdio servers.
   if (p === 'servers/check-stdio-updates' && m === 'POST')
     return { command: 'check_stdio_updates', args: {} };
+  // Paginated server search (dashboard list). Runtime status/tool-name
+  // matching is merged in Rust; page is 1-based like the dashboard list.
+  if (p === 'servers/search' && m === 'POST') {
+    const b = body as { search?: string; typeFilter?: string; statusFilter?: string; page?: number; pageSize?: number } | null;
+    return {
+      command: 'search_servers',
+      args: {
+        search: b?.search ?? '',
+        typeFilter: b?.typeFilter ?? 'custom',
+        statusFilter: b?.statusFilter ?? 'all',
+        page: b?.page ?? 1,
+        pageSize: b?.pageSize ?? 10,
+      },
+    };
+  }
   // Upstream OAuth disconnect (#984) — desktop has no upstream-OAuth token storage,
   // so this is a no-op stub. The UI button stays hidden (oauth.connected is never
   // populated by the Rust backend); the stub only guards against an unmapped-route error.
@@ -179,6 +194,14 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       .filter(Boolean) as string[];
 
   if (p === 'groups' && m === 'GET') return { command: 'list_groups', args: {} };
+  // Paginated group search (ServerForm group dropdown). page is 0-based.
+  if (p === 'groups/search' && m === 'POST') {
+    const b = body as { searchKey?: string; page?: number; pageSize?: number } | null;
+    return {
+      command: 'search_groups',
+      args: { searchKey: b?.searchKey ?? '', page: b?.page ?? 0, pageSize: b?.pageSize ?? 50 },
+    };
+  }
   if (p === 'groups' && m === 'POST') {
     // Rust GroupPayload.servers: Vec<JsonValue> — preserve full IGroupServerConfig[]
     const b = body as { name?: string; description?: string; servers?: Array<unknown> } | null;
@@ -345,6 +368,13 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
 
   // Builtin prompts CRUD
   if (segs[0] === 'prompts') {
+    if (p === 'prompts/search' && m === 'POST') {
+      const b = body as { searchKey?: string; filter?: string; page?: number; pageSize?: number } | null;
+      return {
+        command: 'search_builtin_prompts',
+        args: { searchKey: b?.searchKey ?? '', filter: b?.filter ?? 'all', page: b?.page ?? 0, pageSize: b?.pageSize ?? 10 },
+      };
+    }
     if (segs[1] === 'call') return { command: 'call_builtin_prompt', args: { id: segs[2] ?? '', args: body ?? {} } };
     if (m === 'GET' && segs.length === 1) return { command: 'list_builtin_prompts', args: {} };
     if (m === 'GET' && segs.length === 2) return { command: 'get_builtin_prompt', args: { id: segs[1] } };
@@ -355,6 +385,13 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
 
   // Builtin resources CRUD
   if (segs[0] === 'resources') {
+    if (p === 'resources/search' && m === 'POST') {
+      const b = body as { searchKey?: string; filter?: string; page?: number; pageSize?: number } | null;
+      return {
+        command: 'search_builtin_resources',
+        args: { searchKey: b?.searchKey ?? '', filter: b?.filter ?? 'all', page: b?.page ?? 0, pageSize: b?.pageSize ?? 10 },
+      };
+    }
     if (m === 'GET' && segs.length === 1) return { command: 'list_builtin_resources', args: {} };
     if (m === 'GET' && segs.length === 2) return { command: 'get_builtin_resource', args: { id: segs[1] } };
     if (m === 'POST') return { command: 'create_builtin_resource', args: { payload: body } };
@@ -508,6 +545,14 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   //    (list_skill_agents, scan_skills_for_import, list_skills, get_skill,
   //     import_skills, export_skills_to_agents, delete_skill, save_skill_agents).
   if (segs[0] === 'skills') {
+    // Paginated library-skill search (Skills page toolbar). page is 0-based.
+    if (p === 'skills/search' && m === 'POST') {
+      const b = body as { searchKey?: string; page?: number; pageSize?: number } | null;
+      return {
+        command: 'search_skills',
+        args: { searchKey: b?.searchKey ?? '', page: b?.page ?? 0, pageSize: b?.pageSize ?? 10 },
+      };
+    }
     // GET /skills/agents — list configured agents (Phase 2.2: real command)
     if (segs[1] === 'agents' && m === 'GET')
       return { command: 'list_skill_agents', args: {} };
@@ -647,6 +692,25 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       const b = body as { searchKey?: string[] } | null;
       return { command: 'rag_tag_search', args: { searchKey: b?.searchKey ?? [] } };
     }
+    // POST /rag/tags/search-paged — paginated tag search for the searchable
+    // dropdowns. SQL-level LIKE + LIMIT/OFFSET; returns {items,total,page,pageSize}.
+    if (segs[1] === 'tags' && segs[2] === 'search-paged' && m === 'POST') {
+      const b = body as { searchKey?: string; page?: number; pageSize?: number } | null;
+      return {
+        command: 'rag_tag_search_paged',
+        args: { searchKey: b?.searchKey ?? '', page: b?.page ?? 0, pageSize: b?.pageSize ?? 50 },
+      };
+    }
+    // POST /rag/docs/search-paged - paginated doc search for the file list's
+    // toolbar (name substring + ANY-match tag filter). SQL-level filtering
+    // over the rag_docs mirror; returns {items,total,page,pageSize}.
+    if (segs[1] === 'docs' && segs[2] === 'search-paged' && m === 'POST') {
+      const b = body as { searchKey?: string; tags?: string[]; page?: number; pageSize?: number } | null;
+      return {
+        command: 'rag_doc_search_paged',
+        args: { searchKey: b?.searchKey ?? '', tags: b?.tags ?? [], page: b?.page ?? 0, pageSize: b?.pageSize ?? 50 },
+      };
+    }
     // POST /rag/docs/set-tags — set a document's tag list (re-indexes)
     if (segs[1] === 'docs' && segs[2] === 'set-tags' && m === 'POST') {
       const b = body as { id?: string; tags?: string[] } | null;
@@ -682,25 +746,58 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // POST /rag/docs/pick — OS multi-file picker (plain-text), returns paths
     if (segs[1] === 'docs' && segs[2] === 'pick' && m === 'POST')
       return { command: 'pick_rag_files', args: {} };
+    // POST /rag/docs/pick-folder — OS folder picker; backend scans the folder's
+    // immediate file children (non-recursive) + returns them as import candidates.
+    if (segs[1] === 'docs' && segs[2] === 'pick-folder' && m === 'POST')
+      return { command: 'pick_rag_folder', args: {} };
     // POST /rag/docs/upload — upload a single file by disk path (backend reads
-    // bytes from disk + detects encoding; no base64/JSON byte transfer).
+    // bytes from disk + detects encoding; no base64/JSON byte transfer). `method`
+    // selects the import method: "symlink" (default — record original_path, no
+    // copy) or "copy".
     if (segs[1] === 'docs' && segs[2] === 'upload' && m === 'POST') {
-      const b = body as { filePath?: string; tags?: string[] } | null;
+      const b = body as { filePath?: string; tags?: string[]; method?: string } | null;
       return {
         command: 'upload_rag_doc',
-        args: { filePath: b?.filePath ?? '', tags: b?.tags ?? [] },
+        args: {
+          filePath: b?.filePath ?? '',
+          tags: b?.tags ?? [],
+          method: b?.method ?? 'symlink',
+        },
       };
     }
-    // POST /rag/docs/delete - delete a doc + its vector records
+    // POST /rag/docs/delete - delete a doc + its vector records (symlink docs
+    // keep the original file untouched).
     if (segs[1] === 'docs' && segs[2] === 'delete' && m === 'POST') {
       const b = body as { id?: string } | null;
       return { command: 'delete_rag_doc', args: { id: b?.id ?? '' } };
     }
-    // POST /rag/docs/update - replace a doc's content + meta + vectors by id
-    // (pick a new file; id preserved; tags preserved; content re-embedded).
+    // POST /rag/docs/update - replace a doc's content + meta + vectors by id.
+    // mode="original" re-reads the recorded original_path; mode="file" reads a
+    // freshly-picked filePath (which then becomes the recorded original_path).
     if (segs[1] === 'docs' && segs[2] === 'update' && m === 'POST') {
-      const b = body as { id?: string; filePath?: string } | null;
-      return { command: 'update_rag_doc', args: { id: b?.id ?? '', filePath: b?.filePath ?? '' } };
+      const b = body as { id?: string; mode?: string; filePath?: string } | null;
+      return {
+        command: 'update_rag_doc',
+        args: {
+          id: b?.id ?? '',
+          mode: b?.mode ?? 'file',
+          filePath: b?.filePath ?? null,
+        },
+      };
+    }
+    // POST /rag/docs/check-update - classify the recorded original's state for
+    // the per-row UpdateDialog (lost / changed / no-change / legacy-no-path).
+    if (segs[1] === 'docs' && segs[2] === 'check-update' && m === 'POST') {
+      const b = body as { id?: string } | null;
+      return { command: 'check_rag_update', args: { id: b?.id ?? '' } };
+    }
+    // POST /rag/docs/batch-preview - aggregate counts for the confirm dialog.
+    if (segs[1] === 'docs' && segs[2] === 'batch-preview' && m === 'POST') {
+      return { command: 'preview_batch_update', args: {} };
+    }
+    // POST /rag/docs/batch-update - kick off the background re-index pass.
+    if (segs[1] === 'docs' && segs[2] === 'batch-update' && m === 'POST') {
+      return { command: 'batch_update_rag_docs', args: {} };
     }
     // GET /rag/docs/:id — full document (with content)
     if (segs[1] === 'docs' && m === 'GET' && segs.length === 3)
@@ -802,6 +899,22 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   if (command === 'add_server' || command === 'update_server') {
     return { success: true, data: toFrontendServer(result as Record<string, unknown>) };
   }
+  // search_servers returns a Rust ServerPage { items: ServerInfo[], total, page,
+  // pageSize }. Map each ServerInfo → frontend Server (same as list_servers) so
+  // ServerCard gets the flat { name, status: string, tools, config, enabled }
+  // shape it expects; otherwise server.status is a raw ServerStatus object and
+  // renders as "[object Object]" in the status cell.
+  if (command === 'search_servers') {
+    const r = result as { items?: unknown[]; total?: number; page?: number; pageSize?: number } | null;
+    const items = (r?.items ?? []).map((si) => toFrontendServer(si as Record<string, unknown>));
+    return {
+      success: true,
+      data: { items, total: r?.total ?? items.length, page: r?.page ?? 1, pageSize: r?.pageSize ?? items.length },
+      total: r?.total ?? items.length,
+      page: r?.page ?? 1,
+      pageSize: r?.pageSize ?? items.length,
+    };
+  }
   if (command === 'delete_server' || command === 'toggle_server' || command === 'reload_server') {
     return { success: true };
   }
@@ -810,6 +923,28 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   if (command === 'check_stdio_updates') {
     const r = result as { checked?: number } | null;
     return { success: true, checked: (r?.checked as number) ?? 0 };
+  }
+
+  // ── Paginated search pages (Rust *Page { items, total, page, pageSize }) ──
+  // These come back already camelCased and shape-compatible with the frontend
+  // *Page types, so they'd also survive the generic-object fallback below. We
+  // branch explicitly anyway (defensive defaults + identical handling for all)
+  // so a future nested-shape change here is caught at one place rather than
+  // silently leaking a raw object into a list cell (see the search_servers fix).
+  if (
+    command === 'search_groups' ||
+    command === 'search_builtin_prompts' ||
+    command === 'search_builtin_resources' ||
+    command === 'search_skills' ||
+    command === 'rag_doc_search_paged' ||
+    command === 'rag_tag_search_paged'
+  ) {
+    const r = result as { items?: unknown[]; total?: number; page?: number; pageSize?: number } | null;
+    const items = r?.items ?? [];
+    return {
+      success: true,
+      data: { items, total: r?.total ?? items.length, page: r?.page ?? 0, pageSize: r?.pageSize ?? items.length },
+    };
   }
 
   // ── Activity log commands ─────────────────────────────────────────────────

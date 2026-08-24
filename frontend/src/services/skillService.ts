@@ -3,6 +3,7 @@ import {
   SkillAgent,
   ScannedSkill,
   ExportResultItem,
+  SkillPage,
   ApiResponse,
 } from '@/types';
 import { apiGet, apiPost, apiPut } from '../utils/fetchInterceptor';
@@ -189,4 +190,22 @@ export const deleteSkill = async (id: string, cleanupAgentIds: string[] = []): P
   if (!response.success) {
     throw new Error(response.message || 'Failed to delete skill');
   }
+};
+
+/**
+ * Paginated library-skill search (SQL-level LIKE + ORDER BY dir_name; FS
+ * existence filter applied server-side). `page` is 0-based.
+ */
+export const searchSkills = async (
+  searchKey: string,
+  page: number,
+  pageSize: number,
+): Promise<SkillPage> => {
+  const response: ApiResponse<SkillPage> = await apiPost('/skills/search', {
+    searchKey,
+    page,
+    pageSize,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to search skills');
+  return response.data ?? { items: [], total: 0, page, pageSize };
 };

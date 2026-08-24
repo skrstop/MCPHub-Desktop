@@ -35,3 +35,13 @@ fn default_enabled() -> bool {
 fn default_mime_type() -> String {
     "text/plain".to_string()
 }
+
+/// A page of builtin-resource search results. `page` is 0-based.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcePage {
+    pub items: Vec<BuiltinResource>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}

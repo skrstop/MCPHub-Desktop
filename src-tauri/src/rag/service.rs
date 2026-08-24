@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
+use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
@@ -21,7 +22,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::models::rag::{
-    RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus, RagTagStat,
+    BatchPreview, RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus,
+    RagDocPage, RagTagPage, RagTagStat, RagUpdateCheck,
 };
 use crate::rag::chunker::chunk_document;
 use crate::rag::embedder::{check_memory_sufficient, detect_format, load_embedder, read_max_context, Embedder};
@@ -100,6 +102,76 @@ fn emit_reindex_progress(app: &AppHandle, current: u32, total: u32, name: &str) 
     if let Err(e) = app.emit(REINDEX_PROGRESS_EVENT, &payload) {
         log::warn!("[RAG] emit reindex-progress failed: {e}");
     }
+}
+
+/// File-level + char-level progress emitted during the async batch-update pass
+/// (re-indexing docs whose source changed). The frontend's batch-update
+/// progress dialog reuses the upload overlay style and listens on
+/// `rag://batch-update-progress`. `phase` = "checking" before reading the
+/// source md5, "reindexing" while `reindex_doc` runs (the char-level
+/// `rag://upload-progress` events fire inside reindex_doc for the sub-bar),
+/// "done" once the whole batch finishes.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RagBatchUpdateProgress {
+    /// 0-based index of the doc currently being processed.
+    current: u32,
+    /// Total docs in the batch.
+    total: u32,
+    /// Display name of the current doc.
+    name: String,
+    /// "checking" | "reindexing" | "done".
+    phase: String,
+}
+
+const BATCH_UPDATE_PROGRESS_EVENT: &str = "rag://batch-update-progress";
+
+fn emit_batch_update_progress(
+    app: &AppHandle,
+    current: u32,
+    total: u32,
+    name: &str,
+    phase: &str,
+) {
+    let payload = RagBatchUpdateProgress {
+        current,
+        total,
+        name: name.to_string(),
+        phase: phase.to_string(),
+    };
+    if let Err(e) = app.emit(BATCH_UPDATE_PROGRESS_EVENT, &payload) {
+        log::warn!("[RAG] emit batch-update-progress failed: {e}");
+    }
+}
+
+/// Single running batch-update task handle. Guards against a second trigger
+/// restarting the task while one is in flight (the frontend button re-open the
+/// progress dialog instead of re-triggering, but this is the backend guard).
+static BATCH_UPDATE_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Serializes all doc-mutating operations (update from original/file, MCP
+/// rag_file_update, delete, set-tags) so concurrent read-modify-write of the
+/// same `{id}.meta` can't interleave. Lock ordering with the runtime lock is
+/// ALWAYS meta_lock -> runtime: every holder acquires this first, then awaits
+/// `reindex_doc`/vector ops (which take the runtime lock internally). Never
+/// acquire in the reverse order (deadlock).
+static META_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn meta_lock() -> &'static Mutex<()> {
+    META_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Atomically write a `.meta` file: write to `{path}.tmp` then rename over the
+/// target. Rename-on-same-filesystem is atomic on all supported platforms, so
+/// a crash mid-write can never leave a truncated/half JSON that would make the
+/// doc disappear from `list_docs` (metas are parsed strictly).
+fn write_meta_atomic(meta_path: &Path, meta: &DocMeta) -> Result<()> {
+    let bytes = serde_json::to_vec(meta)?;
+    let tmp = meta_path.with_extension("meta.tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, meta_path)?;
+    Ok(())
 }
 
 /// The loaded runtime. Dropped on disable to release resources. `model` is a
@@ -864,6 +936,13 @@ pub async fn start(app: &AppHandle) -> Result<()> {
     };
     ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
     NEEDS_REINDEX.store(needs_reindex, std::sync::atomic::Ordering::SeqCst);
+    // Startup reconciliation: rebuild the SQL mirror tables (rag_docs /
+    // rag_doc_tags / rag_tags) from the on-disk .meta files. Cheap (one scan +
+    // one transaction) and heals any drift from a crash mid-CRUD or manual
+    // .meta edits. Non-fatal: queries fall back to whatever is in the tables.
+    if let Err(e) = rebuild_rag_sql_index(app).await {
+        rag_log("warn", format!("startup rebuild_rag_sql_index failed: {}", e));
+    }
     if needs_reindex {
         rag_log("info", "RAG enabled (model + vector DB ready); embedding dim changed — reindex required (frontend will prompt)");
     } else {
@@ -1212,6 +1291,22 @@ struct DocMeta {
     /// `file_type_label(name)` at read time.
     #[serde(default)]
     file_type: Option<String>,
+    /// Import method: "symlink" (only records original_path, no copied file) or
+    /// "copy" (copies bytes into rag/files). `None` for legacy docs (pre-feature)
+    /// -> treated as "copy" at read time.
+    #[serde(default)]
+    method: Option<String>,
+    /// Absolute path of the original imported file. For "symlink" docs this is
+    /// the live source read at index/view time; for "copy" docs it's recorded
+    /// for update detection (md5 compare) + "open original location". `None` for
+    /// legacy docs that predate this field.
+    #[serde(default)]
+    original_path: Option<String>,
+    /// MD5 (hex) of the source file content captured at import time. Used for
+    /// update detection: re-hash the source and compare. `None` for legacy docs
+    /// -> treated as "has update" by `check_rag_update`.
+    #[serde(default)]
+    md5: Option<String>,
 }
 
 /// Default content version for a freshly-uploaded doc + back-compat fallback
@@ -1221,13 +1316,17 @@ fn default_version() -> u32 {
 }
 
 /// List distinct tags with their document counts. Reads from the
-/// `rag_tag_stats` table (kept in sync by `recompute_tag_stats`). When
-/// `search_keys` is non-empty, only returns tags that contain (case-
-/// insensitive) any of the keys — used by the `rag_tag_search` MCP tool.
+/// `rag_tags` table (kept in sync by `upsert_doc_sql`/`remove_doc_sql`/
+/// `rebuild_rag_sql_index`; ordered by file_count DESC, created_at DESC,
+/// tag ASC). When `search_keys` is non-empty, only returns tags that contain
+/// (case-insensitive) any of the keys — used by the `rag_tag_search` MCP tool.
+/// Unbounded (no pagination) — kept for the MCP tool contract.
 pub async fn list_tags(search_keys: Vec<String>) -> Result<Vec<RagTagStat>> {
     let pool = crate::db::pool();
-    let rows = sqlx::query("SELECT tag, file_count FROM rag_tag_stats ORDER BY tag")
-        .fetch_all(pool)
+    let rows = sqlx::query(
+        "SELECT tag, file_count FROM rag_tags ORDER BY file_count DESC, created_at DESC, tag",
+    )
+    .fetch_all(pool)
         .await?;
     let keys: Vec<String> = search_keys
         .into_iter()
@@ -1249,14 +1348,216 @@ pub async fn list_tags(search_keys: Vec<String>) -> Result<Vec<RagTagStat>> {
     Ok(out)
 }
 
-/// Recompute the `rag_tag_stats` table from the on-disk `.meta` files: count
-/// how many documents carry each tag, then replace the table wholesale (tags
-/// whose count is 0 are simply not inserted — i.e. dropped). Called after
-/// every tag-changing op (upload / set_doc_tags / delete / batch).
-pub async fn recompute_tag_stats(app: &AppHandle) -> Result<()> {
+/// Paginated tag search for the frontend's searchable dropdowns. Filters at
+/// the SQL level (case-insensitive LIKE) + LIMIT/OFFSET so even a huge tag
+/// library stays cheap. `search_key` is a single substring (empty = all);
+/// `page` is 0-based; `page_size` is clamped to a sane range. Returns the
+/// page's items + the total matching count (so the UI can show "load more"
+/// / stop fetching).
+pub async fn list_tags_paged(
+    search_key: String,
+    page: u32,
+    page_size: u32,
+) -> Result<RagTagPage> {
+    let pool = crate::db::pool();
+    let page = page.min(10_000);
+    // Clamp page_size: at least 1, at most 200 — defends against accidental
+    // huge fetches while still allowing a comfortable dropdown page.
+    let page_size = page_size.clamp(1, 200);
+    let key = search_key.trim().to_lowercase();
+    // LIKE pattern is case-insensitive for ASCII in SQLite by default for the
+    // ASCII range; we also wrap the column in LOWER() so non-ASCII comparison
+    // matches the trimmed-lowercased key.
+    let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+    let offset = (page as i64) * (page_size as i64);
+
+    let total: i64 = if key.is_empty() {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM rag_tags")
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM rag_tags WHERE LOWER(tag) LIKE ? ESCAPE '\\'",
+        )
+        .bind(&pattern)
+        .fetch_one(pool)
+        .await?
+    };
+
+    // Most-used tags first (file_count DESC), then newest first (created_at
+    // DESC), tag ASC as the deterministic tie-breaker - matches the dropdown's
+    // "关联文件数倒序 + 创建时间倒序" requirement and is served by
+    // idx_rag_tags_file_count.
+    let rows = if key.is_empty() {
+        sqlx::query(
+            "SELECT tag, file_count FROM rag_tags ORDER BY file_count DESC, created_at DESC, tag LIMIT ? OFFSET ?",
+        )
+        .bind(page_size as i64)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT tag, file_count FROM rag_tags \
+             WHERE LOWER(tag) LIKE ? ESCAPE '\\' ORDER BY file_count DESC, created_at DESC, tag LIMIT ? OFFSET ?",
+        )
+        .bind(&pattern)
+        .bind(page_size as i64)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let tag: String = sqlx::Row::try_get(&row, "tag")?;
+        let file_count: i64 = sqlx::Row::try_get(&row, "file_count")?;
+        items.push(RagTagStat {
+            tag,
+            file_count: file_count.max(0) as u32,
+        });
+    }
+    Ok(RagTagPage {
+        items,
+        total: total.max(0) as u64,
+        page,
+        page_size,
+    })
+}
+
+// ── SQL 镜像维护（rag_docs / rag_doc_tags / rag_tags）──────────────────────
+//
+// `.meta` 文件仍是唯一事实源；这三张 SQLite 表是随文档 CRUD **增量维护**的
+// 查询索引（供标签下拉、文件搜索等 SQL 分页查询）。启动时
+// `rebuild_rag_sql_index` 全量对账一次，兜底崩溃残留/手工改动导致的漂移。
+//   - rag_doc_tags(doc_id, tag)：标签-文档关联表
+//   - rag_tags(tag, file_count)：独立标签表，file_count 随关联表 CRUD 增减，
+//     减到 0 的标签行直接删除（"关联文件数为 0 则该标签删除"）
+//   - rag_docs：文档元数据镜像（文件搜索用）
+
+/// 读取一个文档当前在 SQL 关联表里的标签集合（无记录 = 新文档/漂移）。
+async fn sql_doc_tags(
+    tx: &mut sqlx::SqliteConnection,
+    doc_id: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let rows = sqlx::query("SELECT tag FROM rag_doc_tags WHERE doc_id = ?")
+        .bind(doc_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    rows.into_iter()
+        .map(|r| sqlx::Row::try_get::<String, _>(&r, "tag").map_err(Into::into))
+        .collect()
+}
+
+/// 把一个文档的元数据 + 标签增量同步进 SQL 镜像表（同一事务）：
+/// - 标签 diff：移除的计数 -1（归零删行），新增的 UPSERT 计数 +1
+/// - `rag_doc_tags`：该 doc_id 的关联行全量替换
+/// - `rag_docs`：UPSERT 元数据行
+///
+/// 调用方负责先落盘 `.meta`（事实源）；失败向上传播，调用点用 warn 日志兜底。
+async fn upsert_doc_sql(meta: &DocMeta) -> Result<()> {
+    let pool = crate::db::pool();
+    let mut tx = pool.begin().await?;
+
+    let old_tags = sql_doc_tags(&mut tx, &meta.id).await?;
+    // dedup（同 rebuild 的语义：同文档重复标签只计一次）
+    let new_tags: std::collections::HashSet<String> = meta.tags.iter().cloned().collect();
+
+    for tag in old_tags.difference(&new_tags) {
+        sqlx::query("UPDATE rag_tags SET file_count = file_count - 1 WHERE tag = ?")
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM rag_tags WHERE tag = ? AND file_count <= 0")
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM rag_doc_tags WHERE doc_id = ? AND tag = ?")
+            .bind(&meta.id)
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for tag in new_tags.difference(&old_tags) {
+        // created_at 记录标签首次创建时间（毫秒时间戳）：新标签打上当前时间，
+        // 已有标签保留原值（ON CONFLICT 只递增计数，不覆盖 created_at）。
+        let now_ms = chrono::Utc::now().timestamp_millis().to_string();
+        sqlx::query(
+            "INSERT INTO rag_tags (tag, file_count, created_at) VALUES (?, 1, ?) \
+             ON CONFLICT(tag) DO UPDATE SET file_count = file_count + 1",
+        )
+        .bind(tag)
+        .bind(&now_ms)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("INSERT OR IGNORE INTO rag_doc_tags (doc_id, tag) VALUES (?, ?)")
+            .bind(&meta.id)
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query(
+        "INSERT INTO rag_docs (id, name, size, uploaded_at, file_type, method, original_path, md5, version, chunk_count) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+           name = excluded.name, size = excluded.size, uploaded_at = excluded.uploaded_at, \
+           file_type = excluded.file_type, method = excluded.method, \
+           original_path = excluded.original_path, md5 = excluded.md5, \
+           version = excluded.version, chunk_count = excluded.chunk_count",
+    )
+    .bind(&meta.id)
+    .bind(&meta.name)
+    .bind(meta.size as i64)
+    .bind(&meta.uploaded_at)
+    .bind(&meta.file_type)
+    .bind(&meta.method)
+    .bind(&meta.original_path)
+    .bind(&meta.md5)
+    .bind(meta.version as i64)
+    .bind(meta.chunk_count as i64)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 从 SQL 镜像表移除一个文档：其所有标签计数 -1（归零删行），删关联行 + rag_docs 行。
+async fn remove_doc_sql(doc_id: &str) -> Result<()> {
+    let pool = crate::db::pool();
+    let mut tx = pool.begin().await?;
+
+    let old_tags = sql_doc_tags(&mut tx, doc_id).await?;
+    for tag in &old_tags {
+        sqlx::query("UPDATE rag_tags SET file_count = file_count - 1 WHERE tag = ?")
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM rag_tags WHERE tag = ? AND file_count <= 0")
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM rag_doc_tags WHERE doc_id = ?")
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM rag_docs WHERE id = ?")
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 全量对账：扫描所有 `.meta` 文件，整表重建 `rag_docs` / `rag_doc_tags` /
+/// `rag_tags`（单一事务 DELETE + 批量 INSERT）。用于 RAG 启动时兜底漂移，以及
+/// reindex_all / batch_update 结束后的安全网。计数为 0 的标签自然不落表。
+pub async fn rebuild_rag_sql_index(app: &AppHandle) -> Result<()> {
     let dir = files_dir(app)?;
-    // Count docs per tag by scanning all .meta files.
-    let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut docs: Vec<DocMeta> = Vec::new();
     if dir.exists() {
         for entry in std::fs::read_dir(&dir)? {
             let path = entry?.path();
@@ -1265,25 +1566,75 @@ pub async fn recompute_tag_stats(app: &AppHandle) -> Result<()> {
             }
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
-            let mut seen = std::collections::HashSet::new();
-            for tag in &meta.tags {
-                if !tag.is_empty() {
-                    seen.insert(tag.clone());
-                }
-            }
-            for tag in seen {
-                *counts.entry(tag).or_insert(0) += 1;
+            docs.push(meta);
+        }
+    }
+
+    // 标签计数 + 关联行（同文档重复标签去重）
+    let mut counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut assoc: Vec<(String, String)> = Vec::new();
+    for meta in &docs {
+        let mut seen = std::collections::HashSet::new();
+        for tag in &meta.tags {
+            if !tag.is_empty() && seen.insert(tag.clone()) {
+                *counts.entry(tag.clone()).or_insert(0) += 1;
+                assoc.push((meta.id.clone(), tag.clone()));
             }
         }
     }
 
     let pool = crate::db::pool();
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM rag_tag_stats").execute(&mut *tx).await?;
+    // 保留现有标签的 created_at（对账重建不应重置排序依据）；新标签用当前
+    // 时间，与增量 upsert_doc_sql 的语义一致。
+    let old_created: std::collections::HashMap<String, String> = sqlx::query(
+        "SELECT tag, created_at FROM rag_tags",
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .filter_map(|r| {
+        let tag: String = sqlx::Row::try_get(&r, "tag").ok()?;
+        let created: String = sqlx::Row::try_get(&r, "created_at").unwrap_or_default();
+        Some((tag, created))
+    })
+    .collect();
+    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
+
+    sqlx::query("DELETE FROM rag_docs").execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM rag_doc_tags").execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM rag_tags").execute(&mut *tx).await?;
+    for meta in &docs {
+        sqlx::query(
+            "INSERT INTO rag_docs (id, name, size, uploaded_at, file_type, method, original_path, md5, version, chunk_count) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&meta.id)
+        .bind(&meta.name)
+        .bind(meta.size as i64)
+        .bind(&meta.uploaded_at)
+        .bind(&meta.file_type)
+        .bind(&meta.method)
+        .bind(&meta.original_path)
+        .bind(&meta.md5)
+        .bind(meta.version as i64)
+        .bind(meta.chunk_count as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (doc_id, tag) in &assoc {
+        sqlx::query("INSERT OR IGNORE INTO rag_doc_tags (doc_id, tag) VALUES (?, ?)")
+            .bind(doc_id)
+            .bind(tag)
+            .execute(&mut *tx)
+            .await?;
+    }
     for (tag, count) in &counts {
-        sqlx::query("INSERT INTO rag_tag_stats (tag, file_count) VALUES (?, ?)")
+        let created = old_created.get(tag).cloned().unwrap_or_else(|| now_ms.clone());
+        sqlx::query("INSERT INTO rag_tags (tag, file_count, created_at) VALUES (?, ?, ?)")
             .bind(tag)
             .bind(*count as i64)
+            .bind(&created)
             .execute(&mut *tx)
             .await?;
     }
@@ -1309,30 +1660,172 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
         if path.extension().and_then(|e| e.to_str()) != Some("meta") {
             continue;
         }
-        let bytes = std::fs::read(&path)?;
-        let meta: DocMeta = serde_json::from_slice(&bytes)?;
-        // The actual on-disk file name (uuid for uploads, meta.name for
-        // rag_file_create) — content_path_for resolves which exists. Surfaced
-        // so the user can match the file when its folder is opened.
-        let file_name = content_path_for(&dir, &meta.id, &meta.name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        out.push(RagDocInfo {
-            id: meta.id,
-            name: meta.name.clone(),
-            size: meta.size,
-            uploaded_at: meta.uploaded_at,
-            tags: meta.tags,
-            chunk_count: meta.chunk_count,
-            file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name)),
-            version: meta.version.max(1),
-            file_name,
-        });
+        // Skip unreadable/corrupt metas instead of failing the whole listing -
+        // consistent with every other scanner (rebuild_rag_sql_index /
+        // run_batch_update / preview_batch_update / reindex_all /
+        // find_doc_ids_by_name). A single bad meta (partial write, crash,
+        // manual edit) must not blank the entire doc list.
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
+        out.push(doc_info_from_meta(&dir, meta));
     }
     out.sort_by(|a, b| b.uploaded_at.cmp(&a.uploaded_at));
     Ok(out)
+}
+
+/// Build the list-view `RagDocInfo` for one parsed `.meta`: resolves the
+/// on-disk file name (uuid for uploads, meta.name for rag_file_create) and the
+/// filesystem-derived flags (lost_original / content_available). Shared by
+/// `list_docs` (full scan) and `search_docs_paged` (page enrichment only).
+fn doc_info_from_meta(dir: &Path, meta: DocMeta) -> RagDocInfo {
+    // The actual on-disk file name - content_path_for resolves which exists.
+    // Surfaced so the user can match the file when its folder is opened.
+    // Empty for "symlink" docs (no copied file - content lives at original_path).
+    let is_symlink = meta.method.as_deref() == Some("symlink");
+    let file_name = if is_symlink {
+        String::new()
+    } else {
+        content_path_for(dir, &meta.id, &meta.name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
+    // lost_original: the recorded original_path is missing on disk (both
+    // symlink AND copy docs count - the badge + auto-update skip apply to
+    // both). content_available: can the content be read RIGHT NOW? symlink
+    // = original exists; copy = the copy file exists in rag/files. A copy
+    // doc whose original vanished still has its copy -> content_available
+    // true (view/open stay enabled), only auto-update is off.
+    let original_exists = meta
+        .original_path
+        .as_deref()
+        .map(|p| !p.is_empty() && Path::new(p).exists())
+        .unwrap_or(false);
+    let has_original_path = meta
+        .original_path
+        .as_deref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    let lost_original = has_original_path && !original_exists;
+    let content_available = if is_symlink {
+        original_exists
+    } else {
+        // copy: the imported copy lives in rag/files. Check the resolved
+        // content path (handles {id}.{ext} / {id} / {meta_name}).
+        content_path_for(dir, &meta.id, &meta.name).exists()
+    };
+    // Compute the display file_type label BEFORE the struct moves `name`.
+    let file_type = meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name));
+    RagDocInfo {
+        id: meta.id,
+        name: meta.name,
+        size: meta.size,
+        uploaded_at: meta.uploaded_at,
+        tags: meta.tags,
+        chunk_count: meta.chunk_count,
+        file_type,
+        version: meta.version.max(1),
+        file_name,
+        method: meta.method.clone().unwrap_or_default(),
+        original_path: meta.original_path.clone().unwrap_or_default(),
+        md5: meta.md5.clone().unwrap_or_default(),
+        lost_original,
+        content_available,
+    }
+}
+
+/// Paginated doc search over the `rag_docs` SQL mirror: `search_key` is a
+/// case-insensitive substring on the doc name (empty = all), `tags` is an
+/// ANY-match filter via the `rag_doc_tags` association table. SQL does the
+/// filtering / ordering (uploaded_at DESC) / LIMIT+OFFSET; the returned page's
+/// doc ids are then enriched from their `.meta` files (file_name /
+/// lost_original / content_available are filesystem-derived). `page` is
+/// 0-based. Works with RAG off (the mirror is rebuilt on the last RAG enable).
+pub async fn search_docs_paged(
+    app: &AppHandle,
+    search_key: String,
+    tags: Vec<String>,
+    page: u32,
+    page_size: u32,
+) -> Result<RagDocPage> {
+    let dir = files_dir(app)?;
+    let page = page.min(10_000);
+    let page_size = page_size.clamp(1, 200);
+    let key = search_key.trim().to_lowercase();
+    // Escape LIKE wildcards in the user input (same rules as list_tags_paged).
+    let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+    let offset = (page as i64) * (page_size as i64);
+    let want_tags: Vec<String> = tags
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let mut conds: Vec<String> = Vec::new();
+    if !key.is_empty() {
+        conds.push("LOWER(name) LIKE ? ESCAPE '\\'".to_string());
+    }
+    if !want_tags.is_empty() {
+        let placeholders = vec!["?"; want_tags.len()].join(", ");
+        conds.push(format!(
+            "id IN (SELECT doc_id FROM rag_doc_tags WHERE tag IN ({}))",
+            placeholders
+        ));
+    }
+    let where_clause = if conds.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conds.join(" AND "))
+    };
+
+    let pool = crate::db::pool();
+    // Count query (total across all pages, not just this one).
+    let count_sql = format!("SELECT COUNT(*) FROM rag_docs {}", where_clause);
+    let mut count_q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(&*count_sql));
+    if !key.is_empty() {
+        count_q = count_q.bind(&pattern);
+    }
+    for t in &want_tags {
+        count_q = count_q.bind(t);
+    }
+    let total: i64 = count_q.fetch_one(pool).await?;
+
+    // Page query: id list ordered like list_docs (uploaded_at DESC, id as the
+    // deterministic tie-breaker).
+    let data_sql = format!(
+        "SELECT id FROM rag_docs {} ORDER BY uploaded_at DESC, id LIMIT ? OFFSET ?",
+        where_clause
+    );
+    let mut data_q = sqlx::query(sqlx::AssertSqlSafe(&*data_sql));
+    if !key.is_empty() {
+        data_q = data_q.bind(&pattern);
+    }
+    for t in &want_tags {
+        data_q = data_q.bind(t);
+    }
+    let rows = data_q
+        .bind(page_size as i64)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+    // Enrich just this page from the .meta files (source of truth). Skip
+    // unreadable/corrupt metas - same policy as list_docs.
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = sqlx::Row::try_get(&row, "id")?;
+        let meta_path = dir.join(format!("{}.meta", id));
+        let Ok(bytes) = std::fs::read(&meta_path) else { continue };
+        let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
+        items.push(doc_info_from_meta(&dir, meta));
+    }
+    Ok(RagDocPage {
+        items,
+        total: total.max(0) as u64,
+        page,
+        page_size,
+    })
 }
 
 /// Get the full content of a document (for the View dialog).
@@ -1343,10 +1836,39 @@ pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
         return Ok(None);
     };
     let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
-    // Content file is `dir/{id}` for uploads, `dir/{meta.name}` for
-    // rag_file_create docs - content_path_for handles both.
-    let content_path = content_path_for(&dir, id, &meta.name);
-    let content = std::fs::read_to_string(&content_path).unwrap_or_default();
+    let is_symlink = meta.method.as_deref() == Some("symlink");
+    // lost_original: original_path missing on disk, regardless of method (so
+    // copy docs whose source vanished also show as lost in the UI + are skipped
+    // by batch update). See `classify_original` for the shared definition.
+    let original_exists = meta
+        .original_path
+        .as_deref()
+        .map(|p| !p.is_empty() && Path::new(p).exists())
+        .unwrap_or(false);
+    let has_original_path = meta
+        .original_path
+        .as_deref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    let lost_original = has_original_path && !original_exists;
+    // Content: for symlink docs read from original_path (if it exists); for
+    // copy docs read from the rag/files copy via content_path_for. Symlink +
+    // lost -> empty content (the UI greys "view" via content_available).
+    let (content, content_available) = if is_symlink {
+        if let Some(op) = meta.original_path.as_deref() {
+            if !op.is_empty() && Path::new(op).exists() {
+                (std::fs::read_to_string(op).unwrap_or_default(), true)
+            } else {
+                (String::new(), false)
+            }
+        } else {
+            (String::new(), false)
+        }
+    } else {
+        let content_path = content_path_for(&dir, id, &meta.name);
+        let avail = content_path.exists();
+        (std::fs::read_to_string(&content_path).unwrap_or_default(), avail)
+    };
     Ok(Some(RagDoc {
         id: meta.id,
         name: meta.name.clone(),
@@ -1356,6 +1878,10 @@ pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
         tags: meta.tags,
         chunk_count: meta.chunk_count,
         file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name)),
+        method: meta.method.clone().unwrap_or_default(),
+        original_path: meta.original_path.clone().unwrap_or_default(),
+        lost_original,
+        content_available,
     }))
 }
 
@@ -1400,6 +1926,80 @@ pub fn pick_files(app: &AppHandle) -> Vec<RagPickedFile> {
         .collect()
 }
 
+/// Open the OS folder picker, then scan its immediate children (no recursion)
+/// for files. Sub-directories + hidden files (leading dot, any platform) are
+/// skipped. Each candidate must pass BOTH filters:
+///   1. extension catalog — its lowercased dot-prefixed extension (".md",
+///      ".py"…) must be present in `file_type_map()` (built from
+///      `runtimes/rag/file_support.json`), so unknown/unsupported file kinds
+///      are dropped by name before reading bytes;
+///   2. content sniff — the first 8 KiB must look like text via
+///      `is_likely_text` (same rule as upload validation), so a misnamed
+///      binary file still gets filtered out.
+/// This way the dialog only lists files the upload pipeline would actually
+/// accept. Returns an empty vec if the user cancels or no supported file
+/// remains.
+pub fn pick_folder(app: &AppHandle) -> Vec<RagPickedFile> {
+    use tauri_plugin_dialog::DialogExt;
+    let b = app.dialog().file().set_title("Select a folder to import");
+    let Some(fp) = b.blocking_pick_folder() else { return Vec::new() };
+    let Ok(folder) = fp.into_path() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&folder) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Skip directories (non-recursive scan) and symlinks that don't resolve
+        // to a regular file — only importable files pass through.
+        let ft = match std::fs::metadata(&path) {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !ft.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else { continue };
+        let name = name.to_string_lossy().to_string();
+        // Skip dotfiles (hidden on Unix; conventionally hidden on Windows too)
+        // so macOS `.DS_Store` and similar noise never become import candidates.
+        if name.starts_with('.') {
+            continue;
+        }
+        // Extension-catalog filter: only files whose lowercased dot-prefixed
+        // extension is listed in `file_support.json` are import candidates.
+        // Files with no extension or an unsupported one are dropped here by
+        // name, before we read any bytes.
+        let lower = name.to_lowercase();
+        let ext_ok = lower
+            .rfind('.')
+            .map(|dot| file_type_map().contains_key(&lower[dot..]))
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        // Content sniff (first 8 KiB): a misnamed binary file (e.g. a .txt
+        // that's actually a PDF) is still dropped here, so the dialog only
+        // lists what the upload pipeline would actually accept.
+        let mut head = vec![0u8; 8192];
+        let n = std::fs::File::open(&path)
+            .and_then(|mut f| {
+                use std::io::Read;
+                f.read(&mut head)
+            })
+            .unwrap_or(0);
+        head.truncate(n);
+        if !is_likely_text(&head) {
+            continue;
+        }
+        out.push(RagPickedFile {
+            path: path.to_string_lossy().to_string(),
+            name,
+        });
+    }
+    // Stable, readable order (not the OS's arbitrary readdir order).
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
 /// Upload (read + decode + embed + index) a single file given by disk path.
 /// Called per-file by the frontend so it can show per-file progress; the
 /// frontend loops over the picked paths.
@@ -1413,6 +2013,13 @@ pub fn pick_files(app: &AppHandle) -> Vec<RagPickedFile> {
 /// uuid, `rag_file_create` passes `{name}.{docType}` so the file is
 /// human-readable. `display_name` is `meta.name` (what the UI shows). Returns
 /// chunk_count.
+///
+/// Import-method: `method` ("symlink"|"copy"|None), `original_path` (the
+/// imported source's absolute path, recorded for update detection + open-
+/// location), `md5` (hex of the source bytes, for change detection). For
+/// "symlink" docs `write_content` should be false (don't copy bytes into
+/// rag/files — the source is read live from original_path); for "copy" +
+/// legacy (None) it's true.
 async fn write_doc_and_index(
     app: &AppHandle,
     dir: &Path,
@@ -1424,11 +2031,19 @@ async fn write_doc_and_index(
     size: u64,
     file_type: Option<String>,
     version: u32,
+    method: Option<String>,
+    original_path: Option<String>,
+    md5: Option<String>,
 ) -> Result<u32> {
-    let content_path = dir.join(file_stem);
     let meta_path = dir.join(format!("{}.meta", doc_id));
     let uploaded_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-    std::fs::write(&content_path, content)?;
+    // "symlink": don't write a content copy — the source is read live. "copy"
+    // /legacy (None): write the copy as before.
+    let write_content = method.as_deref() != Some("symlink");
+    if write_content {
+        let content_path = dir.join(file_stem);
+        std::fs::write(&content_path, content)?;
+    }
     let chunk_count = reindex_doc(app, doc_id, display_name, content, tags.clone()).await? as u32;
     let title = extract_title(content, display_name);
     let meta = DocMeta {
@@ -1441,12 +2056,25 @@ async fn write_doc_and_index(
         chunk_count,
         version,
         file_type,
+        method,
+        original_path,
+        md5,
     };
-    std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
+    write_meta_atomic(&meta_path, &meta)?;
+    // 增量同步 SQL 镜像（rag_docs / rag_doc_tags / rag_tags）。镜像失败不阻断
+    // 导入主流程（.meta 已落盘，事实源完整；启动对账会修复漂移），但记日志。
+    if let Err(e) = upsert_doc_sql(&meta).await {
+        rag_log("warn", format!("upsert_doc_sql for '{}' failed: {}", meta.name, e));
+    }
     Ok(chunk_count)
 }
 
-pub async fn upload_one_path(app: &AppHandle, file_path: &str, tags: Vec<String>) -> Result<()> {
+pub async fn upload_one_path(
+    app: &AppHandle,
+    file_path: &str,
+    tags: Vec<String>,
+    method: Option<String>,
+) -> Result<()> {
     // Derive the display name first so we can attribute any failure to it in
     // the log (the body below returns early on many `?`, and without this
     // wrapper those failures would never reach rag_log - the user would see
@@ -1456,7 +2084,7 @@ pub async fn upload_one_path(app: &AppHandle, file_path: &str, tags: Vec<String>
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| file_path.to_string());
 
-    let result = upload_one_path_inner(app, file_path, tags).await;
+    let result = upload_one_path_inner(app, file_path, tags, method).await;
     if let Err(ref e) = result {
         rag_log("error", format!("upload failed for '{}': {:#}", name, e));
     }
@@ -1469,7 +2097,10 @@ pub async fn upload_one_path(app: &AppHandle, file_path: &str, tags: Vec<String>
 /// preserved from the existing meta (the update replaces content, not the
 /// user's tag organization). Requires RAG enabled (reindex_doc needs the
 /// runtime to embed the new content).
+///
+/// Holds META_LOCK across the read-modify-write (lock order: meta -> runtime).
 pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) -> Result<u32> {
+    let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let path = Path::new(file_path);
     let name = path
@@ -1503,7 +2134,9 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
 
     // Remove the OLD on-disk content file (resolved by the old meta's name)
     // so a different extension doesn't leave an orphan. The new file is
-    // written below by write_doc_and_index.
+    // written below by write_doc_and_index. (For symlink docs there's no copy
+    // to remove, but content_path_for falls back to meta_name which won't exist
+    // — the .exists() guard handles it.)
     let old_content = content_path_for(&dir, id, &old_meta.name);
     if old_content.exists() {
         if let Err(e) = std::fs::remove_file(&old_content) {
@@ -1523,20 +2156,136 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     // Bump the content version (1 on first upload; +1 each update). Legacy
     // metas without the field default to 1 (see `default_version`).
     let version = old_meta.version.saturating_add(1);
+    // Manual-upload update path records the NEW file as the original source
+    // (this is the legacy-compat path: old docs without original_path get one
+    // now, so future update detection works). MD5 of the new source is stored
+    // as the baseline. Method: keep the doc's existing method; if it was a
+    // legacy doc (method None), manual upload means we now have a copy + a
+    // recorded source -> treat as "copy".
+    let new_method = old_meta.method.clone().or_else(|| Some("copy".to_string()));
+    let new_original_path = Some(file_path.to_string());
+    let new_md5 = Some(compute_md5(&raw));
     // write_doc_and_index writes the new disk file, reindexes (reindex_doc
     // deletes the old vectors by id then adds the new ones), and overwrites
     // the meta with the new name/size/uploaded_at/title/version — id preserved.
-    let chunk_count =
-        write_doc_and_index(app, &dir, id, &file_stem, &name, &content, tags, size, None, version)
-            .await?;
+    let chunk_count = write_doc_and_index(
+        app,
+        &dir,
+        id,
+        &file_stem,
+        &name,
+        &content,
+        tags,
+        size,
+        None,
+        version,
+        new_method,
+        new_original_path,
+        new_md5,
+    )
+    .await?;
 
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
-    }
     Ok(chunk_count)
 }
 
-async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<String>) -> Result<()> {
+/// Update a doc by re-reading its recorded `original_path` (the "from original"
+/// path in the update dialog + batch update). Re-indexes the current content
+/// of the source, refreshes the stored md5, and for "copy" docs rewrites the
+/// copied file. id/tags preserved. Requires RAG enabled. Returns Err if the
+/// doc has no original_path (legacy) or the source is missing/invalid.
+///
+/// Holds META_LOCK across the whole read-modify-write so a concurrent
+/// delete/update of the same doc can't interleave (lock order: meta -> runtime).
+pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> {
+    let _meta_guard = meta_lock().await.lock().await;
+    let dir = files_dir(app)?;
+    let meta_path = dir.join(format!("{}.meta", id));
+    let old_meta_bytes = std::fs::read(&meta_path)
+        .map_err(|e| anyhow!("update-from-original: read meta {} failed: {}", id, e))?;
+    let old_meta: DocMeta = serde_json::from_slice(&old_meta_bytes)?;
+
+    let original_path = old_meta
+        .original_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow!("no original path recorded for this document"))?;
+    let path = Path::new(original_path);
+    // Keep the doc's DISPLAY name (old_meta.name) rather than re-deriving it
+    // from the source file name: the display name may have been changed via
+    // MCP rag_file_update, and re-deriving would silently revert the rename.
+    // It also keeps charProgress.name (reindex_doc's doc_name) in sync with
+    // batchProgress.name (meta.name) for the frontend progress sub-bar.
+    let name = old_meta.name.clone();
+    if !path.exists() {
+        return Err(anyhow!("original file does not exist: {}", original_path));
+    }
+
+    // Read + validate the source (same rules as upload).
+    let raw = std::fs::read(path).map_err(|e| anyhow!("read failed for {}: {}", name, e))?;
+    if raw.len() > MAX_UPLOAD_BYTES {
+        return Err(anyhow!(
+            "file too large: {} ({} bytes, max {} bytes)",
+            name,
+            raw.len(),
+            MAX_UPLOAD_BYTES
+        ));
+    }
+    if !is_likely_text(&raw) {
+        return Err(anyhow!("UNSUPPORTED_FORMAT: {}", name));
+    }
+    let (content, _encoding) = decode_text(&raw, &name);
+    let size = raw.len() as u64;
+    let tags = old_meta.tags.clone();
+
+    // Remove the OLD copied file for "copy" docs if its name/extension changed
+    // (symlink docs have no copy). For "copy" docs the on-disk name is
+    // `{id}{ext}`; recompute it from the OLD meta name.
+    let is_symlink = old_meta.method.as_deref() == Some("symlink");
+    if !is_symlink {
+        let old_content = content_path_for(&dir, id, &old_meta.name);
+        if old_content.exists() {
+            if let Err(e) = std::fs::remove_file(&old_content) {
+                rag_log("warn", format!("update-from-original: remove old {} failed: {}", old_content.display(), e));
+            }
+        }
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .unwrap_or_default();
+    let file_stem = format!("{id}{ext}");
+
+    rag_log("info", format!("updating '{}' from original ({} bytes) -> id {}", name, raw.len(), id));
+    let version = old_meta.version.saturating_add(1);
+    let new_md5 = Some(compute_md5(&raw));
+    let chunk_count = write_doc_and_index(
+        app,
+        &dir,
+        id,
+        &file_stem,
+        &name,
+        &content,
+        tags,
+        size,
+        old_meta.file_type.clone(),
+        version,
+        old_meta.method.clone(),
+        Some(original_path.to_string()),
+        new_md5,
+    )
+    .await?;
+
+    Ok(chunk_count)
+}
+
+async fn upload_one_path_inner(
+    app: &AppHandle,
+    file_path: &str,
+    tags: Vec<String>,
+    method: Option<String>,
+) -> Result<()> {
     let started = std::time::Instant::now();
     let dir = files_dir(app)?;
     std::fs::create_dir_all(&dir)?;
@@ -1577,10 +2326,11 @@ async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<Strin
     // by uuid), so two uploads of "report.txt" coexist as separate docs. The
     // per-file "update" button (update_doc) is the explicit overwrite path:
     // it replaces one doc's content + vectors + meta by id.
+    let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
     let tags = tags
         .iter()
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty() && seen_lower.insert(t.to_lowercase()))
         .collect::<Vec<_>>();
     let id = Uuid::new_v4().to_string();
     rag_log(
@@ -1600,16 +2350,32 @@ async fn upload_one_path_inner(app: &AppHandle, file_path: &str, tags: Vec<Strin
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_default();
     let file_stem = format!("{id}{ext}");
+    // MD5 of the source bytes — captured at import for update detection
+    // (symlink: live source; copy: the original that was copied). For symlink
+    // docs the content is read fresh from original_path at view/index time, so
+    // the stored md5 is the baseline for "has it changed?".
+    let md5_hex = Some(compute_md5(&raw));
+    let original_path_str = Some(file_path.to_string());
     // reindex_doc returns the chunk count AND drives the per-batch char-progress
     // events for the UI's second progress bar.
-    let chunk_count =
-        write_doc_and_index(app, &dir, &id, &file_stem, &name, &content, tags.clone(), size, None, 1)
-            .await?;
+    let chunk_count = write_doc_and_index(
+        app,
+        &dir,
+        &id,
+        &file_stem,
+        &name,
+        &content,
+        tags.clone(),
+        size,
+        None,
+        1,
+        method.clone(),
+        original_path_str,
+        md5_hex,
+    )
+    .await?;
 
     // Re-sync tag stats after this file's tags are written.
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
-    }
 
     // Per-file import summary — one structured line per file so the Logs page
     // (filter server=rag) gives an at-a-glance read of import cost for tuning
@@ -1692,6 +2458,70 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
     dir.join(meta_name)
 }
 
+/// Compute the MD5 hex digest of `bytes`. Used to fingerprint imported file
+/// content for update detection (symlink/copy): the hash is stored in
+/// `DocMeta.md5` and compared against a fresh hash of the source on update
+/// check. Cheap to compute vs re-embedding, so it's the gate before any
+/// expensive re-index.
+fn compute_md5(bytes: &[u8]) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    // 16 bytes -> 32 hex chars
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Read a file's bytes and compute its MD5. Returns Ok(hash) or Err if the
+/// file can't be read (caller decides what "unreadable" means — e.g. a missing
+/// symlink source is "lost original", not a hard error).
+fn md5_of_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(compute_md5(&bytes))
+}
+
+/// Classify a `DocMeta`'s original-source state for the single-doc update
+/// dialog + batch preview. Centralizes the three legacy-compat rules:
+///   - no `method`        -> treated as "copy"
+///   - no `original_path` -> has_original_path=false (legacy, manual-upload only)
+///   - no `md5`           -> has_md5=false (legacy -> original_changed=true if exists)
+/// `lost_original` is symlink-method + original_path missing.
+fn classify_original(meta: &DocMeta) -> RagUpdateCheck {
+    let method = meta.method.clone().unwrap_or_else(|| "copy".to_string());
+    let is_symlink = method == "symlink";
+    let original_path = meta.original_path.as_deref();
+    let has_original_path = original_path.map(|p| !p.is_empty()).unwrap_or(false);
+    let original_exists = has_original_path && Path::new(original_path.unwrap()).exists();
+    let has_md5 = meta.md5.as_deref().map(|m| !m.is_empty()).unwrap_or(false);
+    // original_changed: source exists AND (no stored md5 -> legacy "has update",
+    // OR stored md5 != fresh hash). If the source can't be read we treat it as
+    // not-changed rather than erroring (the caller already knows original_exists).
+    let original_changed = if original_exists && has_md5 {
+        if let Ok(fresh) = md5_of_file(Path::new(original_path.unwrap())) {
+            fresh != meta.md5.as_deref().unwrap_or("")
+        } else {
+            false
+        }
+    } else {
+        original_exists && !has_md5
+    };
+    // lost_original: the recorded original_path is missing on disk, regardless
+    // of method. Both symlink (no copy) AND copy (copy exists but source gone)
+    // docs count as lost — the batch preview/run pass + the list UI all surface
+    // them as "原始丢失" so the user sees the full count. (Earlier this was
+    // symlink-only, which made copy docs whose source vanished show as "skipped"
+    // in the batch preview — inconsistent with the list's lostOriginal badge.)
+    let lost_original = has_original_path && !original_exists;
+    let _ = is_symlink; // kept for clarity; not gating lost_original anymore.
+    RagUpdateCheck {
+        method,
+        has_original_path,
+        original_exists,
+        has_md5,
+        original_changed,
+        lost_original,
+    }
+}
+
 /// Resolve a file-type label from a docType extension (e.g. "md" -> "Markdown",
 /// "java" -> "Java"). Used by `rag_file_create`/`rag_file_update` to persist an
 /// explicit type even when the filename has no extension. Returns None if the
@@ -1768,11 +2598,13 @@ pub async fn create_doc_from_content(
         ));
     }
     let file_type = file_type_label_from_ext(dt);
-    // Sanitize tags (trim, drop empty) - same rules as the upload path.
+    // Sanitize tags (trim, drop empty, case-insensitive dedup keeping the
+    // first spelling) - same rules as the upload path.
+    let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
     let tags: Vec<String> = tags
         .into_iter()
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty() && seen_lower.insert(t.to_lowercase()))
         .collect();
 
     // Overwrite same-named doc (same as upload path).
@@ -1797,6 +2629,9 @@ pub async fn create_doc_from_content(
         "info",
         format!("rag_file_create '{}' ({} bytes), indexing...", file_name, byte_len),
     );
+    // rag_file_create has no on-disk source file (content is passed inline),
+    // so it's a "copy" with no original_path + an md5 of the content for
+    // consistency with the import-method feature.
     let _chunk_count = write_doc_and_index(
         app,
         &dir,
@@ -1808,6 +2643,9 @@ pub async fn create_doc_from_content(
         byte_len as u64,
         file_type,
         1,
+        Some("copy".to_string()),
+        None,
+        Some(compute_md5(content.as_bytes())),
     )
     .await?;
 
@@ -1821,8 +2659,13 @@ pub async fn create_doc_from_content(
             let _ = rt.db.optimize().await;
         }
     }
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    // The stale docs' .meta files were removed above; drop their SQL mirror
+    // rows too (their tags counted toward rag_tags). The new doc's mirror row
+    // is upserted inside write_doc_and_index.
+    for sid in &stale_ids {
+        if let Err(e) = remove_doc_sql(sid).await {
+            rag_log("warn", format!("remove_doc_sql for stale {} failed: {}", sid, e));
+        }
     }
     Ok(id)
 }
@@ -1843,6 +2686,7 @@ pub async fn update_doc(
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
 ) -> Result<()> {
+    let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", doc_id));
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
@@ -1891,8 +2735,46 @@ pub async fn update_doc(
     }
     // Re-index when content changed OR tags changed (tag edits must propagate
     // to the chunks' stored tags). Reads existing content from disk when only
-    // tags changed.
+    // tags changed. For symlink docs the content lives at original_path, not
+    // the rag/files copy — read/write there instead.
+    let mut content_text_for_md5: Option<String> = None;
     if content.is_some() || tags_changed {
+        let is_symlink = meta.method.as_deref() == Some("symlink");
+        // Symlink docs are read-only through the MCP rag_file_update tool:
+        // writing content would overwrite the user's ORIGINAL file (there is
+        // no copy). Reject with a clear message instead.
+        if is_symlink && content.is_some() {
+            return Err(anyhow!(
+                "symlink documents are read-only via rag_file_update (writing would overwrite the original file); use the UI update dialog or re-import"
+            ));
+        }
+        // Tag-only update on a symlink doc whose original is missing: the
+        // content read below yields "" and reindex_doc would DELETE the old
+        // vectors and insert 0 chunks (irreversible data loss). In that case
+        // skip the re-index and just persist the meta tags below; the chunks
+        // keep their existing tags/embeddings.
+        let symlink_lost = is_symlink
+            && meta
+                .original_path
+                .as_deref()
+                .map(|p| !p.is_empty() && !Path::new(p).exists())
+                .unwrap_or(false);
+        if symlink_lost && content.is_none() {
+            rag_log(
+                "warn",
+                format!("rag_file_update: '{}' original missing; tags saved without re-index (chunks keep old tags)", meta.name),
+            );
+        } else {
+        let content_path = if is_symlink {
+            meta.original_path
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .map(Path::new)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| content_path.clone())
+        } else {
+            content_path.clone()
+        };
         let content_text = if let Some(c) = content {
             let new_content = if append {
                 let old = std::fs::read_to_string(&content_path).unwrap_or_default();
@@ -1916,10 +2798,15 @@ pub async fn update_doc(
         let chunk_count =
             reindex_doc(app, doc_id, &meta.name, &content_text, meta.tags.clone()).await? as u32;
         meta.chunk_count = chunk_count;
+        if content.is_some() {
+            content_text_for_md5 = Some(content_text);
+        }
+        } // else (symlink_lost tag-only): skipped re-index above
     }
 
     // If the content file is named by old_name (rag_file_create doc, not uuid)
     // and the name changed, rename it so content_path_for still resolves.
+    // (Symlink docs have no copied file, so this only applies to copy docs.)
     if meta.name != old_name {
         let by_id = dir.join(doc_id);
         if !by_id.exists() {
@@ -1931,9 +2818,15 @@ pub async fn update_doc(
         }
     }
 
-    std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    // If content changed, refresh the stored md5 so future update detection
+    // compares against the new baseline.
+    if let Some(ct) = content_text_for_md5 {
+        meta.md5 = Some(compute_md5(ct.as_bytes()));
+    }
+
+    write_meta_atomic(&meta_path, &meta)?;
+    if let Err(e) = upsert_doc_sql(&meta).await {
+        rag_log("warn", format!("upsert_doc_sql for '{}' failed: {}", meta.name, e));
     }
     Ok(())
 }
@@ -2207,27 +3100,51 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
         // — uploads are stored as `{id}.{ext}` (ext from the original filename),
         // so a bare `{id}` path doesn't exist and `read_to_string` would fail ->
         // empty content -> 0 chunks (looked like a silent reindex "success").
-        let content_path = content_path_for(&dir, &meta.id, &meta.name);
-        let content = match std::fs::read_to_string(&content_path) {
-            Ok(c) => c,
-            Err(e) => {
-                rag_log(
-                    "warn",
-                    format!(
-                        "reindex: content read failed for '{}' ({}): {}",
-                        meta.name,
-                        content_path.display(),
-                        e
-                    ),
-                );
-                continue;
+        // For "symlink" docs there's no copy — read live from original_path.
+        let is_symlink = meta.method.as_deref() == Some("symlink");
+        let content = if is_symlink {
+            match meta
+                .original_path
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .map(Path::new)
+            {
+                Some(p) if p.exists() => std::fs::read_to_string(p).unwrap_or_default(),
+                _ => {
+                    rag_log(
+                        "warn",
+                        format!(
+                            "reindex: symlink '{}' original missing ({}), skipped",
+                            meta.name,
+                            meta.original_path.as_deref().unwrap_or("")
+                        ),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            let content_path = content_path_for(&dir, &meta.id, &meta.name);
+            match std::fs::read_to_string(&content_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    rag_log(
+                        "warn",
+                        format!(
+                            "reindex: content read failed for '{}' ({}): {}",
+                            meta.name,
+                            content_path.display(),
+                            e
+                        ),
+                    );
+                    continue;
+                }
             }
         };
         let tags = meta.tags.clone();
         match reindex_doc(app, &meta.id, &meta.name, &content, tags).await {
             Ok(cc) => {
                 meta.chunk_count = cc as u32;
-                if let Err(e) = std::fs::write(&meta_path, serde_json::to_vec(&meta)?) {
+                if let Err(e) = write_meta_atomic(&meta_path, &meta) {
                     rag_log("warn", format!("reindex: rewrite meta for '{}' failed: {}", meta.name, e));
                 }
                 done += 1;
@@ -2242,10 +3159,10 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
     }
     NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
     emit_reindex_progress(app, total, total, "");
-    // Tag stats are unchanged by reindex (tags carried over), but recompute is
-    // cheap and keeps them consistent if any meta was skipped/corrupt.
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats after reindex failed: {}", e));
+    // Tags are unchanged by reindex (carried over), but a full mirror rebuild is
+    // cheap and keeps the SQL tables consistent if any meta was skipped/corrupt.
+    if let Err(e) = rebuild_rag_sql_index(app).await {
+        rag_log("warn", format!("rebuild_rag_sql_index after reindex failed: {}", e));
     }
     rag_log("info", format!("reindexed all docs ({} of {} ok)", done, total));
     Ok(done)
@@ -2261,35 +3178,68 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
 /// other call paths. The runtime check happens before `.meta` is written, so a
 /// failure leaves the document unchanged.
 pub async fn set_doc_tags(app: &AppHandle, id: &str, tags: Vec<String>) -> Result<()> {
+    let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", id));
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
         return Err(anyhow!("document not found: {}", id));
     };
     let mut meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
-    let tags = tags
+    // 规整 + 去重：trim、去空、同标签（大小写不敏感）只保留首个。后端兜底
+    // （前端 TagEditor 已按精确匹配去重，这里覆盖批量路径/直接调命令的路径）。
+    let mut seen_lower: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let tags: Vec<String> = tags
         .into_iter()
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>();
+        .filter(|t| !t.is_empty() && seen_lower.insert(t.to_lowercase()))
+        .collect();
 
     // Rewrite the chunks' tags in place (reusing existing embeddings, no
     // re-embed) and prune the replaced chunks. Requires RAG enabled - refuse
     // (rather than silently leaving stale-tag chunks) when the runtime is off.
     // Hold the runtime lock across the meta write + chunk rewrite so RAG can't
-    // be toggled mid-op and leave meta/lancedb out of sync.
+    // be toggled mid-op and leave meta/lancedb out of sync. META_LOCK (held
+    // above) serializes against concurrent update/delete of the same doc.
     {
         let guard = runtime().lock().await;
         let rt = guard
             .as_ref()
             .ok_or_else(|| anyhow!("RAG is not enabled - turn on RAG before editing tags"))?;
         meta.tags = tags.clone();
-        std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
+        write_meta_atomic(&meta_path, &meta)?;
         rewrite_chunks_with_tags(&rt.db, id, &tags).await?;
     }
     rag_log("info", format!("updated tags for '{}' ({} tags)", meta.name, tags.len()));
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    // The SQL mirror update (rag_tags / rag_doc_tags / rag_docs) is best-effort
+    // relative to the .meta + chunk rewrites above, which already succeeded.
+    // Retry on a busy lock: the pool is configured with a 5s busy_timeout, but
+    // a write that lands just past the window should still heal the mirror
+    // rather than silently leaving rag_tags empty (the original "tag dropdown
+    // shows no list" bug). Bail after a few attempts so we never hang the UI.
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=4 {
+        match upsert_doc_sql(&meta).await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                let msg = format!("{}", e);
+                let busy = msg.contains("database is locked") || msg.contains("code: 5");
+                if !busy || attempt == 4 {
+                    last_err = Some(e);
+                    break;
+                }
+                rag_log("warn", format!(
+                    "upsert_doc_sql for '{}' busy (attempt {}/4), retrying: {}",
+                    meta.name, attempt, msg
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(150 * attempt as u64)).await;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        rag_log("warn", format!("upsert_doc_sql for '{}' failed: {}", meta.name, e));
     }
     Ok(())
 }
@@ -2328,7 +3278,13 @@ async fn rewrite_chunks_with_tags(db: &VectorDb, id: &str, tags: &[String]) -> R
 /// disables the delete button when RAG is off, this is the code-level guard
 /// for other call paths (MCP, batch). lancedb cleanup runs before the files
 /// are removed, so a failure leaves the document intact.
+///
+/// Holds META_LOCK for the whole delete (acquired BEFORE the runtime lock -
+/// consistent ordering meta -> runtime with the update paths) so a concurrent
+/// update of the same doc can't re-write the meta after we remove it (the
+/// "deleted doc resurrected" race).
 pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
+    let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
 
     // Remove the doc's chunks from lancedb + prune the freed space. Refuse if
@@ -2348,34 +3304,46 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
     // orphaned regardless of which naming scheme wrote it. Log any removal
     // failure (rather than `let _ =`) so a permissions/path bug surfaces in the
     // Logs page instead of silently leaving the file on disk.
-    let meta_name = std::fs::read(dir.join(format!("{}.meta", id)))
+    //
+    // For "symlink" docs there is NO copied content file (the source lives at
+    // original_path and is never owned by RAG) — only the `.meta` + vectors are
+    // removed; the original file is left untouched.
+    let meta_opt = std::fs::read(dir.join(format!("{}.meta", id)))
         .ok()
-        .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
-        .map(|m| m.name);
-    // Remove every candidate on-disk path (current `{id}{ext}` upload scheme,
-    // legacy bare-`{id}` upload, and `{meta_name}` for rag_file_create) so no
-    // content file is orphaned regardless of which scheme wrote it.
-    let ext = meta_name
-        .as_deref()
-        .and_then(|n| std::path::Path::new(n).extension().and_then(|e| e.to_str()))
-        .map(|e| format!(".{}", e.to_ascii_lowercase()));
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(ref ext) = ext {
-        candidates.push(dir.join(format!("{id}{ext}")));
-    }
-    candidates.push(dir.join(id));
-    if let Some(ref name) = meta_name {
-        let p = dir.join(name);
-        if !candidates.contains(&p) {
-            candidates.push(p);
+        .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok());
+    let meta_name = meta_opt.as_ref().map(|m| m.name.clone());
+    let is_symlink = meta_opt
+        .as_ref()
+        .map(|m| m.method.as_deref() == Some("symlink"))
+        .unwrap_or(false);
+    if !is_symlink {
+        // Remove every candidate on-disk path (current `{id}{ext}` upload scheme,
+        // legacy bare-`{id}` upload, and `{meta_name}` for rag_file_create) so no
+        // content file is orphaned regardless of which scheme wrote it.
+        let ext = meta_name
+            .as_deref()
+            .and_then(|n| std::path::Path::new(n).extension().and_then(|e| e.to_str()))
+            .map(|e| format!(".{}", e.to_ascii_lowercase()));
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(ref ext) = ext {
+            candidates.push(dir.join(format!("{id}{ext}")));
         }
-    }
-    for p in &candidates {
-        if p.exists() {
-            if let Err(e) = std::fs::remove_file(p) {
-                rag_log("warn", format!("delete_doc: remove {} failed: {}", p.display(), e));
+        candidates.push(dir.join(id));
+        if let Some(ref name) = meta_name {
+            let p = dir.join(name);
+            if !candidates.contains(&p) {
+                candidates.push(p);
             }
         }
+        for p in &candidates {
+            if p.exists() {
+                if let Err(e) = std::fs::remove_file(p) {
+                    rag_log("warn", format!("delete_doc: remove {} failed: {}", p.display(), e));
+                }
+            }
+        }
+    } else {
+        rag_log("info", format!("delete_doc: symlink doc {} — original left untouched", id));
     }
     let meta_path = dir.join(format!("{}.meta", id));
     if meta_path.exists() {
@@ -2385,28 +3353,196 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
     }
 
     rag_log("info", format!("deleted document {}", id));
-    if let Err(e) = recompute_tag_stats(app).await {
-        rag_log("warn", format!("recompute_tag_stats failed: {}", e));
+    if let Err(e) = remove_doc_sql(id).await {
+        rag_log("warn", format!("remove_doc_sql for {} failed: {}", id, e));
     }
     Ok(())
 }
 
 /// Reveal a document's file location in the OS file manager.
+///
+/// For "symlink" docs this reveals the ORIGINAL file (original_path), not the
+/// rag/files copy (there is none). For "copy"/legacy docs it reveals the copied
+/// file under rag/files as before. Returns an error if the resolved target no
+/// longer exists on disk (e.g. a symlink whose source was moved/deleted).
 pub async fn open_file_location(app: &AppHandle, id: &str) -> Result<()> {
     let dir = files_dir(app)?;
-    let meta_name = std::fs::read(dir.join(format!("{}.meta", id)))
+    let meta = std::fs::read(dir.join(format!("{}.meta", id)))
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
-        .map(|m| m.name);
-    // Resolve the actual on-disk file (`dir/{id}` for uploads, `dir/{meta.name}`
-    // for rag_file_create) and reveal + select it. The on-disk name may differ
-    // from the display name (uploads are `dir/{uuid}`), so selecting the file
-    // in the OS file manager is what lets the user find it.
-    let target = content_path_for(&dir, id, meta_name.as_deref().unwrap_or(id));
+        .ok_or_else(|| anyhow!("document not found: {}", id))?;
+    let is_symlink = meta.method.as_deref() == Some("symlink");
+    let target = if is_symlink {
+        let op = meta
+            .original_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| anyhow!("no original path recorded for this document"))?;
+        PathBuf::from(op)
+    } else {
+        content_path_for(&dir, id, &meta.name)
+    };
     if !target.exists() {
-        return Err(anyhow!("file not found: {}", target.display()));
+        return Err(if is_symlink {
+            anyhow!("original file does not exist: {}", target.display())
+        } else {
+            anyhow!("file not found: {}", target.display())
+        });
     }
     reveal_in_file_manager(&target)?;
+    Ok(())
+}
+
+// ── import-method update helpers ───────────────────────────────────────────
+
+/// Single-doc update check: classify the recorded original's state so the
+/// per-row UpdateDialog can render the right branch (lost / changed / no-
+/// change / legacy-no-path). Reads `.meta` + stats the source file. Cheap
+/// (one md5 of the source, no embedding).
+pub async fn check_rag_update(app: &AppHandle, id: &str) -> Result<RagUpdateCheck> {
+    let dir = files_dir(app)?;
+    let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id)))
+        .map_err(|e| anyhow!("check: read meta {} failed: {}", id, e))?;
+    let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
+    Ok(classify_original(&meta))
+}
+
+/// Batch-update preview: classify every doc and return the aggregate counts
+/// the confirm dialog shows before the expensive re-index pass runs. No
+/// embedding, no progress events — just a fast filesystem scan.
+pub async fn preview_batch_update(app: &AppHandle) -> Result<BatchPreview> {
+    let dir = files_dir(app)?;
+    if !dir.exists() {
+        return Ok(BatchPreview {
+            total: 0,
+            to_update: 0,
+            skipped: 0,
+            lost: 0,
+        });
+    }
+    let mut total = 0u32;
+    let mut to_update = 0u32;
+    let mut skipped = 0u32;
+    let mut lost = 0u32;
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+        total += 1;
+        let c = classify_original(&meta);
+        if c.lost_original {
+            lost += 1;
+        } else if !c.has_original_path {
+            // legacy doc with no recorded source — can't auto-update, left to
+            // single-doc manual upload (which records a new original_path).
+            skipped += 1;
+        } else if c.original_changed {
+            to_update += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(BatchPreview {
+        total,
+        to_update,
+        skipped,
+        lost,
+    })
+}
+
+/// Run the batch update in the background: re-index every doc whose source
+/// changed (md5 differs, or legacy no-md5 treated as changed). Emits
+/// `rag://batch-update-progress` per doc (checking/reindexing phases); the
+/// char-level sub-bar comes from reindex_doc's existing `rag://upload-progress`
+/// events. Lost/legacy docs are skipped. Guarded by `BATCH_UPDATE_RUNNING` so a
+/// second trigger while one is in flight is a no-op (the frontend re-opens the
+/// dialog instead). Returns immediately; the work runs on a spawned task.
+pub fn batch_update_rag_docs(app: AppHandle) {
+    // CAS guard: if already running, do nothing.
+    if BATCH_UPDATE_RUNNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        rag_log("info", "batch_update: already running, ignoring re-trigger");
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        // RAII guard: whether run_batch_update returns Ok/Err OR panics, the
+        // CAS flag is cleared on drop so a second batch can run later. Without
+        // this, a panic mid-batch would leave BATCH_UPDATE_RUNNING=true forever
+        // (the store(false) below ran in the happy path only), bricking batch
+        // update until app restart.
+        struct RunningGuard;
+        impl Drop for RunningGuard {
+            fn drop(&mut self) {
+                BATCH_UPDATE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _guard = RunningGuard;
+        let result = run_batch_update(&app).await;
+        if let Err(e) = result {
+            // On early-? failure (e.g. files_dir / read_dir error) the done
+            // event was NOT emitted inside run_batch_update, so the frontend's
+            // batchUpdateRunning would stick on "查看进度" forever. Emit an
+            // "error" phase (NOT "done" — that would show a green checkmark
+            // "批量更新完成" for a failed run) so the frontend clears its
+            // running flag AND shows the failure state.
+            rag_log("error", format!("batch_update failed: {:#}", e));
+            emit_batch_update_progress(&app, 0, 0, "", "error");
+        }
+        // _guard drops here -> BATCH_UPDATE_RUNNING = false.
+    });
+}
+
+async fn run_batch_update(app: &AppHandle) -> Result<()> {
+    let dir = files_dir(app)?;
+    if !dir.exists() {
+        emit_batch_update_progress(app, 0, 0, "", "done");
+        return Ok(());
+    }
+    // Collect metas first so the total is known up front. Best-effort: skip
+    // unreadable entries instead of failing the whole batch (a single corrupt
+    // .meta shouldn't brick batch update for all other docs).
+    let mut docs: Vec<DocMeta> = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+        docs.push(meta);
+    }
+    let total = docs.len() as u32;
+    rag_log("info", format!("batch_update: scanning {} docs", total));
+    for (i, meta) in docs.iter().enumerate() {
+        let c = classify_original(meta);
+        emit_batch_update_progress(app, i as u32, total, &meta.name, "checking");
+        // Lost original or legacy-no-path -> skip (manual-upload-only).
+        if c.lost_original || !c.has_original_path {
+            continue;
+        }
+        if !c.original_changed {
+            continue;
+        }
+        emit_batch_update_progress(app, i as u32, total, &meta.name, "reindexing");
+        if let Err(e) = update_doc_from_original(app, &meta.id).await {
+            rag_log("warn", format!("batch_update: '{}' failed: {:#}", meta.name, e));
+        }
+    }
+    emit_batch_update_progress(app, total, total, "", "done");
+    if let Err(e) = rebuild_rag_sql_index(app).await {
+        rag_log("warn", format!("batch_update: rebuild_rag_sql_index failed: {}", e));
+    }
+    rag_log("info", format!("batch_update: done ({} docs)", total));
     Ok(())
 }
 

@@ -241,3 +241,15 @@ pub struct ServerInfo {
     #[serde(default)]
     pub resources: Vec<crate::models::resource::BuiltinResource>,
 }
+
+/// A page of server-search results: the items on the current page + the total
+/// matching count. `page` is 1-based (matches the dashboard list's semantics).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPage {
+    pub items: Vec<ServerInfo>,
+    /// Total matching servers across all pages (NOT just this page).
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}

@@ -48,6 +48,35 @@ pub async fn list_all() -> Result<Vec<ServerConfig>> {
     rows.into_iter().map(map_row).collect()
 }
 
+/// SQL-level search over the `servers` table: case-insensitive substring on
+/// name OR description (empty key = all rows), `ORDER BY name`. Serves the
+/// `search_servers` command; runtime-only fields (connection status, live tool
+/// list) are merged by the caller for the returned candidates only.
+pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
+    let key = search_key.trim().to_lowercase();
+    let rows = if key.is_empty() {
+        sqlx::query(
+            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+             FROM servers ORDER BY name",
+        )
+        .fetch_all(db::pool())
+        .await?
+    } else {
+        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        sqlx::query(
+            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+             FROM servers \
+             WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\' \
+             ORDER BY name",
+        )
+        .bind(&pattern)
+        .bind(&pattern)
+        .fetch_all(db::pool())
+        .await?
+    };
+    rows.into_iter().map(map_row).collect()
+}
+
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
         "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled

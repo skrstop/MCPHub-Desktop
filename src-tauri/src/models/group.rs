@@ -37,3 +37,14 @@ pub struct GroupPayload {
     pub description: Option<String>,
     pub servers: Vec<JsonValue>,  // Can be string[] or GroupServerConfig[]
 }
+
+/// A page of group-search results (searchable group dropdown / list search).
+/// `page` is 0-based.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPage {
+    pub items: Vec<Group>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}

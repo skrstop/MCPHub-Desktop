@@ -8,6 +8,12 @@ interface MultiSelectProps {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  /**
+   * 可选的后端分页搜索：传入后下拉的选项来自后端 SQL 查询（防抖 +
+   * 滚动加载更多），`options` 仅作为已选项的 label 回显来源。返回
+   * (items, total)。未传时保持前端内存过滤。
+   */
+  searchFn?: (searchKey: string, page: number, pageSize: number) => Promise<{ items: { value: string; label: string }[]; total: number }>;
 }
 
 export const MultiSelect: React.FC<MultiSelectProps> = ({
@@ -17,11 +23,74 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
   placeholder = 'Select items...',
   disabled = false,
   className = '',
+  searchFn,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // ── 后端分页搜索状态（searchFn 传入时启用）──
+  const [remoteItems, setRemoteItems] = useState<{ value: string; label: string }[]>([]);
+  const [remoteTotal, setRemoteTotal] = useState(0);
+  const [remotePage, setRemotePage] = useState(0);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const reqIdRef = useRef(0);
+  const REMOTE_PAGE_SIZE = 50;
+
+  // Debounced first-page fetch on open / search-term change.
+  useEffect(() => {
+    if (!searchFn || !isOpen) return;
+    const id = ++reqIdRef.current;
+    setRemoteLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await searchFn(searchTerm.trim(), 0, REMOTE_PAGE_SIZE);
+        if (id !== reqIdRef.current) return;
+        setRemoteItems(res.items);
+        setRemoteTotal(res.total);
+        setRemotePage(0);
+      } catch {
+        if (id !== reqIdRef.current) return;
+        setRemoteItems([]);
+        setRemoteTotal(0);
+      } finally {
+        if (id === reqIdRef.current) setRemoteLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchFn, isOpen, searchTerm]);
+
+  const loadMoreRemote = async () => {
+    if (!searchFn || loadingMore || remoteItems.length >= remoteTotal) return;
+    const id = ++reqIdRef.current;
+    setLoadingMore(true);
+    const next = remotePage + 1;
+    try {
+      const res = await searchFn(searchTerm.trim(), next, REMOTE_PAGE_SIZE);
+      if (id !== reqIdRef.current) return;
+      setRemoteItems((prev) => {
+        const seen = new Set(prev.map((p) => p.value));
+        const merged = [...prev];
+        for (const it of res.items) if (!seen.has(it.value)) merged.push(it);
+        return merged;
+      });
+      setRemoteTotal(res.total);
+      setRemotePage(next);
+    } catch {
+      // ignore - user can scroll again to retry
+    } finally {
+      if (id === reqIdRef.current) setLoadingMore(false);
+    }
+  };
+
+  const onListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (!searchFn) return;
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 24) loadMoreRemote();
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -36,9 +105,13 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const filteredOptions = options.filter((option) =>
-    option.label.toLowerCase().includes(searchTerm.toLowerCase()),
-  );
+  // Backend mode: options come from the paginated search (already filtered
+  // server-side); the prop `options` only fills selected-item labels.
+  const filteredOptions = searchFn
+    ? remoteItems
+    : options.filter((option) =>
+        option.label.toLowerCase().includes(searchTerm.toLowerCase()),
+      );
 
   const handleToggleOption = (value: string) => {
     if (disabled) return;
@@ -129,7 +202,11 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
           </div>
 
           {/* Options list */}
-          <div className="max-h-48 overflow-y-auto">
+          <div
+            ref={listRef}
+            onScroll={onListScroll}
+            className="max-h-48 overflow-y-auto"
+          >
             {filteredOptions.length > 0 ? (
               filteredOptions.map((option) => {
                 const isSelected = selected.includes(option.value);
@@ -151,6 +228,14 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
             ) : (
               <div className="px-3 py-2 text-sm text-gray-500 text-center">
                 {searchTerm ? 'No results found' : 'No options available'}
+              </div>
+            )}
+            {searchFn && !remoteLoading && remoteItems.length < remoteTotal && (
+              <div
+                onClick={loadMoreRemote}
+                className="px-3 py-2 text-sm text-gray-500 text-center cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 border-t border-gray-200 dark:border-gray-700"
+              >
+                Load more ({remoteItems.length}/{remoteTotal})
               </div>
             )}
           </div>

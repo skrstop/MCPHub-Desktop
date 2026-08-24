@@ -98,3 +98,13 @@ pub struct ImportItem {
     pub dir_name: String,
     pub path: Option<String>,
 }
+
+/// A page of library-skill search results. `page` is 0-based.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillPage {
+    pub items: Vec<Skill>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+}

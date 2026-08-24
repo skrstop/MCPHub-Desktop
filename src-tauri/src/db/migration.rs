@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 20;
+pub const TARGET_VERSION: i64 = 23;
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -124,6 +124,9 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         18 => migrate_v18(pool).await,
         19 => migrate_v19(pool).await,
         20 => migrate_v20(pool).await,
+        21 => migrate_v21(pool).await,
+        22 => migrate_v22(pool).await,
+        23 => migrate_v23(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -907,4 +910,528 @@ async fn migrate_v20(pool: &SqlitePool) -> Result<()> {
     add_column_if_missing(pool, "servers", "proxy", "TEXT").await?;
     log::info!("[db] migration v20: added proxy column to servers");
     Ok(())
+}
+
+/// v20 -> v21: RAG 标签/文档 SQL 化 + 全库查询索引。
+///
+/// 三张新 RAG 表（`.meta` 文件仍是唯一事实源，这些表是随 CRUD 增量维护的
+/// 查询镜像，启动时由 RAG 服务对账重建）：
+///   - `rag_tags(tag PK, file_count)`：独立标签表，file_count 是该标签关联的
+///     文档数（随关联表 CRUD 增减，减到 0 由服务层删除该行）。取代 v16 的
+///     `rag_tag_stats`（数据平移后 DROP）。
+///   - `rag_doc_tags(doc_id, tag)`：标签-文档关联表。
+///   - `rag_docs`：文档元数据镜像（供文件名/标签过滤的 SQL 分页搜索）。
+///
+/// 现有表补显式索引（此前全库除 UNIQUE/PK 自动索引外没有任何索引）：
+/// activity_log（ORDER BY created_at DESC + server/status 等值 + tool LIKE）、
+/// app_log（created_at DESC）、builtin_prompts/builtin_resources（name/uri，
+/// 供搜索的 ORDER BY/前缀）、skills（status+dir_name 列表查询）、
+/// bearer_keys（created_at DESC 列表排序）。
+///
+/// 注意：`rag_doc_tags` / `rag_docs` 的数据回填不在这里做（迁移拿不到
+/// AppHandle/files_dir），由 RAG 服务启动时的全量对账完成。
+async fn migrate_v21(pool: &SqlitePool) -> Result<()> {
+    // ---- RAG 标签表：rag_tag_stats -> rag_tags（数据平移） ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rag_tags (
+            tag         TEXT PRIMARY KEY,
+            file_count  INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    // 幂等：只在旧表还有数据而新表为空时平移（防重跑重复插入）
+    let migrated: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM rag_tags) + (SELECT COUNT(*) FROM rag_tag_stats)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let new_empty: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_tags")
+        .fetch_one(pool)
+        .await?;
+    if migrated > 0 && new_empty == 0 {
+        sqlx::query("INSERT INTO rag_tags (tag, file_count) SELECT tag, file_count FROM rag_tag_stats")
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("DROP TABLE IF EXISTS rag_tag_stats")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rag_tags_file_count ON rag_tags(file_count DESC, tag)")
+        .execute(pool)
+        .await?;
+
+    // ---- RAG 标签-文档关联表 ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rag_doc_tags (
+            doc_id  TEXT NOT NULL,
+            tag     TEXT NOT NULL,
+            PRIMARY KEY (doc_id, tag)
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rag_doc_tags_tag ON rag_doc_tags(tag)")
+        .execute(pool)
+        .await?;
+
+    // ---- RAG 文档元数据镜像表 ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rag_docs (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            size          INTEGER NOT NULL DEFAULT 0,
+            uploaded_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            file_type     TEXT,
+            method        TEXT,
+            original_path TEXT,
+            md5           TEXT,
+            version       INTEGER NOT NULL DEFAULT 1,
+            chunk_count   INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rag_docs_name ON rag_docs(name)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rag_docs_uploaded_at ON rag_docs(uploaded_at DESC)")
+        .execute(pool)
+        .await?;
+
+    // ---- 现有表查询索引（全部幂等） ----
+    let index_statements: &[&str] = &[
+        "CREATE INDEX IF NOT EXISTS idx_activity_log_created_at ON activity_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_log_server ON activity_log(server)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_log_tool ON activity_log(tool)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_log_status ON activity_log(status)",
+        "CREATE INDEX IF NOT EXISTS idx_app_log_created_at ON app_log(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_prompts_name ON builtin_prompts(name)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_resources_name ON builtin_resources(name)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_resources_uri ON builtin_resources(uri)",
+        "CREATE INDEX IF NOT EXISTS idx_skills_status_dir_name ON skills(status, dir_name)",
+        "CREATE INDEX IF NOT EXISTS idx_bearer_keys_created_at ON bearer_keys(created_at DESC)",
+    ];
+    for stmt in index_statements {
+        sqlx::query(sqlx::AssertSqlSafe(*stmt))
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow!("create index failed: {} ({})", stmt, e))?;
+    }
+
+    log::info!("[db] migration v21: created rag_tags/rag_doc_tags/rag_docs + lookup indexes");
+    Ok(())
+}
+
+/// v21 -> v22: RAG 标签表补 created_at + 排序索引 + 日志级别/业务表时间索引。
+///
+/// 1. `rag_tags` 增加 `created_at`（标签首次创建时间，毫秒时间戳 TEXT）——
+///    标签下拉排序要求「关联文件数倒序 + 创建时间倒序」，需要记录标签的
+///    创建时间。存量行回填为 0（排序时退化为 file_count DESC, tag ASC 的旧
+///    语义，启动对账 `rebuild_rag_sql_index` 会用当前时间重写）。
+/// 2. 排序索引：`rag_tags(file_count DESC, created_at DESC, tag)`。
+/// 3. 补齐日志级别 + 各业务表 created_at 查询索引（v21 已给 activity_log /
+///    app_log / bearer_keys 等加了部分索引；本迁移补 `app_log(level)` 和
+///    servers/groups/builtin_prompts/builtin_resources/skills 等的
+///    `created_at DESC`）。
+///
+/// 全部 `IF NOT EXISTS` 幂等；DDL 失败返回 Err（不吞错，版本号不脱节）。
+async fn migrate_v22(pool: &SqlitePool) -> Result<()> {
+    // ---- rag_tags 增加 created_at 列（SQLite 无 ADD COLUMN IF NOT EXISTS） ----
+    add_column_if_missing(
+        pool,
+        "rag_tags",
+        "created_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+
+    let index_statements: &[&str] = &[
+        // 标签下拉排序：file_count DESC, created_at DESC（tag 兜底 tie-break）
+        "CREATE INDEX IF NOT EXISTS idx_rag_tags_file_count ON rag_tags(file_count DESC, created_at DESC, tag)",
+        // app_log：级别筛选（info/warn/error/debug）
+        "CREATE INDEX IF NOT EXISTS idx_app_log_level ON app_log(level)",
+        // 业务表 created_at（倒序列表排序）
+        "CREATE INDEX IF NOT EXISTS idx_servers_created_at ON servers(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_groups_created_at ON groups(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_prompts_created_at ON builtin_prompts(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_resources_created_at ON builtin_resources(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_skills_created_at ON skills(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_skill_exports_created_at ON skill_exports(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_templates_created_at ON templates(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_server_tool_config_created_at ON server_tool_config(created_at DESC)",
+    ];
+    for stmt in index_statements {
+        sqlx::query(sqlx::AssertSqlSafe(*stmt))
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow!("create index failed: {} ({})", stmt, e))?;
+    }
+    log::info!("[db] migration v22: rag_tags.created_at + level/created_at indexes");
+    Ok(())
+}
+
+/// v22 -> v23: 索引补全/清理。
+///
+/// 1. 描述字段索引：servers/groups/builtin_prompts/builtin_resources/skills
+///    的 `description`（LIKE 搜索/排序用）。此前这些表只有 name/created_at 等索引，
+///    描述字段搜索走全表扫。
+/// 2. 删除 `builtin_resources` 的 uri 索引（`idx_builtin_resources_uri`）——
+///    resource 的定位用 name 即可，uri 不再单独索引（用户反馈不需要）。
+/// 3. 遗漏点补全：
+///    - `bearer_keys.user_id`（外键 ON DELETE CASCADE，删用户时要按 user_id 查 key）
+///    - `activity_log.key_id` / `activity_log.source_ip`（按 key/IP 审计统计）
+///
+/// 注意 #3 中的索引用 `create_index_if_column_exists` 列存在性守卫，而非无条件
+/// `CREATE INDEX`。历史路径里 `bearer_keys` 经历过两版 schema：v1 的 `CREATE
+/// TABLE` 带 `user_id`，但旧 sqlx 迁移 `0002_schema_fix.sql` `DROP TABLE` 后
+/// 重建为不带 `user_id` 的 `token`-中心表（见 `bearer_key_service`，所有 SELECT
+/// /INSERT 都不碰 user_id）。`get_current_version` 把旧迁移数映射成版本号后，这些
+/// 库的 bearer_keys 实际没有 user_id 列；无条件 `CREATE INDEX ON bearer_keys
+/// (user_id)` 会以 `no such column: user_id` 失败，让整个迁移 Err → DB 初始化
+/// fatal。列守卫让缺失列的单个索引跳过（并 log），其余索引照建，迁移正常完成。
+async fn migrate_v23(pool: &SqlitePool) -> Result<()> {
+    // 删除 uri 索引（幂等：不存在则 no-op）
+    sqlx::query("DROP INDEX IF EXISTS idx_builtin_resources_uri")
+        .execute(pool)
+        .await?;
+
+    // description 索引（各业务表描述字段搜索）——这些表自 v1 起就带 description
+    // 列，无需守卫。
+    let index_statements: &[&str] = &[
+        "CREATE INDEX IF NOT EXISTS idx_servers_description ON servers(description)",
+        "CREATE INDEX IF NOT EXISTS idx_groups_description ON groups(description)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_prompts_description ON builtin_prompts(description)",
+        "CREATE INDEX IF NOT EXISTS idx_builtin_resources_description ON builtin_resources(description)",
+        "CREATE INDEX IF NOT EXISTS idx_skills_description ON skills(description)",
+    ];
+    for stmt in index_statements {
+        sqlx::query(sqlx::AssertSqlSafe(*stmt))
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow!("create index failed: {} ({})", stmt, e))?;
+    }
+
+    // 遗漏点：外键 + 审计字段索引。这些列在不同历史 schema 路径下可能不存在
+    // （bearer_keys.user_id 见上注释；activity_log 在 v9 之前是旧 user_id/action
+    // 版本，没有 key_id/source_ip），用列守卫逐个建，缺失列的跳过。
+    create_index_if_column_exists(pool, "idx_bearer_keys_user_id", "bearer_keys", "user_id").await?;
+    create_index_if_column_exists(pool, "idx_activity_log_key_id", "activity_log", "key_id").await?;
+    create_index_if_column_exists(pool, "idx_activity_log_source_ip", "activity_log", "source_ip").await?;
+
+    log::info!("[db] migration v23: description indexes + bearer_keys.user_id + activity_log key/source_ip; dropped uri index");
+    Ok(())
+}
+
+/// 幂等建索引，且目标列不存在时跳过（不报错）。
+///
+/// 与无条件 `CREATE INDEX` 的区别：历史上有过多个 schema 路径（旧 sqlx 迁移
+/// `0001/0002` + 现行 `migrate_v1..v23`），同一张表在不同库上可能落在不同
+/// 版本的列集合上。若某索引依赖的列在该库不存在，无条件建索引会让整个迁移
+/// `Err`、DB 初始化 fatal。这里先查 `pragma_table_info`，列缺失则跳过并 log。
+async fn create_index_if_column_exists(
+    pool: &SqlitePool,
+    index_name: &str,
+    table: &str,
+    column: &str,
+) -> Result<()> {
+    let exists: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(&*format!(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{}') WHERE name = '{}')",
+        table, column
+    )))
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow!("check column {}.{} existence failed: {}", table, column, e))?;
+    if exists == 0 {
+        log::warn!(
+            "[db] skip index {}: column {}.{} does not exist in this DB (legacy schema path)",
+            index_name, table, column
+        );
+        return Ok(());
+    }
+    let stmt = format!(
+        "CREATE INDEX IF NOT EXISTS {} ON {}({})",
+        index_name, table, column
+    );
+    sqlx::query(sqlx::AssertSqlSafe(&*stmt))
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow!("create index failed: {} ({})", stmt, e))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v21 迁移在全新库上应建出三张 RAG 表 + 全部查询索引，且版本号推进到
+    /// TARGET_VERSION；重跑（run_pending 二次调用）应为幂等 no-op。
+    #[tokio::test]
+    async fn v21_creates_rag_tables_and_indexes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        let version: i64 =
+            sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read version");
+        assert_eq!(version, TARGET_VERSION);
+
+        // 表存在性
+        for table in ["rag_tags", "rag_doc_tags", "rag_docs"] {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 1, "table {} should exist", table);
+        }
+        // 旧表应已删除
+        let old: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='rag_tag_stats'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(old, 0, "rag_tag_stats should be dropped");
+
+        // 索引存在性（v21 新增 + 现有表补的查询索引）
+        for idx in [
+            "idx_rag_tags_file_count",
+            "idx_rag_doc_tags_tag",
+            "idx_rag_docs_name",
+            "idx_rag_docs_uploaded_at",
+            "idx_activity_log_created_at",
+            "idx_activity_log_server",
+            "idx_activity_log_tool",
+            "idx_activity_log_status",
+            "idx_app_log_created_at",
+            "idx_builtin_prompts_name",
+            "idx_builtin_resources_name",
+            "idx_skills_status_dir_name",
+            "idx_bearer_keys_created_at",
+            // v22：app_log 级别 + 各业务表 created_at
+            "idx_app_log_level",
+            "idx_servers_created_at",
+            "idx_groups_created_at",
+            "idx_builtin_prompts_created_at",
+            "idx_builtin_resources_created_at",
+            "idx_skills_created_at",
+            "idx_skill_exports_created_at",
+            "idx_templates_created_at",
+            "idx_server_tool_config_created_at",
+            // v23：description 索引 + 遗漏点（uri 索引已删，见下方断言）。
+            // 注意：在全新库上 bearer_keys.user_id / activity_log.key_id /
+            // source_ip 列都存在（migrate_v1 建 bearer_keys 带 user_id，v9 重建
+            // activity_log 带 key_id/source_ip），所以这三个索引应建出。
+            "idx_servers_description",
+            "idx_groups_description",
+            "idx_builtin_prompts_description",
+            "idx_builtin_resources_description",
+            "idx_skills_description",
+            "idx_bearer_keys_user_id",
+            "idx_activity_log_key_id",
+            "idx_activity_log_source_ip",
+        ] {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+            )
+            .bind(idx)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 1, "index {} should exist", idx);
+        }
+
+        // v23：uri 索引应已删除（v21 建过，v23 DROP）
+        let uri_idx: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_builtin_resources_uri'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(uri_idx, 0, "idx_builtin_resources_uri should be dropped in v23");
+
+        // 幂等：再跑一次不报错也不改版本
+        run_pending(&pool).await.expect("re-run migrations (idempotent)");
+
+        // v22：rag_tags.created_at 列存在且可写入
+        sqlx::query("INSERT INTO rag_tags (tag, file_count, created_at) VALUES ('probe', 1, '123')")
+            .execute(&pool)
+            .await
+            .expect("insert rag_tags with created_at");
+        let created: String = sqlx::query_scalar("SELECT created_at FROM rag_tags WHERE tag='probe'")
+            .fetch_one(&pool)
+            .await
+            .expect("read created_at");
+        assert_eq!(created, "123");
+    }
+
+    /// v23 的列守卫回归：模拟旧 sqlx 迁移 0002 重建的 `bearer_keys`（带 token、
+    /// 不带 user_id）+ 旧版 `activity_log`（无 key_id/source_ip），重跑 v23 应
+    /// 跳过缺失列的索引、其余索引照建、迁移整体成功（不 fatal）。
+    ///
+    /// 复现原 bug：无条件 `CREATE INDEX ON bearer_keys(user_id)` 在没有 user_id
+    /// 列时返回 `no such column: user_id`，让 `migrate_v23` Err → DB 初始化
+    /// fatal。列守卫后应只 warn 跳过。
+    #[tokio::test]
+    async fn v23_skips_indexes_on_missing_columns() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations to v23");
+
+        // 重建成旧 schema：bearer_keys 无 user_id（0002_schema_fix 的形状），
+        // activity_log 无 key_id/source_ip（v9 之前的旧 user_id/action 形状）。
+        sqlx::query("DROP TABLE bearer_keys").execute(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE bearer_keys (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, token TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1, access_type TEXT NOT NULL DEFAULT 'all',
+                allowed_groups TEXT NOT NULL DEFAULT '[]', allowed_servers TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DROP TABLE activity_log").execute(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE activity_log (
+                id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource TEXT NOT NULL,
+                detail TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 删除 v23 可能已建的这三个索引，模拟"列刚被丢掉、索引待重跑"。
+        for idx in [
+            "idx_bearer_keys_user_id",
+            "idx_activity_log_key_id",
+            "idx_activity_log_source_ip",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(&*format!("DROP INDEX IF EXISTS {}", idx)))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // 回退版本号到 v22，重跑 pending（=重跑 v23）。
+        sqlx::query("UPDATE schema_version SET version = 22 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_pending(&pool).await.expect("v23 must not fatal on missing columns");
+
+        // 缺失列的索引应被跳过（不存在）。
+        for idx in [
+            "idx_bearer_keys_user_id",
+            "idx_activity_log_key_id",
+            "idx_activity_log_source_ip",
+        ] {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+            )
+            .bind(idx)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 0, "{} should be skipped (column absent)", idx);
+        }
+        // 其余 v23 索引（description）仍应正常建出。
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_servers_description'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 1, "idx_servers_description should still be created");
+        // 版本号应推进到 v23。
+        let v: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(v, TARGET_VERSION);
+    }
+
+    /// 标签计数语义冒烟：直接驱动 rag_tags/rag_doc_tags 模拟 upsert/remove
+    /// 的 SQL 形状 —— 计数随关联行增减，减到 0 的标签行删除。
+    /// （upsert_doc_sql/remove_doc_sql 走全局 DB_POOL 无法单测，这里覆盖
+    /// 它们执行的 SQL 语义本身。）
+    #[tokio::test]
+    async fn tag_count_semantics_decrement_to_zero_deletes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations");
+
+        // 模拟两个文档带上同一标签 a + 一个文档带标签 b
+        for (doc, tags) in [("d1", vec!["a"]), ("d2", vec!["a", "b"])] {
+            for t in tags {
+                sqlx::query("INSERT INTO rag_doc_tags (doc_id, tag) VALUES (?, ?)")
+                    .bind(doc)
+                    .bind(t)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "INSERT INTO rag_tags (tag, file_count) VALUES (?, 1) \
+                     ON CONFLICT(tag) DO UPDATE SET file_count = file_count + 1",
+                )
+                .bind(t)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+        let count: i64 = sqlx::query_scalar("SELECT file_count FROM rag_tags WHERE tag='a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // 删除 d1：a 计数 -1（还剩 1，行保留）；再删 d2：a、b 都归零 -> 行删除
+        for doc in ["d1", "d2"] {
+            let old_tags: Vec<String> =
+                sqlx::query_scalar("SELECT tag FROM rag_doc_tags WHERE doc_id = ?")
+                    .bind(doc)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            for t in old_tags {
+                sqlx::query("UPDATE rag_tags SET file_count = file_count - 1 WHERE tag = ?")
+                    .bind(&t)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM rag_tags WHERE tag = ? AND file_count <= 0")
+                    .bind(&t)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("DELETE FROM rag_doc_tags WHERE doc_id = ?")
+                .bind(doc)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_tags")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "zero-count tags must be deleted");
+    }
 }

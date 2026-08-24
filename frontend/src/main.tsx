@@ -17,6 +17,33 @@ function removeSplash() {
   }
 }
 
+/**
+ * Production builds disable the webview context menu (right-click) so packaged
+ * users don't get the browser's "Save image / Inspect / Back" menu over app
+ * content. Dev keeps it for debugging. Implemented as a capture-phase
+ * contextmenu listener so it wins over any component's own handler.
+ */
+function setupProductionContextMenuGuard() {
+  if (process.env.NODE_ENV !== 'production') return;
+  document.addEventListener(
+    'contextmenu',
+    (e) => {
+      // Allow the native menu inside editable fields + the dev-rendered code/
+      // snippet viewers where the user may legitimately want copy/paste.
+      const target = e.target as HTMLElement | null;
+      const editable =
+        target &&
+        (target.isContentEditable ||
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.closest('input,textarea,[contenteditable]'));
+      if (editable) return;
+      e.preventDefault();
+    },
+    { capture: true },
+  );
+}
+
 // Load runtime configuration before starting the app
 async function initializeApp() {
   try {
@@ -26,7 +53,8 @@ async function initializeApp() {
 
     // Store config in window object
     window.__MCPHUB_CONFIG__ = config;
-
+    // Disable the right-click context menu in packaged builds (dev keeps it).
+    setupProductionContextMenuGuard();
     // Start React app
     ReactDOM.createRoot(document.getElementById('root')!).render(
       <React.StrictMode>

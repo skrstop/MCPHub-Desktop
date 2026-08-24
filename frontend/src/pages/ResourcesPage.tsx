@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BuiltinResource } from '@/types';
 import { useBuiltinResourceData } from '@/hooks/useBuiltinResourceData';
@@ -7,7 +7,8 @@ import { Edit, Trash, Plus, FileText, X, ChevronDown, Search } from 'lucide-reac
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { StatusDot } from '@/components/ui/StatusDot';
 import Pagination from '@/components/ui/Pagination';
-import { selectItemPage, getItemFilterCounts, type ItemFilter } from '@/utils/listFilters';
+import { getItemFilterCounts, type ItemFilter } from '@/utils/listFilters';
+import { searchBuiltinResources } from '@/services/builtinResourceService';
 
 // Form dialog for creating/editing a built-in resource
 interface ResourceFormDialogProps {
@@ -216,23 +217,47 @@ const ResourcesPage: React.FC = () => {
     [resources],
   );
 
-  // Filter against the full list and paginate the filtered result client-side,
-  // mirroring ServersPage so filters reach resources on other pagination pages.
-  const { items: visibleResources, pagination } = useMemo(
-    () =>
-      selectItemPage(resources, filter, search, page, pageSize, {
-        haystack: (r) => r.uri + ' ' + (r.name || '') + ' ' + (r.description || ''),
-        isEnabled: (r) => r.enabled !== false,
-      }),
-    [resources, filter, search, page, pageSize],
-  );
+  // ── 搜索/筛选/分页后端化 ──（同 PromptsPage：单一数据路径，空搜索=后端全量分页）
+  const [pageItems, setPageItems] = useState<BuiltinResource[]>([]);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [pageLoading, setPageLoading] = useState(false);
+  const reqIdRef = useRef(0);
 
-  // Sync page when client-side pagination clamps it (filter/search narrows results).
   useEffect(() => {
-    if (pagination.page !== page) {
-      setPage(pagination.page);
-    }
-  }, [pagination.page, page]);
+    const id = ++reqIdRef.current;
+    setPageLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        // backend page is 0-based; the UI's `page` is 1-based
+        const res = await searchBuiltinResources(search.trim(), filter, page - 1, pageSize);
+        if (id !== reqIdRef.current) return;
+        setPageItems(res.items);
+        setPageTotal(res.total);
+      } catch {
+        if (id !== reqIdRef.current) return;
+        setPageItems([]);
+        setPageTotal(0);
+      } finally {
+        if (id === reqIdRef.current) setPageLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [search, filter, page, pageSize, resources]);
+
+  const visibleResources = pageItems;
+  const totalPages = Math.max(1, Math.ceil(pageTotal / pageSize));
+  const safePage = Math.min(page, totalPages);
+  useEffect(() => {
+    if (safePage !== page) setPage(safePage);
+  }, [safePage, page]);
+  const pagination = {
+    page: safePage,
+    limit: pageSize,
+    total: pageTotal,
+    totalPages,
+    hasNextPage: safePage < totalPages,
+    hasPrevPage: safePage > 1,
+  };
 
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {

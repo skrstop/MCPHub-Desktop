@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X, Loader2 } from 'lucide-react';
@@ -11,6 +11,7 @@ import JSONImportForm from '@/components/JSONImportForm';
 import Pagination from '@/components/ui/Pagination';
 import { useToast } from '@/contexts/ToastContext';
 import { apiPost } from '@/utils/fetchInterceptor';
+import { ApiResponse, ServerPage } from '@/types';
 import { useServerData } from '@/hooks/useServerData';
 import { useCostData } from '@/hooks/useCostData';
 import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/utils/serverFilters';
@@ -77,19 +78,65 @@ const ServersPage: React.FC = () => {
     [allServers],
   );
 
-  // Filter against the full list and paginate the filtered result client-side,
-  // so status filters reach servers that live on other pagination pages.
-  const { servers: visibleServers, pagination: clientPagination } = useMemo(
+  // ── 搜索后端化（混合模式）──
+  // 搜索词或状态筛选非空时走后端 `search_servers`（SQL name/description LIKE
+  // 预过滤 + Rust 合并运行时状态/工具名匹配 + 后端分页，防抖 + 竞态守卫）；
+  // 空搜索 + all 筛选时保持前端全量路径 —— 服务器列表由轮询实时刷新
+  // （连接状态是运行时数据），前端分页可直接吃到轮询更新。
+  const searchActive = search.trim() !== '' || filter !== 'all';
+  const [serverPageItems, setServerPageItems] = useState<Server[]>([]);
+  const [serverPageTotal, setServerPageTotal] = useState(0);
+  const [serverPageLoading, setServerPageLoading] = useState(false);
+  const serverReqId = useRef(0);
+
+  useEffect(() => {
+    if (!searchActive) {
+      serverReqId.current += 1;
+      setServerPageItems([]);
+      setServerPageTotal(0);
+      return;
+    }
+    const id = ++serverReqId.current;
+    setServerPageLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res: ApiResponse<ServerPage> = await apiPost('/servers/search', {
+          search: search.trim(),
+          typeFilter,
+          statusFilter: filter,
+          page: currentPage,
+          pageSize: serversPerPage,
+        });
+        if (id !== serverReqId.current) return;
+        setServerPageItems(res.data?.items ?? []);
+        setServerPageTotal(res.data?.total ?? 0);
+      } catch {
+        if (id !== serverReqId.current) return;
+        setServerPageItems([]);
+        setServerPageTotal(0);
+      } finally {
+        if (id === serverReqId.current) setServerPageLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchActive, search, filter, typeFilter, currentPage, serversPerPage]);
+
+  // Client-side path (empty search): full list filter + pagination, fed by polling.
+  const { servers: clientVisibleServers, pagination: clientPagination } = useMemo(
     () => selectServerPage(typeFilteredServers, filter, search, currentPage, serversPerPage),
     [typeFilteredServers, filter, search, currentPage, serversPerPage],
   );
 
-  // Sync currentPage when client-side pagination clamps it (filter/search narrows results).
+  const visibleServers = searchActive ? serverPageItems : clientVisibleServers;
+  const listTotal = searchActive ? serverPageTotal : clientPagination.total;
+  const totalPages = searchActive
+    ? Math.max(1, Math.ceil(serverPageTotal / serversPerPage))
+    : clientPagination.totalPages;
+  const safePage = Math.min(currentPage, totalPages);
   useEffect(() => {
-    if (clientPagination.page !== currentPage) {
-      setCurrentPage(clientPagination.page);
-    }
-  }, [clientPagination.page, currentPage, setCurrentPage]);
+    if (safePage !== currentPage) setCurrentPage(safePage);
+  }, [safePage, currentPage, setCurrentPage]);
+  const pagination = { page: safePage, limit: serversPerPage, total: listTotal, totalPages };
 
   const handleEditClick = async (server: Server) => {
     const fullServerData = await handleServerEdit(server);
@@ -280,7 +327,7 @@ const ServersPage: React.FC = () => {
             onChange={(e) => setSearch(e.target.value)}
             className="flex-1 bg-transparent outline-none text-[13px]"
             style={{ color: 'var(--hub-ink)' }}
-            placeholder={t('market.searchPlaceholder') || 'Search…'}
+            placeholder={t('server.searchPlaceholder') || 'Search…'}
           />
           {search && (
             <button onClick={() => setSearch('')} className="hub-icon-btn sm">
@@ -290,7 +337,7 @@ const ServersPage: React.FC = () => {
         </div>
 
         <div className="ml-auto hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
-          {clientPagination.total}/{allServers.length}
+          {pagination.total}/{typeFilteredServers.length}
         </div>
       </div>
 
@@ -329,16 +376,16 @@ const ServersPage: React.FC = () => {
           <div className="flex items-center mt-4 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
             <div className="flex-[2]">
               {t('common.showing', {
-                start: (clientPagination.page - 1) * clientPagination.limit + 1,
-                end: Math.min(clientPagination.page * clientPagination.limit, clientPagination.total),
-                total: clientPagination.total,
+                start: (pagination.page - 1) * pagination.limit + 1,
+                end: Math.min(pagination.page * pagination.limit, pagination.total),
+                total: pagination.total,
               })}
             </div>
             <div className="flex-[4] flex justify-center">
-              {clientPagination.totalPages > 1 && (
+              {pagination.totalPages > 1 && (
                 <Pagination
-                  currentPage={clientPagination.page}
-                  totalPages={clientPagination.totalPages}
+                  currentPage={pagination.page}
+                  totalPages={pagination.totalPages}
                   onPageChange={setCurrentPage}
                   disabled={isLoading}
                 />

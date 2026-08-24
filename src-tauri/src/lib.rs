@@ -357,6 +357,7 @@ pub fn run() {
             commands::auth::change_password,
             // Server commands
             commands::servers::list_servers,
+            commands::servers::search_servers,
             commands::servers::get_server,
             commands::servers::add_server,
             commands::servers::update_server,
@@ -369,6 +370,7 @@ pub fn run() {
             commands::servers::clear_cache,
             // Group commands
             commands::groups::list_groups,
+            commands::groups::search_groups,
             commands::groups::add_group,
             commands::groups::update_group,
             commands::groups::delete_group,
@@ -407,6 +409,7 @@ pub fn run() {
             commands::bearer_keys::delete_bearer_key,
             // Builtin prompt commands
             commands::prompts::list_builtin_prompts,
+            commands::prompts::search_builtin_prompts,
             commands::prompts::get_builtin_prompt,
             commands::prompts::create_builtin_prompt,
             commands::prompts::update_builtin_prompt,
@@ -414,6 +417,7 @@ pub fn run() {
             commands::prompts::call_builtin_prompt,
             // Builtin resource commands
             commands::resources::list_builtin_resources,
+            commands::resources::search_builtin_resources,
             commands::resources::get_builtin_resource,
             commands::resources::create_builtin_resource,
             commands::resources::update_builtin_resource,
@@ -459,6 +463,7 @@ pub fn run() {
             commands::skills::delete_skill_agent,
             commands::skills::scan_skills_for_import,
             commands::skills::list_skills,
+            commands::skills::search_skills,
             commands::skills::get_skill,
             commands::skills::import_skills,
             commands::skills::scan_folder_for_skills,
@@ -475,11 +480,14 @@ pub fn run() {
             commands::rag::get_rag_doc,
             commands::rag::get_rag_chunks,
             commands::rag::pick_rag_files,
+            commands::rag::pick_rag_folder,
             commands::rag::upload_rag_doc,
             commands::rag::update_rag_doc,
             commands::rag::delete_rag_doc,
             commands::rag::rag_search_command,
             commands::rag::rag_tag_search,
+            commands::rag::rag_tag_search_paged,
+            commands::rag::rag_doc_search_paged,
             commands::rag::get_rag_settings,
             commands::rag::save_rag_settings,
             commands::rag::rag_model_limits,
@@ -491,6 +499,9 @@ pub fn run() {
             commands::rag::rag_current_model,
             commands::rag::rag_select_model,
             commands::rag::rag_download_model,
+            commands::rag::check_rag_update,
+            commands::rag::preview_batch_update,
+            commands::rag::batch_update_rag_docs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCPHub application");

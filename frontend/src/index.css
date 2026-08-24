@@ -177,6 +177,8 @@
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .hub-icon-btn:hover { background: var(--hub-surface-hover); border-color: var(--hub-line); }
+.hub-icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.hub-icon-btn:disabled:hover { background: transparent; border-color: transparent; }
 .hub-icon-btn.sm { width: 26px; height: 26px; border-radius: 6px; }
 
 /* Inputs */

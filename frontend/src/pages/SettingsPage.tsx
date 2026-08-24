@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { emit } from '@tauri-apps/api/event';
@@ -7,6 +7,7 @@ import { Switch } from '@/components/ui/ToggleGroup';
 import { MultiSelect } from '@/components/ui/MultiSelect';
 import RuntimeVersionManager from '@/components/RuntimeVersionManager';
 import { useSettingsData } from '@/hooks/useSettingsData';
+import { searchGroups } from '@/services/groupService';
 import { useToast } from '@/contexts/ToastContext';
 import { PermissionChecker } from '@/components/PermissionChecker';
 import { PERMISSIONS } from '@/constants/permissions';
@@ -241,6 +242,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                     options={isGroupsMode ? availableGroups : availableServers}
                     selected={isGroupsMode ? selectedGroups : selectedServers}
                     onChange={isGroupsMode ? setSelectedGroups : setSelectedServers}
+                    searchFn={isGroupsMode ? groupSearchFn : undefined}
                     placeholder={
                       isGroupsMode
                         ? t('settings.selectGroups') || 'Select groups...'
@@ -262,6 +264,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                       options={availableGroups}
                       selected={selectedGroups}
                       onChange={setSelectedGroups}
+                      searchFn={groupSearchFn}
                       placeholder={t('settings.selectGroups') || 'Select groups...'}
                       disabled={loading}
                     />
@@ -423,7 +426,7 @@ const SettingsPage: React.FC = () => {
   const { showToast } = useToast();
   const { allServers: servers } = useServerContext(); // Use allServers for settings (not paginated)
   const { groups } = useGroupData();
-  const { auth } = useAuth();
+  const { auth, reloadAuth, exitGuestMode } = useAuth();
   const isAdmin = auth.user?.isAdmin === true;
 
   const [installConfig, setInstallConfig] = useState<{
@@ -773,8 +776,24 @@ const SettingsPage: React.FC = () => {
     // exposeHttp and httpPort are top-level config, not inside routing
     if (key === 'exposeHttp' || key === 'httpPort') {
       await updateSystemConfig({ [key]: value });
-    } else {
-      await updateRoutingConfig(key, value);
+      return;
+    }
+    await updateRoutingConfig(key, value);
+
+    // skipAuth toggle drives the auth mode for the whole app:
+    //  - ON  → reload auth so the public-config check admits a guest session,
+    //          effectively switching into guest mode live (no re-login needed).
+    //  - OFF → the guest session is no longer valid; clear local auth state
+    //          (skipAuth already persisted above by updateRoutingConfig) and
+    //          drop to the login page so the user must authenticate (or
+    //          re-enable guest) to continue.
+    if (key === 'skipAuth') {
+      if (value === true) {
+        await reloadAuth();
+      } else {
+        await exitGuestMode({ skipServerUpdate: true });
+        navigate('/login');
+      }
     }
   };
 
@@ -1342,6 +1361,20 @@ const SettingsPage: React.FC = () => {
     value: group.name,
     label: group.name,
   }));
+
+  // Backend paginated search backing the group MultiSelect dropdowns (SQL
+  // LIKE + LIMIT/OFFSET; `availableGroups` above stays as the selected-label
+  // fallback). Stable identity so MultiSelect's effect deps don't churn.
+  const groupSearchFn = useCallback(
+    async (searchKey: string, page: number, pageSize: number) => {
+      const res = await searchGroups(searchKey, page, pageSize);
+      return {
+        items: res.items.map((g) => ({ value: g.name, label: g.name })),
+        total: res.total,
+      };
+    },
+    [],
+  );
 
   // Reset selected arrays when accessType changes
   useEffect(() => {

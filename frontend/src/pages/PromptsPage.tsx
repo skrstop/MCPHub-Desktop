@@ -1,13 +1,14 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BuiltinPrompt, PromptArgument } from '@/types';
 import { useBuiltinPromptData } from '@/hooks/useBuiltinPromptData';
+import { searchBuiltinPrompts } from '@/services/builtinPromptService';
 import { useAuth } from '@/contexts/AuthContext';
 import { Edit, Trash, Plus, MessageSquare, X, ChevronDown, Search } from 'lucide-react';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { StatusDot } from '@/components/ui/StatusDot';
 import Pagination from '@/components/ui/Pagination';
-import { selectItemPage, getItemFilterCounts, type ItemFilter } from '@/utils/listFilters';
+import { getItemFilterCounts, type ItemFilter } from '@/utils/listFilters';
 
 // Form dialog for creating/editing a built-in prompt
 interface PromptFormDialogProps {
@@ -270,23 +271,50 @@ const PromptsPage: React.FC = () => {
 
   const counts = useMemo(() => getItemFilterCounts(prompts, (p) => p.enabled !== false), [prompts]);
 
-  // Filter against the full list and paginate the filtered result client-side,
-  // mirroring ServersPage so filters reach prompts on other pagination pages.
-  const { items: visiblePrompts, pagination } = useMemo(
-    () =>
-      selectItemPage(prompts, filter, search, page, pageSize, {
-        haystack: (p) => p.name + ' ' + (p.title || '') + ' ' + (p.description || ''),
-        isEnabled: (p) => p.enabled !== false,
-      }),
-    [prompts, filter, search, page, pageSize],
-  );
+  // ── 搜索/筛选/分页后端化 ──
+  // 搜索词或 enabled 筛选非空时走后端 SQL 分页查询（防抖 + 竞态守卫）；
+  // 两者皆空且只有一页数据时也可走后端（等价），这里统一始终走后端,
+  // 空搜索 = 后端返回全部分页 —— 保持单一数据路径。
+  const [pageItems, setPageItems] = useState<BuiltinPrompt[]>([]);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [pageLoading, setPageLoading] = useState(false);
+  const reqIdRef = useRef(0);
 
-  // Sync page when client-side pagination clamps it (filter/search narrows results).
   useEffect(() => {
-    if (pagination.page !== page) {
-      setPage(pagination.page);
-    }
-  }, [pagination.page, page]);
+    const id = ++reqIdRef.current;
+    setPageLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        // backend page is 0-based; the UI's `page` is 1-based
+        const res = await searchBuiltinPrompts(search.trim(), filter, page - 1, pageSize);
+        if (id !== reqIdRef.current) return;
+        setPageItems(res.items);
+        setPageTotal(res.total);
+      } catch {
+        if (id !== reqIdRef.current) return;
+        setPageItems([]);
+        setPageTotal(0);
+      } finally {
+        if (id === reqIdRef.current) setPageLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [search, filter, page, pageSize, prompts]);
+
+  const visiblePrompts = pageItems;
+  const totalPages = Math.max(1, Math.ceil(pageTotal / pageSize));
+  const safePage = Math.min(page, totalPages);
+  useEffect(() => {
+    if (safePage !== page) setPage(safePage);
+  }, [safePage, page]);
+  const pagination = {
+    page: safePage,
+    limit: pageSize,
+    total: pageTotal,
+    totalPages,
+    hasNextPage: safePage < totalPages,
+    hasPrevPage: safePage > 1,
+  };
 
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
