@@ -1550,296 +1550,49 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `2b10ae3` (origin/main，v1.0.30 tag 之后 2 个未发布提交) |
-| **对应 origin tag**            | `v1.0.30`（最新 tag，指向 `bfd153c`） |
-| **桌面端版本号**               | `1.0.30001` |
-| **同步执行日期**               | 2026-08-21              |
+| **当前已同步到 origin commit** | `6133796` (origin/main，v1.0.32 tag 之后 3 个未发布提交) |
+| **对应 origin tag**            | `v1.0.32`（最新 tag，指向 `20e3ba7`） |
+| **桌面端版本号**               | `1.0.32003` |
+| **同步执行日期**               | 2026-08-25              |
 
-> 下次同步时，使用 `2b10ae3` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 2b10ae3..HEAD`）。
+> 下次同步时，使用 `6133796` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 6133796..HEAD`）。
+>
+> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`6133796` = `v1.0.32`（`20e3ba7`）之后 3 个未发布提交（`bc961cb` #1072/#1073 + `d2df5ae` #1071 + `6133796` #1075）。
 >
 > ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
 
 ### 4.4 最近同步记录
 
-#### 2026-08-21：同步 `bfd153c` -> `2b10ae3`（2 个 commit，安全 + openapi 修复）
+#### 2026-08-25：同步 `2b10ae3` -> `6133796`（19 个 commit，跨入 v1.0.31/v1.0.32）
 
-origin 仍为 `v1.0.30`（`2b10ae3` = v1.0.30 tag 之后 2 个未发布提交，无新 tag）；桌面端版本号不变 `1.0.30001`（本轮无 Rust 源码改动、无版本号变更，仅子模块指针前进 + 文档登记）。
+origin 从 `v1.0.30` 跨入 `v1.0.32`（`6133796` = `v1.0.32` tag `20e3ba7` 之后 3 个未发布提交）；桌面端版本号 `1.0.30002` -> `1.0.32003`（按 §4.3 规则以 origin 最新 tag `v1.0.32` 为基线 + 递增序号 003；本轮把先前规划的 `1.0.30002`/`1.0.30003` 两版 release notes 合并为单版 `1.0.32003` 发布，详见 `doc/upgrade/1.0.32003.md`）。
 
-`cd mcphub-origin && git --no-pager log --oneline bfd153c..2b10ae3` 共 2 个 commit（`51dc8d1` #1058 + `2b10ae3` #1059）；`git diff --stat bfd153c..2b10ae3 -- frontend/ locales/` 为空（两 commit 均不触及前端/locales，只改 Node 后端 `src/clients/openapi.ts` + `src/services/sseService.ts` 及其测试）。
-
-**已同步到 desktop（前端 / locales）**
-
-无。两 commit 均不触及 `frontend/` 或 `locales/`。
-
-**已镜像到 desktop（Rust 后端）**
-
-无。经逐项评估，两个 commit 在桌面端 Rust 架构下均无对应落点（详见「未同步」），不需要 Rust 镜像。
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `51dc8d1` | fix(openapi): expose header parameters in generated MCP input schema (#1058) | **不同步** | 上游修复其 TS `OpenAPIClient.generateInputSchema` 漏掉 `in: header` 参数的问题（只发 path/query/body，header 参数如 Authorization/X-API-Key 不进 inputSchema，模型无法填写）。桌面端 OpenAPI 工具生成**完全委托** `rmcp-openapi` crate（`openapi_transport.rs::list_tools` → `server.tool_collection.to_mcp_tools()`），桌面自身不生成 inputSchema。核查 crate 0.31.3 源码 `tool_generator.rs:1448/1547`：`ParameterIn::Header` 参数已收集进 `header_params` 并逐个 `properties.insert(...)` 加入 inputSchema（字段名加 `header_` 前缀），即 crate 早已暴露 header 参数——上游 #1058 修复的 bug 在 crate 实现中本就不存在。桌面端无 inputSchema 生成层，无可镜像落点。 |
-| `2b10ae3` | fix(security): require full containment for scoped bearer keys on group routes (GHSA-454m-4vm6-842f) (#1059) | **不同步**（架构上桌面端已免疫，详见分析） | 上游修复 `sseService.isBearerKeyAllowedForRequest` 对 servers/custom 作用域 bearer key 在 group 路由上的「any-overlap」漏洞：原逻辑 `groupServerNames.some(name => allowedServers.includes(name))`——只要 group 里有**一个** server 在 key 的 `allowedServers` 里就放行整个 group，导致 servers 作用域 key 可越权访问 group 内其他 server。改为 `every`（全包含）+ 空 group 拒绝。桌面端 Rust bearer key group 鉴权走**不同路径**：`get_allowed_servers`（http_server.rs:394）把 `accessType=servers` 的 key 展开成 `allowed_servers` HashSet，再在 group 路由（`dispatch_mcp`/`list_group_tools`/`call_group_tool`）对 group 的**每个 server**逐个 `allowed.contains(&s.name)` 过滤——即只暴露 key 能访问的那些 server，未授权的 server 被过滤掉（而非「放行整个 group」）。因此桌面端不存在「一个 member 命中就放行全 group」的越权：servers 作用域 key 在 group 路由上只能看到 `allowed_servers ∩ group.servers`，secret-server 永远不在结果里。架构语义不同（上游是「整组放行/拒绝」二元判断；桌面是「逐 server 过滤暴露子集」），#1059 的越权前提在桌面端不成立，无需镜像。空 group 场景：桌面端 `accessible.is_empty() && allowed_opt.is_some()` → 403，与上游修复后的「空 group 拒绝」一致。 |
-
-**同步后验证**：本轮仅子模块指针 `bfd153c -> 2b10ae3` + AGENTS.md §4.3/§4.4 登记，无 Rust/frontend/locales 源码改动。`cargo check` / `npm run build` 状态与上一轮（`968abae`）一致，无需重跑。子模块内部工作树干净（`main` 分支，HEAD = `2b10ae3`，零改动），符合 §6「禁止修改 mcphub-origin 原始源文件」约束。
-
----
-
-#### 2026-08-20：同步 `0249c73` -> `bfd153c`（2 个 commit，跨入 v1.0.30）
-
-origin 从 `v1.0.29` 跨入 `v1.0.30`（`bfd153c` 精确指向 `v1.0.30` tag）；桌面端版本 `1.0.29001` -> `1.0.30001`。
-
-`cd mcphub-origin && git --no-pager log --oneline 0249c73..bfd153c` 共 2 个 commit（`244847e` #1054 + `bfd153c` #1055）；`git diff --stat 0249c73..bfd153c -- frontend/ locales/` 涉及 `ServerForm.tsx`（#1054+#1055）、`Button.tsx`/`EmbeddingSyncContext.tsx`/`serverFormPayload.ts`/`types/index.ts`/`serverVisibility.ts`/`tsconfig.json`（#1055）+ 4 个 locales（#1054），以及 Node 后端 `serverController.ts`/`mcpService.ts`/`dataService.ts`/`ServerDao*`/`ServerRepository.ts`/`smartRoutingService.ts`/`serverConfigPersistence.ts`/`migration.ts`/`routes/index.ts` + `db/entities/Server.ts`（#1054/#1055，评估镜像）。
+`cd mcphub-origin && git --no-pager log --oneline 2b10ae3..6133796` 共 19 个 commit；`git diff --stat 2b10ae3..6133796 -- frontend/ locales/` 涉及 `App.tsx`/`DynamicForm.tsx`/`LoginPage.tsx`/`OAuthConsentPage.tsx`（新增）/`types/runtime.ts`/`vite.config.ts`/`viteBasePath.ts`（新增）/`viteProxy.ts`（新增）+ 4 个 locales，以及大量 Node 后端安全加固（`src/controllers/*`/`src/services/*`/`src/utils/*`）+ 测试。
 
 **已同步到 desktop（前端 / locales）**
 
 | 来源 commit | 说明 | desktop 应用方式 |
 | ----------- | ---- | ---------------- |
-| `244847e` | feat: Implement group visibility and shared user functionality for servers (#1054) | 前端类型对齐（`types/index.ts`：`ServerConfig`/`ServerFormData`/`Server` 加 `sharedWithUsers?: string[]`，visibility 注释从「group 预留」改为「group = 指定用户共享」）。locales en/zh/fr/tr 各补齐 `visibility*` + `share*` 共 14 键（zh/en 更新 8 个旧键 + 新增 6 键；fr/tr 新增全 14 键），`group` 语义从「预留/分组」改为「共享给指定用户」。**但 `ServerForm` 的 visibility 选择器块、`sharedWithUsers` 候选 UI、`apiGet('/servers/:name/share-candidates')` 调用均不镜像**——桌面端隐藏可见性（所有 server 默认公开）、单用户免登录、Rust 无 share-candidates 端点，故前端只对齐类型/翻译（dormant），UI 不引入。 |
-| `bfd153c` | fix: avoid unnecessary runtime reloads when editing a server (#1055) | 前端 3 个自定义文件 + 3 个基线一致文件手动合并：① `ServerForm.tsx`（⚠️ 自定义文件手动合并，保留 3 处桌面差异：`getInitialServerType` 跳过 `builtin`、visibility 默认 `public`、删除 visibility 选择器块；同步上游 #1055 的 Basic Info 3 列网格（name 1 格 / description 2 格）、OAuth2↔OpenID Connect 配置块顺序调整（OpenID Connect 在前）、`+` 按钮统一改 `hub-btn primary`、passthrough headers + OAuth 配置从 openapi/sse 分支移入 Advanced 分区按 `serverType` 路由（openapi 透传 `openapi.passthroughHeaders`，其余用 `formData.passthroughHeaders`）；**不镜像 cookieSession UI**——桌面 `rmcp-openapi` 传输无 cookie 持久化，toggle 为 no-op，注释隐藏）；② `serverFormPayload.ts`（⚠️ 自定义文件手动合并：`buildOptions` timeout 改为始终回显 `typeof options.timeout === 'number'` 而非 `&& !== 60000`（避免触发后端连接变更误判）；`config.proxy = formData.proxy` round-trip；保留桌面差异——不发送 `visibility`/`sharedWithUsers`，perSessionClient/startOnDemand 按 serverType 分支）；③ `types/index.ts`（⚠️ 自定义文件：`ServerConfig` 加 `startOnDemand`/`idleTimeoutMs` 注释更新 + `sharedWithUsers`；`ServerFormData` 加 `sharedWithUsers` + `proxy?: ProxychainsConfig`）；④ `Button.tsx`（与基线一致，直接复制新版本：`onClick` 类型放宽为 `void | Promise<void>`，handleClick 检测 Promise 自动 setInternalLoading）；⑤ `EmbeddingSyncContext.tsx`（与基线一致，直接复制新版本：`const progress = data.progress` 收窄闭包持有，避免 TS narrowing 在 setTimeout 内丢失）；⑥ `serverVisibility.ts`（与基线一致，直接复制：group fallback `Group` -> `Shared`、`getServerVisibilityOptions` defaultValue `Group` -> `Shared`）。 |
+| `ae9ed56` + `dd5c7d7` | fix(security): resolve CodeQL prototype pollution + barrier guards（#1066 / #1068） | `frontend/src/components/ui/DynamicForm.tsx` `handleInputChange` 合并原型污染防护：循环内具名 `key` + 拦截 `__proto__`/`constructor`/`prototype` 直接 `return prev`；`lastKey` 同样校验（空或特殊 key 放弃赋值）。桌面端 `DynamicForm` 被 `ToolCard`（`tool.inputSchema`，**来自不可信上游 MCP 服务器**）与 `PromptCard`（builtin prompt 参数）复用，攻击面与登录态无关，纯前端防御性改动。`diff -w desktop vs origin` 该文件零差异（与上游一致）。 |
 
 **已镜像到 desktop（Rust 后端）**
 
-| 来源 commit | 说明 | desktop 镜像方式 |
-| ----------- | ---- | ---------------- |
-| `bfd153c` | fix: avoid unnecessary runtime reloads when editing a server (#1055) | `commands/servers.rs::update_server` 重写为镜像上游 `hasConnectionRelevantChange`：先 `server_service::get_by_name(&name)` 取既有配置 -> 比对连接相关子集（序列化整个 `ServerConfig` 为 JSON 后剔除 `id`/`name`/`description` 等访问/元数据字段 + 默认超时 60000 视为未设置 + `strip_nulls` 归一）-> 无连接相关变更时仅持久化 + 保留实时连接（`pool::connect_server` 不触发），有变更或 enabled 改变才 `disconnect_server` + 后台 spawn 重连。`starting` 状态按 `connection_relevant_changed` 派生。rename 仍由开头 `disconnect_server(&name)`（旧名）天然覆盖（上游 #1055 另需 `closeServer(name)` 是因其 `addOrUpdateServer` 按新名 close 才漏，桌面无此问题）。 |
-| `bfd153c`（proxy round-trip 部分） | `ServerConfig` 新增 `proxy: Option<ProxychainsConfig>` 字段（`models/server.rs` 新增 `ProxychainsConfig` 结构体，camelCase 序列化，`type` rename 为 `proxy_type`）；`db/migration.rs` `migrate_v20`（`add_column_if_missing servers proxy TEXT`，幂等）+ `TARGET_VERSION` 19 -> 20 + `apply_migration` 加 `20 => migrate_v20`；`services/server_service.rs` 3 个 SELECT 列清单 + INSERT/UPDATE bind + `map_row` 读取 `proxy`；`services/settings_import.rs` + `rag/service.rs` builtin 的 `ServerConfig` 字面量补 `proxy: None`。使前端 `config.proxy` round-trip 真正生效（此前 serde 默默丢弃该字段，编辑任何字段都会丢 proxy 触发重连）。 |
+无。本轮 19 个 commit 经逐项评估均无 Rust 镜像落点（详见「未同步」）。
 
 **未同步（经评估无需 / 无法同步）**
 
 | 来源 commit | 说明 | 处理决策 | 原因分析 |
 | ----------- | ---- | -------- | -------- |
-| `244847e`（后端部分） | `serverController.ts`（`getServerShareCandidates` 端点 + `isAccessOnlyServerUpdate`）/`dataService.ts`（group 可见性过滤）/`ServerDao*`/`ServerRepository.ts`（`sharedWithUsers` 列与查询）/`mcpService.ts`（`getVisibleServerInfos` 按用户过滤）/`smartRoutingService.ts`/`db/entities/Server.ts`（`sharedWithUsers` 列）/`migration.ts`/`routes/index.ts` | **不同步** | 桌面端 Rust 无 `visibility`/`owner`/`sharedWithUsers` 概念（`server_service.rs` 无这些列）、单用户免登录架构（`SessionState` 始终 admin/None）、前端已隐藏可见性 UI 且不发送 visibility/sharedWithUsers。整套按用户过滤可见性 + share-candidates 端点属多用户特性，桌面端无对应架构。前端类型字段（`sharedWithUsers`）与 14 个 locale 键已对齐（dormant），待将来实现多用户时落地。 |
-| `bfd153c`（后端测试部分） | `tests/controllers/serverController.test.ts`（+298）/`tests/frontend/serverFormPayload.test.ts`/`serverLocales.test.ts`/`serverVisibility.test.ts` | **不同步** | 纯 Node/TS 测试；桌面端 Rust 无对应单测基建，#1055 的 Rust 镜像已通过 `cargo check` 验证编译。 |
-| `bfd153c`（`tsconfig.json`） | 移除 `ignoreDeprecations: "6.0"`、空白调整 | **不同步** | 桌面端 `tsconfig.json` 在 2026-08-04 同步（§记忆 dep-upgrade）时已主动加 `baseUrl`/移除 `ignoreDeprecations`，与上游目标一致但已本地化，无改动需要。 |
-| cookieSession（#1047 体系，`ServerForm.tsx` 上游块） | OpenAPI Set-Cookie 跨调用按下游 session 持久化 | **不同步** | 桌面端 `mcp/openapi_transport.rs` 经 `rmcp-openapi` crate，无 cookie 持久化注入点；2026-08-17 同步 #1047 时已决策「架构分歧无法镜像」。本次 `ServerForm` 合并保留 `cookieSession` 注释隐藏（toggle 无后端落点，为 no-op），不引入 UI。 |
-
-**同步后验证**：`cd frontend && npm run build` 通过（1.61s）；`cd src-tauri && ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0，11m45s，无 error/warning）。`npx tsc --noEmit` 错误数 27 -> 21（新 `Button.tsx` async onClick + `EmbeddingSyncContext.tsx` narrowing 修复消解 6 个既有错误，无新增；`ServersPage.tsx:36` 的 `handleServerVisibilityChange` 死引用为同步前既有，ServerCard visibility UI 在桌面端不渲染故运行时无影响）。桌面端自定义文件经 `diff -w` 核对：`ServerForm.tsx` 与 origin 仅余 3 处桌面差异（getInitialServerType builtin 跳过 / visibility 默认 public / visibility 选择器块删除）+ 故意保留的 cookieSession/visibility UI 删除；`serverFormPayload.ts`/`types/index.ts` 保留桌面端 perSessionClient/startOnDemand 分支与不发送 visibility 的差异。版本号已同步：`package.json` / `frontend/package.json` / `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml` / `Cargo.lock` 均已 `1.0.29001` -> `1.0.30001`；changelog `doc/upgrade/1.0.29001.md` -> `1.0.30001.md`。如需对 Cargo.lock 做正式复核，用 asdf/rustup cargo 1.96.0 + `ORT_SKIP_DOWNLOAD=1` + 本地代理 127.0.0.1:7890（cargo 不在 PATH）。
-
----
-
-#### 2026-08-18：同步 `9fb73dd` -> `0249c73`（2 个 commit）
-
-origin 仍为 `v1.0.29`（`0249c73` = v1.0.29 tag 之后 2 个未发布提交，无新 tag）；桌面端版本号不变 `1.0.29001`（与 2026-08-17 同步共用同一待发布版本，上次同步的改动当时未提交，本次一并提供）。
-
-`cd mcphub-origin && git --no-pager log --oneline 9fb73dd..0249c73` 共 2 个 commit（`eabde16` #1052 + `0249c73` #1053）；`git diff --stat 9fb73dd..0249c73 -- frontend/ locales/` 涉及 `SettingsContext.tsx`/`SettingsPage.tsx`/`configService.ts`（#1053）+ 4 个 locales。
-
-**已同步到 desktop（前端 / locales）**
-
-| 来源 commit | 说明 | desktop 应用方式 |
-| ----------- | ---- | ---------------- |
-| `0249c73` | feat(auth): make Better Auth base URL configurable in settings (#1053) | 前端 3 个自定义文件手动合并：`SettingsContext.tsx`（`BetterAuthConfig` 接口 + `getDefaultBetterAuthConfig` + `normalizeBetterAuthConfig` + `mergeBetterAuthConfig` 均加 `baseUrl`，默认 `''`）；`SettingsPage.tsx`（`tempBetterAuthConfig` state/初始值/useEffect 播种/`handleBetterAuthTextChange` key 联合类型/`handleSaveBetterAuthConfig` 差异检测与 `updates.baseUrl` 均加 `baseUrl`；UI 在「Enable Better Auth」开关卡与「Auth base path」卡片之间插入 Base URL 输入框，与上游位置一致）；`configService.ts`（顶层 `BetterAuthConfig` 接口加 `baseUrl?: string`，与上游改动点一致；`SystemConfig.auth.betterAuth` 嵌套内联接口上游未改，桌面端保持一致不改）。locales：en/zh/fr/tr 各加 `settings.betterAuthBaseUrl` + `betterAuthBaseUrlDescription` 2 键（用上游翻译，插在 `enableBetterAuthDescription` 与 `betterAuthBasePath` 之间，与上游顺序一致）。桌面端 Better Auth 区块在 Tauri 模式整段隐藏（`!isTauri()` 守卫保留），字段与翻译先行对齐，web 模式直接生效。 |
-
-**已镜像到 desktop（Rust 后端）**
-
-无。#1053 的后端改动（`src/betterAuth.ts`/`betterAuthConfig.ts`/`serverController.ts`）属 Node Better-Auth 社交登录体系，桌面端 Better Auth 集成在 §7 待办（未实现），Rust 侧无对应落点；`update_settings` 对未知 config 字段的透传由 `config_service::update` 深合并 JSON 兜底，前端发出的 `auth.betterAuth.baseUrl` 会被原样持久化、不丢失。
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `0249c73`（后端部分） | `src/betterAuth.ts`/`betterAuthConfig.ts`/`serverController.ts` + 3 个 Node 测试文件（#1053 后端） | **不同步** | Node Better-Auth 运行时配置解析（`BETTER_AUTH_URL` 环境变量优先、base URL 拼 redirect URI）；桌面端无 Better Auth 服务（§7 待办），无对应架构；前端 `baseUrl` 字段经 `config_service::update` 深合并持久化，不丢字段。 |
-| `eabde16` | chore: align license metadata with Apache-2.0 (#1052) | **不同步** | 仅改 origin `package.json` license 字段 + `docs/api-reference/openapi.json`；桌面端独立 npm 依赖图（4.1 策略 4），license 元数据非本仓库同步范围。 |
-
-**同步后验证**：`cd frontend && npm run build` 通过；locales 4 文件均通过 `JSON.parse` 校验，runtime* 键未受影响；无 Rust 源码改动（`cargo check` 无需重跑，版本号维持 1.0.29001 与上次同步一致）。
-
----
-
-#### 2026-08-17：同步 `a8ace62` -> `9fb73dd`（4 个 commit）
-
-origin 从 `v1.0.28` 系列跨入 `v1.0.29`（`9fb73dd` 精确指向 `v1.0.29` tag）；桌面端版本 `1.0.28002` -> `1.0.29001`。
-
-`cd mcphub-origin && git --no-pager log --oneline a8ace62..9fb73dd` 共 4 个 commit（`3723946` #1046 + `a1bb974` #1047 + `8bb8334` #1048 + `9fb73dd` #1049 docs）；`git diff --stat a8ace62..9fb73dd -- frontend/ locales/` 非空（#1047 触及 origin `frontend/` 与各 `locales/`）。
-
-**已同步到 desktop（前端 / locales）**
-
-无。桌面 `frontend/` 为自研独立前端，不复用 origin `frontend/`；origin #1047 的前端改动属上游 TS ServerForm/locales，桌面无对应文件，不直接搬运。
-
-**已镜像到 desktop（Rust 后端）**
-
-无。本次 4 个 origin commit 均未镜像到 Rust：#1046/#1047/#1048 为 TS MCP-SDK / axios 特定实现，桌面 OpenAPI 走 `rmcp-openapi` crate、MCP 传输层无 OAuth provider，架构分歧无可镜像落点（详见「未同步」）；#1049 为纯 README 文档。
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `3723946` | fix(oauth): restore 401 auto-discovery for URL-only Streamable HTTP servers (#1046) | **不同步** | 上游为 TS MCP SDK 的 `createOAuthProvider`（`authProvider` 挂载 → SDK 拦截 401 挑战做 OAuth 发现）。桌面端 MCP 传输层（`mcp/http_transport.rs`、`sse_transport.rs`）无 OAuth provider 实现，`src-tauri/src` 全局无 oauth/cookie 相关代码，无可镜像落点。 |
-| `a1bb974` | feat(openapi): persist Set-Cookie across calls per downstream session (#1047) | **不同步** | API 调用路径走 `rmcp-openapi` crate，cookie 持久化由该 crate 决定，桌面无法在外层注入按 sessionId 隔离的 CookieJar；spec 拉取路径用裸 `reqwest::Client::new()`，无登录态流程，不涉及 Set-Cookie 持久化。架构分歧，无法直接镜像。 |
-| `8bb8334` | fix(openapi): authenticate spec document download with configured credentials (#1048) | **不同步** | 上游把 spec 下载改走带 `setupSecurity` 凭据 + `maxRedirects:0` + SSRF 校验的 `httpClient`，属 TS axios + 上游自有 SSRF/安全方案体系。桌面 `openapi_transport.rs::fetch_spec` 用裸 `reqwest::Client::new()` 只发 `config.headers`，确有同源隐患（spec URL 需鉴权时拉不到），但完整移植需引入 cookie/OAuth2/SSRF 一套（与上游 `utils/ssrf.ts`、`setupSecurity` 对应的桌面实现尚无），属 feature 级工作而非 fix 镜像。本轮不做，留作独立任务评估；如需缓解，最小补丁是让 `fetch_spec` 在拉 spec 时也注入 `OpenApiSecurity` 凭据（ApiKey cookie / OAuth2 token）。 |
-| `9fb73dd` | docs: fix broken star history chart (#1049) | **不同步** | 纯 README 文档，对桌面构建无影响。 |
-
-**同步后验证**：本次仅版本号 + 子模块指针 + 文档同步，无 Rust 源码改动。`src-tauri/Cargo.toml`/`Cargo.lock` 仅 `mcphub` 包 `version` 行 `1.0.28002`->`1.0.29001`（元数据，不影响编译）。版本号已同步：`package.json` / `frontend/package.json` / `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml` / `Cargo.lock` 均已 `1.0.28002` -> `1.0.29001`；changelog `doc/upgrade/1.0.28002.md` -> `1.0.29001.md`（内容回退为桌面端自有功能/修复，撤去先前误加的 #1046/#1047/#1048「镜像上游」条目——三者未实际镜像）。如需对 Cargo.lock 做正式 `cargo check` 复核，用 asdf/rustup cargo 1.96.0 + `ORT_SKIP_DOWNLOAD=1` 离线执行（详见本地构建记忆：本地代理 127.0.0.1:7890、cargo 不在 PATH）。
-
----
-
-#### 2026-08-14：同步 `0e8fed0` -> `a8ace62`（2 个 commit）
-
-origin 仍为 `v1.0.28`（`a8ace62` = `v1.0.28` tag 之后 4 个未发布提交，无新 tag）；桌面端版本 `1.0.28001` -> `1.0.28002`。
-
-`cd mcphub-origin && git --no-pager log --oneline 0e8fed0..a8ace62` 共 2 个 commit（`de60851` #1042 + `a8ace62` merge）；`git diff --stat 0e8fed0..a8ace62 -- frontend/ locales/` 为空（无前端/locales 改动）。
-
-**已同步到 desktop（前端 / locales）**
-
-无。本次两 commit 均不触及 `frontend/` 或 `locales/`。
-
-**已镜像到 desktop（Rust 后端）**
-
-| 来源 commit | 说明 | desktop 镜像方式 |
-| ----------- | ---- | ---------------- |
-| `de60851` | fix: bound graceful shutdown for long-lived connections (#1042) | `services/http_server.rs::start()` 的 `axum::serve(...).with_graceful_shutdown(...)` 用 `tokio::time::timeout(SHUTDOWN_GRACE=10s, serve)` 包裹：宽限期内正常优雅关闭；超时则丢弃 serve future 强制中止残留连接（含永不结束的 SSE/Streamable HTTP 长连接），并打 warn 日志。对应 origin `closeHttpServer` 的 10s 宽限期 + `socket.destroy()` 强销毁语义。修复前长连接会令优雅关闭永久挂起（重启服务时旧 task 泄漏、「HTTP server stopped」日志不打印）。 |
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `de60851`（测试部分） | `src/utils/serverShutdown.test.ts`（55 行 Node 单测） | **不同步** | 纯 Node 测试；桌面端 Rust 无对应单测基建，#1042 的 Rust 镜像已通过 `cargo check` 验证编译。 |
-| `a8ace62` | Merge commit from fork | **不同步** | 纯合并提交，无内容改动。 |
-
-**同步后验证**：`cd src-tauri && cargo check` 通过（asdf cargo 1.96.0，17.75s）。本次无 frontend/locales 改动，`frontend && npm run build` 状态与同步前一致，无需重跑；桌面端自定义文件未触及。
-
----
-
-#### 2026-08-13：同步 `45e2bd3` -> `0e8fed0`（5 个 commit）
-
-origin 版本 `v1.0.27` -> `v1.0.28`；桌面端版本 `1.0.27001` -> `1.0.28001`。
-
-`cd mcphub-origin && git --no-pager log --oneline 45e2bd3..0e8fed0` 共 5 个 commit；`git diff --stat 45e2bd3..0e8fed0 -- frontend/ locales/` 涉及 `ServerForm.tsx`（#1034，2174 行重构）+ 4 个 locales（#1032，每文件 6 键），以及 Node 后端 `mcpService.ts`/`serverController.ts`/`mcpOAuthProvider.ts`/`serverConfigPersistence.ts`/测试（#1032/#1033/#1041，不同步）。
-
-**已同步到 desktop（前端 / locales）**
-
-| 来源 commit | 说明 | desktop 应用方式 |
-| ----------- | ---- | ---------------- |
-| `cf1adc9` | fix: wake startOnDemand servers so they can serve tool calls (#1032) | locales：en/zh/fr/tr 各加 6 键（`server.startOnDemand`/`startOnDemandDescription`/`idleTimeoutMs`/`idleTimeoutMsDescription` + `status.sleeping`/`sleepingDescription`），用上游翻译。桌面端 `StatusDot.tsx`/`ServerForm.tsx` 此前用内联 fallback（`t('status.sleeping', 'Sleeping')` 等），现补齐真键使其走翻译。前端 tsx 无改动（#1032 前端只动 locales）。 |
-| `98d51ce` | refactor: restructure server edit form into 3 sections (#1034，= `v1.0.28` tag) | 前端：`ServerForm.tsx` 手动合并 3 分区重构（Section 1 Basic Info / Section 2 Connection / Section 3 Advanced Options 可折叠 + `isAdvancedExpanded` state）。**合并策略**：以 origin 新版（98d51ce）为基线（已含桌面端 openapi oauth2 字段 + perSessionClient + startOnDemand），再定点回加 3 处桌面端差异：① `getInitialServerType` 显式返回类型 `: 'stdio'\|'sse'\|'streamable-http'\|'openapi'` + `!== 'builtin'` 跳过（ServerForm 仅用于自定义 server）；② visibility 默认 `'public'`（origin 为 `'private'`）；③ 删除 Advanced 分区内的 visibility 选择器（桌面端隐藏可见性，所有 server 默认公开），留 `{/* Visibility section hidden in desktop client - all servers are public by default */}` 注释。origin 在 #1034 中移除的 OAuth 旧字段（authorizationEndpoint/tokenEndpoint/scopes/resource/accessToken/refreshToken）在桌面端本就被注释为死代码，随基线一并清理。perSessionClient 注释采纳 origin 更准确的「except openapi」（与 `serverType !== 'openapi'` 条件一致）。`diff -w origin新 vs 合并后` 仅余上述 3 处桌面差异，确认无误。无 locales 改动（origin 用内联 fallback）。 |
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `cf1adc9`（后端部分） | fix: wake startOnDemand（Node `mcpService.ts` 216 行：重写 `ensureServerReady` 直接 spawn+connect+缓存 tools/prompts/resources、`getServerByTool` 跳过 disabled、`primeOnDemandServers` 启动时填充工具缓存、startOnDemand 限 stdio） | **不同步** | origin 的关键 bug 是 `ensureServerReady` 走 `reconnectServer`→`initializeClientsFromSettings`，后者对 on-demand 跳过连接，导致**永远唤不醒睡眠 server**。桌面端 `mcp/on_demand.rs::call_tool_on_demand` 本就是直接 `build_client`+`connect`+`list_tools`+缓存（§3.8），不存在该 bug。逐项核对 origin 4 处修复：① 直接唤醒——桌面已具备；② disabled 守卫——桌面 disable 时 `disconnect_server` 移除 pool 占位 + `shutdown_on_demand_lifecycle`，disabled server 无 pool 条目，`call_tool` 落到「not connected」而非唤醒（比 origin 的 `enabled===false` 检查更彻底，覆盖所有 server 类型）；③ `primeOnDemandServers`（启动时唤醒每个 on-demand server 填充工具缓存再睡）——桌面端**有意不镜像**：on-demand 为低频 server 省内存，启动时全量唤醒会抵消收益；桌面端睡眠 server 工具在首次唤醒后缓存（§3.8.7），此前行为一致，属设计取舍（代价：外部 MCP 客户端 `tools/list` 在首次唤醒前看不到该 server 工具）；④ startOnDemand 限 stdio——桌面 `pool::connect_server` 已 `start_on_demand = cfg.start_on_demand.unwrap_or(false) && cfg.server_type == ServerType::Stdio`（§3.8.3），已具备。综上无需 Rust 镜像。 |
-| `63c84ff` | fix: apply resource description/enabled overrides in dashboard list (#1033) | **不同步** | origin 在 `getServersInfo`（dashboard 列表）给上游 server 的 resources 补上 per-URI 的 description/enabled 覆盖（`serverConfig?.resources?.[resource.uri]`）。桌面端 `list_servers`/`get_server` 返回 `resources: Vec::new()`（`commands/servers.rs` 多处），**dashboard 根本不暴露上游 server 的 resources**，没有可应用覆盖的 resource 列表。桌面端 `BuiltinResource` 是 hub 自有 builtin 资源（`builtin_resources` 表，`ResourcesPage` 管理），与上游 resource 覆盖是不同特性。架构不对应，N/A。 |
-| `0e8fed0` | Remove vector embeddings under old name when renaming a server (#1041) | **不同步** | origin 在 rename server 时调 `removeServerToolEmbeddings(oldName)` 清掉旧名下的 server-tool 向量嵌入，避免 `search_tools` 广告幻影工具。该向量嵌入属于 Smart Routing / `vectorSearchService`（按语义搜索 server 工具）。桌面端 Smart Routing 未实现（§7 待办），无 `vectorSearchService`/server-tool 嵌入；`http_server.rs` 的 `$smart` 仅是「调用所有已连接 server」的 fan-out 路由，非向量搜索。架构不对应，N/A。 |
-| `52e1f49` | chore(deps): bump js-yaml 4.3.0->4.3.1 (#1038) | **不同步** | 仅改 `package.json`+`pnpm-lock.yaml`；js-yaml 为 Node 后端 YAML 依赖，桌面端 Rust 用 serde_yaml，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
-
-**同步后验证**：`cd frontend && npm run build` 通过（7.16s，ServerForm 3 分区重构编译通过）；`cd src-tauri && ORT_SKIP_DOWNLOAD=1 CARGO_NET_OFFLINE=true cargo check` 通过（asdf cargo 1.96.0，22.95s）。桌面端自定义文件 `ServerForm.tsx` 经 `diff -w` 核对仅保留 3 处桌面差异未被覆盖；locales 4 文件均通过 `JSON.parse` 校验，runtime* 键未受影响。
-
----
-
-#### 2026-08-06：同步 `5894e44` -> `45e2bd3`（5 个 commit）
-
-origin 仍为 `v1.0.27`（`45e2bd3` = `v1.0.27` tag 之后 5 个未发布提交，无新 tag）；桌面端版本号不变 `1.0.27001`。
-
-`cd mcphub-origin && git --no-pager log --oneline 5894e44..45e2bd3` 共 5 个 commit；`git diff --stat 5894e44..45e2bd3 -- frontend/ locales/` 涉及 `JSONImportForm.tsx`/`ServerCard.tsx`/`types/index.ts`/`jsonImport.ts`（#1014）+ 4 个 locales，以及 Node 后端 `mcpService.ts`/`mcpOAuthProvider.ts`/`jsonSchemaValidator.ts`（#1028，不同步）。
-
-**已同步到 desktop（前端 / locales）**
-
-| 来源 commit | 说明 | desktop 应用方式 |
-| ----------- | ---- | ---------------- |
-| `45e2bd3` | fix(ui): clearer server-import validation and OAuth clientId/redirect-uri guidance (#1014) | 前端：`utils/jsonImport.ts`——`normalizeImportedServers` 改返回 `{servers, issues}`，新增 `KNOWN_KEYS`/`NormalizedServer`/`ImportIssue`/`NormalizeResult`，检测未知顶层字段 / remote 缺 `url` / stdio 缺 `command` 收集为 issue，remote 类型补传 `oauth`。**合并而非覆盖**：保留桌面端 `parseServerType`/`autoDetectType` 宽松类型检测（commit `74e3f17`），仅叠加 #1014 的 issue 上报与 `oauth` 透传，不回退宽松匹配（上游「unsupported type」严格分支因桌面端宽松检测总能在已知类型内消解而省略）。`components/JSONImportForm.tsx`——`handlePreview` 解构 `{servers, issues}`，有 issue 时展示 `jsonImport.validationErrors` + 详情，`servers` 为空则中止。`components/ServerCard.tsx`——`handleOAuth` 开窗后若 `server.oauth.clientIdConfigured` 追加 `status.oauthClientIdHint` 警告 toast。`types/index.ts`——`Server.oauth` 加 `clientIdConfigured?: boolean`。locales：en/zh/fr/tr 各加 `status.oauthClientIdHint` + `jsonImport.validationErrors` 2 键（用上游翻译）。 |
-| `aa1903d` | feat: add ResilientJsonSchemaValidator (#1028) | 前端无改动（上游改 Node 后端）。 |
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `aa1903d` | feat: add ResilientJsonSchemaValidator (#1028) | **不同步** | 上游 bug 源于 Node MCP SDK 的 `AjvJsonSchemaValidator` 在 `tools/list` 预编译 outputSchema 时对不可解析 `$ref` 抛异常。桌面端 Rust MCP 客户端（`stdio_transport.rs`/`http_transport.rs`/`sse_transport.rs`）仅把 `outputSchema` 原样存为 `serde_json::Value`（`models/server.rs:192`），不编译也不校验输出 schema，`Cargo.toml` 无 ajv/jsonschema/schemars/validator 依赖，该 bug 在桌面端不存在。 |
-| `45e2bd3`（后端部分） | fix(ui): OAuth `clientIdConfigured` 后端透传（`mcpOAuthProvider.ts`/`mcpService.ts`/`src/types/index.ts`） | **不同步** | 桌面端无**上游** OAuth provider：Rust `ServerInfo` 不暴露 `authorizationUrl`/`clientIdConfigured`（grep `authorization_url`/`clientIdConfigured` 在 `src-tauri/` 无命中），`ServerCard.handleOAuth` 的 `server.oauth?.authorizationUrl` 分支当前为 dormant。前端 `clientIdConfigured` 字段 + 警告 toast 仍已镜像（dormant），待上游 OAuth 实现后自动生效。`http_server.rs` 的 OAuth 是 hub 自身 REST 鉴权（下游），非上游 MCP 连接。 |
-| `d2a02fc` | chore(deps): bump hono 4.12.27->4.12.34 (#1027) | **不同步** | hono 为 Node 后端框架，桌面端 Rust 用 axum，`frontend/package.json` 无 hono 依赖。 |
-| `8d7f761` | chore(deps-dev): bump postcss 8.5.18->8.5.23 (#1026) | **不同步** | 桌面端 `frontend/package.json` 的 `postcss: "^8.5.6"` caret 已覆盖 8.5.23，无需改动。 |
-| `6dee783` | chore(deps): bump undici 7.28.0->7.29.0 (#1025) | **不同步** | undici 为 Node 后端 HTTP 客户端，桌面端 Rust 用 reqwest，`frontend/package.json` 无 undici 依赖。 |
-
-**同步后验证**：`cd frontend && npm run build` 通过（2.53s）；`npx tsc --noEmit` 在移植文件中无新增错误（`jsonImport.ts:130` 的 `parseServerType` 返回 `string` 赋给联合类型、`ServerCard.tsx:350-354` 的 `server.type`/`server.openapi` 均为 HEAD 既有，非本次引入；项目用 vite build 不做严格类型检查）。桌面端 `parseServerType`/`autoDetectType` 宽松检测保留未被覆盖；locales JSON 4 文件均通过 `JSON.parse` 校验；RAG/markdown WIP 同步前已 stash，未受影响。
-
----
-
-#### 2026-08-04：同步 `29c0704` -> `5894e44`（11 个 commit）
-
-origin 版本 `v1.0.26` -> `v1.0.27`；桌面端版本 `1.0.26001` -> `1.0.27001`。
-
-`cd mcphub-origin && git --no-pager log --oneline 29c0704..5894e44` 共 11 个 commit；`git diff --stat 29c0704..5894e44 -- frontend/ locales/` 仅 4 个前端文件改动（全部来自 `976b4ac` #1012）。
-
-**已同步到 desktop（前端 / locales）**
-
-| 来源 commit | 说明 | desktop 应用方式 |
-| ----------- | ---- | ---------------- |
-| `976b4ac` | feat: on-demand stdio server spawning to reduce memory usage (#1012) | 前端：`types/index.ts`（`ServerConfig` + `ServerFormData` 新增 `startOnDemand`/`idleTimeoutMs`）、`StatusDot.tsx`（新增 `startOnDemand` prop + Sleeping 渲染）、`ServerCard.tsx`（传 `startOnDemand` prop）、`ServerForm.tsx`（stdio 专属「按需启动」checkbox + idle timeout 输入框 + 初始化）、`serverFormPayload.ts`（payload 携带 `startOnDemand`/`idleTimeoutMs`）。全部为桌面端自定义文件，手动合并保留 hub 样式 / 隐藏 visibility / OAuth2 / 下载进度条等差异。locales 无改动（origin 用内联默认值）。 |
-
-**已镜像到 desktop（Rust 后端）**
-
-| 来源 commit | 说明 | desktop 镜像方式 |
-| ----------- | ---- | ---------------- |
-| `976b4ac` | feat: on-demand stdio server spawning (#1012) | Rust 后端完整实现（详见 §3.8）：`models/server.rs` 新增 `start_on_demand`/`idle_timeout_ms`（`ServerConfig`）+ `start_on_demand`（`ServerStatus`）；`db/migration.rs` `migrate_v17`（`TARGET_VERSION` 16->17）加两列；`server_service.rs` SELECT/INSERT/UPDATE/map_row 持久化 + `perSessionClient`/`startOnDemand` 互斥校验；新增 `mcp/on_demand.rs`（仿 `session_pool.rs`：懒建 client + 创建锁去重 + idle 定时器 + sleeping/awake 状态机）；`pool.rs` `connect_server` 对 on-demand stdio 插入睡眠占位、`call_tool` 路由到 on-demand store、`list_all_tools` 含睡眠 server 缓存工具、`disconnect_server`/`disconnect_all` 清理 on-demand client、新增 `mark_on_demand_awake/sleeping/error` 占位状态机；`mcp_manager.rs` 启动日志区分 sleeping、自动重连循环跳过 on-demand；`http_server.rs` `mcp_scope_server_filters` 含 `start_on_demand` server。 |
-| `a4a628a` | fix: include upstream stderr in connection errors (#1015) | `stdio_transport.rs` 新增 `stderr_tail`（`Arc<std::sync::Mutex<String>>`，~32KB 滚动缓存），stderr drain task 累积每行；`connect()` 的 `initialize` 握手失败路径把 stderr tail 拼进 error message（`--- upstream stderr ---` 段），便于排查 Python traceback / 缺失依赖。 |
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `be49869` | feat: support MCP Apps passthrough on multi-server groups (#1010) | **不同步** | 桌面端无 MCP Apps / MCPB / DXT 功能（`mcp_apps`/`_meta.ui`/`ui://` 资源代理等均未实现）；多服务器组透传建立在 Apps 功能之上，无对应架构。仅改 Node `mcpService.ts` + 文档；无 frontend/locales 改动。 |
-| `f9944fa` | fix(oauth): strip static Authorization header when OAuth provider is active (#1013) | **不同步** | 桌面端 MCP 传输层（SSE/HTTP）无 OAuth provider 抽象，自定义 headers 原样透传，不存在「OAuth token 被静态 Authorization 覆盖」的问题。`http_server.rs` 的 OAuth 是 hub 自身 REST API 鉴权，非上游 MCP 连接。仅改 Node `mcpService.ts`/`mcpOAuthProvider.ts`；无 frontend/locales 改动。 |
-| `5894e44` | test: add unit tests for smartRouting config resolution (#1021) | **不同步** | 纯 Node 单元测试，桌面端 Smart Routing 未实现（§7 待办）；无 frontend/locales 改动。 |
-| `5a2a7c6` | fix: remove duplicated semver@7.8.5 entries from lockfile (#1023) | **不同步** | 仅改 `pnpm-lock.yaml`；桌面端前端用 npm 独立管理，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
-| `cbc862d` | chore(deps-dev): bump @vitejs/plugin-react 5.1.3->5.2.0 (#1020) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；桌面端 npm 独立管理（4.1 策略 4）；无 frontend/locales 改动。 |
-| `3822d66` | chore(deps-dev): bump tailwind-merge 3.3.1->3.6.0 (#1019) | **不同步** | 同上，devDependency 升级，npm 独立管理；无 frontend/locales 改动。 |
-| `a205d54` | chore(deps-dev): bump @typescript-eslint/parser 8.61.1->8.65.0 (#1018) | **不同步** | 同上，lint devDependency 升级；无 frontend/locales 改动。 |
-| `dc10267` | chore(deps): bump better-sqlite3 12.6.2->12.11.1 (#1016) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；better-sqlite3 为 Node 后端依赖，桌面端 Rust 用 sqlx，不共享依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
-| `a89de63` | chore(deps-dev): bump globals 13.24.0->17.8.0 (#1017) | **不同步** | 同上，lint devDependency 升级；无 frontend/locales 改动。 |
-
-**同步后验证**：`cd src-tauri && ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0）；`cd frontend && npm run build` 通过。桌面端自定义文件均手动合并未被覆盖；locales runtime* 键未受影响（本次无 locales 改动）。
-
-#### 2026-07-30：同步 `a99c382` → `29c0704`（5 个 commit）
-
-origin 版本 `v1.0.25` → `v1.0.26`；桌面端版本 `1.0.25001` → `1.0.26001`。
-
-> 基线说明：`a99c382` = `v1.0.25` tag，为 desktop HEAD 实际记录的子模块指针（2026-07-27 `f417a12` 同步前进至此，当时未登记 §4.3/§4.4）。本次以 `a99c382` 为起点同步到 origin/main `29c0704`（v1.0.26 之后 1 个未发布提交）。
-
-`cd mcphub-origin && git --no-pager log --oneline a99c382..29c0704` 共 5 个 commit；`git diff --stat a99c382..29c0704 -- frontend/ locales/` 仅 1 处改动（`frontend/src/components/ServerForm.tsx`，-1 行）。
-
-**已同步到 desktop（前端 / locales）**
-
-| 来源 commit | 说明 | desktop 应用方式 |
-| ----------- | ---- | ---------------- |
-| `e88f664` | fix: allow stdio servers without arguments (#1006) | 前端：`ServerForm.tsx` 手动删除 args 输入框（placeholder `e.g.: -y time-mcp`）的 `required={serverType === 'stdio'}`（⚠️ 自定义文件手动合并，保留 hub 样式/隐藏 visibility/OAuth2 差异；command 输入框的 `required` 保留，与 origin 一致）。locales 无改动。 |
-
-**已镜像到 desktop（Rust 后端）**
-
-无。`e88f664` 的 Rust 后端镜像**不需要**：`mcp/pool.rs` Stdio 分支已用 `cfg.args.clone().unwrap_or_default()`（空 args 默认空 vec）、仅校验 `command` 存在；`stdio_transport.rs` 的 `cmd.args(&resolved_args)` 对空 vec 正常；`server_service.rs` create/update 无 args 必填校验。桌面端 Rust 后端早已容忍 stdio 无 args，与 origin #1006 修复后行为一致。
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `ca37a89` | Add MCP Toplist rank badge (#1001) | **不同步** | 仅改 `README.md`（+2），属文档文件（4.1 策略 4）；无 frontend/locales 改动。 |
-| `446aed8` | fix: fail loudly on invalid vector embedding writes (#1007) | **不同步** | 纯 Node `VectorEmbeddingRepository.ts` 向量嵌入写入校验；桌面端 Rust 后端无 vector embedding 功能（Smart Routing 在 §7 待办，未实现），架构不对应；无 frontend/locales 改动。 |
-| `bb72a8c` | chore(deps): bump better-auth 1.6.19→1.6.22 (#1005) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；better-auth 为 Node 后端依赖，桌面端 Rust 用 Better-Auth 的对应 Rust 实现（未集成，待办），不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。注：`bb72a8c` = `v1.0.26` tag。 |
-| `29c0704` | chore(deps-dev): bump postcss 8.5.12→8.5.18 (#1008) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；postcss 为前端构建 devDependency，桌面端前端用 npm（`package-lock.json`）独立管理，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
-
-**同步后验证**：`cd frontend && npm run build` 通过；`cd src-tauri && CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo check` 通过。locales runtime* 键未受影响（本次无 locales 改动）；桌面端自定义文件仅 `ServerForm.tsx` 一处定点修改，未被覆盖。
-
-#### 2026-07-24：同步 `14a832b` → `cb44e22`（2 个 commit）
-
-origin 仍为 `v1.0.24`（无新 tag；两 commit 均为 v1.0.24 之后的未发布提交）；桌面端版本号不变（`1.0.24003`，本次无任何 desktop 文件改动，不递增）。
-
-`cd mcphub-origin && git --no-pager log --oneline 14a832b..HEAD` 仅 2 个 commit，`git diff --stat 14a832b..HEAD -- frontend/ locales/` 为空（无前端/locales 改动）。
-
-**已同步到 desktop（前端 / locales）**
-
-无。本次两 commit 均不触及 `frontend/` 或 `locales/`。
-
-**已镜像到 desktop（Rust 后端）**
-
-无。
-
-**未同步（经评估无需 / 无法同步）**
-
-| 来源 commit | 说明 | 处理决策 | 原因分析 |
-| ----------- | ---- | -------- | -------- |
-| `b561101` | chore(deps): bump axios from 1.16.1 to 1.18.0 (#992) | **不同步** | 仅改 `pnpm-lock.yaml`；axios 为 Node 后端 HTTP 客户端依赖，桌面端 Rust 用 reqwest，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
-| `cb44e22` | chore(deps): bump js-yaml from 4.2.0 to 4.3.0 (#993) | **不同步** | 仅改 `package.json` + `pnpm-lock.yaml`；js-yaml 为 Node 后端 YAML 解析依赖（服务器配置/OpenAPI），桌面端 Rust 用 serde_yaml，不共享 origin pnpm 依赖图（4.1 策略 4）；无 frontend/locales 改动。 |
-
-**同步后验证**：本次无任何源码文件改动（仅更新本节文档与基线 SHA），`frontend && npm run build` / `src-tauri && cargo check` 状态与同步前一致，无需重跑。
-
+| `199bc9e` #1060 / `64547b8` #1061 / `6133796` #1075 | OAuth consent 页面渲染进 SPA + resource target/client metadata + RFC 9207 issuer/CIMD client | **不同步** | 桌面端无 OAuth Server（§7 待办），Rust 侧无 `/oauth/authorize` 端点、无 consent context 注入。新增 `OAuthConsentPage.tsx`、`App.tsx` 的 `/oauth/authorize` 路由、`types/runtime.ts` 的 `OAuthConsentContext`/`ResourceTarget`/`ConsentClientInfo` 类型 + `__OAUTH_CONSENT_CONTEXT__` window 字段**均不引入**；4 个 locales 的 14 个 consent 键（`oauthServer.application`/`scopesTitle`/`requestInvalid*`/`grantingAccessTo`/`resourceAll`/`resourceSmart`/`resourceServer`/`resourceGroup`/`clientId`/`willRedirectTo`/`policy`/`terms`/`homepage`）**也不补**——本地对 `OAuthConsentPage`/`__OAUTH_CONSENT_CONTEXT__`/这些 consent 键**零引用**（连既有的 `oauthServer.authorizeTitle`/`buttons.*` 也无组件使用，整套属未实现 OAuth Server 的 dormant 翻译）。`LoginPage.tsx` 的 `returnUrl.startsWith('/oauth/authorize')` 分支桌面端已存在（登录后回跳带 token），与 consent 页本身无关，保留不动。待将来实现 OAuth Server 时再统一对齐页面/路由/类型/locales。 |
+| `18db02b` #1064 | fix: support BASE_PATH in local development | **不同步** | 上游把 `vite.config.ts` 拆出 `viteBasePath.ts`/`viteProxy.ts` 支持 `BASE_PATH` 环境变量（子路径部署）。桌面端 Tauri 构建用相对路径 `base: './'`（`frontend/vite.config.ts`），运行时由 `getBasePath()` 解析，**无 BASE_PATH 部署模型**；dev proxy 桌面端走 Tauri IPC（`isTauri()` 拦截 `fetch` → `invoke()`），不依赖 vite proxy 转发到 Node 后端。引入 `viteBasePath.ts`/`viteProxy.ts` 无落点且会破坏桌面端 `base:'./'` + IPC 架构。 |
+| `bf7546d` #1062 | fix(mcp): isolate per-request abort signals to prevent listener leak | **不同步** | 上游修复 Node `mcpService` 的 `AbortController` listener 泄漏（每请求挂 `signal.addEventListener` 不清理）。桌面端 Rust MCP 客户端（`mcp/client.rs`/`pool.rs`/`http_server.rs`）用 `tokio::select!` + `CancellationToken`/`tokio::time::timeout` 管理请求生命周期，无 JS 事件 listener 模型，不存在该泄漏。 |
+| `00f8d06` #1065 / `4ed79f2` / `e927620` / `6ba55ac` / `5837c46` / `058b483` / `a56b4a1` / `dd5c7d7`(后端部分) / `42734d3` | 安全加固（redacting logger、skipAuth 启动告警、OAuth client auth/S256 PKCE、builtin prompt/resource 管理员校验、template export 所有权过滤、SSRF IPv6/OpenAPI $ref、CodeQL barrier guards、Dependabot 传递依赖） | **不同步** | 均为 Node 后端 (`src/controllers/*`/`src/services/*`/`src/utils/ssrf.ts`/`logger.ts`/`requireAdmin.ts` 等) + 测试。桌面端 Rust 后端架构不同：① skipAuth 启动告警——桌面端 skipAuth 是**设计默认**（单用户免登录），非安全隐患，不需告警；② SSRF——桌面 `openapi_transport.rs::fetch_spec` 用裸 `reqwest::Client::new()`，上游 #1048/#1066 SSRF 加固（`utils/ssrf.ts` IPv6 transition/`$ref` 解析）属 feature 级工作，已在 2026-08-17 #1048 评估中留作独立任务，本轮不重复；③ OAuth client auth/PKCE/template 所有权/builtin 管理员校验——桌面端无 OAuth Server、无多用户所有权、builtin prompt/resource 的管理命令已在 Rust 侧自行鉴权（`require_admin`），上游 TS 中间件链无对应镜像落点；④ redacting logger/Dependabot 传递依赖——Node 专属。`DynamicForm` 原型污染（#1066/#1068 前端部分）已同步，见上表。 |
+| `20e3ba7` #1070 / `d2df5ae` #1071 / `41680d3` #1063 / `bc961cb` #1072/#1073 | 日志 stringify、README、数据库配置文档、stdio kill ps 缺失 | **不同步** | ① `20e3ba7`(#1070)= Node `logger.ts` stringify，桌面端 `app_logger` 用 `tracing`/`format!`，无对应；② `d2df5ae`/`41680d3` 纯文档；③ `bc961cb`(#1072/#1073) 修复 `tree-kill` 在无 `ps`（procps）的精简容器镜像里 spawn `ps` 抛 ENOENT——桌面端 `mcp/stdio_transport.rs::kill_process_tree` **不依赖 `ps`**：Unix 用 `libc::kill(-(pid as i32), SIGTERM)` 直接信号进程组，Windows 用 `taskkill /F /T /PID`，均无 `ps` spawn，该 bug 在桌面端不存在。 |
+| 其余 dep bump / Docker / CLI / tests | `package.json`/`pnpm-lock.yaml`/`Dockerfile`/`src/cli/*`/`tests/*` 等 | **不同步** | 部署/文档/CLI/测试文件不同步（§4.1 策略 4）；Node 后端依赖（hono/undici/better-sqlite3/axios 等）桌面端 Rust 用对应 crate（axum/reqwest/sqlx），不共享 origin pnpm 依赖图。 |
+
+**同步后验证**：`cd frontend && npm run build` 通过；`cd src-tauri && ORT_SKIP_DOWNLOAD=1 cargo check` 通过（asdf cargo 1.96.0，无 error/warning；本轮无 Rust 源码改动，仅 `Cargo.toml`/`Cargo.lock` 版本号元数据变更，`mcphub` crate 编译通过）。桌面端自定义文件经 `diff -w` 核对：`DynamicForm.tsx` 与 origin 零差异（已同步防护），其余自定义文件（`ServerForm.tsx`/`App.tsx` 等）本轮未触及。版本号四源已同步：`tauri.conf.json`/`Cargo.toml`/根 `package.json`/`frontend/package.json` 均 -> `1.0.32003`；changelog 为 `doc/upgrade/1.0.32003.md`（合并先前规划的 `1.0.30002`/`1.0.30003` 两版内容）。子模块内部工作树干净（`main` 分支，HEAD = `6133796`，零改动），符合 §6「禁止修改 mcphub-origin 原始源文件」约束。
+
+> 历史同步记录（2026-07-24 ~ 2026-08-21，共 10 轮：`14a832b → cb44e22`、`a99c382 → 29c0704`、`29c0704 → 5894e44`、`5894e44 → 45e2bd3`、`45e2bd3 → 0e8fed0`、`0e8fed0 → a8ace62`、`a8ace62 → 9fb73dd`、`9fb73dd → 0249c73`、`0249c73 → bfd153c`、`bfd153c → 2b10ae3`）已精简，仅保留最近一次基线同步条目。如需查阅历史同步的逐 commit 评估（已同步/已镜像/未同步的决策与原因），见 `git log` 对应提交的 AGENTS.md 版本。
 
 ---
 
@@ -1949,7 +1702,7 @@ npm run build
 - [X]  更新检查日志（`log_event` Tauri command 写入 `app_log`，前端 `[update]` 全流程日志：检查/新版本/已最新/失败/安装；日志页按来源 `update` 可过滤；详见 3.4.7）
 - [X]  release notes Markdown 渲染（`Markdown` 组件 react-markdown+remark-gfm；notes 即 `doc/upgrade/{version}.md` 全文；详见 3.4.7）
 - [X]  安装进度可视化（下载百分比进度条 + 已下载/总字节 + 实时下载速度 EMA；安装阶段 indeterminate spinner；按钮文案随阶段切换；详见 3.4.8）
-- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.30001；详见 3.4.7）
+- [X]  版本号四源同步（`tauri.conf.json` / `Cargo.toml` / 根 `package.json` / `frontend/package.json`；当前 1.0.32003；详见 3.4.7）
 - [X]  stdio 服务器按需启动（startOnDemand：跳过启动连接、首次工具调用懒建进程、空闲超时自动关闭、缓存工具保留；详见 3.8）
 - [X]  stdio 连接错误包含上游 stderr（`stderr_tail` 滚动缓存拼接进 handshake 失败 error；详见 3.9）
 - [X]  编辑服务器避免无谓重连 + proxy 持久化（镜像上游 #1055：`update_server` 比对连接相关字段，仅访问/元数据变更时保留实时连接；`ServerConfig.proxy` + DB v20 持久化使前端 round-trip 生效；详见 3.11）
