@@ -271,6 +271,15 @@ export interface RagDoc {
    *  exists; copy = the rag/files copy exists). View/open-location are gated
    *  on this — a copy doc whose original vanished still has its copy. */
   contentAvailable?: boolean;
+  /** True iff `content` is only a prefix of the full document (paged read via
+   *  `get_rag_doc_paged`). Drives the "load more" button in the View dialog. */
+  truncated?: boolean;
+  /** UTF-8 byte offset of the END of the returned `content` within the full
+   *  document — pass back as the offset for the next page. */
+  nextOffset?: number;
+  /** Total size of the full decoded content in UTF-8 bytes (independent of how
+   *  much was returned) — for the "已加载 X / 全部 Y KB" hint. */
+  contentTotalBytes?: number;
 }
 
 // Document metadata for the list view (no content).
@@ -345,6 +354,16 @@ export interface RagSettings {
   /** Chunk overlap in tokens. `0` = "auto" — use the model's deploy.json
    * `chunkOverlap` (else 100). A positive value is an explicit override. */
   chunkOverlap: number;
+  /** Auto doc update: periodically re-check every doc's recorded original
+   *  (md5) and re-index changed docs in the background — same pass as the
+   *  manual "批量更新" button. Default true. */
+  autoUpdateEnabled: boolean;
+  /** Auto-update interval in seconds. Default 300 (5 min); clamped to
+   *  [60, 86400] by the backend. */
+  autoUpdateIntervalSecs: number;
+  /** Doc-detail page size in KiB: how much content each View-dialog load
+   *  returns. Default 200; clamped to [10, 65536] by the backend. */
+  docLoadChunkKb: number;
 }
 
 /** Model context window (tokens), read from the model's config.json. */
@@ -364,6 +383,17 @@ export interface RagModelLimits {
 export interface RagChunk {
   chunkIndex: number;
   chunkText: string;
+}
+
+/** A page of a document's chunks from the backend paginated query (the
+ *  "view chunks" dialog loads 5 at a time, auto-loading more on scroll). */
+export interface RagChunkPage {
+  items: RagChunk[];
+  /** Total chunks across all pages (NOT just this page). */
+  total: number;
+  /** Index of the first returned chunk (0-based). */
+  offset: number;
+  pageSize: number;
 }
 
 // A single search result fragment returned by a similarity search.

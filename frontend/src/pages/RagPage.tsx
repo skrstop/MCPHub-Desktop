@@ -33,13 +33,17 @@ import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
 import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
 import { getRagTools, ragDocSearchPaged, ragTagSearchPaged } from '@/services/ragService';
-import { RagDoc, RagDocInfo, RagModelInfo, RagPickedFile, RagSettings, RagTagStat } from '@/types';
+import { RagDoc, RagDocInfo, RagModelInfo, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, BatchPreview } from '@/types';
 
 const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
+
+// UTF-8 byte length of a string (matches the backend's byte-offset paging, so
+// the "已加载 X / 全部 Y" hint stays consistent with the server's totals).
+const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
 
 // ─── 导入方式（软链接 / 文件拷贝）—— 已接真实后端 ───
 // 阶段 0 UI 预览已完成并定稿，mock 开关置 false 后所有交互走真实后端。
@@ -116,6 +120,8 @@ const RagPage: React.FC = () => {
     modelLimits,
     viewedDoc,
     viewLoading,
+    loadMoreView,
+    viewMoreLoading,
     searchResults,
     searching,
     uploading,
@@ -141,8 +147,11 @@ const RagPage: React.FC = () => {
     closeView,
     chunksDoc,
     chunksList,
+    chunksTotal,
     chunksLoading,
+    chunksMoreLoading,
     viewChunks,
+    loadMoreChunks,
     closeChunks,
     openLocation,
     search,
@@ -956,6 +965,8 @@ const RagPage: React.FC = () => {
       {viewedDoc && (
         <ViewDialog
           doc={viewedDoc}
+          moreLoading={viewMoreLoading}
+          onLoadMore={loadMoreView}
           onClose={closeView}
           onSaveTags={async (tags) => {
             await setTags(viewedDoc.id, tags);
@@ -964,7 +975,8 @@ const RagPage: React.FC = () => {
         />
       )}
 
-      {/* View chunks dialog - lists all chunks (index + text) of a doc */}
+      {/* View chunks dialog - lists chunks (index + text) of a doc, paginated:
+          5 chunks per page, the next page auto-loads on scroll-to-bottom. */}
       {chunksDoc && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[85vh] flex flex-col">
@@ -976,46 +988,16 @@ const RagPage: React.FC = () => {
                 <X size={16} />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-3">
-              {chunksLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 size={22} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
-                </div>
-              ) : chunksList.length === 0 ? (
-                <p className="text-[13px] text-center py-12" style={{ color: 'var(--hub-ink-3)' }}>
-                  {t('pages.rag.chunksEmpty')}
-                </p>
-              ) : (
-                chunksList.map((c) => (
-                  <div
-                    key={c.chunkIndex}
-                    className="rounded-lg border p-3"
-                    style={{ borderColor: 'var(--hub-line-2)', background: 'var(--hub-bg-2)' }}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span
-                        className="hub-mono text-[11px] px-2 py-0.5 rounded"
-                        style={{ background: 'var(--hub-line)', color: 'var(--hub-ink-2)' }}
-                      >
-                        #{c.chunkIndex + 1}
-                      </span>
-                      <span className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
-                        {t('pages.rag.chunkTokens', { count: c.chunkText.length })}
-                      </span>
-                    </div>
-                    <pre
-                      className="text-[12px] whitespace-pre-wrap break-words"
-                      style={{ color: 'var(--hub-ink)', fontFamily: 'inherit', margin: 0 }}
-                    >
-                      {c.chunkText}
-                    </pre>
-                  </div>
-                ))
-              )}
-            </div>
+            <ChunksScrollList
+              chunks={chunksList}
+              total={chunksTotal}
+              loading={chunksLoading}
+              moreLoading={chunksMoreLoading}
+              onLoadMore={loadMoreChunks}
+            />
             <div className="flex items-center justify-between p-5 border-t border-[var(--hub-line-2)]">
               <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
-                {t('pages.rag.chunksCount', { count: chunksList.length })}
+                {t('pages.rag.chunksShownCount', { shown: chunksList.length, total: chunksTotal })}
               </span>
               <button onClick={closeChunks} className="hub-btn">
                 {t('pages.rag.close')}
@@ -1803,6 +1785,17 @@ const SearchSettingsDialog: React.FC<{
   const [chunkSize, setChunkSize] = useState(initial.chunkSize === 0 ? resolvedSize : initial.chunkSize);
   const [chunkOverlap, setChunkOverlap] = useState(initial.chunkOverlap === 0 ? resolvedOverlap : initial.chunkOverlap);
   const [chunkAuto, setChunkAuto] = useState(initial.chunkSize === 0);
+  // Auto doc update (timed batch re-index): on/off + interval (minutes).
+  // Backend clamps the interval to [60s, 86400s]; the slider works in minutes
+  // ([1, 1440]) for readability and converts on save. `?? fallbacks` cover a
+  // settings fetch that hasn't landed yet (backend defaults: on / 5 min).
+  const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(initial.autoUpdateEnabled ?? true);
+  const [autoUpdateIntervalMin, setAutoUpdateIntervalMin] = useState(
+    Math.max(1, Math.round((initial.autoUpdateIntervalSecs ?? 300) / 60)),
+  );
+  // Doc-detail page size (KiB): how much content the View dialog loads per
+  // page. Backend clamps to [10, 65536].
+  const [docLoadChunkKb, setDocLoadChunkKb] = useState(initial.docLoadChunkKb || 200);
   const sum = vectorWeight + keywordWeight;
 
   const handleVectorChange = (v: number) => {
@@ -1909,6 +1902,57 @@ const SearchSettingsDialog: React.FC<{
               </p>
             </div>
           </div>
+          {/* ── Document update / loading settings ── */}
+          <div className="border-t border-[var(--hub-line-2)] pt-4 space-y-4">
+            <p className="text-[12px] font-medium" style={{ color: 'var(--hub-ink-2)' }}>
+              {t('pages.rag.docUpdateSection')}
+            </p>
+            {/* Auto doc update toggle */}
+            <div>
+              <label className="flex items-center gap-2 text-[13px] cursor-pointer" style={{ color: 'var(--hub-ink)' }}>
+                <input
+                  type="checkbox"
+                  checked={autoUpdateEnabled}
+                  onChange={(e) => setAutoUpdateEnabled(e.target.checked)}
+                  style={{ accentColor: 'var(--hub-accent)' }}
+                />
+                {t('pages.rag.autoUpdateEnabled')}
+              </label>
+              <p className="mt-1 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.autoUpdateHint')}
+              </p>
+            </div>
+            {/* Interval (minutes) — only meaningful while enabled */}
+            <div style={autoUpdateEnabled ? {} : { opacity: 0.5, pointerEvents: 'none' }}>
+              <NumericSlider
+                label={t('pages.rag.autoUpdateInterval')}
+                value={autoUpdateIntervalMin}
+                min={1}
+                max={1440}
+                step={1}
+                unit={t('pages.rag.unitMinutes')}
+                onChange={setAutoUpdateIntervalMin}
+              />
+              <p className="mt-1 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.autoUpdateIntervalHint')}
+              </p>
+            </div>
+            {/* Doc-detail page size */}
+            <div>
+              <NumericSlider
+                label={t('pages.rag.docLoadChunkKb')}
+                value={docLoadChunkKb}
+                min={10}
+                max={65_536}
+                step={10}
+                unit="KB"
+                onChange={(v) => setDocLoadChunkKb(Math.max(10, Math.min(65_536, v)))}
+              />
+              <p className="mt-1 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.docLoadChunkKbHint')}
+              </p>
+            </div>
+          </div>
         </div>
         <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
           <button onClick={onClose} className="hub-btn">
@@ -1924,6 +1968,9 @@ const SearchSettingsDialog: React.FC<{
                 // Auto: send 0 so the backend resolves per loaded model.
                 chunkSize: chunkAuto ? 0 : chunkSize,
                 chunkOverlap: chunkAuto ? 0 : chunkOverlap,
+                autoUpdateEnabled,
+                autoUpdateIntervalSecs: autoUpdateIntervalMin * 60,
+                docLoadChunkKb,
               })
             }
             className="hub-btn primary"
@@ -2471,9 +2518,11 @@ const TagEditor: React.FC<{ tags: string[]; onChange: (tags: string[]) => void }
  *  with the full new list on every change. */
 const ViewDialog: React.FC<{
   doc: RagDoc;
+  moreLoading: boolean;
+  onLoadMore: () => void;
   onClose: () => void;
   onSaveTags: (tags: string[]) => Promise<void>;
-}> = ({ doc, onClose, onSaveTags }) => {
+}> = ({ doc, moreLoading, onLoadMore, onClose, onSaveTags }) => {
   const { t } = useTranslation();
   const [tags, setTags] = useState<string[]>(doc.tags || []);
   const [busy, setBusy] = useState(false);
@@ -2633,6 +2682,33 @@ const ViewDialog: React.FC<{
               raw={mode === 'source'}
             />
           </div>
+          {/* Paged-content footer: only when the doc was truncated (only part
+              of it loaded). Shows how much is loaded out of the total and the
+              "load more" button that fetches the next docLoadChunkKb slice.
+              Each click APPENDS (see loadMoreView) until truncated=false. */}
+          {doc.truncated && (
+            <div
+              className="flex items-center justify-between gap-2 rounded-lg border px-3"
+              style={{ borderColor: 'var(--hub-line-2)', background: 'var(--hub-surface)', padding: '8px 12px' }}
+            >
+              <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.viewLoadedHint', {
+                  loaded: formatSize(utf8Bytes(doc.content)),
+                  total: formatSize(doc.contentTotalBytes ?? 0),
+                })}
+              </span>
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={moreLoading}
+                className="hub-btn sm inline-flex items-center gap-1"
+                title={t('pages.rag.viewLoadMoreHint')}
+              >
+                {moreLoading ? <Loader2 size={13} className="animate-spin" /> : <ChevronDown size={13} />}
+                {t('pages.rag.viewLoadMore')}
+              </button>
+            </div>
+          )}
         </div>
         <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
           <button onClick={onClose} className="hub-btn">
@@ -2640,6 +2716,100 @@ const ViewDialog: React.FC<{
           </button>
         </div>
       </div>
+    </div>
+  );
+};
+
+/** Scrollable chunks list with scroll-to-bottom auto-load. Shows the loaded
+ *  pages (5 chunks each); when the user scrolls to (near) the bottom and more
+ *  pages remain, `onLoadMore` fires to fetch the next page. A manual "load
+ *  more" button sits at the tail as a fallback for scroll-jitter edge cases. */
+const ChunksScrollList: React.FC<{
+  chunks: { chunkIndex: number; chunkText: string }[];
+  total: number;
+  loading: boolean;
+  moreLoading: boolean;
+  onLoadMore: () => void;
+}> = ({ chunks, total, loading, moreLoading, onLoadMore }) => {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const hasMore = chunks.length < total;
+
+  // Scroll-to-bottom detection: fire when within 40px of the bottom (a small
+  // threshold so it triggers reliably even with fractional scroll positions /
+  // zoom). Guarded by `moreLoading` upstream (loadMoreChunks no-ops while a
+  // fetch is in flight), so repeated scroll events don't stack requests.
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || loading || moreLoading || !hasMore) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) onLoadMore();
+  }, [loading, moreLoading, hasMore, onLoadMore]);
+
+  return (
+    <div
+      ref={scrollRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto p-5 space-y-3"
+    >
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 size={22} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+        </div>
+      ) : chunks.length === 0 ? (
+        <p className="text-[13px] text-center py-12" style={{ color: 'var(--hub-ink-3)' }}>
+          {t('pages.rag.chunksEmpty')}
+        </p>
+      ) : (
+        <>
+          {chunks.map((c) => (
+            <div
+              key={c.chunkIndex}
+              className="rounded-lg border p-3"
+              style={{ borderColor: 'var(--hub-line-2)', background: 'var(--hub-bg-2)' }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span
+                  className="hub-mono text-[11px] px-2 py-0.5 rounded"
+                  style={{ background: 'var(--hub-line)', color: 'var(--hub-ink-2)' }}
+                >
+                  #{c.chunkIndex + 1}
+                </span>
+                <span className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                  {t('pages.rag.chunkTokens', { count: c.chunkText.length })}
+                </span>
+              </div>
+              <pre
+                className="text-[12px] whitespace-pre-wrap break-words"
+                style={{ color: 'var(--hub-ink)', fontFamily: 'inherit', margin: 0 }}
+              >
+                {c.chunkText}
+              </pre>
+            </div>
+          ))}
+          {/* Tail: next-page spinner / manual load-more / all-loaded hint. */}
+          {hasMore ? (
+            <div className="flex items-center justify-center py-3">
+              {moreLoading ? (
+                <Loader2 size={16} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+              ) : (
+                <button type="button" className="hub-btn sm" onClick={onLoadMore}>
+                  <ChevronDown size={13} />
+                  {t('pages.rag.chunksLoadMore', { count: Math.min(5, total - chunks.length) })}
+                </button>
+              )}
+            </div>
+          ) : (
+            <div
+              className="flex items-center justify-center gap-1.5 text-[11px] py-3"
+              style={{ color: 'var(--hub-ink-3)' }}
+            >
+              <Check size={12} />
+              {t('pages.rag.chunksAllLoaded')}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 };

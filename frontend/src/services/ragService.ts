@@ -3,6 +3,7 @@ import {
   RagDoc,
   RagDocInfo,
   RagChunk,
+  RagChunkPage,
   RagPickedFile,
   RagSettings,
   RagSearchResult,
@@ -38,19 +39,57 @@ export const listRagDocs = async (): Promise<RagDocInfo[]> => {
   return response.data || [];
 };
 
-/** Get the full content of a document (for the View dialog). */
+/** Get the full content of a document (for the View dialog). Unpaged — kept
+ *  for the rag_get MCP path; the View dialog uses `getRagDocPaged`. */
 export const getRagDoc = async (id: string): Promise<RagDoc | null> => {
   const response: ApiResponse<RagDoc | null> = await apiGet(`/rag/docs/${encodeURIComponent(id)}`);
   if (!response.success) throw new Error(response.message || 'Failed to get RAG doc');
   return response.data ?? null;
 };
 
+/** Paged doc-detail read for the View dialog: skip `offsetBytes` UTF-8 bytes
+ *  of the decoded content, return up to `limitBytes` more (0 = the user's
+ *  configured docLoadChunkKb page size). The result's truncated / nextOffset /
+ *  contentTotalBytes drive the "load more" button. Prevents loading a huge
+ *  document's whole content at once (which crashed the WebView). */
+export const getRagDocPaged = async (
+  id: string,
+  offsetBytes: number,
+  limitBytes: number,
+): Promise<RagDoc | null> => {
+  const response: ApiResponse<RagDoc | null> = await apiPost('/rag/docs/get-paged', {
+    id,
+    offsetBytes,
+    limitBytes,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to get RAG doc');
+  return response.data ?? null;
+};
+
 /** Get a document's chunks (index + text, no embeddings) for the "view
- *  chunks" dialog. Requires RAG enabled (chunks live in lancedb). */
+ *  chunks" dialog. Requires RAG enabled (chunks live in lancedb). Unpaged —
+ *  the dialog uses `getRagChunksPaged`. */
 export const getRagChunks = async (id: string): Promise<RagChunk[]> => {
   const response: ApiResponse<RagChunk[]> = await apiPost('/rag/docs/chunks', { id });
   if (!response.success) throw new Error(response.message || 'Failed to get RAG chunks');
   return response.data ?? [];
+};
+
+/** Paginated chunks for the "view chunks" dialog: `offset` chunks skipped,
+ *  then up to `pageSize` returned + the total count, so the UI can auto-load
+ *  the next page on scroll-to-bottom. Requires RAG enabled. */
+export const getRagChunksPaged = async (
+  id: string,
+  offset: number,
+  pageSize: number,
+): Promise<RagChunkPage> => {
+  const response: ApiResponse<RagChunkPage> = await apiPost('/rag/docs/chunks-paged', {
+    id,
+    offset,
+    pageSize,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to get RAG chunks');
+  return response.data ?? { items: [], total: 0, offset, pageSize };
 };
 
 /**
@@ -212,12 +251,23 @@ export const ragDocSearchPaged = async (
   return response.data ?? { items: [], total: 0, page, pageSize };
 };
 
-/** Get RAG search settings (weights + max results). */
+/** Get RAG search settings (weights + max results + auto-update + doc page
+ *  size). */
 export const getRagSettings = async (): Promise<RagSettings> => {
   const response: ApiResponse<RagSettings> = await apiGet('/rag/settings');
   if (!response.success) throw new Error(response.message || 'Failed to get RAG settings');
   return (
-    response.data ?? { vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0 }
+    response.data ?? {
+      vectorWeight: 0.9,
+      keywordWeight: 0.1,
+      maxResults: 20,
+      scoreThreshold: 0.65,
+      chunkSize: 0,
+      chunkOverlap: 0,
+      autoUpdateEnabled: true,
+      autoUpdateIntervalSecs: 300,
+      docLoadChunkKb: 200,
+    }
   );
 };
 

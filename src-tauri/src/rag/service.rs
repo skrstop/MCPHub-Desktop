@@ -948,6 +948,10 @@ pub async fn start(app: &AppHandle) -> Result<()> {
     } else {
         rag_log("info", "RAG enabled (model + vector DB ready)");
     }
+    // Re-arm the auto doc-update timer now that the runtime is up (a no-op if
+    // the setting is off — the loop exits on its first settings read). The
+    // generation bump retires any loop left over from a previous enable.
+    restart_auto_update_timer(app);
     Ok(())
 }
 
@@ -1830,6 +1834,49 @@ pub async fn search_docs_paged(
 
 /// Get the full content of a document (for the View dialog).
 pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
+    // Unpaged read: the whole content in one go (rag_get MCP tool + internal
+    // callers). The UI uses `get_doc_paged` instead.
+    match get_doc_inner(app, id, None).await? {
+        Some((doc, _full)) => Ok(Some(doc)),
+        None => Ok(None),
+    }
+}
+
+/// Read a document's content as a page: `offset` UTF-8 bytes are skipped, then
+/// up to `limit_bytes` are returned (the limit is char-boundary-aligned so the
+/// slice is always valid UTF-8). Returns the RagDoc with `truncated` /
+/// `next_offset` / `content_total_bytes` set, plus the FULL decoded content
+/// (the caller — the command layer — drops it; kept internal so unpaged and
+/// paged reads share one code path).
+pub async fn get_doc_paged(
+    app: &AppHandle,
+    id: &str,
+    offset_bytes: u64,
+    limit_bytes: u64,
+) -> Result<Option<RagDoc>> {
+    let limit = if limit_bytes == 0 {
+        // 0 → fall back to the user's configured page size.
+        (get_settings().await.unwrap_or_default().doc_load_chunk_kb as u64) * 1024
+    } else {
+        limit_bytes
+    };
+    match get_doc_inner(app, id, Some((offset_bytes, limit))).await? {
+        Some((doc, _full)) => Ok(Some(doc)),
+        None => Ok(None),
+    }
+}
+
+/// Shared core of `get_doc` (whole content) and `get_doc_paged` (a window).
+/// `range = Some((offset, limit))` slices the decoded UTF-8 content by byte
+/// window, backing off to the nearest char boundary so the prefix/suffix is
+/// never a broken multi-byte sequence. The second tuple element is the full
+/// content length in bytes (already reflected in `content_total_bytes`; the
+/// tuple keeps callers from re-reading).
+async fn get_doc_inner(
+    app: &AppHandle,
+    id: &str,
+    range: Option<(u64, u64)>,
+) -> Result<Option<(RagDoc, u64)>> {
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", id));
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
@@ -1869,20 +1916,48 @@ pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
         let avail = content_path.exists();
         (std::fs::read_to_string(&content_path).unwrap_or_default(), avail)
     };
-    Ok(Some(RagDoc {
-        id: meta.id,
-        name: meta.name.clone(),
-        size: meta.size,
-        content,
-        uploaded_at: meta.uploaded_at,
-        tags: meta.tags,
-        chunk_count: meta.chunk_count,
-        file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name)),
-        method: meta.method.clone().unwrap_or_default(),
-        original_path: meta.original_path.clone().unwrap_or_default(),
-        lost_original,
-        content_available,
-    }))
+    let total_bytes = content.len() as u64;
+    // Apply the byte window (paged read). `is_char_boundary` guarantees the
+    // slices stay valid UTF-8 even when offset/limit land mid multi-byte char.
+    let (paged, truncated, next_offset) = match range {
+        Some((offset, limit)) => {
+            let offset = (offset.min(total_bytes)) as usize;
+            // Back off to the char boundary at-or-before the offset.
+            let mut start = offset;
+            while start > 0 && !content.is_char_boundary(start) {
+                start -= 1;
+            }
+            let limit = (limit as usize).min((total_bytes as usize).saturating_sub(start));
+            // Extend to the char boundary at-or-after the limit end.
+            let mut end = start + limit;
+            while end < content.len() && !content.is_char_boundary(end) {
+                end += 1;
+            }
+            let truncated = end < content.len();
+            (content[start..end].to_string(), truncated, end as u64)
+        }
+        None => (content.clone(), false, total_bytes),
+    };
+    Ok(Some((
+        RagDoc {
+            id: meta.id,
+            name: meta.name.clone(),
+            size: meta.size,
+            content: paged,
+            uploaded_at: meta.uploaded_at,
+            tags: meta.tags,
+            chunk_count: meta.chunk_count,
+            file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name)),
+            method: meta.method.clone().unwrap_or_default(),
+            original_path: meta.original_path.clone().unwrap_or_default(),
+            lost_original,
+            content_available,
+            truncated,
+            next_offset,
+            content_total_bytes: total_bytes,
+        },
+        total_bytes,
+    )))
 }
 
 /// Read a document's chunks (index + text, no embeddings) for the "view chunks"
@@ -1890,19 +1965,58 @@ pub async fn get_doc(app: &AppHandle, id: &str) -> Result<Option<RagDoc>> {
 /// (chunks live in lancedb). Returns an empty vec if the doc has no chunks
 /// (not yet indexed / model swapped + not re-indexed).
 pub async fn get_doc_chunks(id: &str) -> Result<Vec<crate::models::rag::RagChunk>> {
+    // Unpaged: all chunks (kept for any internal caller).
+    let (chunks, _total) = get_doc_chunks_inner(id, 0, u32::MAX).await?;
+    Ok(chunks)
+}
+
+/// Paginated chunks for the "view chunks" dialog: `offset` chunks are skipped,
+/// then up to `page_size` returned (clamped to [1, 200]), plus the total chunk
+/// count so the UI can stop loading when all pages are in. Ordering matches
+/// `get_doc_chunks` (chunk_index ASC).
+pub async fn get_doc_chunks_paged(
+    id: &str,
+    offset: u32,
+    page_size: u32,
+) -> Result<crate::models::rag::RagChunkPage> {
+    let page_size = page_size.clamp(1, 200);
+    let (items, total) = get_doc_chunks_inner(id, offset, page_size).await?;
+    Ok(crate::models::rag::RagChunkPage {
+        items,
+        total,
+        offset,
+        page_size,
+    })
+}
+
+/// Shared core: read the doc's chunk records, sort by index, slice to the
+/// [offset, offset+limit) window, and return (page items, total count).
+/// Reading all records then slicing in memory is intentional: the records are
+/// already in lancedb's scan order and the per-doc chunk counts are small
+/// (hundreds at most — chunked text, one row per chunk), while a SQL-style
+/// LIMIT pushdown isn't available on the vector store query API.
+async fn get_doc_chunks_inner(
+    id: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<crate::models::rag::RagChunk>, u64)> {
     let guard = runtime().lock().await;
     let Some(rt) = guard.as_ref() else {
         return Err(anyhow!("RAG is not enabled - turn on RAG before viewing chunks"));
     };
     let mut records = rt.db.read_chunks_by_doc(id).await?;
     records.sort_by_key(|r| r.chunk_index);
-    Ok(records
+    let total = records.len() as u64;
+    let items = records
         .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
         .map(|r| crate::models::rag::RagChunk {
             chunk_index: r.chunk_index,
             chunk_text: r.chunk_text,
         })
-        .collect())
+        .collect();
+    Ok((items, total))
 }
 
 /// Open the OS multi-file picker. No extension filter — validation is
@@ -3546,6 +3660,113 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
+// ── auto (timed) doc update ─────────────────────────────────────────────────
+
+/// Auto-update timer generation. Bumped whenever the settings change (interval
+/// or enable/disable) so a running timer loop wakes, notices the generation
+/// moved, and restarts with the new cadence. This is how interval changes take
+/// effect without an app restart.
+static AUTO_UPDATE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Re-arm the auto-update timer after settings changed: bump the generation so
+/// any running loop exits, then (if enabled + RAG runtime available) spawn a
+/// fresh loop with the new interval. Called from `save_settings` (user edited
+/// the settings dialog) and at app startup / RAG enable.
+///
+/// The timer only fires while RAG is enabled (re-index needs the embedding
+/// runtime); each tick re-checks `is_enabled()` so toggling RAG off mid-wait
+/// simply skips ticks without restarting the loop.
+pub fn restart_auto_update_timer(app: &AppHandle) {
+    let gen = AUTO_UPDATE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    // Clone the AppHandle (an Arc — cheap) so the spawned loop owns 'static
+    // data.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            // Read the CURRENT settings every iteration so an interval change
+            // is picked up on the next wake even without a generation bump.
+            let settings = get_settings().await.unwrap_or_default();
+            if !settings.auto_update_enabled {
+                // Disabled: stop this loop. save_settings bumps the generation
+                // + re-calls restart_auto_update_timer on re-enable.
+                rag_log("info", "auto-update: disabled, timer stopped");
+                return;
+            }
+            // Sleep in short slices and watch for a generation change so a
+            // settings edit (interval change / disable) takes effect promptly
+            // instead of after the full old interval.
+            let total = std::time::Duration::from_secs(settings.auto_update_interval_secs);
+            let slice = std::time::Duration::from_millis(500);
+            let mut waited = std::time::Duration::ZERO;
+            let mut interrupted = false;
+            while waited < total {
+                tokio::time::sleep(slice.min(total - waited)).await;
+                waited += slice.min(total - waited);
+                let cur = AUTO_UPDATE_GEN.load(std::sync::atomic::Ordering::SeqCst);
+                if cur != gen {
+                    // A newer loop was armed (settings changed) — this one is
+                    // obsolete. The new loop re-reads settings itself.
+                    interrupted = true;
+                    break;
+                }
+            }
+            if interrupted {
+                return;
+            }
+            // Tick: only run while RAG is enabled (re-index needs the runtime).
+            // Skip silently otherwise — the doc list is still readable, and
+            // the next enable re-arms the timer (start() calls this fn).
+            if !is_enabled() {
+                continue;
+            }
+            // Guard against overlap with a manual batch run + a still-running
+            // previous tick (BATCH_UPDATE_RUNNING is the same CAS guard
+            // batch_update_rag_docs uses, so auto/manual mutually exclude).
+            if BATCH_UPDATE_RUNNING
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_err()
+            {
+                continue; // a manual (or previous auto) pass is in flight — skip this tick
+            }
+            struct RunningGuard;
+            impl Drop for RunningGuard {
+                fn drop(&mut self) {
+                    BATCH_UPDATE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = RunningGuard;
+            // Pre-scan (same md5 classification the confirm dialog shows). If
+            // nothing changed, release the guard and DO NOT emit any progress
+            // events — an idle tick must not flash the header button to
+            // "查看进度" or pop anything in the UI.
+            if let Ok(preview) = preview_batch_update(&app).await {
+                if preview.to_update == 0 {
+                    continue; // _guard drops -> BATCH_UPDATE_RUNNING = false
+                }
+                rag_log(
+                    "info",
+                    format!(
+                        "auto-update: {} of {} doc(s) changed, re-indexing…",
+                        preview.to_update, preview.total
+                    ),
+                );
+            }
+            // Real work: run the same pass as the manual button — same
+            // progress events, same button state, same dialog.
+            let result = run_batch_update(&app).await;
+            if let Err(e) = result {
+                rag_log("error", format!("auto-update pass failed: {:#}", e));
+            }
+            // _guard drops here -> BATCH_UPDATE_RUNNING = false.
+        }
+    });
+}
+
 // ── search ─────────────────────────────────────────────────────────────────
 
 /// Hybrid search: vector nearest-neighbor + keyword (term) matching, merged
@@ -3736,10 +3957,32 @@ pub async fn get_settings() -> Result<RagSettings> {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32)
             .unwrap_or(d.chunk_overlap),
+        auto_update_enabled: rag
+            .get("autoUpdateEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(d.auto_update_enabled),
+        // Clamp the interval so a bad persisted value can't busy-loop the
+        // auto-update timer (min 1 minute, max 1 day).
+        auto_update_interval_secs: rag
+            .get("autoUpdateIntervalSecs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(d.auto_update_interval_secs)
+            .clamp(60, 86_400),
+        // Clamp the doc-detail page size (min 10 KiB, max 64 MiB = the upload
+        // cap) so a bad value can't crash the View dialog or underflow to 0.
+        doc_load_chunk_kb: rag
+            .get("docLoadChunkKb")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(d.doc_load_chunk_kb)
+            .clamp(10, 65_536),
     })
 }
 
 pub async fn save_settings(settings: RagSettings) -> Result<()> {
+    // Same clamps as get_settings so a round-trip normalizes bad values.
+    let interval = settings.auto_update_interval_secs.clamp(60, 86_400);
+    let chunk_kb = settings.doc_load_chunk_kb.clamp(10, 65_536);
     let patch = json!({
         "rag": {
             "vectorWeight": settings.vector_weight as f64,
@@ -3747,10 +3990,21 @@ pub async fn save_settings(settings: RagSettings) -> Result<()> {
             "maxResults": settings.max_results,
             "scoreThreshold": settings.score_threshold as f64,
             "chunkSize": settings.chunk_size,
-            "chunkOverlap": settings.chunk_overlap
+            "chunkOverlap": settings.chunk_overlap,
+            "autoUpdateEnabled": settings.auto_update_enabled,
+            "autoUpdateIntervalSecs": interval,
+            "docLoadChunkKb": chunk_kb
         }
     });
     crate::services::config_service::update(&patch).await?;
+    Ok(())
+}
+
+/// Save settings + re-arm the auto-update timer (called by the Tauri command
+/// so an interval change / toggle takes effect immediately without a restart).
+pub async fn save_settings_and_rearm(app: &AppHandle, settings: RagSettings) -> Result<()> {
+    save_settings(settings).await?;
+    restart_auto_update_timer(app);
     Ok(())
 }
 

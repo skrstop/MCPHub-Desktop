@@ -4,8 +4,8 @@
 use tauri::AppHandle;
 
 use crate::models::rag::{
-    BatchPreview, RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus,
-    RagTagPage, RagTagStat, RagUpdateCheck,
+    BatchPreview, RagChunkPage, RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings,
+    RagStatus, RagTagPage, RagTagStat, RagUpdateCheck,
 };
 use crate::rag::service;
 
@@ -29,11 +29,42 @@ pub async fn get_rag_doc(app: AppHandle, id: String) -> Result<Option<RagDoc>, S
     service::get_doc(&app, &id).await.map_err(|e| e.to_string())
 }
 
+/// Paged doc-detail read for the View dialog: skip `offset` UTF-8 bytes of the
+/// decoded content, return up to `limit_bytes` more (char-boundary aligned).
+/// `limit_bytes = 0` uses the user's configured `doc_load_chunk_kb` page size.
+/// The result's `truncated` / `nextOffset` / `contentTotalBytes` drive the
+/// "load more" button. Prevents loading a huge doc's whole content at once.
+#[tauri::command]
+pub async fn get_rag_doc_paged(
+    app: AppHandle,
+    id: String,
+    offset_bytes: u64,
+    limit_bytes: u64,
+) -> Result<Option<RagDoc>, String> {
+    service::get_doc_paged(&app, &id, offset_bytes, limit_bytes)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Read a document's chunks (index + text, no embeddings) for the "view
 /// chunks" dialog. Requires RAG enabled (chunks live in lancedb).
 #[tauri::command]
 pub async fn get_rag_chunks(id: String) -> Result<Vec<crate::models::rag::RagChunk>, String> {
     service::get_doc_chunks(&id).await.map_err(|e| e.to_string())
+}
+
+/// Paginated chunks for the "view chunks" dialog: `offset` chunks skipped,
+/// then up to `page_size` returned (clamped [1,200]) + the total count so the
+/// UI can auto-load the next page on scroll-to-bottom. Requires RAG enabled.
+#[tauri::command]
+pub async fn get_rag_chunks_paged(
+    id: String,
+    offset: u32,
+    page_size: u32,
+) -> Result<RagChunkPage, String> {
+    service::get_doc_chunks_paged(&id, offset, page_size)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Open the OS multi-file picker (no extension filter — validation is
@@ -234,8 +265,12 @@ pub async fn rag_tools() -> Result<Vec<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-pub async fn save_rag_settings(settings: RagSettings) -> Result<(), String> {
-    service::save_settings(settings).await.map_err(|e| e.to_string())
+pub async fn save_rag_settings(app: AppHandle, settings: RagSettings) -> Result<(), String> {
+    // Persist + re-arm the auto-update timer so interval/toggle changes take
+    // effect immediately (the running loop wakes on the generation bump).
+    service::save_settings_and_rearm(&app, settings)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

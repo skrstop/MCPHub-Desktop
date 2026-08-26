@@ -1,6 +1,6 @@
 {
   "name": "mcphub-desktop",
-  "version": "1.0.32003",
+  "version": "1.0.32004",
   "private": true,
   "scripts": {
     "tauri": "tauri",

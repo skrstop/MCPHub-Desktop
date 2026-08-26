@@ -674,7 +674,21 @@
       "tagAddNew": "Add \"{{tag}}\"",
       "batchUpdateFailed": "Batch update failed - see the logs",
       "contentUnavailableView": "Cannot read document content",
-      "contentUnavailableOpen": "Cannot open file location"
+      "contentUnavailableOpen": "Cannot open file location",
+      "docUpdateSection": "Document Update & Loading",
+      "autoUpdateEnabled": "Auto-update documents on a schedule",
+      "autoUpdateHint": "Periodically check every document's original file (md5 compare) in the background and auto re-index changed ones. Shares the same progress dialog and button state as the manual \"Batch Update\".",
+      "autoUpdateInterval": "Check interval (minutes)",
+      "autoUpdateIntervalHint": "Check originals for changes every N minutes. Range 1–1440 minutes (backend clamps to 60 s–24 h).",
+      "unitMinutes": "min",
+      "docLoadChunkKb": "Doc load size per page (KB)",
+      "docLoadChunkKbHint": "How much content each View-dialog load returns (KB). Large docs load their first page only; click \"Load more\" to keep reading — avoids loading a huge document at once. Range 10–65536 KB.",
+      "viewLoadedHint": "Loaded {{loaded}} / {{total}} total",
+      "viewLoadMore": "Load more",
+      "viewLoadMoreHint": "Load the next page of content",
+      "chunksShownCount": "Loaded {{shown}} / {{total}} chunks",
+      "chunksLoadMore": "Load {{count}} more",
+      "chunksAllLoaded": "All chunks loaded"
     }
   },
   "logs": {

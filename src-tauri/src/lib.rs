@@ -313,6 +313,11 @@ pub fn run() {
                         if let Err(e) = rag::service::start(&app_for_rag).await {
                             log::error!("[RAG] auto-start on boot failed: {:#}", e);
                         }
+                        // start() re-arms the auto doc-update timer itself on
+                        // success; on failure arm it anyway so it retries via
+                        // the next manual enable (its ticks no-op while RAG is
+                        // off, so this is cheap).
+                        rag::service::restart_auto_update_timer(&app_for_rag);
                     });
                 }
 
@@ -478,7 +483,9 @@ pub fn run() {
             commands::rag::rag_status,
             commands::rag::list_rag_docs,
             commands::rag::get_rag_doc,
+            commands::rag::get_rag_doc_paged,
             commands::rag::get_rag_chunks,
+            commands::rag::get_rag_chunks_paged,
             commands::rag::pick_rag_files,
             commands::rag::pick_rag_folder,
             commands::rag::upload_rag_doc,

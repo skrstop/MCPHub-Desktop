@@ -32,6 +32,23 @@ pub struct RagSettings {
     /// value is an explicit override. Default 0 (auto).
     #[serde(default = "default_chunk_overlap")]
     pub chunk_overlap: u32,
+    /// Auto doc update: periodically (every `auto_update_interval_secs`) check
+    /// every doc's recorded original for md5 changes and re-index the changed
+    /// ones in the background — the same pass as the manual "批量更新" button.
+    /// Default true (on). Only runs while RAG is enabled (re-index needs the
+    /// embedding runtime).
+    #[serde(default = "default_auto_update_enabled")]
+    pub auto_update_enabled: bool,
+    /// Auto-update check interval in seconds. Default 300 (5 minutes). Clamped
+    /// to [60, 86400] at read time so a bad persisted value can't busy-loop.
+    #[serde(default = "default_auto_update_interval_secs")]
+    pub auto_update_interval_secs: u64,
+    /// Doc-detail page size in KiB: how much content `get_rag_doc_paged`
+    /// returns per call (the View dialog loads this much up front, then the
+    /// "load more" button fetches the next page). Default 200. Clamped to
+    /// [10, 65536] at read time (the upload cap is 64 MiB).
+    #[serde(default = "default_doc_load_chunk_kb")]
+    pub doc_load_chunk_kb: u32,
 }
 
 fn default_vector_weight() -> f32 {
@@ -60,6 +77,19 @@ fn default_chunk_overlap() -> u32 {
     // 0 = "auto" — resolved per loaded model (deploy.json `chunkOverlap`, else 100).
     0
 }
+fn default_auto_update_enabled() -> bool {
+    // Auto doc update on by default — docs linked to originals stay fresh
+    // without the user clicking "批量更新".
+    true
+}
+fn default_auto_update_interval_secs() -> u64 {
+    // 5 minutes between auto-update scans.
+    300
+}
+fn default_doc_load_chunk_kb() -> u32 {
+    // 200 KiB per doc-detail page — keeps the View dialog cheap on huge docs.
+    200
+}
 
 /// Default content version (1) for legacy docs whose `.meta` predates the
 /// `version` field (serde fills it for missing/corrupt values). Referenced by
@@ -79,6 +109,9 @@ impl Default for RagSettings {
             score_threshold: 0.65,
             chunk_size: 0,
             chunk_overlap: 0,
+            auto_update_enabled: true,
+            auto_update_interval_secs: 300,
+            doc_load_chunk_kb: 200,
         }
     }
 }
@@ -176,6 +209,22 @@ pub struct RagDoc {
     /// still has its copy, so view works.
     #[serde(default)]
     pub content_available: bool,
+    /// True iff `content` is only a PREFIX of the full document (paged read,
+    /// `get_rag_doc_paged`). False for the unpaged `get_rag`. When true the UI
+    /// shows the "load more" button; each click fetches the next
+    /// `doc_load_chunk_kb` slice.
+    #[serde(default)]
+    pub truncated: bool,
+    /// UTF-8 byte offset of the END of the returned `content` within the full
+    /// decoded document. For the next page the frontend passes this back as
+    /// the read offset. Equals the full length when `truncated` is false.
+    #[serde(default)]
+    pub next_offset: u64,
+    /// Total size of the full decoded content in UTF-8 bytes (independent of
+    /// how much was returned this call) — lets the UI show
+    /// "已加载 X / 全部 Y KB" without an extra round-trip.
+    #[serde(default)]
+    pub content_total_bytes: u64,
 }
 
 /// A search result fragment.
@@ -196,6 +245,21 @@ pub struct RagSearchResult {
 pub struct RagChunk {
     pub chunk_index: i64,
     pub chunk_text: String,
+}
+
+/// A page of a document's chunks (for the paginated "view chunks" dialog):
+/// the chunks on this page + the total chunk count so the UI knows when all
+/// pages are loaded. `offset` is the 0-based index of the first returned
+/// chunk; `page_size` is the per-page cap actually applied.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagChunkPage {
+    pub items: Vec<RagChunk>,
+    /// Total chunks across all pages (NOT just this page).
+    pub total: u64,
+    /// Index of the first returned chunk (0-based).
+    pub offset: u32,
+    pub page_size: u32,
 }
 
 /// A tag with the number of documents that carry it.

@@ -642,7 +642,21 @@
       "pathExists": "Bu dosya zaten içe aktarılmış",
       "batchUpdateFailed": "Toplu güncelleme başarısız - günlüklere bakın",
       "contentUnavailableView": "Belge içeriği okunamıyor",
-      "contentUnavailableOpen": "Dosya konumu açılamıyor"
+      "contentUnavailableOpen": "Dosya konumu açılamıyor",
+      "docUpdateSection": "Belge Güncelleme ve Yükleme",
+      "autoUpdateEnabled": "Belgeleri zamanlanmış olarak otomatik güncelle",
+      "autoUpdateHint": "Tüm belgelerin orijinal dosyalarını (md5 karşılaştırması) arka planda periyodik olarak denetler ve değişenleri otomatik olarak yeniden indeksler. Manuel \"Toplu Güncelleme\" ile aynı ilerleme penceresini ve düğme durumunu paylaşır.",
+      "autoUpdateInterval": "Denetim aralığı (dakika)",
+      "autoUpdateIntervalHint": "Orijinal dosyaları her N dakikada bir değişiklik için denetler. Aralık 1–1440 dakika (arka plan 60 sn–24 s ile sınırlar).",
+      "unitMinutes": "dk",
+      "docLoadChunkKb": "Sayfa başına yükleme boyutu (KB)",
+      "docLoadChunkKbHint": "Görüntüleme penceresi her yüklemede ne kadar içerik döndürür (KB). Büyük belgeler yalnızca ilk sayfayı yükler; devam etmek için \"Daha fazla yükle\"ye tıklayın — büyük bir belgenin tek seferde yüklenmesini önler. Aralık 10–65536 KB.",
+      "viewLoadedHint": "Yüklendi {{loaded}} / toplam {{total}}",
+      "viewLoadMore": "Daha fazla yükle",
+      "viewLoadMoreHint": "İçeriğin sonraki sayfasını yükle",
+      "chunksShownCount": "Yüklendi {{shown}} / {{total}} parça",
+      "chunksLoadMore": "{{count}} tane daha yükle",
+      "chunksAllLoaded": "Tüm parçalar yüklendi"
     }
   },
   "logs": {

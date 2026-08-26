@@ -642,7 +642,21 @@
       "pathExists": "Ce fichier a déjà été importé",
       "batchUpdateFailed": "Échec de la mise à jour par lot - voir les logs",
       "contentUnavailableView": "Impossible de lire le contenu du document",
-      "contentUnavailableOpen": "Impossible d'ouvrir l'emplacement du fichier"
+      "contentUnavailableOpen": "Impossible d'ouvrir l'emplacement du fichier",
+      "docUpdateSection": "Mise à jour et chargement des documents",
+      "autoUpdateEnabled": "Mise à jour automatique planifiée des documents",
+      "autoUpdateHint": "Vérifie périodiquement en arrière-plan les fichiers originaux de tous les documents (comparaison md5) et réindexe automatiquement ceux qui ont changé. Partage la même boîte de progression et le même état de bouton que la « mise à jour par lot » manuelle.",
+      "autoUpdateInterval": "Intervalle de vérification (minutes)",
+      "autoUpdateIntervalHint": "Vérifie les changements des fichiers originaux toutes les N minutes. Plage 1–1440 minutes (le backend limite à 60 s–24 h).",
+      "unitMinutes": "min",
+      "docLoadChunkKb": "Taille de chargement par page (KB)",
+      "docLoadChunkKbHint": "Quantité de contenu renvoyée par chaque chargement de la boîte de visualisation (KB). Les gros documents ne chargent que la première page ; cliquez sur « Charger plus » pour continuer — évite de charger un document entier d'un coup. Plage 10–65536 KB.",
+      "viewLoadedHint": "Chargé {{loaded}} / {{total}} au total",
+      "viewLoadMore": "Charger plus",
+      "viewLoadMoreHint": "Charger la page de contenu suivante",
+      "chunksShownCount": "Chargés {{shown}} / {{total}} fragments",
+      "chunksLoadMore": "Charger {{count}} de plus",
+      "chunksAllLoaded": "Tous les fragments sont chargés"
     }
   },
   "logs": {

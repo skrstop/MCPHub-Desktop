@@ -802,11 +802,34 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // GET /rag/docs/:id — full document (with content)
     if (segs[1] === 'docs' && m === 'GET' && segs.length === 3)
       return { command: 'get_rag_doc', args: { id: decodeURIComponent(segs[2]) } };
+    // POST /rag/docs/get-paged - paged doc-detail read for the View dialog
+    // (offsetBytes skipped, limitBytes returned; 0 limit = configured page
+    // size). Returns truncated/nextOffset/contentTotalBytes for "load more".
+    if (segs[1] === 'docs' && segs[2] === 'get-paged' && m === 'POST') {
+      const b = body as { id?: string; offsetBytes?: number; limitBytes?: number } | null;
+      return {
+        command: 'get_rag_doc_paged',
+        args: {
+          id: b?.id ?? '',
+          offsetBytes: b?.offsetBytes ?? 0,
+          limitBytes: b?.limitBytes ?? 0,
+        },
+      };
+    }
     // POST /rag/docs/chunks - a document's chunks (index + text) for the
     // "view chunks" dialog (RAG must be enabled; chunks live in lancedb).
     if (segs[1] === 'docs' && segs[2] === 'chunks' && m === 'POST') {
       const b = body as { id?: string } | null;
       return { command: 'get_rag_chunks', args: { id: b?.id ?? '' } };
+    }
+    // POST /rag/docs/chunks-paged - paginated chunks (offset skipped, pageSize
+    // returned + total) for the scroll-to-load-more "view chunks" dialog.
+    if (segs[1] === 'docs' && segs[2] === 'chunks-paged' && m === 'POST') {
+      const b = body as { id?: string; offset?: number; pageSize?: number } | null;
+      return {
+        command: 'get_rag_chunks_paged',
+        args: { id: b?.id ?? '', offset: b?.offset ?? 0, pageSize: b?.pageSize ?? 5 },
+      };
     }
     // GET /rag/docs — list documents (metadata only)
     if (segs[1] === 'docs' && m === 'GET' && segs.length === 2)
@@ -944,6 +967,22 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     return {
       success: true,
       data: { items, total: r?.total ?? items.length, page: r?.page ?? 0, pageSize: r?.pageSize ?? items.length },
+    };
+  }
+  // get_rag_chunks_paged returns RagChunkPage { items, total, offset, pageSize }
+  // — same camelCase passthrough, but with an offset (0-based chunk index)
+  // instead of a page number.
+  if (command === 'get_rag_chunks_paged') {
+    const r = result as { items?: unknown[]; total?: number; offset?: number; pageSize?: number } | null;
+    const items = r?.items ?? [];
+    return {
+      success: true,
+      data: {
+        items,
+        total: r?.total ?? items.length,
+        offset: r?.offset ?? 0,
+        pageSize: r?.pageSize ?? items.length,
+      },
     };
   }
 

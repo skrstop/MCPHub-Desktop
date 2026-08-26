@@ -1446,6 +1446,41 @@ PY
 - **批量进度 error phase**：`rag://batch-update-progress` 的 phase 增加 `"error"`（任务早期失败）；前端 useRagData 接受并清 running（不 refetch），BatchUpdateDialog 渲染 ⚠️ 失败态。
 - **i18n**：`batchUpdateFailed`/`contentUnavailableView`/`contentUnavailableOpen` 三个新键（4 语言，rag keys=179）。「查看/打开」置灰 tooltip 用通用文案（覆盖 symlink 原始丢失与 copy 拷贝丢失两种成因）。
 
+### 3.13 RAG 文档自动定时更新 + 文档详情 KB 分页 + 分片分页（桌面端独有）
+
+> 三个功能（2026-08-26）：①文档自动定时更新（设置开关+间隔，后台异步线程执行，与手动批量更新共用按钮状态与进度弹框）；②文档详情按 KB 分页加载（默认 200KB/页，「加载更多」逐页追加，防大文档一次加载崩溃）；③分片弹框分页展示（每页 5 片，滚动到底自动加载下一页）。
+
+#### 3.13.1 设置模型（RagSettings 新增 3 字段）
+- `src-tauri/src/models/rag.rs` `RagSettings` 加 `auto_update_enabled: bool`（默认 `true`）、`auto_update_interval_secs: u64`（默认 `300`=5 分钟，读取/保存时 clamp `[60, 86400]`）、`doc_load_chunk_kb: u32`（默认 `200`，clamp `[10, 65536]`）。serde `default` 函数 + `Default` impl 同步补齐，旧配置缺 key 自动取默认。
+- `get_settings`/`save_settings`（`rag/service.rs`）读写 `autoUpdateEnabled`/`autoUpdateIntervalSecs`/`docLoadChunkKb`；`save_settings_and_rearm` = save + `restart_auto_update_timer`。
+
+#### 3.13.2 自动定时更新（功能1）
+- **定时器**：`rag/service.rs` `restart_auto_update_timer(app)`——`tauri::async_runtime::spawn` 常驻循环：读 settings→按 interval 分 500ms 切片睡眠（每片检查 `AUTO_UPDATE_GEN` 代数，设置变更即退出让位新循环）→到点 tick：`is_enabled()` 不满足静默跳过；满足则 CAS `BATCH_UPDATE_RUNNING`（与手动批量更新互斥，手动在跑则跳过该 tick）→ `preview_batch_update` 预扫描，`to_update == 0` **不发事件直接放行**（空转不打扰 UI）→ 否则跑与手动按钮完全相同的 `run_batch_update`（同一进度事件/按钮状态/弹框）。
+- **触发点**：`save_settings_and_rearm`（设置保存即重挂定时器，改间隔立即生效）；`start()` 成功尾部（RAG 开启/重启/开机自动恢复）；`lib.rs` 开机 auto-restore 分支兜底。
+- **前端状态同步**：`useRagData.tsx` 的 `rag://batch-update-progress` 监听改为**非终态事件也 setBatchUpdateRunning(true)**——自动更新触发时（前端未发起）头部按钮同样变「查看进度」+ spinner，点击重开进度弹框；done/error 清 running + refetch。手动/自动共用 `batchUpdateRunning`/`batchProgress`，天然同步。
+- **设置 UI**（`RagPage.tsx` SearchSettingsDialog）：新分区「文档更新与加载」= 自动更新 checkbox（hint 说明与手动共用进度）+ 间隔分钟滑条（1–1440，禁用自动更新时置灰，保存时 ×60 转秒）+ 文档加载大小 KB 滑条（10–65536，step 10）。
+
+#### 3.13.3 文档详情 KB 分页（功能2）
+- **后端**：`get_doc_inner(app, id, range: Option<(u64, u64)>)` 统一实现（`get_doc` = 全量；新增 `get_doc_paged(app, id, offset_bytes, limit_bytes)`，`limit_bytes=0` 用设置里的 `doc_load_chunk_kb`）。字节窗口切片**按 UTF-8 字符边界对齐**（offset 向前回退、end 向后扩展到 `is_char_boundary`），永不切出半个多字节字符。`RagDoc` 加 `truncated`（本次是否截断）/`next_offset`（已加载内容末尾的字节偏移，下页传回）/`content_total_bytes`（全量字节，供「已加载 X / 全部 Y」）。
+- **命令/路由**：`get_rag_doc_paged` 命令 + `lib.rs` 注册；`tauriClient.ts` `POST /rag/docs/get-paged` → `{id, offsetBytes, limitBytes}`。
+- **前端**：`ragService.getRagDocPaged`；`useRagData.view(id)` 改调分页接口（offset 0 / limit 0=默认页大小），新增 `loadMoreView()`（从 `viewedDoc.nextOffset` 取下一页，**append** 到已有 content，刷新 truncated/nextOffset/totals）+ `viewMoreLoading`。`ViewDialog` 加 `moreLoading`/`onLoadMore` props：`doc.truncated` 时在内容区下方渲染 footer（`utf8Bytes(doc.content)` 算已加载量 vs `contentTotalBytes` 总量 + 「加载更多」按钮，loading 时 spinner）。标签保存后 `view()` 重新拉首页（重置分页状态）。
+
+#### 3.13.4 分片分页（功能3）
+- **后端**：`get_doc_chunks_inner(id, offset, limit)` 共享核心（读全量 records 排序后内存切片——lancedb 查询 API 无 LIMIT 下推，单文档分片数几百级、代价可忽略）；新增 `get_doc_chunks_paged(id, offset, page_size) -> RagChunkPage {items, total, offset, pageSize}`（`page_size` clamp `[1,200]`）。模型 `RagChunkPage`（`models/rag.rs`）。
+- **命令/路由**：`get_rag_chunks_paged` + 注册；`tauriClient.ts` `POST /rag/docs/chunks-paged` → `{id, offset, pageSize}`，响应 transform 分支（offset 版，区别于 page 版）。
+- **前端**：`ragService.getRagChunksPaged`；`useRagData.viewChunks` 改取首页 5 片（`CHUNKS_PAGE_SIZE = 5`）+ `chunksTotal`；新增 `loadMoreChunks()`（以 `chunksList.length` 为 offset 追加下一页，`chunksMoreLoading` 守并发）。`RagPage` 分片弹框抽出 `ChunksScrollList` 组件：滚动容器 `onScroll` 距底 <40px 自动 `onLoadMore`；尾部有下一页时显示 spinner / 「加载更多 N 片」按钮（兜底），全部加载显示 ✓ 提示；页脚计数改「已加载 X / 共 Y 片」（`chunksShownCount`）。
+
+#### 3.13.5 i18n（4 语言）
+- 新键：`docUpdateSection`/`autoUpdateEnabled`/`autoUpdateHint`/`autoUpdateInterval`/`autoUpdateIntervalHint`/`unitMinutes`/`docLoadChunkKb`/`docLoadChunkKbHint`/`viewLoadedHint`/`viewLoadMore`/`viewLoadMoreHint`/`chunksShownCount`/`chunksLoadMore`/`chunksAllLoaded`。
+
+#### 3.13.6 边界 / 兼容
+- 旧配置无新 key → serde default（自动更新默认开、5 分钟、200KB）；`get_doc`（MCP `rag_get` 工具）语义不变仍返回全量。
+- 自动更新 tick 与手动批量共用 `BATCH_UPDATE_RUNNING` CAS 守卫——互斥不重叠；RAG 关闭期间 tick 静默跳过（循环不退出，下次 enable 生效）。
+- `utf8Bytes` 前端用 `TextEncoder`（与后端字节偏移分页口径一致）。
+- 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过；`npx tsc --noEmit`（RAG 相关 0 错误）+ `npm run build` 通过。
+- `loadMoreView`/`loadMoreChunks` 用 **ref 锁**（`viewFetchingRef`/`chunksFetchingRef`）防同渲染周期内滚动事件堆积导致重复拉页（state 闭包值同步性不足）。
+- 版本：`1.0.32003 -> 1.0.32004`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json / Cargo.lock）。
+
 ---
 
 ---
