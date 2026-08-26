@@ -1479,7 +1479,7 @@ PY
 - `utf8Bytes` 前端用 `TextEncoder`（与后端字节偏移分页口径一致）。
 - 编译验证：`ORT_SKIP_DOWNLOAD=1 cargo check` 通过；`npx tsc --noEmit`（RAG 相关 0 错误）+ `npm run build` 通过。
 - `loadMoreView`/`loadMoreChunks` 用 **ref 锁**（`viewFetchingRef`/`chunksFetchingRef`）防同渲染周期内滚动事件堆积导致重复拉页（state 闭包值同步性不足）。
-- 版本：`1.0.32003 -> 1.0.32004`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json / Cargo.lock）。
+- 版本：维持 `1.0.32003` 不变（用户要求，tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json / Cargo.lock）。
 
 ---
 
