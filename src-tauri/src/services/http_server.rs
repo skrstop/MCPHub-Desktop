@@ -150,6 +150,9 @@ fn build_oauth_401(headers: &HeaderMap, reason: &str) -> Response {
 
 struct ServerHandle {
     abort_tx: tokio::sync::oneshot::Sender<()>,
+    /// Diagnostics companion of abort_tx (see start()): fired together in
+    /// stop() so the serve task can classify its own ending.
+    probe_tx: tokio::sync::oneshot::Sender<()>,
     port: u16,
     body_limit_bytes: usize,
 }
@@ -1498,9 +1501,23 @@ async fn mcp_root_get(headers: HeaderMap) -> Response {
     let endpoint_uri = format!("/mcp/message?sessionId={}", sid);
     let endpoint_ev: Result<Event, std::convert::Infallible> =
         Ok(Event::default().event("endpoint").data(endpoint_uri));
-    let message_stream = UnboundedReceiverStream::new(rx).map(|s| {
-        Ok::<Event, std::convert::Infallible>(Event::default().event("message").data(s))
-    });
+    // Diagnostics: log when the legacy SSE stream ENDS (client gone / channel
+    // dropped) - previously there was no trace of a session vanishing.
+    let watch_sid = sid.clone();
+    let message_stream = UnboundedReceiverStream::new(rx)
+        .map(|s| Ok::<Event, std::convert::Infallible>(Event::default().event("message").data(s)))
+        .chain(futures_util::stream::unfold((), move |()| {
+            let watch_sid = watch_sid.clone();
+            async move {
+                let line = format!(
+                    "[http-server-watch] legacy SSE stream ended: session={} (client disconnected or channel dropped)",
+                    watch_sid
+                );
+                log::info!("{}", line);
+                app_logger::log_to_db("info", &line);
+                None
+            }
+        }));
     let stream = futures_util::stream::iter([endpoint_ev]).chain(message_stream);
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
@@ -1643,6 +1660,32 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     log::info!("{}", http_msg);
     app_logger::log_to_db("info", &http_msg);
 
+    // Diagnostics heartbeat (2026-08-27): a 30s tick tagged [http-server-watch],
+    // written only to the DB log panel. If the server ever stops responding
+    // again, the heartbeat trail distinguishes "serve task dead, process alive"
+    // (heartbeats continue, port gone) from a process-level death (both stop).
+    // The fd count catches EMFILE death spirals (fds climbing toward the limit
+    // until accept() fails).
+    {
+        let hb_port = port;
+        tauri::async_runtime::spawn(async move {
+            let mut n: u64 = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                n += 1;
+                #[cfg(unix)]
+                let fd_count = std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0);
+                #[cfg(not(unix))]
+                let fd_count = 0usize;
+                let line = format!(
+                    "[http-server-watch] heartbeat #{} port={} pid={} fds={}",
+                    n, hb_port, std::process::id(), fd_count
+                );
+                app_logger::log_to_db("debug", &line);
+            }
+        });
+    }
+
     // On Windows, external clients are commonly blocked by Windows Defender
     // Firewall even though the bind succeeded (loopback works, 0.0.0.0 inbound
     // doesn't). Log a proactive hint so "started but unreachable" shows up in the
@@ -1667,36 +1710,58 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     });
 
     let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
-
-    // Bound graceful shutdown so a long-lived connection (SSE / Streamable HTTP
-    // streams that stay open indefinitely) can't keep the server task alive
-    // forever after a stop/restart. Mirrors upstream #1042 (bound graceful
-    // shutdown for long-lived connections): give in-flight requests a grace
-    // period to finish, then force-close by dropping the serve future (which
-    // aborts the listener + remaining connections) instead of waiting forever.
-    const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+    // Diagnostics probe (2026-08-27 "HTTP 服务静默挂掉" investigation): a second
+    // channel fired alongside abort_tx in stop(). abort_rx is consumed by the
+    // graceful-shutdown future and can't be probed after the fact; this probe
+    // lets the serve task classify its own ending as intentional vs unexpected.
+    let (probe_tx, mut abort_rx_probe) = tokio::sync::oneshot::channel::<()>();
 
     tokio::spawn(async move {
+        // FIX (2026-08-27): an earlier attempt to bound graceful shutdown
+        // (mirroring upstream #1042) wrapped tokio::time::timeout around the
+        // WHOLE serve future - which killed the server exactly 10s after
+        // startup: the timeout elapsed, the serve future was dropped (listener
+        // closed, fds released) while the status still said running, and
+        // nothing restarted it. Symptom: external clients can't connect
+        // anymore, lsof shows no listener, app process alive.
+        //
+        // Correct structure: serve runs UNBOUNDED; with_graceful_shutdown fires
+        // when abort_rx completes (stop()/config restart). The outcome is then
+        // classified for the [http-server-watch] diagnostics trail - including
+        // panics, which tokio otherwise swallows silently at the task boundary.
         let serve = axum::serve(listener, app).with_graceful_shutdown(async {
             let _ = abort_rx.await;
         });
-        match tokio::time::timeout(SHUTDOWN_GRACE, serve).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => log::warn!("[shutdown] HTTP server ended with error: {e}"),
-            Err(_) => {
-                log::warn!(
-                    "[shutdown] HTTP server graceful shutdown exceeded {}s grace period; \
-                     force-closing in-flight (long-lived SSE/HTTP) connections",
-                    SHUTDOWN_GRACE.as_secs()
-                );
-                // The `serve` future was dropped on timeout, aborting the
-                // listener and any remaining in-flight connections.
-            }
-        }
+        let serve_fut = std::future::IntoFuture::into_future(serve);
+        let outcome = match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(serve_fut)).await {
+            Ok(Ok(())) => "clean stop".to_string(),
+            Ok(Err(e)) => format!("accept-loop error: {e}"),
+            Err(panic) => format!(
+                "PANIC: {}",
+                panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "(non-string panic payload)".to_string())
+            ),
+        };
+        //   Ok(())            -> stop() explicitly fired the probe
+        //   Err(Disconnected) -> ServerHandle dropped = start() replacing it
+        //                        (port/body-limit config restart) - intentional
+        //   Err(Empty)        -> nobody asked; serve died on its own
+        let stopped_intentionally =
+            !matches!(abort_rx_probe.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty));
+        let line = format!(
+            "[http-server-watch] serve task ended ({}): {}",
+            if stopped_intentionally { "intentional stop" } else { "UNEXPECTED - serve died without a stop request" },
+            outcome
+        );
+        log::warn!("{}", line);
+        app_logger::log_to_db("warn", &line);
         log::info!("MCPHub HTTP server stopped");
     });
 
-    *guard = Some(ServerHandle { abort_tx, port, body_limit_bytes });
+    *guard = Some(ServerHandle { abort_tx, probe_tx, port, body_limit_bytes });
     Ok(())
 }
 
@@ -1705,6 +1770,7 @@ pub async fn stop() {
     let mut guard = handle().lock().await;
     if let Some(h) = guard.take() {
         let _ = h.abort_tx.send(());
+        let _ = h.probe_tx.send(());
         log::info!("MCPHub HTTP server shutdown requested");
         set_status(HttpServerStatus {
             running: false,
