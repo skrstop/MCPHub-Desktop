@@ -255,10 +255,12 @@ const useRagDataState = () => {
     });
 
     // Batch-update progress: the backend emits one event per doc (checking /
-    // reindexing phases) + a final "done". Drives the batch-progress dialog's
-    // file-level bar; the char-level sub-bar reuses `rag://upload-progress`
-    // above (reindex_doc emits it). On "done" we clear the running flag + refetch
-    // the doc list (chunk counts / version / md5 changed).
+    // reindexing phases) + a final "done" (or "error" on early failure). Drives
+    // the batch-progress dialog's file-level bar; the char-level sub-bar reuses
+    // `rag://upload-progress` above (reindex_doc emits it). On either terminal
+    // phase we clear the running flag + refetch the doc list (chunk counts /
+    // version / md5 changed; on error a partial pass may still have changed
+    // some docs).
     //
     // Any non-terminal event also SETS the running flag: the backend's timed
     // auto-update pass emits the same events without the frontend having
@@ -275,16 +277,21 @@ const useRagDataState = () => {
             : 'checking';
         setBatchProgress({ current: p.current, total: p.total, name: p.name, phase });
         if (phase === 'done' || phase === 'error') {
-          // Both terminal phases clear the running flag. On done we also refetch
-          // (chunk counts / versions / md5 changed); on error nothing was
-          // processed, so no refetch is needed.
+          // Both terminal phases clear the running flag. On either terminal
+          // phase we also refetch the doc list: "done" because chunk counts /
+          // versions / md5 changed, "error" because a partially-applied pass
+          // (some docs re-indexed before the failure) still changed state and
+          // the list must not stay stale. The original code skipped the refetch
+          // on error, which left the list out of sync after a failed batch.
           setBatchUpdateRunning(false);
-          if (phase === 'done') {
-            // Slight delay so the "完成" state is visible before the dialog clears.
-            setTimeout(() => {
-              if (mounted.current) fetchDocs();
-            }, 600);
-          }
+          // Slight delay on "done" so the "完成" state is visible before the
+          // dialog clears. On "error" refetch immediately (no success state to
+          // hold the dialog open for). `mounted.current` guards the unmount
+          // race; the fetch itself is best-effort (fetchDocs swallows).
+          const delay = phase === 'done' ? 600 : 0;
+          setTimeout(() => {
+            if (mounted.current) fetchDocs();
+          }, delay);
         } else {
           // An in-flight pass (manual OR the timed auto-update): the button
           // shows "查看进度" so the user can open the shared progress dialog.
@@ -604,12 +611,18 @@ const useRagDataState = () => {
       try {
         await updateRagDoc(id, opts);
         setUploadProgress({ current: 1, total: 1, name });
-        await fetchDocs();
       } finally {
         setUploading(false);
         setUpdatingDoc(false);
         setUploadProgress(null);
         setCharProgress(null);
+        // Refresh in `finally` regardless of success: the backend re-index
+        // (reindex_doc) returns once chunks are re-embedded, and even on error
+        // the on-disk meta/version may have partially changed. Without this, a
+        // thrown update (error swallowed into {success:false} by apiRequest ->
+        // updateRagDoc re-throws) left the row showing the old version/md5,
+        // which is the "file list doesn't update after single update" symptom.
+        await fetchDocs();
       }
     },
     [fetchDocs],
@@ -645,20 +658,51 @@ const useRagDataState = () => {
 
   const remove = useCallback(
     async (id: string) => {
-      await deleteRagDoc(id);
-      await fetchDocs();
+      // Refresh in `finally` regardless of success: the backend delete_doc
+      // returns once the doc's vectors are removed (the slow lancedb Prune now
+      // runs deferred in the background), so even on error the on-disk state
+      // may have partially changed and the list should be re-read. Without this
+      // a thrown delete (error swallowed into {success:false} by apiRequest ->
+      // deleteRagDoc re-throws) would skip fetchDocs and the row would linger.
+      try {
+        await deleteRagDoc(id);
+      } finally {
+        await fetchDocs();
+      }
     },
     [fetchDocs],
   );
 
   // Batch delete: delete each doc by id, then refresh the list once. Each
-  // delete also reclaims lancedb vectors on the backend (see delete_doc).
+  // delete also reclaims lancedb vectors on the backend (the Prune is deduped
+  // + deferred, so a 50-doc burst prunes once, not 50× — see delete_doc).
+  //
+  // Tolerates per-item failures: one bad id (e.g. meta already gone, or a
+  // transient lock error) must NOT abort the remaining deletes AND skip the
+  // final refresh (which left the list stale — the original symptom). Each
+  // failure is collected + re-thrown AFTER the refresh so the caller can still
+  // surface an error toast, but the list always reflects what actually got
+  // deleted.
   const removeMany = useCallback(
     async (ids: string[]) => {
-      for (const id of ids) {
-        await deleteRagDoc(id);
+      const failures: string[] = [];
+      try {
+        for (const id of ids) {
+          try {
+            await deleteRagDoc(id);
+          } catch (e) {
+            failures.push(`${id}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      } finally {
+        // Always refresh: even if every delete threw, a prior partial delete
+        // (the IPC returned {success:false} but the backend had already
+        // removed the .meta) means the list is stale.
+        await fetchDocs();
       }
-      await fetchDocs();
+      if (failures.length > 0) {
+        throw new Error(`Failed to delete ${failures.length} of ${ids.length} doc(s): ${failures.join('; ')}`);
+      }
     },
     [fetchDocs],
   );

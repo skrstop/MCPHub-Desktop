@@ -7,6 +7,7 @@ import './i18n';
 // Setup fetch interceptors
 import './utils/setupInterceptors';
 import { loadRuntimeConfig } from './utils/runtime';
+import { installExternalLinkInterceptor } from './utils/externalLink';
 
 /** Remove the splash loading screen (index.html) with a fade-out animation */
 function removeSplash() {
@@ -55,6 +56,9 @@ async function initializeApp() {
     window.__MCPHUB_CONFIG__ = config;
     // Disable the right-click context menu in packaged builds (dev keeps it).
     setupProductionContextMenuGuard();
+    // Route bare target="_blank" external links through the `open_external_url`
+    // Tauri command (replaces the removed tauri-plugin-shell's interceptor).
+    installExternalLinkInterceptor();
     // Start React app
     ReactDOM.createRoot(document.getElementById('root')!).render(
       <React.StrictMode>

@@ -162,6 +162,95 @@ async fn meta_lock() -> &'static Mutex<()> {
     META_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Dedup gate for the deferred lancedb prune. LanceDB is append-only: `delete`
+/// and overwrite just create new dataset versions that omit the old rows, and
+/// the old versions (with their embeddings) linger on disk until a prune runs.
+/// `optimize()` runs that prune — but it rewrites every surviving version and
+/// is slow (seconds), so calling it inline in `delete_doc`/overwrite blocks the
+/// IPC response for that whole duration, which is exactly why the doc list
+/// "doesn't refresh" after delete (the `await` never returns until prune ends).
+///
+/// Instead we kick off ONE deduped background prune: the first caller arms a
+/// spawned task that waits briefly (so a burst of deletes coalesces into a
+/// single prune) and then prunes once. While that task is pending, further
+/// callers are no-ops — they know a prune is already queued, so one prune
+/// covers them all. The caller's request returns immediately, and disk space
+/// is reclaimed a moment later without blocking the UI refresh.
+static PRUNE_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Wakes the parked prune task when a fresh delete/overwrite arrives after the
+/// coalesce delay has already elapsed but before the task re-checks the gate.
+static PRUNE_NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+
+fn prune_notify() -> &'static tokio::sync::Notify {
+    PRUNE_NOTIFY.get_or_init(|| tokio::sync::Notify::new())
+}
+
+/// Schedule a deduped background prune. Safe to call on every delete/overwrite;
+/// extra calls while one is queued or running are coalesced into that single
+/// prune. The caller does NOT wait — this returns immediately. If the runtime
+/// was just dropped (RAG disabled) between the caller's check and the task's,
+/// the task acquires the runtime lock, sees `None`, and exits harmlessly.
+fn schedule_deferred_prune(app: &AppHandle) {
+    // CAS: only the FIRST caller after an idle period arms a task. Concurrent
+    // callers (burst delete) lose the CAS and return — they rely on the armed
+    // task's prune (which will see their deletes too, since delete_by_doc
+    // already wrote the new versions before we get here).
+    if PRUNE_PENDING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return; // a prune is already queued/running — nothing to do
+    }
+    // Move the AppHandle into the spawned task so it owns 'static data (kept
+    // for future prune-event diagnostics; the prune itself only needs the
+    // runtime, which it re-acquires via the global lock below). Prefixed `_`
+    // because no current prune path reads it, but holding it prevents a future
+    // emit/diagnostics addition from silently dropping the handle.
+    let _app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Coalesce window: a burst of deletes (batch delete, overwrite-many)
+        // should fold into ONE prune. Wait briefly so later deletes that lost
+        // the CAS land before we prune. Short enough that disk reclaim feels
+        // immediate, long enough that a 50-doc batch delete prunes once not
+        // 50×. The Notify lets a delete arriving just after this delay cut the
+        // wait short so reclaim still happens promptly in the single-doc case.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            prune_notify().notified(),
+        )
+        .await;
+        // Take the runtime lock (same meta->runtime ordering invariant: we hold
+        // no meta lock here, and the inline delete paths have already released
+        // theirs, so there's no ordering risk). Holding it for the prune
+        // serializes against a concurrent reindex_doc/search on the same table.
+        let guard = runtime().lock().await;
+        let Some(rt) = guard.as_ref() else {
+            // RAG was disabled between the delete and the prune. The deleted
+            // rows' old versions will be reclaimed on next enable's optimize or
+            // a reset's drop_table; no orphan vectors are left queryable (the
+            // delete already wrote a version omitting them).
+            PRUNE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        };
+        if let Err(e) = rt.db.optimize().await {
+            rag_log("warn", format!("deferred prune failed: {:#}", e));
+        }
+        // Clear the gate LAST so a delete that arrived during this prune (and
+        // lost the CAS) leaves PRUNE_PENDING=true — the next idle caller arms a
+        // fresh prune for those newer deletes.
+        PRUNE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        // If a delete arrived during the prune (lost CAS, still pending), wake
+        // so the next armed task doesn't sit through the full coalesce delay.
+        prune_notify().notify_one();
+    });
+}
+
 /// Atomically write a `.meta` file: write to `{path}.tmp` then rename over the
 /// target. Rename-on-same-filesystem is atomic on all supported platforms, so
 /// a crash mid-write can never leave a truncated/half JSON that would make the
@@ -2770,7 +2859,10 @@ pub async fn create_doc_from_content(
             for sid in &stale_ids {
                 let _ = rt.db.delete_by_doc(sid).await;
             }
-            let _ = rt.db.optimize().await;
+            // Reclaim the overwritten docs' freed space in the background
+            // (deduped) instead of blocking this call on a slow inline Prune.
+            // See `schedule_deferred_prune`.
+            schedule_deferred_prune(app);
         }
     }
     // The stale docs' .meta files were removed above; drop their SQL mirror
@@ -3409,7 +3501,12 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow!("RAG is not enabled - turn on RAG before deleting documents"))?;
         rt.db.delete_by_doc(id).await?;
-        rt.db.optimize().await?;
+        // Reclaim the freed disk space in the background (deduped across a burst
+        // of deletes) instead of blocking this IPC on a slow lancedb Prune —
+        // see `schedule_deferred_prune`. The doc is already gone from the table
+        // (delete_by_doc wrote a new version omitting it), so the list refresh
+        // can return immediately while the prune runs moments later.
+        schedule_deferred_prune(app);
     }
 
     // Content file is `dir/{id}` for uploads, `dir/{meta.name}` for

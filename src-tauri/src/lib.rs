@@ -174,7 +174,14 @@ pub fn run() {
     // crash.log. stderr-only until `setup()` resolves the app data dir.
     install_crash_hook();
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        // NOTE: tauri-plugin-shell is intentionally NOT registered. Its injected
+        // init script auto-invokes `plugin:shell|open` for every target=_blank
+        // link, and that command spawns via pre_exec (double fork) which forces
+        // std's fork() path - the atfork child handler then walks mimalloc's
+        // malloc zone (the `override` feature) and segfaults on macOS 26
+        // (_malloc_fork_child -> pc=0). External links go through the
+        // `open_external_url` command (posix_spawn, no fork) + a frontend
+        // click interceptor instead.
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())

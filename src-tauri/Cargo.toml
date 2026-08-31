@@ -26,7 +26,10 @@ tauri = { version = "2", features = [
   "image-png",
   "devtools",
 ] }
-tauri-plugin-shell = "2"
+# tauri-plugin-shell intentionally absent: its injected init script opens
+# target=_blank links via pre_exec/double-fork, which crashes in
+# _malloc_fork_child with mimalloc's malloc-zone override on macOS 26.
+# External links use the `open_external_url` command (posix_spawn) instead.
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

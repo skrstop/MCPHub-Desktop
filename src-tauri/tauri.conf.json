@@ -65,9 +65,6 @@
     }
   },
   "plugins": {
-    "shell": {
-      "open": true
-    },
     "updater": {
       "endpoints": [
         "https://github.com/skrstop/MCPHub-Desktop/releases/latest/download/latest.json"
