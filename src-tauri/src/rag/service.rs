@@ -22,8 +22,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::models::rag::{
-    BatchPreview, RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings, RagStatus,
-    RagDocPage, RagTagPage, RagTagStat, RagUpdateCheck,
+    BatchPreview, RagDoc, RagDocInfo, RagFolderScan, RagPickedFile, RagScanFile, RagScanGroup,
+    RagSearchResult, RagSettings, RagStatus, RagDocPage, RagTagPage, RagTagStat, RagUpdateCheck,
 };
 use crate::rag::chunker::chunk_document;
 use crate::rag::embedder::{check_memory_sufficient, detect_format, load_embedder, read_max_context, Embedder};
@@ -2129,9 +2129,16 @@ pub fn pick_files(app: &AppHandle) -> Vec<RagPickedFile> {
         .collect()
 }
 
-/// Open the OS folder picker, then scan its immediate children (no recursion)
-/// for files. Sub-directories + hidden files (leading dot, any platform) are
-/// skipped. Each candidate must pass BOTH filters:
+/// Open the OS folder picker, then scan the folder's children for import
+/// candidates. Flat mode (`recursive=false`, the pre-existing behavior) scans
+/// only immediate file children. Recursive mode (`recursive=true`) walks all
+/// descendant directories, skipping:
+///   - directories named in `folder_ignore.json` (dev/build dirs like
+///     node_modules, dist, target — see `folder_ignore_set()`);
+///   - hidden entries (leading dot, any platform) — macOS `.DS_Store` and
+///     `.git`-style dirs never become candidates;
+///   - symlinked directories (loop safety).
+/// Each file candidate must pass BOTH filters (same as flat mode):
 ///   1. extension catalog — its lowercased dot-prefixed extension (".md",
 ///      ".py"…) must be present in `file_type_map()` (built from
 ///      `runtimes/rag/file_support.json`), so unknown/unsupported file kinds
@@ -2140,67 +2147,192 @@ pub fn pick_files(app: &AppHandle) -> Vec<RagPickedFile> {
 ///      `is_likely_text` (same rule as upload validation), so a misnamed
 ///      binary file still gets filtered out.
 /// This way the dialog only lists files the upload pipeline would actually
-/// accept. Returns an empty vec if the user cancels or no supported file
-/// remains.
-pub fn pick_folder(app: &AppHandle) -> Vec<RagPickedFile> {
+/// accept. Recursive scans stop at `SCAN_FOLDER_FILE_CAP` candidates and set
+/// `truncated` (+ `skipped_files`) so the UI can warn. Returns an empty
+/// groups list if the user cancels or no supported file remains.
+pub fn pick_folder(app: &AppHandle, recursive: bool) -> RagFolderScan {
     use tauri_plugin_dialog::DialogExt;
     let b = app.dialog().file().set_title("Select a folder to import");
-    let Some(fp) = b.blocking_pick_folder() else { return Vec::new() };
-    let Ok(folder) = fp.into_path() else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(&folder) else { return Vec::new() };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Skip directories (non-recursive scan) and symlinks that don't resolve
-        // to a regular file — only importable files pass through.
-        let ft = match std::fs::metadata(&path) {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        if !ft.is_file() {
-            continue;
+    let Some(fp) = b.blocking_pick_folder() else {
+        return RagFolderScan::empty();
+    };
+    let Ok(folder) = fp.into_path() else {
+        return RagFolderScan::empty();
+    };
+    scan_folder(&folder, recursive)
+}
+
+/// Hard cap on candidate files per recursive folder scan. Guards against
+/// accidentally importing a home directory (which can hold hundreds of
+/// thousands of files under node_modules etc.) — the scan stops early and the
+/// UI tells the user to pick a smaller folder.
+const SCAN_FOLDER_FILE_CAP: usize = 500;
+
+/// Lazily-compiled ignore-list from `runtimes/rag/folder_ignore.json`
+/// (directory names, exact match, any depth). Same include_str! pattern as
+/// `file_type_map()`.
+static FOLDER_IGNORE_SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+
+fn folder_ignore_set() -> &'static std::collections::HashSet<String> {
+    FOLDER_IGNORE_SET.get_or_init(|| {
+        let raw = include_str!("../../runtimes/rag/folder_ignore.json");
+        let mut set = std::collections::HashSet::new();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(arr) = v.get("folders").and_then(|f| f.as_array()) {
+                for name in arr.iter().filter_map(|x| x.as_str()) {
+                    set.insert(name.to_lowercase());
+                }
+            }
         }
-        let Some(name) = path.file_name() else { continue };
-        let name = name.to_string_lossy().to_string();
-        // Skip dotfiles (hidden on Unix; conventionally hidden on Windows too)
-        // so macOS `.DS_Store` and similar noise never become import candidates.
-        if name.starts_with('.') {
-            continue;
+        set
+    })
+}
+
+/// Scan `folder` for import candidates, grouped per sub-directory (recursive
+/// mode) or as one flat group (the root, flat mode). Shared filtering rules
+/// with `pick_files`' validation pipeline; see `pick_folder` for the list.
+/// Group/file order is stable (path-sorted), so rescans look identical.
+fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
+    let ignore = folder_ignore_set();
+    // rel-path -> group index in `out.groups`.
+    let mut group_idx: std::collections::HashMap<std::path::PathBuf, usize> =
+        std::collections::HashMap::new();
+    let mut out = RagFolderScan {
+        root: folder.to_string_lossy().to_string(),
+        skipped_dirs: 0,
+        skipped_files: 0,
+        groups: Vec::new(),
+        truncated: false,
+    };
+    let mut total = 0usize;
+
+    // Depth-first walk of the directory tree. Directory read errors are
+    // silently skipped — a folder we can't read contributes nothing to the
+    // import list. The walk stops as soon as the candidate cap is reached;
+    // remaining files are counted into `skipped_files` afterwards.
+    fn walk(
+        dir: &Path,
+        rel: &Path,
+        recursive: bool,
+        ignore: &std::collections::HashSet<String>,
+        out: &mut RagFolderScan,
+        group_idx: &mut std::collections::HashMap<PathBuf, usize>,
+        total: &mut usize,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            if *total >= SCAN_FOLDER_FILE_CAP {
+                out.truncated = true;
+                return;
+            }
+            let path = entry.path();
+            // Skip symlinks entirely (files AND dirs) — an import candidate
+            // must be a real file we can re-read later; a symlinked dir could
+            // also loop the walk.
+            let Ok(lm) = std::fs::symlink_metadata(&path) else { continue };
+            if lm.is_symlink() {
+                continue;
+            }
+            let Ok(md) = std::fs::metadata(&path) else { continue };
+            if md.is_dir() {
+                if !recursive {
+                    continue;
+                }
+                let Some(name) = path.file_name() else { continue };
+                let name = name.to_string_lossy().to_string();
+                // Hidden dirs (any platform) + folder_ignore.json names are
+                // pruned from the walk — nothing beneath them is scanned.
+                if name.starts_with('.') || ignore.contains(&name.to_lowercase()) {
+                    out.skipped_dirs += 1;
+                    continue;
+                }
+                let child_rel = rel.join(&name);
+                walk(&path, &child_rel, recursive, ignore, out, group_idx, total);
+            } else if md.is_file() {
+                let Some(name) = path.file_name() else { continue };
+                let name = name.to_string_lossy().to_string();
+                // Skip dotfiles (hidden on Unix; conventionally hidden on
+                // Windows too) so macOS `.DS_Store` and similar noise never
+                // become import candidates.
+                if name.starts_with('.') {
+                    continue;
+                }
+                // Extension-catalog filter: only files whose lowercased
+                // dot-prefixed extension is listed in file_support.json are
+                // import candidates — dropped by name before reading bytes.
+                let lower = name.to_lowercase();
+                let ext_ok = lower
+                    .rfind('.')
+                    .map(|dot| file_type_map().contains_key(&lower[dot..]))
+                    .unwrap_or(false);
+                if !ext_ok {
+                    out.skipped_files += 1;
+                    continue;
+                }
+                // Content sniff (first 8 KiB): a misnamed binary file (e.g. a
+                // .txt that's actually a PDF) is still dropped here, so the
+                // dialog only lists what the upload pipeline would accept.
+                let mut head = vec![0u8; 8192];
+                let n = std::fs::File::open(&path)
+                    .and_then(|mut f| {
+                        use std::io::Read;
+                        f.read(&mut head)
+                    })
+                    .unwrap_or(0);
+                head.truncate(n);
+                if !is_likely_text(&head) {
+                    out.skipped_files += 1;
+                    continue;
+                }
+                // First file seen in this folder -> create its group.
+                let idx = *group_idx.entry(rel.to_path_buf()).or_insert_with(|| {
+                    out.groups.push(RagScanGroup {
+                        rel_path: rel.to_string_lossy().replace('\\', "/"),
+                        files: Vec::new(),
+                    });
+                    out.groups.len() - 1
+                });
+                out.groups[idx].files.push(RagScanFile {
+                    path: path.to_string_lossy().to_string(),
+                    name,
+                    size: md.len(),
+                });
+                *total += 1;
+            }
         }
-        // Extension-catalog filter: only files whose lowercased dot-prefixed
-        // extension is listed in `file_support.json` are import candidates.
-        // Files with no extension or an unsupported one are dropped here by
-        // name, before we read any bytes.
-        let lower = name.to_lowercase();
-        let ext_ok = lower
-            .rfind('.')
-            .map(|dot| file_type_map().contains_key(&lower[dot..]))
-            .unwrap_or(false);
-        if !ext_ok {
-            continue;
-        }
-        // Content sniff (first 8 KiB): a misnamed binary file (e.g. a .txt
-        // that's actually a PDF) is still dropped here, so the dialog only
-        // lists what the upload pipeline would actually accept.
-        let mut head = vec![0u8; 8192];
-        let n = std::fs::File::open(&path)
-            .and_then(|mut f| {
-                use std::io::Read;
-                f.read(&mut head)
-            })
-            .unwrap_or(0);
-        head.truncate(n);
-        if !is_likely_text(&head) {
-            continue;
-        }
-        out.push(RagPickedFile {
-            path: path.to_string_lossy().to_string(),
-            name,
-        });
     }
-    // Stable, readable order (not the OS's arbitrary readdir order).
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    walk(
+        folder,
+        Path::new(""),
+        recursive,
+        ignore,
+        &mut out,
+        &mut group_idx,
+        &mut total,
+    );
+
+    // Stable, readable order: groups by path (root "" first), files by name.
+    out.groups.sort_by(|a, b| {
+        let a_root = a.rel_path.is_empty();
+        let b_root = b.rel_path.is_empty();
+        b_root.cmp(&a_root).then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+    for g in &mut out.groups {
+        g.files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    }
     out
+}
+
+impl RagFolderScan {
+    fn empty() -> Self {
+        Self {
+            root: String::new(),
+            skipped_dirs: 0,
+            skipped_files: 0,
+            groups: Vec::new(),
+            truncated: false,
+        }
+    }
 }
 
 /// Upload (read + decode + embed + index) a single file given by disk path.

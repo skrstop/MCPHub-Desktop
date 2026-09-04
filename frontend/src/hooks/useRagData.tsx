@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import { isTauri } from '@/utils/tauriClient';
-import { BatchPreview, RagChunk, RagDoc, RagDocInfo, RagModelInfo, RagModelLimits, RagPickedFile, RagSettings, RagSearchResult, RagUpdateCheck } from '@/types';
+import { BatchPreview, RagChunk, RagDoc, RagDocInfo, RagFolderScan, RagModelInfo, RagModelLimits, RagPickedFile, RagSettings, RagSearchResult, RagUpdateCheck } from '@/types';
 import {
   listRagDocs,
   getRagSettings,
@@ -52,6 +52,11 @@ const useRagDataState = () => {
   const { showToast } = useToast();
 
   const [ragDocs, setRagDocs] = useState<RagDocInfo[]>([]);
+  // 每次 fetchDocs 完成后自增。导入/删除/更新/批量更新等所有变更路径最终都会
+  // 调 fetchDocs(刷新 ragDocs),但页面的真实列表走独立的后端分页查询
+  // (RagPage 的 ragDocSearchPaged effect)——它无法感知 ragDocs 变化。这个
+  // 版本号作为「数据已变」信号暴露出去,分页 effect 把它加入依赖即可联动刷新。
+  const [docsVersion, setDocsVersion] = useState(0);
   const [enabled, setEnabled] = useState(false);
   const [initializing, setInitializing] = useState(false);
   // Target state of an in-flight toggle ('on' | 'off' | null) so the loading
@@ -140,7 +145,10 @@ const useRagDataState = () => {
   const fetchDocs = useCallback(async () => {
     try {
       const data = await listRagDocs();
-      if (mounted.current) setRagDocs(data);
+      if (mounted.current) {
+        setRagDocs(data);
+        setDocsVersion((v) => v + 1);
+      }
     } catch {
       if (mounted.current) setRagDocs([]);
     }
@@ -584,13 +592,15 @@ const useRagDataState = () => {
   }, []);
 
   // Pick a folder: the backend opens the OS folder picker and scans the
-  // folder's immediate file children (non-recursive). Returns the same shape
-  // as `pickFiles` so the upload loop + dedup merge identically.
-  const pickFolder = useCallback(async (): Promise<RagPickedFile[]> => {
+  // folder — immediate file children only when `recursive` is false, all
+  // descendant dirs when true (dev dirs / hidden entries / symlinks skipped,
+  // 500-file cap). Returns a grouped result the Upload dialog renders as a
+  // tree; multi-file picks are folded into the same shape by the page.
+  const pickFolder = useCallback(async (recursive: boolean): Promise<RagFolderScan> => {
     try {
-      return await pickRagFolder();
+      return await pickRagFolder(recursive);
     } catch {
-      return [];
+      return { root: '', skippedDirs: 0, skippedFiles: 0, groups: [], truncated: false };
     }
   }, []);
 
@@ -846,6 +856,7 @@ const useRagDataState = () => {
   return {
     t,
     ragDocs,
+    docsVersion,
     enabled,
     initializing,
     togglingTo,

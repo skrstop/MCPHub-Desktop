@@ -746,10 +746,14 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // POST /rag/docs/pick — OS multi-file picker (plain-text), returns paths
     if (segs[1] === 'docs' && segs[2] === 'pick' && m === 'POST')
       return { command: 'pick_rag_files', args: {} };
-    // POST /rag/docs/pick-folder — OS folder picker; backend scans the folder's
-    // immediate file children (non-recursive) + returns them as import candidates.
-    if (segs[1] === 'docs' && segs[2] === 'pick-folder' && m === 'POST')
-      return { command: 'pick_rag_folder', args: {} };
+    // POST /rag/docs/pick-folder — OS folder picker; backend scans the folder
+    // (recursive=true walks all descendant dirs, skipping dev dirs/hidden/
+    // symlinks, capped; false = immediate file children only) and returns a
+    // grouped candidate list for the Upload dialog's tree view.
+    if (segs[1] === 'docs' && segs[2] === 'pick-folder' && m === 'POST') {
+      const b = body as { recursive?: boolean } | null;
+      return { command: 'pick_rag_folder', args: { recursive: b?.recursive ?? false } };
+    }
     // POST /rag/docs/upload — upload a single file by disk path (backend reads
     // bytes from disk + detects encoding; no base64/JSON byte transfer). `method`
     // selects the import method: "symlink" (default — record original_path, no

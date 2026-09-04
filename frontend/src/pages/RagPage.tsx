@@ -17,6 +17,7 @@ import {
   Tag,
   Download,
   Check,
+  CheckCircle2,
   ChevronDown,
   Code,
   Plus,
@@ -33,7 +34,7 @@ import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
 import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
 import { getRagTools, ragDocSearchPaged, ragTagSearchPaged } from '@/services/ragService';
-import { RagDoc, RagDocInfo, RagModelInfo, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, BatchPreview } from '@/types';
+import { RagDoc, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, BatchPreview } from '@/types';
 
 const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -164,13 +165,21 @@ const RagPage: React.FC = () => {
     batchUpdate,
     batchUpdateRunning,
     batchProgress,
+    docsVersion,
   } = useRagData();
 
   const [showUpload, setShowUpload] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showVectorSearch, setShowVectorSearch] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<RagDocInfo | null>(null);
-  const [pickedFiles, setPickedFiles] = useState<RagPickedFile[]>([]);
+  // ── 文件选择状态:分组结构(文件夹扫描或多选文件统一折叠为一组) ──
+  // scan.groups 按子文件夹分组;scan.selectedPaths 是勾选集(默认全选)。
+  // 上传时只取勾选的文件,flat 映射回 RagPickedFile 走原有 upload 管线。
+  const [scan, setScan] = useState<RagFolderScan | null>(null);
+  // 勾选状态用 Set<string>(文件绝对路径)表示,null = 未初始化(扫描后默认全选)。
+  const [selectedPaths, setSelectedPaths] = useState<Set<string> | null>(null);  // 「包含子文件夹」递归开关(默认关 = 现状行为),扫描「选择文件夹」时读取。
+  const [folderRecursive, setFolderRecursive] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [uploadTags, setUploadTags] = useState<string[]>([]);
   const [fileNameSearch, setFileNameSearch] = useState('');
   const [selectedTagFilter, setSelectedTagFilter] = useState<Set<string>>(new Set());
@@ -220,39 +229,151 @@ const RagPage: React.FC = () => {
     }
   };
 
+  // ── 选中操作(分组树,无 checkbox:点行选中/取消) ──
+  // null 哨兵(= 全选)物化为具体集合;所有增删都在物化后的集合上进行。
+  // updater 内必须用传入的 prev 物化,不能用闭包里的 selectedPaths
+  // (那是渲染时旧值,连续点击会互相覆盖)。
+  const resolveSelected = (prev: Set<string> | null): Set<string> => {
+    if (prev) return prev;
+    if (!scan) return new Set();
+    return new Set(scan.groups.flatMap((g) => g.files.map((f) => f.path)));
+  };
+  // 当前选中集(selectedPaths 为 null 时 = 全选,即扫描结果中所有文件)。
+  const currentSelected = (): Set<string> => resolveSelected(selectedPaths);
+  // 单个文件选中/取消。
+  const toggleFileSelected = (path: string) => {
+    setSelectedPaths((prev) => {
+      const next = resolveSelected(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+  // 整组切换:组内全选中 -> 清空;否则全选。
+  const toggleGroupSelected = (files: RagScanFile[]) => {
+    setSelectedPaths((prev) => {
+      const next = resolveSelected(prev);
+      const all = files.every((f) => next.has(f.path));
+      if (all) files.forEach((f) => next.delete(f.path));
+      else files.forEach((f) => next.add(f.path));
+      return next;
+    });
+  };
+  // 清除整组已选(部分选中状态下的组级「清除 M」)。
+  const clearGroupSelected = (files: RagScanFile[]) => {
+    setSelectedPaths((prev) => {
+      const next = resolveSelected(prev);
+      files.forEach((f) => next.delete(f.path));
+      return next;
+    });
+  };
+  // 全部选中 / 全部清除(底栏全局按钮)。「清除」必须物化为空集,
+  // 不能保留 null 哨兵,否则 UI 仍显示全选。
+  const setAllSelected = (on: boolean) => {
+    setSelectedPaths(
+      on && scan ? new Set(scan.groups.flatMap((g) => g.files.map((f) => f.path))) : new Set<string>()
+    );
+  };
+
+  // 多选文件:折叠成单组(根)分组结构,与文件夹扫描共用一套渲染/上传。
   const handlePick = async () => {
     const picked = await pickFiles();
     if (picked.length === 0) return;
-    setPickedFiles((prev) => {
-      const existing = new Set(prev.map((f) => f.path));
-      const fresh = picked.filter((f) => !existing.has(f.path));
-      return [...prev, ...fresh];
+    mergeIntoScan({
+      root: '',
+      skippedDirs: 0,
+      skippedFiles: 0,
+      truncated: false,
+      groups: [{ relPath: '', files: picked.map((p) => ({ ...p, size: 0 })) }],
     });
   };
 
-  // Pick a folder: backend scans its immediate file children (non-recursive),
-  // returns the same shape as handlePick so the merge/dedup + upload loop are
-  // identical to multi-file import.
+  // Pick a folder: backend scans per the recursive switch (flat = immediate
+  // children as one root group — the pre-existing behavior; recursive = all
+  // descendant dirs with folder_ignore.json + hidden + symlink skipping, cap
+  // 500). Result replaces the tree (a folder pick is a fresh scan, not a
+  // merge — mixing two roots' relative paths would be misleading).
   const handlePickFolder = async () => {
-    const picked = await pickFolder();
-    if (picked.length === 0) return;
-    setPickedFiles((prev) => {
-      const existing = new Set(prev.map((f) => f.path));
-      const fresh = picked.filter((f) => !existing.has(f.path));
-      return [...prev, ...fresh];
+    setScanning(true);
+    try {
+      const result = await pickFolder(folderRecursive);
+      if (result.groups.length === 0) return;
+      setScan(result);
+      setSelectedPaths(null); // 默认全选
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  // 把一次多选文件合并进现有树:按 path 去重。文件夹扫描是 replace
+  // (handlePickFolder 里直接 setScan),只有多选文件走 merge(用户可以
+  // 「选择文件」多次累加);合并保留原有 root/统计,skipped* 只累加新值。
+  const mergeIntoScan = (next: RagFolderScan) => {
+    setScan((prev) => {
+      if (!prev || prev.groups.length === 0) return next;
+      const existing = new Set(prev.groups.flatMap((g) => g.files.map((f) => f.path)));
+      const merged = [...prev.groups];
+      for (const g of next.groups) {
+        const idx = merged.findIndex((m) => m.relPath === g.relPath);
+        const fresh = g.files.filter((f) => !existing.has(f.path));
+        if (fresh.length === 0) continue;
+        if (idx >= 0) merged[idx] = { ...merged[idx], files: [...merged[idx].files, ...fresh] };
+        else merged.push({ ...g, files: fresh });
+      }
+      return {
+        ...prev,
+        skippedFiles: prev.skippedFiles + next.skippedFiles,
+        groups: merged,
+      };
+    });
+    // 新合并进来的文件默认勾选(不改变已有勾选)。
+    setSelectedPaths((prev) => {
+      const base = prev ?? new Set<string>();
+      const nextSet = new Set(base);
+      for (const g of next.groups) for (const f of g.files) nextSet.add(f.path);
+      return nextSet;
     });
   };
 
-  const removeFile = (idx: number) => {
-    setPickedFiles((prev) => prev.filter((_, i) => i !== idx));
+  // 选中文件的扁平列表(上传管线输入,按组序 + 组内排序保持展示顺序)。
+  const selectedPickedFiles: RagPickedFile[] = useMemo(() => {
+    const sel = currentSelected();
+    if (!scan) return [];
+    return scan.groups
+      .flatMap((g) => g.files)
+      .filter((f) => sel.has(f.path))
+      .map((f) => ({ path: f.path, name: f.name }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scan, selectedPaths]);
+
+  const removeFile = (path: string) => {
+    setScan((prev) => {
+      if (!prev) return prev;
+      const groups = prev.groups
+        .map((g) => ({ ...g, files: g.files.filter((f) => f.path !== path) }))
+        .filter((g) => g.files.length > 0);
+      return { ...prev, groups };
+    });
+    setSelectedPaths((prev) => {
+      if (!prev) return prev;
+      const next = new Set(prev);
+      next.delete(path);
+      return next;
+    });
+  };
+
+  // 重置选择状态(关闭对话框 / 完成导入时)。
+  const resetPickState = () => {
+    setScan(null);
+    setSelectedPaths(null);
   };
 
   const handleUploadConfirm = async () => {
-    if (pickedFiles.length === 0) {
+    if (selectedPickedFiles.length === 0) {
       showToast(t('pages.rag.noFileSelected'), 'error');
       return;
     }
-    const { success, failed } = await upload(pickedFiles, uploadTags, uploadMethod);
+    const { success, failed } = await upload(selectedPickedFiles, uploadTags, uploadMethod);
     // Only claim success when nothing failed - per-file errors are already
     // toasted inside upload. Showing a green "success" while files actually
     // failed (and thus aren't in the list) was misleading.
@@ -263,7 +384,7 @@ const RagPage: React.FC = () => {
     } else {
       showToast(t('pages.rag.uploadPartialFailed', { success, failed }), 'error');
     }
-    setPickedFiles([]);
+    resetPickState();
     setUploadTags([]);
     setShowUpload(false);
   };
@@ -461,8 +582,11 @@ const RagPage: React.FC = () => {
       }
     }, 250);
     return () => clearTimeout(timer);
+    // docsVersion:导入/删除/更新/批量更新完成后 fetchDocs 会自增它,这里
+    // 联动重取当前页(否则变更后的列表停留旧数据,需手动刷新)。requestId
+    // 竞态守卫保证乱序响应不会覆盖较新的结果。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchKey, searchTagsKey, docPage, docPageSize]);
+  }, [searchKey, searchTagsKey, docPage, docPageSize, docsVersion]);
 
   // 过滤条件变化 → 回到第一页（避免停在越界的页码）。每页数变化单独处理。
   useEffect(() => {
@@ -705,8 +829,7 @@ const RagPage: React.FC = () => {
                     type="checkbox"
                     checked={checked}
                     onChange={() => toggleSelect(doc.id)}
-                    className="h-4 w-4 rounded flex-shrink-0"
-                    style={{ accentColor: 'var(--hub-accent)' }}
+                    className="hub-checkbox"
                   />
                   <FileText size={14} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
                   <span className="truncate text-[13px]" style={{ color: 'var(--hub-ink)' }} title={doc.name}>
@@ -867,19 +990,27 @@ const RagPage: React.FC = () => {
         <UploadDialog
           onClose={() => {
             setShowUpload(false);
-            setPickedFiles([]);
+            resetPickState();
             setUploadTags([]);
           }}
-          pickedFiles={pickedFiles}
-          existingPaths={existingPaths}
+          scan={scan}
+          selectedPaths={currentSelected()}
+          scanning={scanning}
+          recursive={folderRecursive}
+          onRecursiveChange={setFolderRecursive}
           onPick={handlePick}
           onPickFolder={handlePickFolder}
+          onToggleFile={toggleFileSelected}
+          onToggleGroup={toggleGroupSelected}
+          onClearGroup={clearGroupSelected}
+          onSetAll={setAllSelected}
           onRemoveFile={removeFile}
           onConfirm={handleUploadConfirm}
           tags={uploadTags}
           onTagsChange={setUploadTags}
           method={uploadMethod}
           onMethodChange={setUploadMethod}
+          existingPaths={existingPaths}
         />
       )}
 
@@ -1027,6 +1158,26 @@ const RagPage: React.FC = () => {
                   {deleteTarget.name}
                 </span>
               </div>
+              {/* 按导入方式区分后果:软链接只删索引/元数据(原始文件不动);
+                  拷贝会连 rag/files 里的拷贝文件一起实际删除。 */}
+              {(deleteTarget.method === 'symlink' || deleteTarget.method === 'copy') && (
+                <div
+                  className="mt-2 flex items-start gap-1.5"
+                  style={{ fontSize: 12, color: deleteTarget.method === 'copy' ? 'var(--hub-warn)' : 'var(--hub-ink-3)' }}
+                >
+                  {deleteTarget.method === 'symlink' ? (
+                    <>
+                      <Link2 size={13} style={{ marginTop: 1, flexShrink: 0 }} />
+                      <span>{t('pages.rag.deleteConfirmSymlink')}</span>
+                    </>
+                  ) : (
+                    <>
+                      <CopyIcon size={13} style={{ marginTop: 1, flexShrink: 0 }} />
+                      <span>{t('pages.rag.deleteConfirmCopy')}</span>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
               <button onClick={() => setDeleteTarget(null)} className="hub-btn">
@@ -1054,6 +1205,29 @@ const RagPage: React.FC = () => {
               <p className="text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
                 {t('pages.rag.batchDeleteConfirm', { count: selectedIds.size })}
               </p>
+              {/* 批量删除按选中集里两种导入方式的数量分别说明后果(legacy 无
+                  method 字段的文档按拷贝处理,后端删除分支同样如此)。 */}
+              {(() => {
+                const picked = docs.filter((d) => selectedIds.has(d.id));
+                const nSymlink = picked.filter((d) => d.method === 'symlink').length;
+                const nCopy = picked.length - nSymlink;
+                return (
+                  <div className="mt-2 space-y-1">
+                    {nSymlink > 0 && (
+                      <div className="flex items-start gap-1.5" style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>
+                        <Link2 size={13} style={{ marginTop: 1, flexShrink: 0 }} />
+                        <span>{t('pages.rag.deleteConfirmSymlinkCount', { count: nSymlink })}</span>
+                      </div>
+                    )}
+                    {nCopy > 0 && (
+                      <div className="flex items-start gap-1.5" style={{ fontSize: 12, color: 'var(--hub-warn)' }}>
+                        <CopyIcon size={13} style={{ marginTop: 1, flexShrink: 0 }} />
+                        <span>{t('pages.rag.deleteConfirmCopyCount', { count: nCopy })}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
               <button onClick={() => setShowBatchDelete(false)} className="hub-btn" disabled={batchDeleting}>
@@ -1459,27 +1633,69 @@ const formatEta = (secs: number): string => {
   return `${m}m ${s.toString().padStart(2, '0')}s`;
 };
 
-/** Upload dialog with a custom file-picker button (i18n) + a list of selected
- *  files below it. The native input is hidden; a labeled button triggers it. */
+/** Upload dialog: two entry points (multi-file pick + folder pick with an
+ *  optional recursive switch) feeding one grouped candidate tree. Each group
+ *  is a sub-folder (root files form the '' group). Selection is checkbox-free:
+ *  clicking a row selects it (left accent bar + highlight + CheckCircle icon),
+ *  group headers carry 全选 N / 清除 text buttons; the chevron collapses/
+ *  expands independently. Only selected files upload; the footer shows the
+ *  selected/total count and the confirm button carries a live count badge.
+ *  Already-imported paths are flagged in red (existing logic). */
 const UploadDialog: React.FC<{
   onClose: () => void;
-  pickedFiles: RagPickedFile[];
-  existingPaths: Set<string>;
+  scan: RagFolderScan | null;
+  /** Currently-checked file paths (null-semantics already resolved by the
+   *  parent — this is always a concrete set). */
+  selectedPaths: Set<string>;
+  scanning: boolean;
+  recursive: boolean;
+  onRecursiveChange: (v: boolean) => void;
   onPick: () => void;
   onPickFolder: () => void;
-  onRemoveFile: (idx: number) => void;
+  onToggleFile: (path: string) => void;
+  onToggleGroup: (files: RagScanFile[]) => void;
+  onClearGroup: (files: RagScanFile[]) => void;
+  onSetAll: (on: boolean) => void;
+  onRemoveFile: (path: string) => void;
   onConfirm: () => void;
   tags: string[];
   onTagsChange: (tags: string[]) => void;
-  // 导入方式（软链接/文件拷贝）。
+  // 导入方式(软链接/文件拷贝)。
   method?: MockMethod;
   onMethodChange?: (m: MockMethod) => void;
-}> = ({ onClose, pickedFiles, existingPaths, onPick, onPickFolder, onRemoveFile, onConfirm, tags, onTagsChange, method, onMethodChange }) => {
+  existingPaths: Set<string>;
+}> = ({
+  onClose, scan, selectedPaths, scanning, recursive, onRecursiveChange,
+  onPick, onPickFolder, onToggleFile, onToggleGroup, onClearGroup, onSetAll,
+  onRemoveFile, onConfirm,
+  tags, onTagsChange, method, onMethodChange, existingPaths,
+}) => {
   const { t } = useTranslation();
   const showMethod = method !== undefined && onMethodChange !== undefined;
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const totalFiles = scan ? scan.groups.reduce((n, g) => n + g.files.length, 0) : 0;
+  const totalSize = scan
+    ? scan.groups.reduce((n, g) => n + g.files.reduce((s, f) => s + (f.size || 0), 0), 0)
+    : 0;
+  // 递归扫描分组多时对话框加宽,扁平/单组保持原宽度。
+  const groupCount = scan?.groups.length ?? 0;
+  const wide = groupCount > 1;
+
+  const toggleCollapse = (rel: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(rel)) next.delete(rel);
+      else next.add(rel);
+      return next;
+    });
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-lg w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
+      <div
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col"
+        style={{ maxWidth: wide ? 640 : 512 }}
+      >
         <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
           <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">{t('pages.rag.uploadDialogTitle')}</h2>
           <button onClick={onClose} className="hub-icon-btn sm">
@@ -1490,7 +1706,7 @@ const UploadDialog: React.FC<{
           <p className="text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
             {t('pages.rag.uploadHint')}
           </p>
-          {/* 导入方式选择（软链接 / 文件拷贝）+ 帮助按钮（需求1）——仿 skill 安装的分段切换样式，标题与选择同行 */}
+          {/* 导入方式选择(软链接 / 文件拷贝)+ 帮助按钮 —— 仿 skill 安装的分段切换样式 */}
           {showMethod && (
             <div className="flex items-center gap-2 flex-wrap">
               <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
@@ -1538,49 +1754,221 @@ const UploadDialog: React.FC<{
               </div>
             </div>
           )}
-          {/* OS file picker (Tauri dialog) — backend reads from disk by path,
+          {/* OS pickers (Tauri dialog) — backend reads from disk by path,
               no bytes/base64 over IPC. Two entry points: multi-file pick +
-              folder pick (scans the folder's immediate file children). Both
-              append to the same list and share the upload pipeline. */}
+              folder pick (flat or recursive per the switch beside it). */}
           <div className="flex items-center gap-2 flex-wrap">
             <button type="button" onClick={onPick} className="hub-btn">
               <Upload size={13} /> {t('pages.rag.uploadSelect')}
             </button>
-            <button type="button" onClick={onPickFolder} className="hub-btn" title={t('pages.rag.uploadSelectFolderHint', '选择文件夹，自动导入其下的一级文件')}>
-              <FolderOpen size={13} /> {t('pages.rag.uploadSelectFolder', '选择文件夹')}
+            <button type="button" onClick={onPickFolder} className="hub-btn" disabled={scanning}>
+              {scanning ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}{' '}
+              {t('pages.rag.uploadSelectFolder')}
             </button>
+            {/* 递归开关:仅影响「选择文件夹」的扫描深度(hub-switch,同全局开关样式) */}
+            <span
+              className="flex items-center gap-1.5 text-[12px] cursor-pointer select-none"
+              style={{ color: 'var(--hub-ink-2)' }}
+              title={t('pages.rag.recursiveHint', '开启后递归扫描所选文件夹的全部子目录;关闭只导入一级文件')}
+              onClick={() => onRecursiveChange(!recursive)}
+            >
+              <Switch checked={recursive} onCheckedChange={onRecursiveChange} size="compact" />
+              {t('pages.rag.recursive', '包含子文件夹')}
+            </span>
           </div>
-          {pickedFiles.length > 0 && (
-            <div className="space-y-1">
-              {pickedFiles.map((file, idx) => {
-                const exists = existingPaths.has(file.path);
-                return (
+          {/* 扫描中占位(大目录递归扫描可能 >1s) */}
+          {scanning && (
+            <div className="hub-card flex flex-col items-center gap-2" style={{ padding: 24 }}>
+              <Loader2 size={18} className="animate-spin" style={{ color: 'var(--hub-ink-2)' }} />
+              <span className="text-[12.5px]" style={{ color: 'var(--hub-ink-2)' }}>
+                {t('pages.rag.scanningFolder', '正在扫描文件夹…')}
+              </span>
+            </div>
+          )}
+          {/* 分组树:统计条 + 每个子文件夹一组 */}
+          {!scanning && scan && totalFiles > 0 && (
+            <div className="space-y-2">
+              {/* 统计条:根路径 + 文件夹/文件/大小 */}
+              <div
+                className="hub-card flex items-center gap-2 flex-wrap"
+                style={{ padding: '8px 12px', background: 'var(--hub-bg-2)' }}
+              >
+                <FolderOpen size={13} style={{ color: 'var(--hub-ink-3)' }} />
+                {scan.root && (
+                  <span className="hub-mono text-[12px] truncate" style={{ color: 'var(--hub-ink)', maxWidth: 220 }} title={scan.root}>
+                    {scan.root}
+                  </span>
+                )}
+                <span className="hub-tag" style={{ fontSize: 10 }}>
+                  {t('pages.rag.scanGroupsCount', { count: groupCount })}
+                </span>
+                <span className="hub-tag" style={{ fontSize: 10 }}>
+                  {t('pages.rag.filesSelected', { count: totalFiles })}
+                </span>
+                {totalSize > 0 && (
+                  <span className="hub-tag" style={{ fontSize: 10 }}>
+                    {formatSize(totalSize)}
+                  </span>
+                )}
+              </div>
+              {scan.truncated && (
                 <div
-                  key={`${file.path}-${idx}`}
-                  className="flex items-center justify-between gap-2 hub-card"
-                  style={{ padding: '6px 10px', background: 'var(--hub-surface)' }}
+                  className="flex items-start gap-2 hub-card"
+                  style={{ padding: '8px 12px', borderColor: 'var(--hub-warn)' }}
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <FileText size={13} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
-                    <div className="flex flex-col min-w-0">
-                      <span className="truncate text-[12.5px]" style={{ color: 'var(--hub-ink)' }} title={file.path}>
-                        {file.name}
-                      </span>
-                      {exists && (
-                        <span className="text-[11px]" style={{ color: 'var(--hub-err)' }}>
-                          {t('pages.rag.pathExists')}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <button className="hub-icon-btn sm" onClick={() => onRemoveFile(idx)} title={t('pages.rag.removeFile')}>
-                    <X size={13} />
-                  </button>
+                  <AlertTriangle size={14} style={{ color: 'var(--hub-warn)', marginTop: 2, flexShrink: 0 }} />
+                  <span className="text-[12px]" style={{ color: 'var(--hub-ink-2)' }}>
+                    {t('pages.rag.scanTruncated', {
+                      kept: totalFiles,
+                      cap: 500,
+                    })}
+                  </span>
                 </div>
-                );
-              })}
-              <div className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
-                {t('pages.rag.filesSelected', { count: pickedFiles.length })}
+              )}
+              {(scan.skippedDirs > 0 || scan.skippedFiles > 0) && !scan.truncated && (
+                <div className="flex items-center gap-1.5 flex-wrap" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}>
+                  <Info size={11} />
+                  {scan.skippedDirs > 0 && (
+                    <span>
+                      {t('pages.rag.scanSkippedDirs', { count: scan.skippedDirs })}
+                    </span>
+                  )}
+                  {scan.skippedDirs > 0 && scan.skippedFiles > 0 && '·'}
+                  {scan.skippedFiles > 0 && (
+                    <span>{t('pages.rag.scanSkippedFiles', { count: scan.skippedFiles })}</span>
+                  )}
+                </div>
+              )}
+              {/* 组列表 — 无 checkbox 的选中交互:整行点击 = 选中/取消,选中态
+                  由左侧 accent 竖条 + 行高亮 + CheckCircle 图标表达;组头右侧
+                  「全选 N / 清除」文本按钮整组操作;chevron 只负责折叠。 */}
+              <div className="hub-card overflow-hidden">
+                {scan.groups.map((g) => {
+                  const isCollapsed = collapsed.has(g.relPath);
+                  const allChecked = g.files.every((f) => selectedPaths.has(f.path));
+                  const someChecked = g.files.some((f) => selectedPaths.has(f.path));
+                  const groupActive = allChecked || someChecked;
+                  return (
+                    <div key={g.relPath || '__root__'} className="border-b last:border-b-0" style={{ borderColor: 'var(--hub-line-2)' }}>
+                      {/* 组头:右侧全选/清除按钮整组切换;chevron 折叠 */}
+                      <div
+                        className="flex items-center gap-2 select-none"
+                        style={{ padding: '6px 10px', background: 'var(--hub-bg-2)' }}
+                      >
+                        <span
+                          onClick={(e) => { e.stopPropagation(); toggleCollapse(g.relPath); }}
+                          title={isCollapsed ? t('pages.rag.expandGroup', '展开') : t('pages.rag.collapseGroup', '收起')}
+                          className="cursor-pointer hover:opacity-70 transition-opacity"
+                          style={{ display: 'inline-flex', alignItems: 'center', padding: 2 }}
+                        >
+                          <ChevronDown
+                            size={13}
+                            style={{
+                              color: 'var(--hub-ink-3)',
+                              transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                              transition: 'transform 0.15s ease',
+                            }}
+                          />
+                        </span>
+                        <FolderOpen
+                          size={13}
+                          style={{ color: groupActive ? 'var(--hub-ink)' : 'var(--hub-ink-3)', flexShrink: 0 }}
+                        />
+                        <span
+                          className="hub-mono text-[12px] font-medium truncate"
+                          style={{ color: 'var(--hub-ink)' }}
+                          title={g.relPath || scan.root}
+                        >
+                          {g.relPath || t('pages.rag.scanRootGroup', '(根目录)')}
+                        </span>
+                        {/* 全选/清除:文本按钮,选中数 >0 时显示已选比例 */}
+                        <button
+                          type="button"
+                          onClick={() => onToggleGroup(g.files)}
+                          className="ml-auto flex-shrink-0 text-[11.5px] font-medium cursor-pointer bg-transparent border-0 transition-colors"
+                          style={{ color: allChecked ? 'var(--hub-ink-3)' : 'var(--hub-ink-2)', padding: '2px 6px' }}
+                        >
+                          {allChecked
+                            ? t('pages.rag.clearGroup', '清除')
+                            : someChecked
+                              ? t('pages.rag.selectAllGroupRemaining', '补选 {{count}}', { count: g.files.length - g.files.filter((f) => selectedPaths.has(f.path)).length })
+                              : t('pages.rag.selectAllGroup', '全选 {{count}}', { count: g.files.length })}
+                        </button>
+                        {/* 部分选中时提供独立「清除 M」(否则点行逐个取消才能清空) */}
+                        {someChecked && !allChecked && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onClearGroup(g.files)}
+                              className="flex-shrink-0 text-[11.5px] cursor-pointer bg-transparent border-0 transition-colors"
+                              style={{ color: 'var(--hub-ink-3)', padding: '2px 6px' }}
+                            >
+                              {t('pages.rag.clearGroupCount', '清除 {{count}}', { count: g.files.filter((f) => selectedPaths.has(f.path)).length })}
+                            </button>
+                            <span className="hub-mono text-[11px] flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
+                              {g.files.filter((f) => selectedPaths.has(f.path)).length}/{g.files.length}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      {/* 组内文件(收起时隐藏):整行点击 = 切换选中;✕ 仅移除 */}
+                      {!isCollapsed &&
+                        g.files.map((file) => {
+                          const exists = existingPaths.has(file.path);
+                          const checked = selectedPaths.has(file.path);
+                          return (
+                            <div
+                              key={file.path}
+                              className="group/file relative flex items-center gap-2 select-none cursor-pointer transition-colors"
+                              style={{
+                                padding: '5px 10px 5px 14px',
+                                background: checked ? 'var(--hub-surface-hover)' : undefined,
+                              }}
+                              onClick={() => onToggleFile(file.path)}
+                              role="option"
+                              aria-selected={checked}
+                            >
+                              {/* 选中标记:左侧 accent 竖条 */}
+                              {checked && (
+                                <span
+                                  className="absolute left-0 top-0 bottom-0"
+                                  style={{ width: 2.5, background: 'var(--hub-ink)', borderRadius: '0 2px 2px 0' }}
+                                />
+                              )}
+                              {checked ? (
+                                <CheckCircle2 size={13} style={{ color: 'var(--hub-ink)', flexShrink: 0 }} />
+                              ) : (
+                                <FileText size={13} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} className="opacity-60 transition-opacity group-hover/file:opacity-100" />
+                              )}
+                              <span
+                                className="truncate text-[12.5px]"
+                                style={{ color: checked ? 'var(--hub-ink)' : 'var(--hub-ink-2)' }}
+                                title={file.path}
+                              >
+                                {file.name}
+                              </span>
+                              {exists && (
+                                <span className="text-[11px] flex-shrink-0" style={{ color: 'var(--hub-err)' }}>
+                                  {t('pages.rag.pathExists')}
+                                </span>
+                              )}
+                              <span className="hub-mono text-[11px] ml-auto flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
+                                {file.size > 0 ? formatSize(file.size) : ''}
+                              </span>
+                              <button
+                                className="hub-icon-btn sm opacity-0 group-hover/file:opacity-100"
+                                onClick={(e) => { e.stopPropagation(); onRemoveFile(file.path); }}
+                                title={t('pages.rag.removeFile')}
+                                style={{ width: 22, height: 22 }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1598,11 +1986,45 @@ const UploadDialog: React.FC<{
           </div>
         </div>
         <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          {totalFiles > 0 && (
+            <>
+              <span className="hub-mono text-[12px] mr-auto" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.scanSelectedCount', { selected: selectedPaths.size, total: totalFiles })}
+              </span>
+              {/* 全局 全选/清除:与组头按钮同语义,一键覆盖所有分组 */}
+              <button
+                type="button"
+                onClick={() => onSetAll(selectedPaths.size < totalFiles)}
+                className="text-[12px] font-medium cursor-pointer bg-transparent border-0 transition-colors"
+                style={{ color: 'var(--hub-ink-2)', padding: '2px 6px' }}
+              >
+                {selectedPaths.size < totalFiles
+                  ? t('pages.rag.selectAllAll', '全选 {{count}}', { count: totalFiles })
+                  : t('pages.rag.clearAllAll', '清除 {{count}}', { count: totalFiles })}
+              </button>
+            </>
+          )}
           <button onClick={onClose} className="hub-btn">
             {t('pages.rag.cancel')}
           </button>
-          <button onClick={onConfirm} className="hub-btn primary">
+          <button onClick={onConfirm} className="hub-btn primary" disabled={selectedPaths.size === 0}>
             {t('pages.rag.uploadConfirm')}
+            {selectedPaths.size > 0 && (
+              <span
+                className="hub-mono"
+                style={{
+                  fontSize: 11,
+                  background: 'rgba(255,255,255,0.22)',
+                  borderRadius: 9,
+                  padding: '0 7px',
+                  height: 17,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                }}
+              >
+                {selectedPaths.size}
+              </span>
+            )}
           </button>
         </div>
       </div>

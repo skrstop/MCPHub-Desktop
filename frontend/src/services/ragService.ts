@@ -4,6 +4,7 @@ import {
   RagDocInfo,
   RagChunk,
   RagChunkPage,
+  RagFolderScan,
   RagPickedFile,
   RagSettings,
   RagSearchResult,
@@ -104,15 +105,17 @@ export const pickRagFiles = async (): Promise<RagPickedFile[]> => {
 };
 
 /**
- * Open the OS folder picker, scan the folder's immediate (non-recursive) file
- * children, and return them as import candidates — same shape as pickRagFiles
- * so the rest of the upload pipeline (per-file upload + progress) is identical.
- * Hidden files + sub-directories are skipped by the backend.
+ * Open the OS folder picker and scan the folder for import candidates,
+ * grouped per sub-directory. `recursive=false` scans only immediate file
+ * children (single root group, the pre-existing behavior); `recursive=true`
+ * walks all descendant directories, skipping dev dirs (folder_ignore.json),
+ * hidden entries, and symlinks, with a 500-file candidate cap. No file bytes
+ * cross the IPC boundary.
  */
-export const pickRagFolder = async (): Promise<RagPickedFile[]> => {
-  const response: ApiResponse<RagPickedFile[]> = await apiPost('/rag/docs/pick-folder', {});
+export const pickRagFolder = async (recursive: boolean): Promise<RagFolderScan> => {
+  const response: ApiResponse<RagFolderScan> = await apiPost('/rag/docs/pick-folder', { recursive });
   if (!response.success) throw new Error(response.message || 'Failed to pick folder');
-  return response.data || [];
+  return response.data || { root: '', skippedDirs: 0, skippedFiles: 0, groups: [], truncated: false };
 };
 
 /**

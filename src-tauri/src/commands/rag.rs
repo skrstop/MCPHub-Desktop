@@ -4,8 +4,8 @@
 use tauri::AppHandle;
 
 use crate::models::rag::{
-    BatchPreview, RagChunkPage, RagDoc, RagDocInfo, RagPickedFile, RagSearchResult, RagSettings,
-    RagStatus, RagTagPage, RagTagStat, RagUpdateCheck,
+    BatchPreview, RagChunkPage, RagDoc, RagDocInfo, RagFolderScan, RagPickedFile, RagSearchResult,
+    RagSettings, RagStatus, RagTagPage, RagTagStat, RagUpdateCheck,
 };
 use crate::rag::service;
 
@@ -77,13 +77,15 @@ pub async fn pick_rag_files(app: AppHandle) -> Result<Vec<RagPickedFile>, String
     Ok(service::pick_files(&app))
 }
 
-/// Open the OS folder picker, scan the folder's immediate (non-recursive) file
-/// children, and return them as import candidates. Hidden files + sub-directories
-/// are skipped. Same return shape as `pick_rag_files` so the upload pipeline is
-/// identical to multi-file import.
+/// Open the OS folder picker, scan the folder, and return import candidates
+/// grouped per sub-directory. `recursive=false` (the pre-existing behavior)
+/// scans only immediate file children as a single root group; `recursive=true`
+/// walks all descendant directories (skipping folder_ignore.json dev dirs,
+/// hidden entries, and symlinks) with a 500-file candidate cap. Same per-file
+/// filtering as `pick_rag_files`. No file bytes cross the IPC boundary.
 #[tauri::command]
-pub async fn pick_rag_folder(app: AppHandle) -> Result<Vec<RagPickedFile>, String> {
-    Ok(service::pick_folder(&app))
+pub async fn pick_rag_folder(app: AppHandle, recursive: bool) -> Result<RagFolderScan, String> {
+    Ok(service::pick_folder(&app, recursive))
 }
 
 /// Read + decode-to-UTF-8 + chunk + embed + index a single file (by disk

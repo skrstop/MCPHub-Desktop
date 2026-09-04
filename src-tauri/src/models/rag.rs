@@ -304,6 +304,50 @@ pub struct RagPickedFile {
     pub name: String,
 }
 
+/// A picked/scan candidate file with its size, for the grouped folder-scan
+/// result (the Upload dialog shows sizes + a total in its summary bar).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagScanFile {
+    pub path: String,
+    pub name: String,
+    /// File size in bytes (0 if metadata failed — the file is still listed).
+    pub size: u64,
+}
+
+/// One folder group in a recursive folder-scan result: the folder's path
+/// relative to the scanned root ("" for the root itself) + the import
+/// candidates it contains (already filtered by the same rules as the flat
+/// scan: extension catalog + content sniff + not hidden).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagScanGroup {
+    /// Folder path relative to the scan root; "" for the root's own files.
+    pub rel_path: String,
+    pub files: Vec<RagScanFile>,
+}
+
+/// Result of a folder scan (recursive or flat) for the Upload dialog's grouped
+/// tree view. Flat scans return a single group (the root). The frontend folds
+/// multi-file picks into a single pseudo-group too, so all three entry points
+/// share one rendering.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagFolderScan {
+    /// Absolute path of the scanned folder ("" for multi-file picks).
+    pub root: String,
+    /// Number of sub-directories that were skipped by folder_ignore.json
+    /// (recursive scans only; 0 for flat scans).
+    pub skipped_dirs: u32,
+    /// Number of candidate files dropped because they exceeded the scan cap.
+    /// 0 unless `truncated` is true.
+    pub skipped_files: u32,
+    pub groups: Vec<RagScanGroup>,
+    /// True iff the scan stopped early at the candidate cap (`SCAN_FILE_CAP`);
+    /// the summary shows a warning and suggests picking a smaller folder.
+    pub truncated: bool,
+}
+
 /// Result of an upload batch.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]

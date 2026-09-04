@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG 递归文件夹导入 — 页面原型</title>
+<style>
+/* ===== 项目设计 token(与 frontend/src/index.css 保持一致)===== */
+:root {
+  --hub-bg: oklch(0.985 0.002 250);
+  --hub-bg-2: oklch(0.975 0.002 250);
+  --hub-surface: #ffffff;
+  --hub-surface-hover: oklch(0.97 0.003 250);
+  --hub-ink: oklch(0.18 0.01 250);
+  --hub-ink-2: oklch(0.42 0.01 250);
+  --hub-ink-3: oklch(0.6 0.01 250);
+  --hub-line: oklch(0.92 0.004 250);
+  --hub-line-2: oklch(0.96 0.003 250);
+  --hub-accent: oklch(0.55 0.15 250);
+  --hub-accent-soft: oklch(0.95 0.04 250);
+  --hub-ok: oklch(0.66 0.15 145);
+  --hub-warn: oklch(0.78 0.13 80);
+  --hub-err: oklch(0.62 0.18 25);
+  --hub-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--hub-bg);
+  color: var(--hub-ink);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 40px 32px 80px;
+}
+.page-title { font-size: 20px; font-weight: 600; letter-spacing: -0.018em; margin-bottom: 6px; }
+.page-sub { font-size: 13px; color: var(--hub-ink-3); margin-bottom: 32px; }
+
+.state-label {
+  font-size: 12px; font-weight: 600; color: var(--hub-ink-2);
+  margin: 44px 0 10px; display: flex; align-items: center; gap: 8px;
+}
+.state-label .num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 6px; font-size: 11px;
+  background: var(--hub-accent-soft); color: var(--hub-accent);
+}
+.state-desc { font-size: 12.5px; color: var(--hub-ink-3); margin: -4px 0 14px; padding-left: 28px; }
+
+/* ===== 通用组件样式(与 index.css 一致)===== */
+.hub-card { background: var(--hub-surface); border: 1px solid var(--hub-line); border-radius: 10px; }
+.hub-tag {
+  display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 5px;
+  font-size: 11px; color: var(--hub-ink-2); background: var(--hub-bg-2);
+  border: 1px solid var(--hub-line); font-family: var(--hub-mono); white-space: nowrap;
+}
+.hub-tag.accent { color: var(--hub-accent); background: var(--hub-accent-soft); border-color: transparent; }
+.hub-mono { font-family: var(--hub-mono); font-feature-settings: 'ss01'; letter-spacing: -0.01em; }
+.hub-btn {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+  font-size: 12.5px; border-radius: 7px; border: 1px solid var(--hub-line);
+  background: var(--hub-surface); color: var(--hub-ink); cursor: pointer; font-family: inherit;
+}
+.hub-btn:hover { background: var(--hub-surface-hover); }
+.hub-btn.primary { background: var(--hub-ink); color: var(--hub-bg); border-color: var(--hub-ink); }
+.hub-btn.sm { height: 26px; padding: 0 9px; font-size: 12px; }
+.hub-btn.danger { color: var(--hub-err); }
+.hub-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 6px; border: 1px solid transparent;
+  background: transparent; color: var(--hub-ink-2); cursor: pointer;
+}
+.hub-icon-btn:hover { background: var(--hub-surface-hover); border-color: var(--hub-line); }
+.hub-icon-btn.sm { width: 26px; height: 26px; border-radius: 6px; }
+svg { flex-shrink: 0; }
+
+/* ===== 对话框 ===== */
+.scrim {
+  background: repeating-linear-gradient(45deg, oklch(0.93 0.003 250), oklch(0.93 0.003 250) 10px, oklch(0.96 0.003 250) 10px, oklch(0.96 0.003 250) 20px);
+  padding: 24px; border-radius: 12px; border: 1px solid var(--hub-line-2);
+  display: flex; align-items: flex-start; justify-content: center;
+}
+.dialog {
+  background: var(--hub-surface); border-radius: 12px; box-shadow: 0 20px 50px rgb(0 0 0 / 0.14);
+  width: 560px; max-width: 100%; border: 1px solid var(--hub-line-2);
+  display: flex; flex-direction: column; max-height: 640px;
+}
+.dialog.wide { width: 640px; }
+.dlg-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 20px; border-bottom: 1px solid var(--hub-line-2);
+}
+.dlg-title { font-size: 15px; font-weight: 700; }
+.dlg-body { padding: 18px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.dlg-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  padding: 16px 20px; border-top: 1px solid var(--hub-line-2);
+}
+.hint { font-size: 12.5px; color: var(--hub-ink-3); }
+
+/* 分段切换(导入方式/扫描深度同款) */
+.seg {
+  display: inline-flex; align-items: center; border-radius: 7px;
+  border: 1px solid var(--hub-line); background: var(--hub-bg-2); overflow: hidden;
+}
+.seg button {
+  display: flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 12px;
+  border: none; cursor: pointer; border-radius: 5px; font-family: inherit;
+  background: transparent; color: var(--hub-ink-3); font-weight: 400;
+}
+.seg button.on { background: var(--hub-surface); color: var(--hub-ink); font-weight: 600; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.label { font-size: 13px; font-weight: 500; }
+
+/* Switch */
+.switch { width: 30px; height: 17px; border-radius: 9px; background: var(--hub-ink); position: relative; display: inline-block; cursor: pointer; }
+.switch.off { background: oklch(0.85 0.005 250); }
+.switch::after {
+  content: ''; position: absolute; top: 2px; left: 15px; width: 13px; height: 13px;
+  border-radius: 50%; background: #fff; transition: left .15s ease;
+}
+.switch.off::after { left: 2px; }
+
+/* 文件行 */
+.file-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: var(--hub-bg-2); border: 1px solid var(--hub-line-2); border-radius: 8px;
+}
+.file-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-sub { font-size: 11px; color: var(--hub-err); }
+.warn-line { font-size: 11px; color: var(--hub-err); display: flex; align-items: center; gap: 4px; }
+
+/* ===== 分组树(新)===== */
+.scan-summary {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: var(--hub-bg-2); border: 1px solid var(--hub-line-2); border-radius: 8px;
+}
+.scan-summary .stats { display: flex; gap: 6px; flex-wrap: wrap; }
+.group-tree { border: 1px solid var(--hub-line-2); border-radius: 8px; overflow: hidden; }
+.grp-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--hub-bg-2); border-bottom: 1px solid var(--hub-line-2);
+  cursor: pointer;
+}
+.grp-head .path { font-size: 12.5px; font-weight: 500; font-family: var(--hub-mono); }
+.grp-head .cnt { font-size: 11px; color: var(--hub-ink-3); font-family: var(--hub-mono); margin-left: auto; }
+.grp-files { padding: 4px 8px 6px 30px; display: flex; flex-direction: column; gap: 3px; background: var(--hub-surface); }
+.grp-file { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px; font-size: 12px; }
+.grp-file:hover { background: var(--hub-surface-hover); }
+.grp-file .sz { margin-left: auto; font-size: 11px; color: var(--hub-ink-3); font-family: var(--hub-mono); }
+.grp-file .x { opacity: 0; }
+.grp-file:hover .x { opacity: 1; }
+.grp-muted { font-size: 11.5px; color: var(--hub-ink-3); padding: 8px 12px; display: flex; align-items: center; gap: 6px; }
+.grp-muted .hub-tag { cursor: pointer; }
+
+.excluded-box {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 8px 12px; border: 1px dashed var(--hub-line); border-radius: 8px;
+  font-size: 11.5px; color: var(--hub-ink-3);
+}
+.spin {
+  width: 14px; height: 14px; border: 2px solid var(--hub-line); border-top-color: var(--hub-ink-2);
+  border-radius: 50%; animation: r .7s linear infinite; display: inline-block;
+}
+@keyframes r { to { transform: rotate(360deg); } }
+
+/* checkbox */
+.cbx { width: 14px; height: 14px; accent-color: var(--hub-accent); cursor: pointer; }
+.cb-xs { width: 12px; height: 12px; accent-color: var(--hub-accent); cursor: pointer; }
+
+.note-box {
+  background: var(--hub-surface); border: 1px solid var(--hub-line);
+  border-radius: 10px; padding: 18px 22px; max-width: 700px;
+  font-size: 13px; color: var(--hub-ink-2); line-height: 1.9;
+}
+.note-box h3 { font-size: 13px; margin-bottom: 8px; color: var(--hub-ink); }
+.note-box code { font-family: var(--hub-mono); font-size: 12px; background: var(--hub-bg-2); padding: 1px 5px; border-radius: 4px; }
+.note-box ul { padding-left: 18px; }
+
+/* 确认按钮徽标 */
+.confirm-count {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 7px;
+  border-radius: 9px; background: rgb(255 255 255 / 0.22); font-size: 11px;
+  font-family: var(--hub-mono);
+}
+</style>
+</head>
+<body>
+
+<div class="page-title">RAG 文档导入 — 递归扫描文件夹</div>
+<div class="page-sub">页面原型(与项目设计 token 一致)· 确认后进入逻辑实现 · <span class="hub-mono" style="font-size:12px">doc/rag_recursive_folder_import_mockup.html</span></div>
+
+<!-- ═══════════════ 状态 1 ═══════════════ -->
+<div class="state-label"><span class="num">1</span> 初始对话框 — 「选择文件夹」旁新增递归开关</div>
+<div class="state-desc">现有 UploadDialog 微调:按钮行不变,下方新增「包含子文件夹」开关 + 「自动排除常见目录」开关(默认均开)。关闭递归开关时行为与现状完全一致(仅一级)。</div>
+<div class="scrim">
+  <div class="dialog">
+    <div class="dlg-head">
+      <span class="dlg-title">导入文档</span>
+      <button class="hub-icon-btn sm">✕</button>
+    </div>
+    <div class="dlg-body">
+      <p class="hint">选择要导入 RAG 知识库的文档,支持批量选择与文件夹导入。</p>
+
+      <!-- 导入方式(现有,不变) -->
+      <div class="row">
+        <span class="label">导入方式</span>
+        <span class="hub-tag" title="说明">?</span>
+        <div class="seg">
+          <button class="on">🔗 软链接</button>
+          <button>⧉ 文件拷贝</button>
+        </div>
+      </div>
+
+      <!-- 按钮行(现有,不变) -->
+      <div class="row">
+        <button class="hub-btn">⬆ 选择文件</button>
+        <button class="hub-btn" title="选择文件夹导入">📂 选择文件夹</button>
+      </div>
+
+      <!-- ★ 新增:递归开关(选文件夹前/后均可调,扫描时读取)。
+           排除目录不做开关——由 runtimes/rag/folder_ignore.json 配置驱动,
+           递归扫描时自动跳过 node_modules/dist/target 等开发类目录。 -->
+      <div class="hub-card" style="padding:10px 12px; display:flex; flex-direction:column; gap:6px;">
+        <div class="row" style="justify-content:space-between;">
+          <div class="row" style="flex-wrap:nowrap;">
+            <span style="font-size:12.5px;">包含子文件夹(递归扫描)</span>
+            <span class="hub-tag" title="勾选后扫描所选文件夹下所有层级的子目录;不勾选只导入一级文件(现状行为)">?</span>
+          </div>
+          <span class="switch"></span>
+        </div>
+        <div class="hint" style="font-size:11px; display:flex; align-items:center; gap:4px;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+          递归时自动跳过 node_modules、dist、target 等开发类目录
+          <span class="hub-mono" style="font-size:10px;">folder_ignore.json</span>
+        </div>
+      </div>
+
+      <div class="hint" style="margin-top:-6px;">尚未选择文件</div>
+
+      <!-- 标签(现有,不变) -->
+      <div>
+        <div class="row" style="margin-bottom:6px;">🏷 <span class="label">标签</span></div>
+        <div class="hub-card" style="padding:6px 10px;">
+          <span class="hint" style="font-size:12px;">输入后回车添加标签,应用到本次全部文档…</span>
+        </div>
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <button class="hub-btn">取消</button>
+      <button class="hub-btn" style="opacity:.5; cursor:not-allowed;">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 状态 2 ═══════════════ -->
+<div class="state-label"><span class="num">2</span> 递归扫描完成 — 按文件夹分组展示</div>
+<div class="state-desc">选完文件夹后,列表从「扁平文件列表」升级为「分组树」:每个子文件夹一行(可整组勾选/取消、展开/收起),根目录文件单独一组。顶部显示扫描统计;底部提示被排除的目录与文件数。对话框加宽至 640px。</div>
+<div class="scrim">
+  <div class="dialog wide">
+    <div class="dlg-head">
+      <span class="dlg-title">导入文档</span>
+      <button class="hub-icon-btn sm">✕</button>
+    </div>
+    <div class="dlg-body">
+
+      <!-- 导入方式(不变,原型中略去以聚焦新内容) -->
+      <div class="row">
+        <span class="label">导入方式</span>
+        <div class="seg">
+          <button class="on">🔗 软链接</button>
+          <button>⧉ 文件拷贝</button>
+        </div>
+        <div class="row" style="margin-left:auto;">
+          <button class="hub-btn">⬆ 选择文件</button>
+          <button class="hub-btn">📂 选择文件夹</button>
+        </div>
+      </div>
+
+      <!-- ★ 递归开关(选中文件夹后仍可改,重新点「选择文件夹」重扫) -->
+      <div class="hub-card" style="padding:10px 12px; display:flex; flex-direction:column; gap:6px;">
+        <div class="row" style="justify-content:space-between;">
+          <div class="row" style="flex-wrap:nowrap;"><span style="font-size:12.5px;">包含子文件夹(递归扫描)</span></div>
+          <span class="switch"></span>
+        </div>
+        <div class="hint" style="font-size:11px; display:flex; align-items:center; gap:4px;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+          递归时自动跳过开发类目录 <span class="hub-mono" style="font-size:10px;">folder_ignore.json</span>
+        </div>
+      </div>
+
+      <!-- ★ 扫描统计条 -->
+      <div class="scan-summary">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+        <span style="font-size:12.5px; font-weight:500;" class="hub-mono">~/Documents/my-wiki</span>
+        <div class="stats">
+          <span class="hub-tag accent">5 个文件夹</span>
+          <span class="hub-tag">86 个文件</span>
+          <span class="hub-tag">24.5 MB</span>
+        </div>
+        <button class="hub-btn sm" style="margin-left:auto;" title="重新扫描">↻ 重扫</button>
+      </div>
+
+      <!-- ★ 分组树:根目录文件(默认展开) -->
+      <div class="group-tree">
+        <div class="grp-head">
+          <span class="cbx" type="checkbox" checked></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2" style="transform:rotate(90deg)"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="path">(根目录)</span>
+          <span class="cnt">12 个文件 · 全选</span>
+        </div>
+        <div class="grp-files">
+          <div class="grp-file">
+            <span class="cb-xs" checked></span>
+            <span class="file-name">README.md</span>
+            <span class="sz">4.2 KB</span>
+          </div>
+          <div class="grp-file">
+            <span class="cb-xs" checked></span>
+            <span class="file-name">TODO.md</span>
+            <span class="warn-line">⚠ 已导入过</span>
+            <span class="sz">1.1 KB</span>
+          </div>
+          <div class="grp-file" style="color:var(--hub-ink-3);">
+            <span class="cb-xs"></span>
+            <span class="file-name" style="text-decoration:line-through;">设计稿.fig</span>
+            <span class="sz">— 已过滤(不支持)</span>
+          </div>
+          <div class="hint" style="font-size:11px; padding:2px 6px;">… 其余 9 个文件</div>
+        </div>
+
+        <!-- 子文件夹组(默认收起) -->
+        <div class="grp-head" style="border-top:1px solid var(--hub-line-2);">
+          <span class="cbx" checked></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-accent)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="path">notes/</span>
+          <span class="cnt">34 个文件 · 全选</span>
+        </div>
+
+        <div class="grp-head" style="border-top:1px solid var(--hub-line-2);">
+          <span class="cbx" checked></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-accent)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="path">notes/2026-09/</span>
+          <span class="cnt">21 个文件 · 全选</span>
+        </div>
+
+        <div class="grp-head" style="border-top:1px solid var(--hub-line-2);">
+          <span class="cbx"></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="path">code-snapshots/</span>
+          <span class="cnt">19 个文件 · 未选</span>
+        </div>
+      </div>
+
+      <!-- ★ 排除信息:配置来自 folder_ignore.json,递归时无条件应用 -->
+      <div class="excluded-box">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        已自动跳过:<span class="hub-tag" title="来自 folder_ignore.json">node_modules</span><span class="hub-tag" title="来自 folder_ignore.json">dist</span> 等 51 个开发类目录、
+        <span class="hub-mono">.DS_Store</span> 等隐藏文件、以及 7 个不支持的文件类型
+      </div>
+
+      <!-- 标签(不变) -->
+      <div>
+        <div class="row" style="margin-bottom:6px;">🏷 <span class="label">标签</span><span class="hint" style="font-size:11px;">(应用到本次勾选的全部文档)</span></div>
+        <div class="hub-card" style="padding:6px 10px; display:flex; gap:6px; align-items:center;">
+          <span class="hub-tag accent">wiki ×</span>
+          <span class="hint" style="font-size:12px;">回车添加…</span>
+        </div>
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <span class="hint hub-mono" style="margin-right:auto; font-size:12px;">已勾选 75 / 86 个文件</span>
+      <button class="hub-btn">取消</button>
+      <button class="hub-btn primary">导入 <span class="confirm-count">75</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 状态 3 ═══════════════ -->
+<div class="state-label"><span class="num">3</span> 扫描中</div>
+<div class="state-desc">递归扫描大目录时(>500ms),文件列表区域先显示扫描占位。扫描在后端线程执行,不阻塞 UI;此处可先不确定进度(转圈),后续如需可加流式计数。</div>
+<div class="scrim">
+  <div class="dialog">
+    <div class="dlg-head">
+      <span class="dlg-title">导入文档</span>
+      <button class="hub-icon-btn sm">✕</button>
+    </div>
+    <div class="dlg-body">
+      <div class="row">
+        <span class="label">导入方式</span>
+        <div class="seg">
+          <button class="on">🔗 软链接</button>
+          <button>⧉ 文件拷贝</button>
+        </div>
+      </div>
+      <div class="row">
+        <button class="hub-btn">⬆ 选择文件</button>
+        <button class="hub-btn">📂 选择文件夹</button>
+      </div>
+      <div class="hub-card" style="padding:24px; display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <span class="spin" style="width:18px;height:18px;border-width:2.5px;"></span>
+        <span style="font-size:12.5px; color:var(--hub-ink-2);">正在扫描子文件夹…</span>
+        <span class="hint hub-mono" style="font-size:11px;">~/Documents/my-wiki · 已发现 342 个文件</span>
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <button class="hub-btn">取消</button>
+      <button class="hub-btn" style="opacity:.5; cursor:not-allowed;">导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 状态 4 ═══════════════ -->
+<div class="state-label"><span class="num">4</span> 边界情况 — 文件数超上限</div>
+<div class="state-desc">为防误选超大目录(如整个用户主目录),后端限制单次最多返回 500 个文件(可调常量)。超限时显示警告条,只保留按名称排序的前 500 个,并建议用户改选更小的目录。</div>
+<div class="scrim">
+  <div class="dialog wide">
+    <div class="dlg-head">
+      <span class="dlg-title">导入文档</span>
+      <button class="hub-icon-btn sm">✕</button>
+    </div>
+    <div class="dlg-body">
+      <div class="scan-summary">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+        <span style="font-size:12.5px; font-weight:500;" class="hub-mono">~/Documents</span>
+        <div class="stats">
+          <span class="hub-tag">128 个文件夹</span>
+          <span class="hub-tag">2,341 个文件(已截取前 500)</span>
+        </div>
+        <button class="hub-btn sm" style="margin-left:auto;">↻ 重扫</button>
+      </div>
+      <div class="hub-card" style="padding:10px 12px; display:flex; gap:8px; align-items:flex-start; border-color:oklch(0.85 0.1 80);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--hub-warn)" stroke-width="2" style="margin-top:1px;"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4M12 17h.01"/></svg>
+        <span style="font-size:12.5px; color:var(--hub-ink-2);">该文件夹下共发现 2,341 个可导入文件,超出单次导入上限 500。已按路径排序保留前 500 个,如需全部导入请分批选择子文件夹。</span>
+      </div>
+      <div class="group-tree">
+        <div class="grp-head">
+          <span class="cbx" checked></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2" style="transform:rotate(90deg)"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="path">(根目录)</span>
+          <span class="cnt">8 个文件 · 全选</span>
+        </div>
+        <div class="grp-files">
+          <div class="grp-file"><span class="cb-xs" checked></span><span class="file-name">2025-年度总结.md</span><span class="sz">12 KB</span></div>
+          <div class="grp-file"><span class="cb-xs" checked></span><span class="file-name">2026-Q1-计划.md</span><span class="sz">9 KB</span></div>
+          <div class="hint" style="font-size:11px; padding:2px 6px;">… 其余 6 个文件</div>
+        </div>
+        <div class="grp-head" style="border-top:1px solid var(--hub-line-2);">
+          <span class="cbx" checked></span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-ink-3)" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--hub-accent)" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          <span class="path">projects/alpha/</span>
+          <span class="cnt">122 个文件 · 全选</span>
+        </div>
+        <div class="hint" style="font-size:11px; padding:6px 12px;">… 更多分组</div>
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <span class="hint hub-mono" style="margin-right:auto; font-size:12px;">已勾选 500 / 500 个文件</span>
+      <button class="hub-btn">取消</button>
+      <button class="hub-btn primary">导入 <span class="confirm-count">500</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 交互说明 ═══════════════ -->
+<div class="state-label"><span class="num">✎</span> 交互与实现说明(确认页面后按此实现)</div>
+<div class="note-box">
+  <h3>交互流</h3>
+  <ul>
+    <li><b>入口不变</b>:仍是 UploadDialog 里的「选择文件夹」按钮;新增「包含子文件夹」开关(默认<b>关</b>?或默认开——待确认)。</li>
+    <li>开关<b>关</b>时 = 现有行为(仅一级文件),列表保持扁平样式;开关<b>开</b>时 = 递归扫描,列表变为分组树。</li>
+    <li>分组树:组头勾选框 = 整组全选/取消;箭头 = 展开/收起;文件行 hover 出现 ✕ 可单个移除;已导入路径红色提示(现有逻辑)。</li>
+    <li>取消勾选的文件不参与上传;底部按钮徽标实时显示「实际将导入 N 个」。</li>
+    <li>「重扫」按钮 = 重新弹出 OS 目录选择框并按当前开关重新扫描。</li>
+  </ul>
+  <h3>后端改动(确认页面后实现)</h3>
+  <ul>
+    <li>新增 <code>runtimes/rag/folder_ignore.json</code>(✅ 已创建,51 个开发类目录名,按目录名任意层级匹配;隐藏目录由点开头规则处理)。<code>include_str!</code> 编译期内置,模式同 <code>file_support.json</code>。</li>
+    <li><code>pick_rag_folder</code> 命令增加参数 <code>recursive: bool</code>;递归时应用 folder_ignore.json 排除(无开关,自动生效),复用现有扩展名白名单 + 8KiB 内容嗅探过滤。</li>
+    <li>返回结构升级为 <code>{ root, groups: [{ relPath, files: [{path, name, size}] }], totalFiles, truncated }</code>;扁平模式下 groups 只有一组,前端两种渲染兼容。</li>
+    <li>递归用 <code>walkdir</code>(需新增依赖);跳过符号链接目录防循环;上限 500 文件 + 截断标记。</li>
+    <li>「文件多选」入口返回结构不变,前端统一转成单组。</li>
+  </ul>
+</div>
+
+</body>
+</html>

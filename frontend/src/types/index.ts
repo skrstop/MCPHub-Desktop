@@ -470,6 +470,38 @@ export interface RagPickedFile {
   name: string;
 }
 
+/** A scan-candidate file with its size, for the grouped folder-scan result
+ *  (the Upload dialog shows sizes + a total in its summary bar). */
+export interface RagScanFile {
+  path: string;
+  name: string;
+  /** Bytes (0 if metadata failed — the file is still listed). */
+  size: number;
+}
+
+/** One folder group in a recursive folder-scan result: the folder's path
+ *  relative to the scanned root ('' for the root itself) + its import
+ *  candidates. Multi-file picks are folded into a single pseudo-group by the
+ *  frontend, so all entry points share one rendering. */
+export interface RagScanGroup {
+  relPath: string;
+  files: RagScanFile[];
+}
+
+/** Result of a folder scan (recursive or flat) for the Upload dialog's
+ *  grouped tree view. Flat scans return a single root group. */
+export interface RagFolderScan {
+  /** Absolute path of the scanned folder ('' for multi-file picks). */
+  root: string;
+  /** Sub-directories skipped by folder_ignore.json (recursive only). */
+  skippedDirs: number;
+  /** Candidate files dropped (unsupported ext / binary sniff / over cap). */
+  skippedFiles: number;
+  groups: RagScanGroup[];
+  /** True iff the scan stopped early at the backend candidate cap. */
+  truncated: boolean;
+}
+
 
 
 
