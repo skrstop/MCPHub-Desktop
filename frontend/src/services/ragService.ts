@@ -15,6 +15,7 @@ import {
   RagModelLimits,
   RagModelInfo,
   RagUpdateCheck,
+  RagOcrStatus,
   BatchPreview,
   ApiResponse,
 } from '@/types';
@@ -187,6 +188,14 @@ export const previewBatchUpdate = async (): Promise<BatchPreview> => {
   return response.data ?? { total: 0, toUpdate: 0, skipped: 0, lost: 0 };
 };
 
+/** OCR capability probe: upload-dialog pre-flight + the OCR-missing failure
+ *  dialog (Linux needs the external tesseract binary + language packs). */
+export const getOcrStatus = async (): Promise<RagOcrStatus> => {
+  const response: ApiResponse<RagOcrStatus> = await apiGet('/rag/ocr-status');
+  if (!response.success) throw new Error(response.message || 'Failed to get OCR status');
+  return response.data ?? { available: true, platform: '', distro: null, engine: '', missingLangs: [] };
+};
+
 /** Run the batch update in the background: re-index every doc whose source
  *  changed. Returns immediately; progress arrives via the
  *  `rag://batch-update-progress` event. Guarded against double triggers. */
@@ -294,10 +303,19 @@ export const getRagTools = async (): Promise<Record<string, unknown>[]> => {
   return response.data ?? [];
 };
 
-/** Reveal a document's file location in the OS file manager. */
-export const openRagFileLocation = async (id: string): Promise<void> => {
-  const response: ApiResponse = await apiPost('/rag/open-location', { id });
+/** Reveal a document's file location in the OS file manager.
+ *  `target: "source"` reveals the ORIGINAL imported file; default/omitted
+ *  reveals the content file (extracted Markdown for PDF/Office/image docs). */
+export const openRagFileLocation = async (id: string, target?: 'source' | 'content'): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/open-location', { id, target });
   if (!response.success) throw new Error(response.message || 'Failed to open file location');
+};
+
+/** Open a doc's ORIGINAL source file with the OS default application
+ *  ("view source file" for PDF/Office/image imports). */
+export const openRagSourceFile = async (id: string): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/open-source-file', { id });
+  if (!response.success) throw new Error(response.message || 'Failed to open source file');
 };
 
 /**

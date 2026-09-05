@@ -19,6 +19,14 @@ pub async fn rag_status() -> Result<RagStatus, String> {
     Ok(service::status())
 }
 
+/// OCR capability probe for the upload dialog's pre-flight + the failure
+/// dialog (image OCR unavailable on Linux without tesseract). Cheap — the
+/// Linux probe is cached after the first call.
+#[tauri::command]
+pub fn get_ocr_status() -> crate::rag::extract::ocr::OcrStatus {
+    crate::rag::extract::ocr::status()
+}
+
 #[tauri::command]
 pub async fn list_rag_docs(app: AppHandle) -> Result<Vec<RagDocInfo>, String> {
     service::list_docs(&app).await.map_err(|e| e.to_string())
@@ -276,8 +284,21 @@ pub async fn save_rag_settings(app: AppHandle, settings: RagSettings) -> Result<
 }
 
 #[tauri::command]
-pub async fn open_rag_file_location(app: AppHandle, id: String) -> Result<(), String> {
-    service::open_file_location(&app, &id).await.map_err(|e| e.to_string())
+pub async fn open_rag_file_location(
+    app: AppHandle,
+    id: String,
+    target: Option<String>,
+) -> Result<(), String> {
+    service::open_file_location(&app, &id, target)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open a doc's ORIGINAL source file with the OS default application
+/// ("view source file" for PDF/Office/image imports).
+#[tauri::command]
+pub async fn open_rag_doc_source_file(app: AppHandle, id: String) -> Result<(), String> {
+    service::open_doc_source(&app, &id).await.map_err(|e| e.to_string())
 }
 
 /// Re-embed every uploaded doc with the currently-loaded model, after a model

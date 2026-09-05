@@ -31,10 +31,11 @@ import {
 import { Switch } from '@/components/ui/ToggleGroup';
 import Pagination from '@/components/ui/Pagination';
 import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
+import { isExtractedSource } from '@/utils/fileType';
 import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
-import { getRagTools, ragDocSearchPaged, ragTagSearchPaged } from '@/services/ragService';
-import { RagDoc, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, BatchPreview } from '@/types';
+import { getRagTools, ragDocSearchPaged, ragTagSearchPaged, getOcrStatus } from '@/services/ragService';
+import { RagDoc, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, RagOcrStatus, BatchPreview } from '@/types';
 
 const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -108,8 +109,84 @@ const RagMethodHelpIcon: React.FC = () => {
   );
 };
 
-const RagPage: React.FC = () => {
+// OCR 引擎缺失弹框：Linux 无 tesseract（或语言包不全）时，导入图片/PDF/
+// Office 的 OCR 环节会带 `OCR_MISSING:` 哨兵失败——此处按平台/发行版展示
+// 具体安装命令（等宽块 + 一键复制）。macOS/Windows 理论不触发（系统内置），
+// 兜底文案直接说明引擎不可用。
+const OcrMissingDialog: React.FC<{
+  status: RagOcrStatus;
+  onClose: () => void;
+}> = ({ status, onClose }) => {
   const { t } = useTranslation();
+  const { showToast } = useToast();
+  const distro = (status.distro || '').toLowerCase();
+  const installCmd = distro.includes('ubuntu') || distro.includes('debian') || distro.includes('apt')
+    ? t('pages.rag.ocrInstallApt')
+    : distro.includes('fedora') || distro.includes('rhel') || distro.includes('centos') || distro.includes('dnf')
+      ? t('pages.rag.ocrInstallDnf')
+      : distro.includes('arch') || distro.includes('manjaro') || distro.includes('pacman')
+        ? t('pages.rag.ocrInstallPacman')
+        : t('pages.rag.ocrInstallOther');
+  const [copied, setCopied] = useState(false);
+  const copyCmd = async () => {
+    try {
+      await navigator.clipboard.writeText(installCmd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      showToast(t('pages.rag.ocrInstallCopyFailed', '复制失败'), 'error');
+    }
+  };
+  const missing = status.missingLangs.length > 0
+    ? t('pages.rag.ocrMissingLangs', { langs: status.missingLangs.join(', ') })
+    : null;
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+            {t('pages.rag.ocrMissingTitle', 'OCR 引擎不可用')}
+          </h2>
+          <button onClick={onClose} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          <p className="text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+            {t('pages.rag.ocrMissingBody', { platform: status.platform || 'linux' })}
+          </p>
+          {missing && (
+            <p className="text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>{missing}</p>
+          )}
+          {/* 等宽安装命令块 + 一键复制（Linux 按发行版择一展示） */}
+          <div className="relative group">
+            <pre
+              className="hub-mono text-[12px] overflow-x-auto"
+              style={{ padding: '10px 12px', background: 'var(--hub-bg-2)', border: '1px solid var(--hub-line)', borderRadius: 8, color: 'var(--hub-ink)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+            >
+              {installCmd}
+            </pre>
+            <button
+              onClick={copyCmd}
+              className="hub-btn sm absolute top-1.5 right-1.5"
+              title={t('pages.rag.ocrInstallCopy', '复制命令')}
+            >
+              {copied ? <Check size={12} /> : <CopyIcon size={12} />}
+            </button>
+          </div>
+          <p className="text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+            {t('pages.rag.ocrInstallHint', '安装完成后重新导入即可。')}
+          </p>
+        </div>
+        <div className="flex items-center justify-end p-5 border-t border-[var(--hub-line-2)] shrink-0">
+          <button onClick={onClose} className="hub-btn primary">{t('common.ok', '知道了')}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const RagPage: React.FC = () => {  const { t } = useTranslation();
   const { showToast } = useToast();
   const {
     ragDocs,
@@ -155,6 +232,7 @@ const RagPage: React.FC = () => {
     loadMoreChunks,
     closeChunks,
     openLocation,
+    openSourceFile,
     search,
     setTags,
     pickFiles,
@@ -165,6 +243,9 @@ const RagPage: React.FC = () => {
     batchUpdate,
     batchUpdateRunning,
     batchProgress,
+    ocrMissing,
+    dismissOcrMissing,
+    reportOcrMissingIf,
     docsVersion,
   } = useRagData();
 
@@ -435,11 +516,33 @@ const RagPage: React.FC = () => {
     }
   };
 
-  const handleOpenFolder = async (doc: RagDocInfo) => {
+  const handleOpenFolder = async (doc: RagDocInfo, target?: 'source' | 'content') => {
     // 软链接/拷贝打开地址，原始丢失时后端会报错（open_file_location 对 symlink
     // 找不到原始文件时返回 Err）。这里只兜底提示；真实打开由后端 reveal 处理。
+    // target="source" 显式打开原始文件位置（二次解析类文档的两个选项之一）。
     try {
-      await openLocation(doc.id);
+      await openLocation(doc.id, target);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.openFolderNotReady'), 'error');
+    }
+  };
+
+  // 二次解析类文档（PDF/Office/图片）的「打开文件夹」两选项菜单：
+  // 源文件（original_path）/ 解析后的文件（rag/files 提取 Markdown）。
+  const [folderMenuId, setFolderMenuId] = useState<string | null>(null);
+  const handleFolderClick = (doc: RagDocInfo) => {
+    const hasSource = !!doc.originalPath && doc.lostOriginal !== true;
+    if (isExtractedSource(doc.name) && hasSource) {
+      setFolderMenuId((cur) => (cur === doc.id ? null : doc.id));
+      return;
+    }
+    // 非二次解析 / 无可用源文件：保持原行为（打开内容文件位置）。
+    void handleOpenFolder(doc);
+  };
+  const handleViewSourceFile = async (doc: { id: string }) => {
+    setFolderMenuId(null);
+    try {
+      await openSourceFile(doc.id);
     } catch (err) {
       showToast(err instanceof Error ? err.message : t('pages.rag.openFolderNotReady'), 'error');
     }
@@ -500,6 +603,11 @@ const RagPage: React.FC = () => {
       showToast(t('pages.rag.updateDone', '文档已更新'), 'success');
     } catch (err) {
       setUpdateActionPhase('error');
+      // OCR 缺失（更新图片类文档时引擎不可用）→ 安装命令弹框，而非 toast。
+      if (await reportOcrMissingIf(err)) {
+        setUpdatingId(null);
+        return;
+      }
       showToast(err instanceof Error ? err.message : t('pages.rag.updateFailed', '更新文档失败'), 'error');
     } finally {
       setUpdatingId(null);
@@ -925,14 +1033,45 @@ const RagPage: React.FC = () => {
                 >
                   {updatingId === doc.id ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
                 </button>
-                <button
-                  className="hub-icon-btn sm"
-                  onClick={() => handleOpenFolder(doc)}
-                  title={noContent ? t('pages.rag.contentUnavailableOpen', '无法打开文件位置') : t('pages.rag.openFolder')}
-                  disabled={disabled || noContent}
-                >
-                  <FolderOpen size={13} />
-                </button>
+                <div className="relative">
+                  <button
+                    className="hub-icon-btn sm"
+                    onClick={() => handleFolderClick(doc)}
+                    title={noContent ? t('pages.rag.contentUnavailableOpen', '无法打开文件位置') : t('pages.rag.openFolder')}
+                    disabled={disabled || noContent}
+                  >
+                    <FolderOpen size={13} />
+                  </button>
+                  {folderMenuId === doc.id && (
+                    <>
+                      {/* 透明遮罩：点击任意处关闭菜单 */}
+                      <div className="fixed inset-0 z-20" onClick={() => setFolderMenuId(null)} />
+                      <div
+                        className="absolute right-0 top-full z-30 mt-1 rounded-lg border py-1 min-w-[140px]"
+                        style={{
+                          borderColor: 'var(--hub-line-2)',
+                          background: 'var(--hub-surface, #fff)',
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                        }}
+                      >
+                        <button
+                          className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/10"
+                          style={{ color: 'var(--hub-ink)' }}
+                          onClick={() => { setFolderMenuId(null); void handleOpenFolder(doc, 'source'); }}
+                        >
+                          {t('pages.rag.openFolderSource')}
+                        </button>
+                        <button
+                          className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-black/5 dark:hover:bg-white/10"
+                          style={{ color: 'var(--hub-ink)' }}
+                          onClick={() => { setFolderMenuId(null); void handleOpenFolder(doc); }}
+                        >
+                          {t('pages.rag.openFolderExtracted')}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
                 <button
                   className="hub-icon-btn sm"
                   onClick={() => setDeleteTarget(doc)}
@@ -1054,6 +1193,9 @@ const RagPage: React.FC = () => {
         />
       )}
 
+      {/* OCR 引擎缺失弹框（导入图片/PDF/Office 时 Linux 无 tesseract） */}
+      {ocrMissing && <OcrMissingDialog status={ocrMissing} onClose={dismissOcrMissing} />}
+
       {/* Search settings dialog */}
       {showSettings && (
         <SearchSettingsDialog
@@ -1103,6 +1245,7 @@ const RagPage: React.FC = () => {
             await setTags(viewedDoc.id, tags);
             await view(viewedDoc.id);
           }}
+          onOpenSourceFile={() => handleViewSourceFile(viewedDoc)}
         />
       )}
 
@@ -1673,6 +1816,18 @@ const UploadDialog: React.FC<{
   const { t } = useTranslation();
   const showMethod = method !== undefined && onMethodChange !== undefined;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // OCR pre-flight: when the dialog opens, probe the platform's OCR engine —
+  // image/PDF/Office imports route through OCR for (parts of) their content,
+  // so warn early on Linux boxes without tesseract instead of failing per
+  // file during the upload.
+  const [ocrStatus, setOcrStatus] = useState<RagOcrStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getOcrStatus()
+      .then((s) => { if (!cancelled) setOcrStatus(s); })
+      .catch(() => { /* probe failure is non-fatal — skip the hint */ });
+    return () => { cancelled = true; };
+  }, []);
   const totalFiles = scan ? scan.groups.reduce((n, g) => n + g.files.length, 0) : 0;
   const totalSize = scan
     ? scan.groups.reduce((n, g) => n + g.files.reduce((s, f) => s + (f.size || 0), 0), 0)
@@ -1706,6 +1861,13 @@ const UploadDialog: React.FC<{
           <p className="text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
             {t('pages.rag.uploadHint')}
           </p>
+          {/* OCR 预检提示：Linux 无 tesseract 时提前告知（图片/PDF/Office 依赖） */}
+          {ocrStatus && !ocrStatus.available && (
+            <p className="text-[12px] flex items-start gap-1.5" style={{ color: 'var(--hub-ink-3)' }}>
+              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" style={{ color: '#d97706' }} />
+              {t('pages.rag.ocrPreflightHint')}
+            </p>
+          )}
           {/* 导入方式选择(软链接 / 文件拷贝)+ 帮助按钮 —— 仿 skill 安装的分段切换样式 */}
           {showMethod && (
             <div className="flex items-center gap-2 flex-wrap">
@@ -2944,7 +3106,11 @@ const ViewDialog: React.FC<{
   onLoadMore: () => void;
   onClose: () => void;
   onSaveTags: (tags: string[]) => Promise<void>;
-}> = ({ doc, moreLoading, onLoadMore, onClose, onSaveTags }) => {
+  /** Open the doc's ORIGINAL source file with the OS default app. Only
+   *  provided for extractable-source docs (PDF/Office/image); the button is
+   *  hidden when absent or when the source is lost/unknown. */
+  onOpenSourceFile?: () => void;
+}> = ({ doc, moreLoading, onLoadMore, onClose, onSaveTags, onOpenSourceFile }) => {
   const { t } = useTranslation();
   const [tags, setTags] = useState<string[]>(doc.tags || []);
   const [busy, setBusy] = useState(false);
@@ -3041,18 +3207,35 @@ const ViewDialog: React.FC<{
               <TagEditor tags={tags} onChange={handleChange} />
             </div>
           </div>
-          {/* Content toolbar: render/source toggle. Zoom is gesture-only
+          {/* Content toolbar: render/source toggle + view-original-file
+              button (extractable sources only). Zoom is gesture-only
               (Ctrl/Cmd + wheel or pinch) - show the level as a hint. */}
           <div className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setMode((m) => (m === 'render' ? 'source' : 'render'))}
-              className="hub-btn sm inline-flex items-center gap-1"
-              title={mode === 'render' ? t('pages.rag.viewSource') : t('pages.rag.viewRender')}
-            >
-              {mode === 'render' ? <Code size={13} /> : <Eye size={13} />}
-              <span>{mode === 'render' ? t('pages.rag.viewSource') : t('pages.rag.viewRender')}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setMode((m) => (m === 'render' ? 'source' : 'render'))}
+                className="hub-btn sm inline-flex items-center gap-1"
+                title={mode === 'render' ? t('pages.rag.viewSource') : t('pages.rag.viewRender')}
+              >
+                {mode === 'render' ? <Code size={13} /> : <Eye size={13} />}
+                <span>{mode === 'render' ? t('pages.rag.viewSource') : t('pages.rag.viewRender')}</span>
+              </button>
+              {/* 查看源文件：二次解析类文档（PDF/Office/图片）默认展示的是
+                  提取后的 Markdown/OCR 文本；此按钮用系统默认程序打开原始
+                  文件。原始丢失/未知时隐藏。 */}
+              {onOpenSourceFile && isExtractedSource(doc.name) && doc.originalPath && doc.lostOriginal !== true && (
+                <button
+                  type="button"
+                  onClick={onOpenSourceFile}
+                  className="hub-btn sm inline-flex items-center gap-1"
+                  title={t('pages.rag.openOriginalFile')}
+                >
+                  <FileText size={13} />
+                  <span>{t('pages.rag.openOriginalFile')}</span>
+                </button>
+              )}
+            </div>
             <div className="flex items-center gap-1">
               <button
                 type="button"

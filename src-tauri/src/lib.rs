@@ -488,6 +488,7 @@ pub fn run() {
             // RAG — toggle/status/list/get/pick+upload/delete/search/tags/settings/open-location
             commands::rag::rag_toggle,
             commands::rag::rag_status,
+            commands::rag::get_ocr_status,
             commands::rag::list_rag_docs,
             commands::rag::get_rag_doc,
             commands::rag::get_rag_doc_paged,
@@ -508,6 +509,7 @@ pub fn run() {
             commands::rag::rag_tools,
             commands::rag::set_rag_tags,
             commands::rag::open_rag_file_location,
+            commands::rag::open_rag_doc_source_file,
             commands::rag::rag_reindex_all,
             commands::rag::rag_list_models,
             commands::rag::rag_current_model,

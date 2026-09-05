@@ -717,9 +717,16 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       return { command: 'set_rag_tags', args: { id: b?.id ?? '', tags: b?.tags ?? [] } };
     }
     // POST /rag/open-location — reveal a doc's file in the OS file manager
+    // (target: "source" = original file, default/omitted = content file)
     if (segs[1] === 'open-location' && m === 'POST') {
+      const b = body as { id?: string; target?: string } | null;
+      return { command: 'open_rag_file_location', args: { id: b?.id ?? '', target: b?.target } };
+    }
+    // POST /rag/open-source-file — open a doc's ORIGINAL source file with the
+    // OS default application ("view source file" for PDF/Office/image docs)
+    if (segs[1] === 'open-source-file' && m === 'POST') {
       const b = body as { id?: string } | null;
-      return { command: 'open_rag_file_location', args: { id: b?.id ?? '' } };
+      return { command: 'open_rag_doc_source_file', args: { id: b?.id ?? '' } };
     }
     // POST /rag/reindex-all — re-embed every doc with the currently-loaded
     // model (after a model swap recreated the vector table). Emits progress
@@ -730,6 +737,10 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // GET /rag/models - list available model sizes (ready / downloadable).
     if (segs[1] === 'models' && m === 'GET')
       return { command: 'rag_list_models', args: {} };
+    // GET /rag/ocr-status - OCR capability probe (upload dialog pre-flight +
+    // the OCR-missing failure dialog). Linux tesseract probe is cached.
+    if (segs[1] === 'ocr-status' && m === 'GET')
+      return { command: 'get_ocr_status', args: {} };
     // GET /rag/model - the currently-selected model size (or null).
     if (segs[1] === 'model' && m === 'GET')
       return { command: 'rag_current_model', args: {} };

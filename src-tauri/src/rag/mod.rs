@@ -25,10 +25,14 @@
 //! - `gguf_modernbert`: the modern-bert GGUF architecture (ModernBert encoder +
 //!   CLS-pool, for Granite Embedding 97M Multilingual R2).
 //! - `vectordb`: lancedb connection + insert/query/delete.
+//! - `extract`: content extraction strategies for binary imports (PDF /
+//!   Office / image-OCR) + the plain-text fallback, behind a
+//!   `ContentExtractor` trait (see `chunker.rs` for the pattern).
 //! - `service`: high-level lifecycle + document + search operations.
 
 pub mod chunker;
 pub mod embedder;
+pub mod extract;
 pub mod gguf;
 pub mod gguf_gemma;
 pub mod gguf_lfm2;

@@ -1483,6 +1483,71 @@ PY
 
 ---
 
+### 3.14 RAG 文档导入支持 PDF/Office 解析 + 图片 OCR（桌面端独有，2026-09-05）
+
+> 实施计划见 `doc/rag_office_document_import_plan_20260905.md`（v2.3）。RAG 导入从「仅纯文本」扩展到 **PDF / Word(docx/doc) / Excel(xlsx/xls) / PowerPoint(pptx/ppt) / 常见图片**，提取为 Markdown 后走既有 chunker → embedding → lancedb 管线；内嵌图片过 OCR。查看/分片/搜索与普通文本完全一致。
+
+#### 3.14.1 依赖（相对计划 v2.3 有一处重要偏离）
+
+| 格式 | 计划选型 | **实际落地** | 说明 |
+|---|---|---|---|
+| PDF | pdf_oxide 0.3 | **pdf_oxide 0.3.77** | `PdfDocument::from_bytes` + `to_markdown_all(&ConversionOptions::default())`（detect_headings + 表格开、图片关——图片自管） |
+| Office 六格式 | office_oxide 0.1 | **office_oxide 0.1.9** | `Document::from_reader(Cursor, DocumentFormat)` + `to_ir()`；Markdown 用 crate 自带的 **`DocumentIR::to_markdown()`**（计划写的是自行遍历 IR 渲染，实际直接复用 crate 渲染器更稳）；图片仍自行遍历 IR 收集 |
+| 图片 OCR | uni-ocr 0.1.5 | **自研三平台实现（弃用 uni-ocr）** | ⚠️ uni-ocr 的 macOS 后端 `cidre` 构建脚本硬依赖完整 Xcode 的 `xcodebuild`（编译内置 pomace 工程），CommandLineTools 环境无法编译（`xcode-select -p` 无 Xcode）。改为：macOS `objc2`+`objc2-vision`+`objc2-foundation`（纯绑定，链接系统 Vision）；Windows 复用已有 `windows` crate 加 WinRT 特性（Windows.Media.Ocr）；Linux 自调 `tesseract` 子进程（无 uni-ocr 的 unwrap panic 风险）。**对外接口与计划一致**（available/status/image_bytes + OCR_MISSING 哨兵） |
+| image | — | **image 0.25**（default-features=false，features=png/jpeg/gif/bmp/webp/tiff） | 校验上传字节 + Linux 端 PNG 重编码；与 pdf_oxide 的 image 子集合并单份编译 |
+| zip | Windows-only | **全平台** `{ version="8", default-features=false, features=["deflate"] }` | 从 Windows target 段提升；与 office_oxide 内部声明一致单份编译，砍掉 zstd-sys 等 C 依赖。`commands/runtime.rs` 用法不变 |
+
+macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequest Revision3 + automaticallyDetectsLanguage，中英文自动覆盖）。
+
+#### 3.14.2 提取层（策略模式，`src/rag/extract/`）
+
+- `mod.rs`：`ContentExtractor` trait（`can_handle`/`extract`/`name`）+ 静态注册表 `EXTRACTORS`（优先级：pdf → office → image → text 兜底）+ `run(filename, bytes)` 派发（内部 `tauri::async_runtime::spawn_blocking`，重活不占 async worker）+ `can_extract(filename)`（由注册表推导，供 service 判断「可提取格式」）。哨兵：`UNSUPPORTED_FORMAT:` / `EXTRACT_FAILED:` / `OCR_MISSING:`。
+- `ocr.rs`：`OcrStatus { available, platform, distro, engine, missingLangs }`（camelCase 序列化）；`status()` Linux 探测 OnceLock 缓存（`tesseract --version` + `--list-langs` 校验 chi_sim/eng）；`image_bytes(bytes)` 同步（策略已在 blocking 线程内，不再嵌套 spawn_blocking）——先 `image::load_from_memory` 校验，macOS 传原始字节给 Vision，Windows WinRT 流管线（CoInitializeEx MTA + DataWriter→BitmapDecoder→OcrEngine，RPC_E_CHANGED_MODE 容错），Linux 重编码 PNG 写临时文件 + `tesseract <png> stdout -l chi_sim+eng --psm 1`。`clean_text` 统一去空行。
+- `pdf.rs`：文字层空（扫描件）时——OCR 可用则逐页取内嵌图 OCR 恢复整篇；不可用报 `EXTRACT_FAILED: pdf has no text layer (scanned document)...`。文字层正常时内嵌图逐张 OCR，以 `> OCR(图片N):` 引用块追加文末（单图失败 log+跳过不阻断）；OCR 不可用但有内嵌图时文末注 `[图片未识别：当前平台 OCR 引擎不可用]`。
+- `office.rs`：`DocumentFormat::from_extension`（仅六格式，.ods/.xlsm 落空走文本兜底拒绝）→ IR 深遍历（Table→Row→Cell / List→Item→nested / TextBox / Note 嵌套）收集 `Element::Image.data`，**Emf/Wmf 矢量格式跳过**；OCR 文本 `[图片OCR]` 块追加文末。
+- `image.rs`：直连 OCR 核心；空结果报 `EXTRACT_FAILED: no text recognized in image`。
+- `text.rs`：原通用文本路径原样搬入（`is_likely_text` 嗅探 + `decode_text`），行为与旧版逐字节一致。
+
+#### 3.14.3 service.rs 打通（4 处）
+
+- **`content_from_source(name, &raw) -> Result<(String, &'static str)>`** helper：`can_extract` → `extract::run`（encoding 标签 "extracted-md"）；否则维持旧嗅探+decode_text（保留真实编码标签进导入摘要）。三个入口（`upload_one_path_inner` / `update_doc_from_file` / `update_doc_from_original`）的 `is_likely_text → UNSUPPORTED_FORMAT → decode_text` 块全部替换。
+- **内容文件命名**：extractable 源落盘 `{id}.md`（内容是派生 Markdown），文本源维持 `{id}{ext}`；`content_path_for` 在 candidate 1（`{id}{ext}`）与 legacy `{id}` 之间插入 candidate `dir/{id}.md`。
+- **method 强制 copy**：extractable 源在三个写入入口一律 `method = Some("copy")`（内容文件是派生物，symlink 语义无意义）；md5 仍对原始字节计算，更新检测（单条/批量/自动定时）零改动自动覆盖「从原始重提取」。
+- **`scan_folder` 8KiB 嗅探**：`can_extract` 命中的文件跳过 `is_likely_text`（PDF 头 8KiB 必有 NUL 会被误杀）；文本类保持嗅探。`file_support.json` 加 15 条扩展（7 文档 + 8 图片，共 196 条）后，扫描对话框才会列出这类文件。
+- `is_likely_text`/`rag_log` 提为 `pub(crate)`（text 策略 / extract 模块复用）。
+
+#### 3.14.4 命令 + 前端
+
+- **`get_ocr_status` 命令**（`commands/rag.rs` + `lib.rs` 注册）：返回 `OcrStatus`；`tauriClient.ts` 映射 `GET /rag/ocr-status`；`ragService.getOcrStatus()`。
+- **useRagData.tsx**：`ocrMissing` state + `reportOcrMissingIf(err)`（OCR_MISSING 前缀 → 拉状态开弹框，返回是否命中供调用方分流）+ `dismissOcrMissing`。`upload()` 错误分支：`OCR_MISSING` → 弹框；`EXTRACT_FAILED` → toast `pages.rag.extractFailed`（带后端具体原因，如扫描件无文字层）；`UNSUPPORTED_FORMAT` 不变。`RagPage.runUpdateAction` 的 catch 也走 `reportOcrMissingIf`（更新图片文档同样弹框）。
+- **RagPage.tsx**：新增 `OcrMissingDialog`（标题/正文/缺失语言包行 + 按 distro 选 apt/dnf/pacman 安装命令等宽块 + 一键复制；macOS/Windows 不触发）；渲染于根级（BatchUpdateDialog 之后）。`UploadDialog` 打开时预检 `getOcrStatus`，`!available` 时在提示区渲染 `ocrPreflightHint` 警示行。
+- **fileType.ts**：`EXTRACTED_MARKDOWN_EXTS`（7 文档扩展）——`isMarkdown` 对它们返回 true（查看/搜索片段按 Markdown 渲染），`hlLangFor` 返回 undefined。图片扩展不在其中（OCR 文本按纯文本 `<pre>` 渲染）。
+- **locales 四语言**：`unsupportedFile` 改为「无法解析的二进制文件」（去掉"仅支持纯文本"旧说法）、`uploadHint` 更新为全格式支持文案；新增 `extractFailed`/`ocrMissingTitle`/`ocrMissingBody`/`ocrMissingLangs`/`ocrPreflightHint`/`ocrInstallCopy(Failed)`/`ocrInstallHint`/`ocrInstallApt/Dnf/Pacman/Other` + `common.ok`（12+ 键 × 4 语言，rag keys 223→235）。
+
+#### 3.14.5 边界
+
+- 提取文档 size 字段 = 原始源文件字节数（语义不变）；`file_type` 标签走既有 `file_type_label`（PDF/Word 等，来自 file_support.json）。
+- `rag_file_create`（MCP 工具）不受影响（输入本就是 UTF-8 文本）。
+- OCR 语言固定中英双语（tesseract chi_sim+eng；macOS automaticallyDetectsLanguage；Windows 系统语言兜底 zh-Hans/en-US）。
+- `EXTRACT_FAILED` 的 toast 按文件逐条弹（与 UNSUPPORTED_FORMAT 行为一致）。
+
+#### 3.14.6 验证
+
+- `ORT_SKIP_DOWNLOAD=1 cargo check --lib` 通过；Windows/Linux cfg 代码经 scratch-crate 交叉 type-check 通过（本机无法全量 cross-check：blake3/zstd-sys C 构建脚本需对应平台编译器）。
+- 临时集成测试 `rag/extract/tests_tmp.rs`（**发布前删除**）：真实 PDF（doc/test/*.pdf 中文样本）+ Python zipfile 构造的最小 docx/xlsx/pptx（中文/表格/多 sheet/幻灯片）+ 空 PNG OCR 管线（预期 EXTRACT_FAILED）+ 文本兜底回归。
+- 前端 `npm run build` 通过。
+- 真机手动验证（用户）：`tauri dev` 后 RAG 页上传 pdf/docx/xlsx/pptx → 导入/分片/搜索/查看（Markdown 渲染）链路 + 扫描件 PDF 失败 toast + Linux tesseract 缺失弹框。
+- 版本：`1.0.33002 → 1.0.33101`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog `doc/upgrade/1.0.33101.md`。
+
+#### 3.14.7 复合验证（2026-09-01，3 轮）
+
+- **Round 1 提取策略内部**：`ext_format` 点号修复生效（点号文件名 "pdf" 不再被 office 误认）；`ConversionOptions::default()` 确认 = 语义模式（detect_headings=true、extract_tables=true、include_images=false，图片由 extract_images 单独处理，无双提取）；macOS Vision `autoreleasepool`（ocr.rs）生效，spawn_blocking 线程池复用不泄漏 autorelease 对象；image.rs（独立图片无文本 → EXTRACT_FAILED 合理）、text.rs（NUL sniff 历史路径 byte-for-byte 保真）、office.rs（Emf/Wmf 跳过、Table/List/TextBox/Footnote 递归完整）、mod.rs（spawn_blocking + 策略归因日志 + sentinel 规范）逐文件审查通过。
+- **Round 2 service.rs 集成**：全链路验证——`content_path_for` 四候选（`{id}{ext}`→`{id}.md`→`{id}`→`{name}`）对全部场景闭环（text.md 内容与 extractable 提取内容同路径不冲突、pdf→txt/pdf→md 互转无孤儿、rag_file_create 按名命名走候选4）；upload/update/manual/original/batch/auto-update 全部复用同一 `content_from_source` 派发链；scan_folder 对 extractable 跳过 NUL sniff（PDF 头部有 NUL）；update_doc_from_file 原本就有旧 content 删除（早期怀疑的孤儿 bug 是窗口截图不全导致的误报，未引入改动）。
+- **Round 3 回归**：`cargo check` 0 错 0 警；`cargo test --lib` 19 passed；临时冒烟测试（真实 PDF doc/test/苏州2.pdf 提取成功、点号名拒绝、损坏 PDF EXTRACT_FAILED sentinel、二进制拒绝、文本往返、最小 docx 提取成功）全过，**跑完已删**；`npx tsc --noEmit` 24 错误 = 基线 24（全存量）；`npm run build` 通过。
+- 本轮复合验证结论：**未发现新的逻辑漏洞**；Round 1 期间修复的 2 处（ext_format 点号误认、update_doc_from_original 按显示名派发）+ delete/open/reindex 的 content_path_for 收敛已覆盖全部发现的问题。
+
+---
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录

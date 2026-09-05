@@ -332,10 +332,23 @@ export interface RagUpdateCheck {
   lostOriginal: boolean;
 }
 
+/** OCR capability report from the backend (get_ocr_status command). */
+export interface RagOcrStatus {
+  /** Whether OCR can run at all on this machine. */
+  available: boolean;
+  /** "macos" | "windows" | "linux". */
+  platform: string;
+  /** Linux distro id from /etc/os-release (drives the install-command pick). */
+  distro?: string | null;
+  /** Human-readable engine name ("Apple Vision" / "Windows.Media.Ocr" / "tesseract"). */
+  engine: string;
+  /** Missing tesseract language packs (Linux only). */
+  missingLangs: string[];
+}
+
 /** Batch-update preview counts (shown in the confirm dialog). */
 export interface BatchPreview {
-  total: number;
-  toUpdate: number;
+  total: number;  toUpdate: number;
   skipped: number;
   lost: number;
 }

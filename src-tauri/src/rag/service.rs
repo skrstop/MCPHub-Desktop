@@ -31,7 +31,9 @@ use crate::rag::vectordb::{ChunkInput, VectorDb};
 
 /// Write a RAG log line to both the env logger and the DB log panel (visible
 /// in the Logs page, filterable by server = "rag"). `level` is "info"/"warn"/"error".
-fn rag_log(level: &str, msg: impl std::fmt::Display) {
+/// `pub(crate)` so sibling modules (`rag::extract::*`) log their extraction /
+/// OCR progress into the same pipeline.
+pub(crate) fn rag_log(level: &str, msg: impl std::fmt::Display) {
     let line = format!("[RAG] {}", msg);
     match level {
         "warn" => log::warn!("{}", line),
@@ -2109,9 +2111,10 @@ async fn get_doc_chunks_inner(
 }
 
 /// Open the OS multi-file picker. No extension filter — validation is
-/// content-based (`is_likely_text`), so the user may pick any file (including
-/// PDF/Word/Excel) and get a clear rejection if it isn't plain text. Returns
-/// the picked paths + display names; no bytes cross IPC (backend reads disk).
+/// content-based (extract strategies for PDF/Office/images, `is_likely_text`
+/// sniff otherwise), so the user may pick any file and get a clear rejection
+/// or a parse failure if it can't be processed. Returns the picked paths +
+/// display names; no bytes cross IPC (backend reads disk).
 pub fn pick_files(app: &AppHandle) -> Vec<RagPickedFile> {
     use tauri_plugin_dialog::DialogExt;
     let b = app.dialog().file().set_title("Select documents");
@@ -2272,17 +2275,22 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
                 // Content sniff (first 8 KiB): a misnamed binary file (e.g. a
                 // .txt that's actually a PDF) is still dropped here, so the
                 // dialog only lists what the upload pipeline would accept.
-                let mut head = vec![0u8; 8192];
-                let n = std::fs::File::open(&path)
-                    .and_then(|mut f| {
-                        use std::io::Read;
-                        f.read(&mut head)
-                    })
-                    .unwrap_or(0);
-                head.truncate(n);
-                if !is_likely_text(&head) {
-                    out.skipped_files += 1;
-                    continue;
+                // Extractable formats (PDF/Office/image) skip the sniff —
+                // their bytes are inherently binary (PDF headers carry NULs)
+                // yet the extract pipeline parses them to Markdown.
+                if !crate::rag::extract::can_extract(&name) {
+                    let mut head = vec![0u8; 8192];
+                    let n = std::fs::File::open(&path)
+                        .and_then(|mut f| {
+                            use std::io::Read;
+                            f.read(&mut head)
+                        })
+                        .unwrap_or(0);
+                    head.truncate(n);
+                    if !is_likely_text(&head) {
+                        out.skipped_files += 1;
+                        continue;
+                    }
                 }
                 // First file seen in this folder -> create its group.
                 let idx = *group_idx.entry(rel.to_path_buf()).or_insert_with(|| {
@@ -2443,7 +2451,8 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| file_path.to_string());
 
-    // Read + validate the new file (same rules as upload).
+    // Read + validate the new file (same rules as upload — extractable
+    // formats go through the extract strategies, text via sniff+decode).
     let raw = std::fs::read(path).map_err(|e| anyhow!("read failed for {}: {}", name, e))?;
     if raw.len() > MAX_UPLOAD_BYTES {
         return Err(anyhow!(
@@ -2453,10 +2462,7 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
             MAX_UPLOAD_BYTES
         ));
     }
-    if !is_likely_text(&raw) {
-        return Err(anyhow!("UNSUPPORTED_FORMAT: {}", name));
-    }
-    let (content, _encoding) = decode_text(&raw, &name);
+    let (content, _encoding) = content_from_source(&name, &raw).await?;
     let size = raw.len() as u64;
 
     // Read the existing meta (for tags + to clean up the OLD on-disk file,
@@ -2479,13 +2485,20 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
         }
     }
 
-    // New on-disk filename = `{id}{ext}` with the NEW file's extension.
+    // New on-disk filename: `{id}{ext}` with the NEW file's extension for
+    // text sources; `{id}.md` for extractable sources (content is derived
+    // Markdown — see upload_one_path_inner).
+    let extractable = crate::rag::extract::can_extract(&name);
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_default();
-    let file_stem = format!("{id}{ext}");
+    let file_stem = if extractable {
+        format!("{id}.md")
+    } else {
+        format!("{id}{ext}")
+    };
 
     rag_log("info", format!("updating '{}' ({} bytes) -> id {}", name, raw.len(), id));
     // Bump the content version (1 on first upload; +1 each update). Legacy
@@ -2494,10 +2507,15 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     // Manual-upload update path records the NEW file as the original source
     // (this is the legacy-compat path: old docs without original_path get one
     // now, so future update detection works). MD5 of the new source is stored
-    // as the baseline. Method: keep the doc's existing method; if it was a
-    // legacy doc (method None), manual upload means we now have a copy + a
-    // recorded source -> treat as "copy".
-    let new_method = old_meta.method.clone().or_else(|| Some("copy".to_string()));
+    // as the baseline. Method: extractable sources are always "copy" (the
+    // content file is derived Markdown); otherwise keep the doc's existing
+    // method — a legacy doc (method None) becomes "copy" since manual upload
+    // now has a copy + a recorded source.
+    let new_method = if extractable {
+        Some("copy".to_string())
+    } else {
+        old_meta.method.clone().or_else(|| Some("copy".to_string()))
+    };
     let new_original_path = Some(file_path.to_string());
     let new_md5 = Some(compute_md5(&raw));
     // write_doc_and_index writes the new disk file, reindexes (reindex_doc
@@ -2555,7 +2573,8 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         return Err(anyhow!("original file does not exist: {}", original_path));
     }
 
-    // Read + validate the source (same rules as upload).
+    // Read + validate the source (same rules as upload — extractable formats
+    // are re-extracted to Markdown, text via sniff+decode).
     let raw = std::fs::read(path).map_err(|e| anyhow!("read failed for {}: {}", name, e))?;
     if raw.len() > MAX_UPLOAD_BYTES {
         return Err(anyhow!(
@@ -2565,10 +2584,11 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
             MAX_UPLOAD_BYTES
         ));
     }
-    if !is_likely_text(&raw) {
-        return Err(anyhow!("UNSUPPORTED_FORMAT: {}", name));
-    }
-    let (content, _encoding) = decode_text(&raw, &name);
+    // Dispatch by the ORIGINAL PATH (the true source), not the display name:
+    // the display name is user-renameable via MCP rag_file_update and may no
+    // longer carry the source extension — a renamed "report.pdf" must still
+    // re-extract, not fall into the text sniff (which would reject the bytes).
+    let (content, _encoding) = content_from_source(original_path, &raw).await?;
     let size = raw.len() as u64;
     let tags = old_meta.tags.clone();
 
@@ -2585,12 +2605,21 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         }
     }
 
+    // On-disk filename: `{id}{ext}` for text sources, `{id}.md` for
+    // extractable sources (derived Markdown — see upload_one_path_inner).
+    // Extractable decision follows the source file (original_path), not the
+    // renameable display name.
+    let extractable = crate::rag::extract::can_extract(original_path);
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_default();
-    let file_stem = format!("{id}{ext}");
+    let file_stem = if extractable {
+        format!("{id}.md")
+    } else {
+        format!("{id}{ext}")
+    };
 
     rag_log("info", format!("updating '{}' from original ({} bytes) -> id {}", name, raw.len(), id));
     let version = old_meta.version.saturating_add(1);
@@ -2606,13 +2635,34 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         size,
         old_meta.file_type.clone(),
         version,
-        old_meta.method.clone(),
+        // Extractable sources are always "copy" (derived content file).
+        if extractable { Some("copy".to_string()) } else { old_meta.method.clone() },
         Some(original_path.to_string()),
         new_md5,
     )
     .await?;
 
     Ok(chunk_count)
+}
+
+/// Extract text content from raw file bytes via the strategy registry
+/// (`rag::extract`): PDF/Office/image sources are parsed to Markdown, plain
+/// text keeps the historical sniff + decode path (which also preserves the
+/// detected-encoding label for the per-file import summary).
+///
+/// Sentinel semantics unchanged — `UNSUPPORTED_FORMAT` (unknown binary via
+/// the text path) / `EXTRACT_FAILED` (supported kind, useless result) /
+/// `OCR_MISSING` (no OCR engine on this platform) propagate verbatim.
+async fn content_from_source(name: &str, raw: &[u8]) -> Result<(String, &'static str)> {
+    if crate::rag::extract::can_extract(name) {
+        let content = crate::rag::extract::run(name, raw.to_vec()).await?;
+        return Ok((content, "extracted-md"));
+    }
+    if !is_likely_text(raw) {
+        return Err(anyhow!("UNSUPPORTED_FORMAT: {}", name));
+    }
+    let (content, encoding) = decode_text(raw, name);
+    Ok((content, encoding))
 }
 
 async fn upload_one_path_inner(
@@ -2644,15 +2694,11 @@ async fn upload_one_path_inner(
             MAX_UPLOAD_BYTES
         ));
     }
-    // Reject non-text files by CONTENT (PDF/Word/Excel etc. are binary — they
-    // contain NUL bytes / a high ratio of non-text control bytes). We can't
-    // enumerate every text extension, so we don't trust the extension; we sniff
-    // the bytes. Returns a sentinel the frontend maps to a localized message.
-    if !is_likely_text(&raw) {
-        return Err(anyhow!("UNSUPPORTED_FORMAT: {}", name));
-    }
-
-    let (content, encoding) = decode_text(&raw, &name);
+    // Reject unknown binaries by CONTENT. Extractable formats (PDF/Office/
+    // images) bypass the NUL sniff — their bytes are inherently binary and
+    // are parsed to Markdown by the extract strategies instead. Returns a
+    // sentinel the frontend maps to a localized message.
+    let (content, encoding) = content_from_source(&name, &raw).await?;
     let size = raw.len() as u64;
     let char_count = content.chars().count() as u64;
 
@@ -2675,16 +2721,21 @@ async fn upload_one_path_inner(
             name, raw.len(), char_count, encoding
         ),
     );
-    // On-disk filename = `{id}{ext}` (uuid + original extension). The uuid
-    // keeps it unique across same-named uploads; the extension lets the file
-    // show its type in the OS file manager + lets the UI display a recognizable
-    // name. Files with no extension fall back to the bare uuid.
+    // On-disk filename: `{id}{ext}` for text sources (uuid + original
+    // extension — unique across same-named uploads, shows its type in the OS
+    // file manager); `{id}.md` for extractable sources (PDF/Office/image),
+    // because the stored content is the DERIVED Markdown, not the raw bytes.
+    let extractable = crate::rag::extract::can_extract(&name);
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_default();
-    let file_stem = format!("{id}{ext}");
+    let file_stem = if extractable {
+        format!("{id}.md")
+    } else {
+        format!("{id}{ext}")
+    };
     // MD5 of the source bytes — captured at import for update detection
     // (symlink: live source; copy: the original that was copied). For symlink
     // docs the content is read fresh from original_path at view/index time, so
@@ -2704,7 +2755,11 @@ async fn upload_one_path_inner(
         size,
         None,
         1,
-        method.clone(),
+        // Extractable sources ALWAYS import as "copy": the content file is
+        // derived Markdown, so the symlink/copy distinction (about the raw
+        // source bytes) doesn't apply — all read paths then treat it as a
+        // plain copy document with zero special-casing.
+        if extractable { Some("copy".to_string()) } else { method.clone() },
         original_path_str,
         md5_hex,
     )
@@ -2764,9 +2819,12 @@ fn find_doc_ids_by_name(dir: &Path, name: &str) -> Vec<String> {
 ///    so the file shows its type in the OS file manager). `ext` is taken from
 ///    `meta_name` (the display name, which carries the original extension for
 ///    uploads and is `{name}.{docType}` for rag_file_create).
-/// 2. `dir/{id}` — the legacy upload scheme (uuid, no extension) for docs
+/// 2. `dir/{id}.md` — extractable imports (PDF/Office/image): their stored
+///    content is the DERIVED Markdown, named `{id}.md` regardless of the
+///    source extension.
+/// 3. `dir/{id}` — the legacy upload scheme (uuid, no extension) for docs
 ///    uploaded before the extension-preserving change. Kept for back-compat.
-/// 3. `dir/{meta_name}` — rag_file_create docs (human-readable name).
+/// 4. `dir/{meta_name}` — rag_file_create docs (human-readable name).
 /// Returns the first candidate that exists; if none exist, the last candidate
 /// (`meta_name`) so callers get a sensible path to create/remove/error on.
 fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf {
@@ -2784,12 +2842,18 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
             return by_id_ext;
         }
     }
-    // Candidate 2: {id} (legacy upload, no extension).
+    // Candidate 2: {id}.md (extracted-Markdown content of PDF/Office/image
+    // imports).
+    let by_id_md = dir.join(format!("{id}.md"));
+    if by_id_md.exists() {
+        return by_id_md;
+    }
+    // Candidate 3: {id} (legacy upload, no extension).
     let by_id = dir.join(id);
     if by_id.exists() {
         return by_id;
     }
-    // Candidate 3: {meta_name} (rag_file_create).
+    // Candidate 4: {meta_name} (rag_file_create).
     dir.join(meta_name)
 }
 
@@ -3671,6 +3735,11 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
         if let Some(ref ext) = ext {
             candidates.push(dir.join(format!("{id}{ext}")));
         }
+        // Extracted-Markdown content of PDF/Office/image imports ({id}.md —
+        // its name does NOT derive from meta_name, so it needs its own
+        // candidate; deduped below for text .md docs where candidate 1 is
+        // already this exact path).
+        candidates.push(dir.join(format!("{id}.md")));
         candidates.push(dir.join(id));
         if let Some(ref name) = meta_name {
             let p = dir.join(name);
@@ -3708,31 +3777,76 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
 /// rag/files copy (there is none). For "copy"/legacy docs it reveals the copied
 /// file under rag/files as before. Returns an error if the resolved target no
 /// longer exists on disk (e.g. a symlink whose source was moved/deleted).
-pub async fn open_file_location(app: &AppHandle, id: &str) -> Result<()> {
+pub async fn open_file_location(app: &AppHandle, id: &str, target: Option<String>) -> Result<()> {
     let dir = files_dir(app)?;
     let meta = std::fs::read(dir.join(format!("{}.meta", id)))
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
         .ok_or_else(|| anyhow!("document not found: {}", id))?;
     let is_symlink = meta.method.as_deref() == Some("symlink");
-    let target = if is_symlink {
+    // target="source": explicitly reveal the ORIGINAL file (second-opinion
+    // view for extractable imports). Default: symlink docs -> original,
+    // copy docs -> the rag/files copy / extracted Markdown.
+    let want_source = target.as_deref() == Some("source");
+    let (resolved, is_source) = if want_source || is_symlink {
         let op = meta
             .original_path
             .as_deref()
             .filter(|p| !p.is_empty())
             .ok_or_else(|| anyhow!("no original path recorded for this document"))?;
-        PathBuf::from(op)
+        (PathBuf::from(op), true)
     } else {
-        content_path_for(&dir, id, &meta.name)
+        (content_path_for(&dir, id, &meta.name), false)
     };
-    if !target.exists() {
-        return Err(if is_symlink {
-            anyhow!("original file does not exist: {}", target.display())
+    if !resolved.exists() {
+        return Err(if is_source {
+            anyhow!("original file does not exist: {}", resolved.display())
         } else {
-            anyhow!("file not found: {}", target.display())
+            anyhow!("file not found: {}", resolved.display())
         });
     }
-    reveal_in_file_manager(&target)?;
+    reveal_in_file_manager(&resolved)?;
+    Ok(())
+}
+
+/// Open a doc's ORIGINAL source file with the OS default application
+/// ("view source file" button in the View dialog — PDF/Office/image sources
+/// are stored as extracted Markdown, this re-opens the real file).
+pub async fn open_doc_source(app: &AppHandle, id: &str) -> Result<()> {
+    let dir = files_dir(app)?;
+    let meta = std::fs::read(dir.join(format!("{}.meta", id)))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
+        .ok_or_else(|| anyhow!("document not found: {}", id))?;
+    let op = meta
+        .original_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow!("no original path recorded for this document"))?;
+    let file = PathBuf::from(op);
+    if !file.exists() {
+        return Err(anyhow!("original file does not exist: {}", file.display()));
+    }
+    open_file_with_default_app(&file)?;
+    Ok(())
+}
+
+/// Open `file` with the OS default application (view the file itself, not
+/// its parent folder).
+fn open_file_with_default_app(file: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(file).spawn()?.wait()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // explorer <file> opens it with the default associated application.
+        std::process::Command::new("explorer").arg(file.as_os_str()).spawn()?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(file).spawn()?.wait()?;
+    }
     Ok(())
 }
 
@@ -4247,7 +4361,9 @@ pub async fn save_settings_and_rearm(app: &AppHandle, settings: RagSettings) -> 
 /// - Otherwise, if >30% of the sample is non-text control bytes -> binary.
 /// ASCII/UTF-8/legacy-CJK text passes (printable ASCII, tab/LF/CR, or high
 /// bytes for multibyte/extended chars are all "text").
-fn is_likely_text(bytes: &[u8]) -> bool {
+/// `pub(crate)`: also used by the `text` fallback strategy in
+/// `rag::extract::text`.
+pub(crate) fn is_likely_text(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(8192)];
     if sample.is_empty() {
         return true; // empty file -> treat as text

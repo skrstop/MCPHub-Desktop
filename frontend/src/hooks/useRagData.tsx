@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import { isTauri } from '@/utils/tauriClient';
-import { BatchPreview, RagChunk, RagDoc, RagDocInfo, RagFolderScan, RagModelInfo, RagModelLimits, RagPickedFile, RagSettings, RagSearchResult, RagUpdateCheck } from '@/types';
+import { BatchPreview, RagChunk, RagDoc, RagDocInfo, RagFolderScan, RagModelInfo, RagModelLimits, RagOcrStatus, RagPickedFile, RagSettings, RagSearchResult, RagUpdateCheck } from '@/types';
 import {
   listRagDocs,
   getRagSettings,
@@ -18,6 +18,7 @@ import {
   pickRagFiles,
   pickRagFolder,
   openRagFileLocation,
+  openRagSourceFile,
   ragToggle,
   ragStatus,
   searchRagDocs,
@@ -30,6 +31,7 @@ import {
   checkRagUpdate,
   previewBatchUpdate,
   batchUpdateRagDocs,
+  getOcrStatus,
 } from '@/services/ragService';
 
 /**
@@ -134,6 +136,28 @@ const useRagDataState = () => {
   // itself failed early, e.g. files_dir/read_dir error; the dialog shows the
   // failure state instead of a green "complete" checkmark).
   const [batchUpdateRunning, setBatchUpdateRunning] = useState(false);
+  // OCR-missing dialog: set when an import fails with the `OCR_MISSING:`
+  // sentinel (standalone image import on Linux without tesseract). The page
+  // renders the install-command dialog; dismissed on close.
+  const [ocrMissing, setOcrMissing] = useState<RagOcrStatus | null>(null);
+  const dismissOcrMissing = useCallback(() => setOcrMissing(null), []);
+  // Shared detector: true if `err` carries the OCR_MISSING sentinel —
+  // fetches the platform status and opens the dialog. Returns false when the
+  // error is something else (caller falls back to its toast).
+  const reportOcrMissingIf = useCallback(async (err: unknown): Promise<boolean> => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.startsWith('OCR_MISSING')) return false;
+    try {
+      const status = await getOcrStatus();
+      if (mounted.current) setOcrMissing(status);
+    } catch {
+      // Status probe failed — still surface the dialog with a minimal stub.
+      if (mounted.current) {
+        setOcrMissing({ available: false, platform: 'linux', distro: null, engine: 'tesseract', missingLangs: [] });
+      }
+    }
+    return true;
+  }, []);
   const [batchProgress, setBatchProgress] = useState<{
     current: number;
     total: number;
@@ -561,8 +585,18 @@ const useRagDataState = () => {
             failed++;
             if (!mounted.current) break;
             const msg = err instanceof Error ? err.message : String(err);
-            if (msg.startsWith('UNSUPPORTED_FORMAT')) {
+            if (msg.startsWith('OCR_MISSING')) {
+              // No OCR engine on this platform -> dialog with install
+              // commands (not a toast).
+              await reportOcrMissingIf(err);
+            } else if (msg.startsWith('UNSUPPORTED_FORMAT')) {
               showToast(t('pages.rag.unsupportedFile', { name: files[i].name }), 'error');
+            } else if (msg.startsWith('EXTRACT_FAILED')) {
+              // Supported document kind but extraction produced nothing
+              // usable — show the backend's concrete reason (e.g. scanned
+              // PDF without a text layer).
+              const reason = msg.split(':').slice(1).join(':').trim();
+              showToast(t('pages.rag.extractFailed', { name: files[i].name, reason }), 'error');
             } else {
               showToast(`${t('pages.rag.uploadFailedFile', { name: files[i].name })}: ${msg}`, 'error');
             }
@@ -580,7 +614,7 @@ const useRagDataState = () => {
       }
       return { success, failed };
     },
-    [fetchDocs],
+    [fetchDocs, reportOcrMissingIf],
   );
 
   const pickFiles = useCallback(async (): Promise<RagPickedFile[]> => {
@@ -826,8 +860,12 @@ const useRagDataState = () => {
     setChunksTotal(0);
   }, []);
 
-  const openLocation = useCallback(async (id: string) => {
-    await openRagFileLocation(id);
+  const openLocation = useCallback(async (id: string, target?: 'source' | 'content') => {
+    await openRagFileLocation(id, target);
+  }, []);
+
+  const openSourceFile = useCallback(async (id: string) => {
+    await openRagSourceFile(id);
   }, []);
 
   const search = useCallback(async (query: string, tags: string[] = []) => {
@@ -901,6 +939,7 @@ const useRagDataState = () => {
     loadMoreChunks,
     closeChunks,
     openLocation,
+    openSourceFile,
     search,
     setTags,
     updateSettings,
@@ -910,6 +949,10 @@ const useRagDataState = () => {
     batchUpdate,
     batchUpdateRunning,
     batchProgress,
+    // OCR-missing dialog (image/PDF/Office imports on Linux w/o tesseract).
+    ocrMissing,
+    dismissOcrMissing,
+    reportOcrMissingIf,
     refresh: fetchDocs,
   };
 };

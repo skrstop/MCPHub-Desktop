@@ -52,7 +52,23 @@ const NAME_TO_HL: Record<string, string> = {
 };
 
 const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mdx', '.rmd']);
+
+// Desktop-only: these source formats are imported THROUGH text extraction
+// (backend parses PDF/Office files to Markdown; see
+// src-tauri/src/rag/extract/), so the stored/viewable content is always
+// Markdown regardless of the original extension. (Image imports (.png/...)
+// also go through extraction, but their OCR output is plain text — rendered
+// as such, not Markdown.)
+const EXTRACTED_MARKDOWN_EXTS = new Set([
+  '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt',
+]);
 const MERMAID_EXTS = new Set(['.mmd', '.mermaid']);
+
+// Image sources imported through OCR extraction (content = recognized text,
+// stored as `{id}.md` like the other extractable kinds).
+const IMAGE_EXTRACTED_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif',
+]);
 
 /** Lowercase extension (with dot) of a filename, or '' if none. */
 export function extOf(fileName?: string): string {
@@ -65,7 +81,18 @@ export function extOf(fileName?: string): string {
 /** Whether the doc should be rendered as Markdown (not as a code block). */
 export function isMarkdown(fileName?: string, fileType?: string): boolean {
   if (fileType === 'Markdown') return true;
-  return MARKDOWN_EXTS.has(extOf(fileName));
+  const ext = extOf(fileName);
+  return MARKDOWN_EXTS.has(ext) || EXTRACTED_MARKDOWN_EXTS.has(ext);
+}
+
+/** Whether this file kind is imported via SECOND-PASS parsing (PDF/Office
+ *  text extraction, image OCR) — the doc has BOTH a source file
+ *  (originalPath) and a derived content file, so "open location"/view can
+ *  target either. Drives the two-entry open-folder menu + the
+ *  "view source file" button in the View dialog. */
+export function isExtractedSource(fileName?: string): boolean {
+  const ext = extOf(fileName);
+  return EXTRACTED_MARKDOWN_EXTS.has(ext) || IMAGE_EXTRACTED_EXTS.has(ext);
 }
 
 /** Whether the doc is a standalone Mermaid diagram (.mmd / .mermaid). */
@@ -85,5 +112,7 @@ export function hlLangFor(fileName?: string, fileType?: string): string | undefi
   if (NAME_TO_HL[base]) return NAME_TO_HL[base];
   const ext = extOf(fileName);
   if (MARKDOWN_EXTS.has(ext) || fileType === 'Markdown') return undefined;
+  // Extracted sources render via the Markdown component, never highlighted.
+  if (EXTRACTED_MARKDOWN_EXTS.has(ext)) return undefined;
   return EXT_TO_HL[ext];
 }

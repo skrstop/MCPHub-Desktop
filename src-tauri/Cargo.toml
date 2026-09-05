@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.33002"
+version = "1.0.33101"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -121,6 +121,20 @@ flate2 = "1"
 tar = "0.4"
 rmcp-openapi = "0.31"
 
+# RAG binary office-document import (rag/extract/): pure-Rust extractors,
+# both output Markdown directly.
+pdf_oxide = "0.3"      # PDF -> markdown (default features: icc + legacy-crypto)
+office_oxide = "0.1"   # docx/doc/xlsx/xls/pptx/ppt -> markdown (default features: none)
+# Image decoding for the OCR pipeline (validate uploads, re-encode to PNG for
+# tesseract on Linux). Feature set matches the formats the image OCR strategy
+# accepts; merges with pdf_oxide's image subset into one compilation.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
+# ZIP container reading (OOXML office files). Promoted from the Windows target
+# section to all platforms with default features off: only the pure-Rust
+# deflate backend (matches office_oxide/pdf_oxide internal declarations for a
+# single compilation; avoids zstd-sys/bzip2/lzma C deps from default features).
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
 # RAG: embedding inference (tokenizers + candle) + vector DB (lancedb).
 # `default-features = false` avoids the esaxx C++ dependency (the macOS CLT
 # C++ headers are incomplete); BPE tokenization only needs fancy-regex.
@@ -179,8 +193,10 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-zip = "8"
 winreg = "0.56"
+# Windows OCR engine (Windows.Media.Ocr, built into the OS) for the RAG
+# image/PDF/Office OCR pipeline. Feature set unlocks the WinRT types used by
+# rag/extract/ocr.rs (engine + bitmap decode + stream plumbing).
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
@@ -194,12 +210,27 @@ windows = { version = "0.62", features = [
     # elevation check in lib::win_deelevate (relaunch non-elevated when the
     # NSIS installer auto-launches the app elevated after a per-machine install).
     "Win32_Security",
+    # WinRT OCR pipeline (rag/extract/ocr.rs).
+    "Foundation",
+    "Globalization",
+    "Graphics",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
 ] }
 # Windows RAG embedding is CPU-only (candle has no DirectML EP).
 
 # macOS: set process display name in Dock during dev
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+# Apple Vision OCR bindings for the RAG image/PDF/Office OCR pipeline
+# (rag/extract/ocr.rs). Pure objc2 header bindings — links the system Vision
+# framework, no extra build toolchain (deliberately NOT a cidre-based crate:
+# cidre's build script requires a full Xcode install, unavailable with
+# CommandLineTools alone).
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-vision = "0.3"
 # candle Metal (GPU) + accelerate (Apple BLAS sgemm) on macOS. The `accelerate`
 # feature makes candle's CPU f32 matmul route through Apple Accelerate (vDSP/
 # AMX) instead of the pure-Rust `gemm` crate - ~2-5x faster for the CPU path
