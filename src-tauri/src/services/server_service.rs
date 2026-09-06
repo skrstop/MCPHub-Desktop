@@ -53,27 +53,67 @@ pub async fn list_all() -> Result<Vec<ServerConfig>> {
 /// `search_servers` command; runtime-only fields (connection status, live tool
 /// list) are merged by the caller for the returned candidates only.
 pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
-    let key = search_key.trim().to_lowercase();
-    let rows = if key.is_empty() {
-        sqlx::query(
+    let key = search_key.trim();
+    if key.is_empty() {
+        let rows = sqlx::query(
             "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
              FROM servers ORDER BY name",
         )
         .fetch_all(db::pool())
-        .await?
-    } else {
-        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
-        sqlx::query(
-            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
-             FROM servers \
-             WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\' \
-             ORDER BY name",
-        )
-        .bind(&pattern)
-        .bind(&pattern)
-        .fetch_all(db::pool())
-        .await?
-    };
+        .await?;
+        return rows.into_iter().map(map_row).collect();
+    }
+
+    // FTS5 路径（中/英/拼音分词）；命中词数优先 + 同数按 name 序；空表/Err/零结果降级 LIKE（§4.4）
+    match crate::services::fts_service::search_ref_ids_weighted(
+        crate::services::fts_service::FtsTable::Servers,
+        key,
+        200,
+    )
+    .await
+    {
+        Ok(weighted) if !weighted.is_empty() => {
+            // 回表（原生 name 序）→ 稳定排序按命中词数降序：相关度第一优先，
+            // 同相关度保持 name 序（2026-09-06 用户要求）。servers 总量小，全量读代价可忽略
+            let counts: std::collections::HashMap<String, i64> =
+                weighted.into_iter().collect();
+            let all = sqlx::query(
+                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+                 FROM servers ORDER BY name",
+            )
+            .fetch_all(db::pool())
+            .await?;
+            let mut configs: Vec<ServerConfig> =
+                all.into_iter().map(map_row).collect::<Result<_>>()?;
+            configs.retain(|c| counts.contains_key(&c.name));
+            configs.sort_by_key(|c| std::cmp::Reverse(counts.get(&c.name).copied().unwrap_or(0)));
+            Ok(configs)
+        }
+        Ok(_) => {
+            // 零结果/空表均降级 LIKE：LIKE 子串语义可补 FTS 词前缀盲区
+            //（如 CJK 内部子串「据」不在分词 token 头部，FTS 查不到）
+            like_search(key).await
+        }
+        Err(e) => {
+            log::warn!("[fts] search servers failed, fallback to LIKE: {e}");
+            like_search(key).await
+        }
+    }
+}
+
+/// 原 LIKE 搜索路径（降级兜底）
+async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
+    let pattern = format!("%{}%", key.to_lowercase().replace('%', "\\%").replace('_', "\\_"));
+    let rows = sqlx::query(
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+         FROM servers \
+         WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\' \
+         ORDER BY name",
+    )
+    .bind(&pattern)
+    .bind(&pattern)
+    .fetch_all(db::pool())
+    .await?;
     rows.into_iter().map(map_row).collect()
 }
 
@@ -100,6 +140,14 @@ fn validate_combination(cfg: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// servers 的 FTS 可搜索文本（P3：多字段单空格拼接）：name + description
+fn server_fts_text(name: &str, description: Option<&str>) -> String {
+    match description {
+        Some(d) if !d.is_empty() => format!("{name} {d}"),
+        _ => name.to_string(),
+    }
+}
+
 pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     // The name "RAG" is reserved for the builtin RAG server (see
     // rag::service::BUILTIN_SERVER_NAME). Reject custom servers using it so a
@@ -121,6 +169,9 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     let start_on_demand = cfg.start_on_demand.unwrap_or(false) as i64;
     let idle_timeout_ms = cfg.idle_timeout_ms.unwrap_or(0) as i64;
 
+    let fts_text = server_fts_text(&cfg.name, cfg.description.as_deref());
+
+    let mut tx = db::pool().begin().await?;
     sqlx::query(
         "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -141,7 +192,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(idle_timeout_ms)
     .bind(&proxy)
     .bind(enabled)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         let msg = e.to_string();
@@ -151,6 +202,16 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
             anyhow!(msg)
         }
     })?;
+
+    // FTS 同步（§4.3 铁律：同事务）
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Servers,
+        &cfg.name,
+        &fts_text,
+    )
+    .await?;
+    tx.commit().await?;
 
     get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Insert failed"))
 }
@@ -174,7 +235,10 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let start_on_demand = cfg.start_on_demand.unwrap_or(false) as i64;
     let idle_timeout_ms = cfg.idle_timeout_ms.unwrap_or(0) as i64;
 
-    sqlx::query(
+    let fts_text = server_fts_text(&cfg.name, cfg.description.as_deref());
+
+    let mut tx = db::pool().begin().await?;
+    let result = sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
          headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
@@ -194,17 +258,47 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&proxy)
     .bind(enabled)
     .bind(name)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(anyhow!("Server '{}' not found", name));
+    }
+
+    // FTS 同步（§4.3 铁律：同事务）。改名 = 删旧 ref_id 行 + 插新 ref_id 行（P5）
+    if name != cfg.name {
+        crate::services::fts_service::sync_delete_tx(
+            &mut tx,
+            crate::services::fts_service::FtsTable::Servers,
+            name,
+        )
+        .await?;
+    }
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Servers,
+        &cfg.name,
+        &fts_text,
+    )
+    .await?;
+    tx.commit().await?;
 
     get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Server not found after update"))
 }
 
 pub async fn delete(name: &str) -> Result<()> {
+    let mut tx = db::pool().begin().await?;
     sqlx::query("DELETE FROM servers WHERE name = ?")
         .bind(name)
-        .execute(db::pool())
+        .execute(&mut *tx)
         .await?;
+    crate::services::fts_service::sync_delete_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Servers,
+        name,
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

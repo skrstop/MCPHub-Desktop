@@ -16,3 +16,4 @@ pub mod mcp_version;
 pub mod mcp_tasks;
 pub mod http_server;
 pub mod skill_service;
+pub mod fts_service;

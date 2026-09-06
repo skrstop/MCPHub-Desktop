@@ -38,6 +38,65 @@ pub async fn search_paged(search_key: &str, page: u32, page_size: u32) -> Result
     let key = search_key.trim().to_lowercase();
     let offset = (page as i64) * (page_size as i64);
 
+    // FTS5 路径（中/英/拼音分词 + rank 排序）；空表/Err 降级原 LIKE（§4.4）
+    if !key.is_empty() {
+        match crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::Groups,
+            &key,
+            1000,
+        )
+        .await
+        {
+            Ok(weighted) if !weighted.is_empty() => {
+                // groups 数量小：全量读（原生 name 序）→ 稳定排序按命中词数降序 → Rust 侧分页
+                let rows = sqlx::query(sqlx::AssertSqlSafe(&*format!(
+                    "SELECT {SELECT_COLS} FROM groups ORDER BY name"
+                )))
+                .fetch_all(db::pool())
+                .await?;
+                let counts: std::collections::HashMap<String, i64> =
+                    weighted.into_iter().collect();
+                let mut items = rows
+                    .iter()
+                    .map(row_to_group)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|g| counts.contains_key(&g.id))
+                    .collect::<Vec<_>>();
+                // 相关度第一优先（稳定排序：同命中数保持 name 序）
+                items.sort_by_key(|g| std::cmp::Reverse(counts.get(&g.id).copied().unwrap_or(0)));
+                let total = items.len() as u64;
+                let window = items
+                    .iter()
+                    .skip(offset.max(0) as usize)
+                    .take(page_size as usize)
+                    .cloned()
+                    .collect();
+                return Ok(GroupPage {
+                    items: window,
+                    total,
+                    page,
+                    page_size,
+                });
+            }
+            Ok(_)
+                if crate::services::fts_service::table_is_empty(
+                    crate::services::fts_service::FtsTable::Groups,
+                )
+                .await
+                .unwrap_or(false) =>
+            {
+                // 空表兜底：继续走下方原 LIKE
+            }
+            Ok(_) => {
+                // 零结果/空表均不返回：落到下方原 LIKE（子串语义补 FTS 词前缀盲区）
+            }
+            Err(e) => {
+                log::warn!("[fts] search groups failed, fallback to LIKE: {e}");
+            }
+        }
+    }
+
     let mut where_clause = String::new();
     let mut pattern = String::new();
     if !key.is_empty() {
@@ -75,8 +134,7 @@ pub async fn search_paged(search_key: &str, page: u32, page_size: u32) -> Result
     })
 }
 
-pub async fn find_by_name_or_id(name_or_id: &str) -> Result<Option<Group>> {
-    let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
+pub async fn find_by_name_or_id(name_or_id: &str) -> Result<Option<Group>> {    let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "SELECT {SELECT_COLS} FROM groups WHERE name = ? OR id = ?"
     )))
     .bind(name_or_id)
@@ -93,6 +151,9 @@ pub async fn find_by_name_or_id(name_or_id: &str) -> Result<Option<Group>> {
 pub async fn create(payload: &GroupPayload) -> Result<Group> {
     let id = Uuid::new_v4().to_string();
     let servers_json = serde_json::to_string(&payload.servers)?;
+    let fts_text = group_fts_text(&payload.name, payload.description.as_deref());
+
+    let mut tx = db::pool().begin().await?;
     sqlx::query(
         "INSERT INTO groups (id, name, description, servers) \
          VALUES (?, ?, ?, ?)",
@@ -101,8 +162,16 @@ pub async fn create(payload: &GroupPayload) -> Result<Group> {
     .bind(&payload.name)
     .bind(&payload.description)
     .bind(&servers_json)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await?;
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Groups,
+        &id,
+        &fts_text,
+    )
+    .await?;
+    tx.commit().await?;
 
     Ok(Group {
         id,
@@ -115,15 +184,30 @@ pub async fn create(payload: &GroupPayload) -> Result<Group> {
 
 pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     let servers_json = serde_json::to_string(&payload.servers)?;
-    sqlx::query(
+    let fts_text = group_fts_text(&payload.name, payload.description.as_deref());
+
+    let mut tx = db::pool().begin().await?;
+    let result = sqlx::query(
         "UPDATE groups SET name=?, description=?, servers=? WHERE id=?",
     )
     .bind(&payload.name)
     .bind(&payload.description)
     .bind(&servers_json)
     .bind(id)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(anyhow!("Group not found"));
+    }
+    // ref_id=id，改名不影响 ref_id
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Groups,
+        id,
+        &fts_text,
+    )
+    .await?;
+    tx.commit().await?;
 
     let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "SELECT {SELECT_COLS} FROM groups WHERE id=?"
@@ -137,9 +221,25 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
 }
 
 pub async fn delete(id: &str) -> Result<()> {
+    let mut tx = db::pool().begin().await?;
     sqlx::query("DELETE FROM groups WHERE id=?")
         .bind(id)
-        .execute(db::pool())
+        .execute(&mut *tx)
         .await?;
+    crate::services::fts_service::sync_delete_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Groups,
+        id,
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
+}
+
+/// groups 的 FTS 可搜索文本（P3）：name + description
+fn group_fts_text(name: &str, description: Option<&str>) -> String {
+    match description {
+        Some(d) if !d.is_empty() => format!("{name} {d}"),
+        _ => name.to_string(),
+    }
 }

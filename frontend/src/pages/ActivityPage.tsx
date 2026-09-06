@@ -4,18 +4,18 @@ import {
   Activity,
   ActivityStats,
   ActivityFilter,
-  ActivityFilterOptions,
   ActivityStatus,
 } from '@/types';
 import {
   getActivities,
   getActivityById,
   getActivityStats,
-  getActivityFilterOptions,
+  getActivityFilterOptionsPaged,
   deleteOldActivities,
   clearAllActivities,
 } from '@/services/activityService';
 import Pagination from '@/components/ui/Pagination';
+import SearchableSelect from '@/components/ui/SearchableSelect';
 
 // Pagination info type
 interface PaginationInfo {
@@ -38,7 +38,6 @@ const ActivityPage: React.FC = () => {
   // State
   const [activities, setActivities] = useState<Activity[]>([]);
   const [stats, setStats] = useState<ActivityStats | null>(null);
-  const [filterOptions, setFilterOptions] = useState<ActivityFilterOptions | null>(null);
   const [pagination, setPagination] = useState<PaginationInfo | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
@@ -53,8 +52,29 @@ const ActivityPage: React.FC = () => {
   const [searchTool, setSearchTool] = useState('');
   const [searchStatus, setSearchStatus] = useState<string>('');
   const [searchGroup, setSearchGroup] = useState('');
-  const [searchUsername, setSearchUsername] = useState('');
   const [searchKeyName, setSearchKeyName] = useState('');
+
+  // 可搜索分页下拉的候选加载器（稳定引用，供 SearchableSelect 内部 useCallback 依赖）
+  const loadServerOptions = useCallback(
+    (search: string, page: number, pageSize: number) =>
+      getActivityFilterOptionsPaged('server', search, page, pageSize),
+    [],
+  );
+  const loadToolOptions = useCallback(
+    (search: string, page: number, pageSize: number) =>
+      getActivityFilterOptionsPaged('tool', search, page, pageSize),
+    [],
+  );
+  const loadGroupOptions = useCallback(
+    (search: string, page: number, pageSize: number) =>
+      getActivityFilterOptionsPaged('group', search, page, pageSize),
+    [],
+  );
+  const loadKeyNameOptions = useCallback(
+    (search: string, page: number, pageSize: number) =>
+      getActivityFilterOptionsPaged('keyName', search, page, pageSize),
+    [],
+  );
 
   // Fetch data
   const fetchData = useCallback(async () => {
@@ -65,11 +85,10 @@ const ActivityPage: React.FC = () => {
       // Use appliedFilters directly for fetching
       const currentFilter = { ...appliedFilters };
 
-      // Fetch activities, stats, and filter options in parallel
-      const [activitiesRes, statsRes, optionsRes] = await Promise.all([
+      // Fetch activities and stats in parallel
+      const [activitiesRes, statsRes] = await Promise.all([
         getActivities(currentPage, itemsPerPage, currentFilter),
         getActivityStats(currentFilter),
-        getActivityFilterOptions(),
       ]);
 
       if (activitiesRes?.success && Array.isArray(activitiesRes.data)) {
@@ -83,9 +102,6 @@ const ActivityPage: React.FC = () => {
         setStats(statsRes.data);
       }
 
-      if (optionsRes?.success && optionsRes.data) {
-        setFilterOptions(optionsRes.data);
-      }
     } catch (err) {
       console.error('Error fetching activity data:', err);
       setError(t('activity.fetchError'));
@@ -151,7 +167,6 @@ const ActivityPage: React.FC = () => {
       }
     }
     if (searchGroup) filters.group = searchGroup;
-    if (searchUsername) filters.username = searchUsername;
     if (searchKeyName) filters.keyName = searchKeyName;
 
     setAppliedFilters(filters);
@@ -164,7 +179,6 @@ const ActivityPage: React.FC = () => {
     setSearchTool('');
     setSearchStatus('');
     setSearchGroup('');
-    setSearchUsername('');
     setSearchKeyName('');
     setAppliedFilters({});
     setCurrentPage(1);
@@ -247,92 +261,22 @@ const ActivityPage: React.FC = () => {
       <div className="hub-card px-4 py-3 mb-4">
         <div className="flex flex-wrap gap-3 items-end">
           <div className="flex-1 min-w-[140px]">
-            <label className="sr-only" htmlFor="activity-server">
-              {t('activity.server')}
-            </label>
-            <div className="relative">
-              <input
-                id="activity-server"
-                type="text"
-                value={searchServer}
-                onChange={(e) => setSearchServer(e.target.value)}
-                placeholder={t('activity.searchServer')}
-                className="hub-input pr-9"
-                list="server-options"
-              />
-              {searchServer && (
-                <button
-                  onClick={() => setSearchServer('')}
-                  className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  aria-label={t('common.clear')}
-                  type="button"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-            {filterOptions?.servers && (
-              <datalist id="server-options">
-                {filterOptions.servers.map((s) => (
-                  <option key={s} value={s} />
-                ))}
-              </datalist>
-            )}
+            <SearchableSelect
+              loadOptions={loadServerOptions}
+              value={searchServer}
+              onChange={setSearchServer}
+              placeholder={t('activity.searchServer')}
+              ariaLabel={t('activity.server')}
+            />
           </div>
           <div className="flex-1 min-w-[140px]">
-            <label className="sr-only" htmlFor="activity-tool">
-              {t('activity.tool')}
-            </label>
-            <div className="relative">
-              <input
-                id="activity-tool"
-                type="text"
-                value={searchTool}
-                onChange={(e) => setSearchTool(e.target.value)}
-                placeholder={t('activity.searchTool')}
-                className="hub-input pr-9"
-                list="tool-options"
-              />
-              {searchTool && (
-                <button
-                  onClick={() => setSearchTool('')}
-                  className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  aria-label={t('common.clear')}
-                  type="button"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-            {filterOptions?.tools && (
-              <datalist id="tool-options">
-                {filterOptions.tools.map((t) => (
-                  <option key={t} value={t} />
-                ))}
-              </datalist>
-            )}
+            <SearchableSelect
+              loadOptions={loadToolOptions}
+              value={searchTool}
+              onChange={setSearchTool}
+              placeholder={t('activity.searchTool')}
+              ariaLabel={t('activity.tool')}
+            />
           </div>
           <div className="flex-1 min-w-[140px]">
             <label className="sr-only" htmlFor="activity-status">
@@ -380,136 +324,22 @@ const ActivityPage: React.FC = () => {
             </datalist>
           </div>
           <div className="flex-1 min-w-[140px]">
-            <label className="sr-only" htmlFor="activity-group">
-              {t('activity.group')}
-            </label>
-            <div className="relative">
-              <input
-                id="activity-group"
-                type="text"
-                value={searchGroup}
-                onChange={(e) => setSearchGroup(e.target.value)}
-                placeholder={t('activity.searchGroup')}
-                className="hub-input pr-9"
-                list="group-options"
-              />
-              {searchGroup && (
-                <button
-                  onClick={() => setSearchGroup('')}
-                  className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  aria-label={t('common.clear')}
-                  type="button"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-            {filterOptions?.groups && (
-              <datalist id="group-options">
-                {filterOptions.groups.map((g) => (
-                  <option key={g} value={g} />
-                ))}
-              </datalist>
-            )}
+            <SearchableSelect
+              loadOptions={loadGroupOptions}
+              value={searchGroup}
+              onChange={setSearchGroup}
+              placeholder={t('activity.searchGroup')}
+              ariaLabel={t('activity.group')}
+            />
           </div>
           <div className="flex-1 min-w-[140px]">
-            <label className="sr-only" htmlFor="activity-username">
-              {t('activity.user')}
-            </label>
-            <div className="relative">
-              <input
-                id="activity-username"
-                type="text"
-                value={searchUsername}
-                onChange={(e) => setSearchUsername(e.target.value)}
-                placeholder={t('activity.searchUsername')}
-                className="hub-input pr-9"
-                list="username-options"
-              />
-              {searchUsername && (
-                <button
-                  onClick={() => setSearchUsername('')}
-                  className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  aria-label={t('common.clear')}
-                  type="button"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-            {filterOptions?.usernames && (
-              <datalist id="username-options">
-                {filterOptions.usernames.map((username) => (
-                  <option key={username} value={username} />
-                ))}
-              </datalist>
-            )}
-          </div>
-          <div className="flex-1 min-w-[140px]">
-            <label className="sr-only" htmlFor="activity-keyname">
-              {t('activity.keyName')}
-            </label>
-            <div className="relative">
-              <input
-                id="activity-keyname"
-                type="text"
-                value={searchKeyName}
-                onChange={(e) => setSearchKeyName(e.target.value)}
-                placeholder={t('activity.searchKeyName')}
-                className="hub-input pr-9"
-                list="keyname-options"
-              />
-              {searchKeyName && (
-                <button
-                  onClick={() => setSearchKeyName('')}
-                  className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  aria-label={t('common.clear')}
-                  type="button"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-            {filterOptions?.keyNames && (
-              <datalist id="keyname-options">
-                {filterOptions.keyNames.map((k) => (
-                  <option key={k} value={k} />
-                ))}
-              </datalist>
-            )}
+            <SearchableSelect
+              loadOptions={loadKeyNameOptions}
+              value={searchKeyName}
+              onChange={setSearchKeyName}
+              placeholder={t('activity.searchKeyName')}
+              ariaLabel={t('activity.keyName')}
+            />
           </div>
           <div className="flex-shrink-0 flex items-center gap-2">
             <button onClick={handleSearch} className="hub-btn primary whitespace-nowrap">

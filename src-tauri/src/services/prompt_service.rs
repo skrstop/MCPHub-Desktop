@@ -48,6 +48,128 @@ pub async fn search_paged(
     let key = search_key.trim().to_lowercase();
     let offset = (page as i64) * (page_size as i64);
 
+    // FTS5 路径（§4.4）：key 非空时优先 FTS（rank 序），enabled 过滤 Rust 侧做；
+    // 空表/Err 降级原 LIKE。builtin_prompts 行数小，Rust 分页代价可忽略。
+    if !key.is_empty() {
+        match crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::Prompts,
+            &key,
+            500,
+        )
+        .await
+        {
+            Ok(weighted) if !weighted.is_empty() => {
+                // 命中词数 map：相关度第一优先，同数保持 name 序（稳定排序）
+                let all = sqlx::query(
+                    "SELECT id, name, title, description, template, arguments, enabled, created_at \
+                     FROM builtin_prompts ORDER BY name",
+                )
+                .fetch_all(db::pool())
+                .await?;
+                let counts: std::collections::HashMap<String, i64> =
+                    weighted.iter().cloned().collect();
+                let mut items = all
+                    .iter()
+                    .map(row_to_prompt)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|p| {
+                        counts.contains_key(&p.name)
+                            && (filter == "all"
+                                || (filter == "active" && p.enabled)
+                                || (filter == "inactive" && !p.enabled))
+                    })
+                    .collect::<Vec<_>>();
+                // 相关度第一优先（稳定排序：同命中数保持 name 序）
+                items.sort_by_key(|p| std::cmp::Reverse(counts.get(&p.name).copied().unwrap_or(0)));
+                let total = items.len() as u64;
+                let window: Vec<BuiltinPrompt> = items
+                    .into_iter()
+                    .skip(offset.max(0) as usize)
+                    .take(page_size as usize)
+                    .collect();
+                return Ok(PromptPage { items: window, total, page, page_size });
+            }
+            Ok(_)
+                if crate::services::fts_service::table_is_empty(
+                    crate::services::fts_service::FtsTable::Prompts,
+                )
+                .await
+                .unwrap_or(false) =>
+            {
+                // 空表兜底：走原 LIKE
+            }
+            Ok(_) => {
+                // 零结果/空表均不返回：落到下方原 LIKE（子串语义补 FTS 词前缀盲区）
+            }
+            Err(e) => {
+                log::warn!("[fts] search prompts failed, fallback to LIKE: {e}");
+            }
+        }
+    }
+
+    // FTS5 路径（§4.4）：key 非空时优先 FTS（rank 序），enabled 过滤在 Rust 侧；
+    // 空表/Err 降级原 LIKE。builtin 表行数小，Rust 分页代价可忽略。
+    if !key.is_empty() {
+        match crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::Prompts,
+            &key,
+            500,
+        )
+        .await
+        {
+            Ok(weighted) if !weighted.is_empty() => {
+                // 命中词数 map：相关度第一优先，同数保持 name 序（稳定排序）
+                let all = sqlx::query(
+                    "SELECT id, name, title, description, template, arguments, enabled, created_at \
+                     FROM builtin_prompts ORDER BY name",
+                )
+                .fetch_all(db::pool())
+                .await?;
+                let counts: std::collections::HashMap<String, i64> =
+                    weighted.iter().cloned().collect();
+                let mut items = all
+                    .iter()
+                    .map(row_to_prompt)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|p| {
+                        counts.contains_key(&p.name)
+                            && match filter {
+                                "active" => p.enabled,
+                                "inactive" => !p.enabled,
+                                _ => true,
+                            }
+                    })
+                    .collect::<Vec<_>>();
+                // 相关度第一优先（稳定排序：同命中数保持 name 序）
+                items.sort_by_key(|p| std::cmp::Reverse(counts.get(&p.name).copied().unwrap_or(0)));
+                let total = items.len() as u64;
+                let window = items
+                    .into_iter()
+                    .skip(offset.max(0) as usize)
+                    .take(page_size as usize)
+                    .collect();
+                return Ok(PromptPage { items: window, total, page, page_size });
+            }
+            Ok(_)
+                if crate::services::fts_service::table_is_empty(
+                    crate::services::fts_service::FtsTable::Prompts,
+                )
+                .await
+                .unwrap_or(false) =>
+            {
+                // 空表兜底：走原 LIKE
+            }
+            Ok(_) => {
+                // 零结果/空表均不返回：落到下方原 LIKE（子串语义补 FTS 词前缀盲区）
+            }
+            Err(e) => {
+                log::warn!("[fts] search prompts failed, fallback to LIKE: {e}");
+            }
+        }
+    }
+
     let mut conds: Vec<String> = Vec::new();
     if !key.is_empty() {
         conds.push(
@@ -116,7 +238,9 @@ pub async fn find_by_id(id: &str) -> Result<Option<BuiltinPrompt>> {
 pub async fn create(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
     let id = Uuid::new_v4().to_string();
     let args_json = serde_json::to_string(&payload.arguments)?;
+    let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
 
+    let mut tx = db::pool().begin().await?;
     sqlx::query(
         "INSERT INTO builtin_prompts (id, name, title, description, template, arguments, enabled) \
          VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -128,8 +252,18 @@ pub async fn create(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
     .bind(&payload.template)
     .bind(&args_json)
     .bind(payload.enabled as i64)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await?;
+
+    // FTS 同步（§4.3 铁律：同事务；ref_id=name）
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Prompts,
+        &payload.name,
+        &fts_text,
+    )
+    .await?;
+    tx.commit().await?;
 
     let row = sqlx::query(
         "SELECT id, name, title, description, template, arguments, enabled, created_at \
@@ -144,6 +278,17 @@ pub async fn create(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
 
 pub async fn update(id: &str, payload: &BuiltinPromptPayload) -> Result<Option<BuiltinPrompt>> {
     let args_json = serde_json::to_string(&payload.arguments)?;
+    let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
+
+    let mut tx = db::pool().begin().await?;
+    // 先读旧 name（ref_id=name：改名时需删旧插新，P5）
+    let old_name: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT name FROM builtin_prompts WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
 
     let affected = sqlx::query(
         "UPDATE builtin_prompts SET name = ?, title = ?, description = ?, template = ?, \
@@ -156,23 +301,68 @@ pub async fn update(id: &str, payload: &BuiltinPromptPayload) -> Result<Option<B
     .bind(&args_json)
     .bind(payload.enabled as i64)
     .bind(id)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await?
     .rows_affected();
 
     if affected == 0 {
+        tx.commit().await?;
         return Ok(None);
     }
+    if old_name.as_deref() != Some(payload.name.as_str()) {
+        if let Some(old) = &old_name {
+            crate::services::fts_service::sync_delete_tx(
+                &mut tx,
+                crate::services::fts_service::FtsTable::Prompts,
+                old,
+            )
+            .await?;
+        }
+    }
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Prompts,
+        &payload.name,
+        &fts_text,
+    )
+    .await?;
+    tx.commit().await?;
+
     find_by_id(id).await
 }
 
 pub async fn delete(id: &str) -> Result<bool> {
+    let mut tx = db::pool().begin().await?;
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM builtin_prompts WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
     let affected = sqlx::query("DELETE FROM builtin_prompts WHERE id = ?")
         .bind(id)
-        .execute(db::pool())
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+    if let Some(name) = name {
+        crate::services::fts_service::sync_delete_tx(
+            &mut tx,
+            crate::services::fts_service::FtsTable::Prompts,
+            &name,
+        )
+        .await?;
+    }
+    tx.commit().await?;
     Ok(affected > 0)
+}
+
+/// prompts 的 FTS 可搜索文本（P3）：name + title + description
+fn prompt_fts_text(name: &str, title: Option<&str>, description: Option<&str>) -> String {
+    [Some(name), title, description]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Render the prompt template by substituting {{arg}} placeholders with provided values.

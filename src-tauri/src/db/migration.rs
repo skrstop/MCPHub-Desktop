@@ -9,7 +9,43 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 23;
+pub const TARGET_VERSION: i64 = 24;
+
+/// Check whether any migration is pending (schema version below target).
+/// Used by the pre-migration backup step in `db::initialize`.
+pub async fn has_pending(pool: &SqlitePool) -> Result<bool> {
+    let current = get_current_version(pool).await?;
+    Ok(current < TARGET_VERSION)
+}
+
+/// Backup the database before applying pending migrations (requirement: keep a
+/// pre-migration copy for manual rollback). Only backs up when migrations are
+/// actually pending, so routine startups neither create nor overwrite the file.
+///
+/// Uses `VACUUM INTO` for a consistent snapshot (works under WAL without
+/// checkpointing; takes a read transaction, never blocks writers beyond
+/// busy_timeout). Note SQLite requires the target file NOT to exist — a stale
+/// backup is removed first. The path is passed as a bound parameter so that
+/// user names containing quotes (Windows %APPDATA%) cannot break the SQL.
+pub async fn backup_before_migration(pool: &SqlitePool, db_path: &std::path::Path) -> Result<()> {
+    if !has_pending(pool).await? {
+        return Ok(());
+    }
+    let bak_path = db_path.with_extension("db.bak"); // mcphub.db -> mcphub.db.bak
+    // VACUUM INTO fails if the target exists — remove stale backup first.
+    let _ = std::fs::remove_file(&bak_path);
+    let start = std::time::Instant::now();
+    sqlx::query("VACUUM INTO ?1")
+        .bind(bak_path.to_string_lossy().as_ref())
+        .execute(pool)
+        .await?;
+    log::info!(
+        "[db] pre-migration backup: {} ({}ms)",
+        bak_path.display(),
+        start.elapsed().as_millis()
+    );
+    Ok(())
+}
 
 /// Initialize the schema_version table (create if not exists, read current version).
 /// Handles migration from old `sqlx::migrate!` system (which used `_sqlx_migrations` table).
@@ -66,7 +102,6 @@ async fn get_current_version(pool: &SqlitePool) -> Result<i64> {
     Ok(0)
 }
 
-/// Update the schema version number.
 async fn set_version(pool: &SqlitePool, version: i64) -> Result<()> {
     sqlx::query(
         "INSERT INTO schema_version (id, version, updated_at)
@@ -127,6 +162,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         21 => migrate_v21(pool).await,
         22 => migrate_v22(pool).await,
         23 => migrate_v23(pool).await,
+        24 => migrate_v24(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -1124,6 +1160,59 @@ async fn migrate_v23(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// v23 → v24: FTS5 full-text index tables (Chinese/English/pinyin tokenization).
+///
+/// Creates one FTS5 table per searchable entity (7 tables: 5 entity mirrors +
+/// rag_docs + app_log). Migration only creates the (empty) tables — data
+/// backfill is done by `fts_service::rebuild_all()` (5 entity tables) and the
+/// RAG service's `rebuild_rag_sql_index()` (fts_rag_docs) at startup, because
+/// migration cannot run the charabia tokenizer. Mirrors the v21 rag_docs
+/// pattern (agent.md §3.5.5 / doc/sqlite_fts_pinyin_plan_20260905.md §4.1).
+///
+/// Columns:
+///   ref_id: source-table locator (UNINDEXED):
+///           servers→name, groups→id, rag_docs→id, skills→dir_name,
+///           prompts/resources→name, app_log→id
+///   zh:  tokenized word sequence (charabia lemma, space separated)
+///   py:  per-CJK-word full-pinyin token (数据库→shujuku; latin words kept)
+///   ini: per-CJK-word initials token (数据库→sjk)
+async fn migrate_v24(pool: &SqlitePool) -> Result<()> {
+    // Smoke assertion: bundled SQLite must be built with FTS5 (fail-fast so we
+    // never silently leave a half-migrated state).
+    let fts5: i64 = sqlx::query_scalar("SELECT sqlite_compileoption_used('ENABLE_FTS5')")
+        .fetch_one(pool)
+        .await?;
+    if fts5 == 0 {
+        return Err(anyhow!(
+            "FTS5 not available in bundled SQLite (SQLITE_ENABLE_FTS5 missing from compile options)"
+        ));
+    }
+
+    let fts_tables: &[&str] = &[
+        "fts_servers",
+        "fts_groups",
+        "fts_rag_docs",
+        "fts_skills",
+        "fts_prompts",
+        "fts_resources",
+        "fts_app_log",
+    ];
+    for table in fts_tables {
+        sqlx::query(sqlx::AssertSqlSafe(
+            format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING fts5(ref_id UNINDEXED, zh, py, ini)"
+            )
+            .leak() as &'static str,
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow!("create FTS5 table {} failed: {}", table, e))?;
+    }
+
+    log::info!("[db] migration v24: FTS5 full-text tables created ({} tables)", fts_tables.len());
+    Ok(())
+}
+
 /// 幂等建索引，且目标列不存在时跳过（不报错）。
 ///
 /// 与无条件 `CREATE INDEX` 的区别：历史上有过多个 schema 路径（旧 sqlx 迁移
@@ -1433,5 +1522,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0, "zero-count tags must be deleted");
+    }
+
+    /// v24：FTS5 表应建出（7 张），重跑 run_pending 幂等；backup_before_migration
+    /// 在有待迁移时产出 .bak、升级完成后不再生成（不覆盖既有备份）。
+    /// VACUUM INTO 无法对 :memory: 库外的句柄语义做覆盖——这里用临时文件库。
+    #[tokio::test]
+    async fn v24_creates_fts_tables_and_backup_semantics() {
+        let dir = std::env::temp_dir().join(format!("mcphub_v24_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("mcphub.db");
+        let bak_path = db_path.with_extension("db.bak");
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&bak_path);
+
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect(&db_url)
+            .await
+            .expect("connect file sqlite");
+
+        // 有待迁移 → 备份生成（文件型快照）
+        assert!(has_pending(&pool).await.unwrap(), "fresh db must have pending migrations");
+        backup_before_migration(&pool, &db_path).await.expect("pre-migration backup");
+        assert!(bak_path.exists(), "backup file should exist when migrations pending");
+
+        run_pending(&pool).await.expect("run migrations to v24");
+
+        // v24 FTS5 表存在性（7 张）
+        for table in [
+            "fts_servers",
+            "fts_groups",
+            "fts_rag_docs",
+            "fts_skills",
+            "fts_prompts",
+            "fts_resources",
+            "fts_app_log",
+        ] {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 1, "FTS table {} should exist", table);
+        }
+
+        let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, TARGET_VERSION);
+
+        // 无待迁移 → 备份 no-op（删除 bak 后不应重新生成）
+        assert!(!has_pending(&pool).await.unwrap(), "no pending after v24");
+        std::fs::remove_file(&bak_path).unwrap();
+        backup_before_migration(&pool, &db_path).await.expect("no-op when up to date");
+        assert!(!bak_path.exists(), "backup must NOT be recreated when up to date");
+
+        // 幂等：重跑 run_pending 不报错、版本不变
+        run_pending(&pool).await.expect("re-run migrations (idempotent)");
+        let version2: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version2, TARGET_VERSION);
+
+        // MATCH 冒烟：FTS5 表可插入并查询（词元由 fts_service 生成，此处直插）
+        sqlx::query("INSERT INTO fts_servers (ref_id, zh, py, ini) VALUES ('demo', '数据库', 'shujuku', 'sjk')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hit: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM fts_servers WHERE fts_servers MATCH ?",
+        )
+        .bind("py:shu*")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(hit, 1, "prefix query on py column should match");
+        // 按行删除（FTS5 无 UPDATE，同步语义依赖 rowid 删除）
+        let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM fts_servers WHERE ref_id='demo'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM fts_servers WHERE rowid = ?")
+            .bind(rowid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fts_servers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "row delete via rowid should work");
+
+        pool.close().await;
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&bak_path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

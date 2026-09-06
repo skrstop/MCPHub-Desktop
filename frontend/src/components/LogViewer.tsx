@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { LogEntry } from '../services/logService';
+import { LogEntry, fetchLogs } from '../services/logService';
 import { Button } from './ui/Button';
 import { Badge } from './ui/Badge';
 import { useTranslation } from 'react-i18next';
+import { isTauri } from '../utils/tauriClient';
 
 interface LogViewerProps {
   logs: LogEntry[];
@@ -18,6 +19,39 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
   const [filter, setFilter] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<Array<'info' | 'error' | 'warn' | 'debug'>>(['info', 'error', 'warn', 'debug']);
   const [sourceFilter, setSourceFilter] = useState<string[]>([]); // empty = show all sources
+  // Desktop backend search state (FTS weighted relevance, see logService.fetchLogs).
+  const [searchResults, setSearchResults] = useState<LogEntry[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchReqId = useRef(0);
+
+  // Desktop: text search goes through the backend `get_logs` search param
+  // (FTS5 tokenized + relevance-ordered over the full log table) instead of
+  // client-side substring over the fetched subset. Web keeps client-side.
+  const searchActive = isTauri() && filter.trim() !== '';
+
+  useEffect(() => {
+    if (!searchActive) {
+      searchReqId.current += 1;
+      setSearchResults(null);
+      setSearchLoading(false);
+      return;
+    }
+    const id = ++searchReqId.current;
+    setSearchLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const rows = await fetchLogs(filter.trim());
+        if (id !== searchReqId.current) return;
+        setSearchResults(rows);
+      } catch {
+        if (id !== searchReqId.current) return;
+        setSearchResults([]);
+      } finally {
+        if (id === searchReqId.current) setSearchLoading(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [filter, searchActive]);
 
   // Auto scroll to top when new logs come in if autoScroll is enabled.
   // Logs are displayed in reverse order (newest first), so we scroll to top.
@@ -25,11 +59,14 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
     if (autoScroll && logContainerRef.current) {
       logContainerRef.current.scrollTop = 0;
     }
-  }, [logs, autoScroll]);
+  }, [logs, searchResults, autoScroll]);
 
   // Filter logs based on current filter settings
-  const filteredLogs = logs.filter(log => {
-    const matchesText = filter ? log.message.toLowerCase().includes(filter.toLowerCase()) : true;
+  const filteredLogs = (searchActive ? searchResults ?? [] : logs).filter(log => {
+    // When the backend search is active it already token-matched the message;
+    // applying the client-side substring here would re-narrow multi-word
+    // queries to the literal "a b" string. Type/source filters still apply.
+    const matchesText = searchActive || !filter || log.message.toLowerCase().includes(filter.toLowerCase());
     const matchesType = typeFilter.includes(log.type);
     // Empty sourceFilter means show all sources
     const matchesSource = sourceFilter.length === 0 || sourceFilter.includes(log.source);
@@ -132,7 +169,7 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, isLoading = false, error = 
         className="flex-grow p-2 overflow-auto bg-card rounded-b-md font-mono text-sm"
         style={{ maxHeight: 'calc(100vh - 300px)' }}
       >
-        {isLoading ? (
+        {(isLoading || (searchActive && searchLoading)) ? (
           <div className="flex justify-center items-center h-full">
             <span>{t('logs.loading')}</span>
           </div>

@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.33101"
+version = "1.0.33102"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -134,6 +134,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # deflate backend (matches office_oxide/pdf_oxide internal declarations for a
 # single compilation; avoids zstd-sys/bzip2/lzma C deps from default features).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+# SQLite FTS5 全文检索分词链（2026-09-05）：
+# charabia（Meilisearch 分词器，default = 全语言：中文/日/韩/泰/希伯来/希腊等）+
+# latin camelCase/snake_case 拆分 + pinyin（汉字→全拼/首字母，生成拼音索引列）。
+# 严禁启用 charabia 的 `chinese-normalization-pinyin`（会把中文 lemma 归一成拼音，
+# 破坏 zh 列"存原文词元"的语义）。
+charabia = { version = "0.10", features = ["latin-camelcase", "latin-snakecase"] }
+pinyin = { version = "0.10", features = ["plain"] }
 
 # RAG: embedding inference (tokenizers + candle) + vector DB (lancedb).
 # `default-features = false` avoids the esaxx C++ dependency (the macOS CLT

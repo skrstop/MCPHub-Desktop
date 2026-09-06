@@ -1,9 +1,11 @@
 import { apiGet, apiDelete } from '@/utils/fetchInterceptor';
+import { invoke } from '@tauri-apps/api/core';
 import {
   Activity,
   ActivityStats,
   ActivityFilter,
   ActivityFilterOptions,
+  FilterOptionsPage,
   ApiResponse,
 } from '@/types';
 
@@ -123,6 +125,22 @@ export const getActivityStats = async (
  */
 export const getActivityFilterOptions = async (): Promise<ApiResponse<ActivityFilterOptions>> => {
   return await apiGet('/activities/filters');
+};
+
+/**
+ * Get paginated searchable filter options (desktop: Tauri backend)
+ */
+export const getActivityFilterOptionsPaged = async (
+  field: string,
+  search: string,
+  page: number,
+  pageSize: number,
+): Promise<FilterOptionsPage> => {
+  const data = await invoke<{ options: string[]; total: number; page: number; pageSize: number }>(
+    'get_activity_filter_options',
+    { field, search, page, pageSize },
+  );
+  return data;
 };
 
 /**

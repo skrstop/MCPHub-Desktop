@@ -315,6 +315,14 @@ export interface RagDocInfo {
   contentAvailable?: boolean;
 }
 
+/** Paged searchable filter options (desktop: Tauri backend get_activity_filter_options). */
+export interface FilterOptionsPage {
+  options: string[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 /** Single-doc update check result (drives the per-row UpdateDialog branches). */
 export interface RagUpdateCheck {
   /** "symlink" | "copy" | "" (legacy). */

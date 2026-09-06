@@ -641,6 +641,31 @@ Changelog API 在桌面端被拦截返回空数据，更新检查完全由 `vers
 
 `doc/upgrade/{version}.md` 存在对应版本时，CI 会将其全文作为 `latest.json` 的 `notes` 发布（见 3.4.3/3.4.4）。
 
+**`doc/upgrade/{version}.md` 格式规范（MUST FOLLOW）**
+
+changelog 采用固定分节格式（参考既有文件如 `doc/upgrade/1.0.33101.md`、`1.0.32003.md`），二级标题固定为以下几节，条目为普通 bullet：
+
+```markdown
+## 新功能
+- 新增能力，粗体标注关键特性名，一句话说清用户可感知的行为
+
+## 修复
+- 用户可感知的 bug 修复，写「现象 + 原因一句话」，不写实现细节
+
+## 限制（可选）
+- 已知限制 / 平台差异
+
+## 基线同步（仅当该版本包含 origin 同步时）
+- 一句话概述同步来源 commit 范围，详情指向 AGENTS.md §4.4 对应条目
+```
+
+规范：
+
+- 文件名与版本号一致（如 `1.0.33102.md`），在四个版本源同步递增后创建
+- 面向用户写：不写实现细节/文件名堆砌，一个功能点一条 bullet，关键特性名加粗
+- 分节顺序固定：新功能 → 修复 → 限制（可选）→ 基线同步（仅含 origin 同步时）；无关的节省略
+- 发布时 CI 将全文作为 `latest.json` 的 `notes`，最终在「关于」对话框按 Markdown 渲染
+
 #### 3.4.8 安装进度可视化（下载进度 / 下载速度 / 安装阶段）
 
 > 背景：之前点击「安装更新」后 UI 只有一个 spinner，用户无法判断更新是否正常进行（下载是否卡住、装到哪一步）。现把 Tauri updater 的 `DownloadEvent` 流驱动成可见的进度状态。
@@ -1546,6 +1571,120 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 - **Round 3 回归**：`cargo check` 0 错 0 警；`cargo test --lib` 19 passed；临时冒烟测试（真实 PDF doc/test/苏州2.pdf 提取成功、点号名拒绝、损坏 PDF EXTRACT_FAILED sentinel、二进制拒绝、文本往返、最小 docx 提取成功）全过，**跑完已删**；`npx tsc --noEmit` 24 错误 = 基线 24（全存量）；`npm run build` 通过。
 - 本轮复合验证结论：**未发现新的逻辑漏洞**；Round 1 期间修复的 2 处（ext_format 点号误认、update_doc_from_original 按显示名派发）+ delete/open/reindex 的 content_path_for 收敛已覆盖全部发现的问题。
 
+### 3.15 SQLite 全文索引（FTS5 + 中英/拼音分词）+ 活动日志筛选优化（桌面端独有，2026-09-05）
+
+> 执行计划与五轮复核记录见 `doc/sqlite_fts_pinyin_plan_20260905.md`（Phase A-G 全部完成）。兑现 `doc/sql_index_rag_search_plan_20260823.md` 中「FTS5 暂不引入」的可选项。
+
+#### 3.15.1 概述
+
+- **FTS5 全文索引**：bundled SQLite（libsqlite3-sys 0.37 无条件 `SQLITE_ENABLE_FTS5`）建 7 张 FTS5 虚拟表 `fts_{servers,groups,rag_docs,skills,prompts,resources,app_log}`，列 = `ref_id UNINDEXED + zh + py + ini`。
+- **分词方案（方案 B，写入时 Rust 分词）**：charabia 0.10 全语言（default features + `latin-camelcase`/`latin-snakecase`，**严禁** `chinese-normalization-pinyin`）+ pinyin 0.10（feature `plain`）。`fts_service::tokenize_fields(text) -> (zh, py, ini)`：charabia tokenize → `is_separator()` 过滤 → `lemma()`（kvariants 繁体规范形 + lowercase）→ 含 CJK 词元经 `ToPinyin`（char trait，`c.to_pinyin() -> Option<Pinyin>`，`plain()`）逐字转全拼/首字母。
+- **查询路由** `build_match_query`：含 CJK → `zh:("词1" "词2"*)`；纯 ASCII → `(py:"t"* OR ini:"t"* OR zh:"t"*)`（每 token 一组）；混合 → AND 连接；token `"`→`""` 转义防注入；空/纯符号 → None（调用方查全部）。**已知边界**：拼音词中前缀搜不到（FTS5 前缀只从 token 头匹配）；多音字取默认读音；zh 列实际存繁体规范形（"数据"→"數据"），写入/查询同管道归一故简繁输入互通。
+- **迁移前备份**：`db::initialize` 在 `run_pending` 前调 `migration::backup_before_migration`——`has_pending()` 为真时 `VACUUM INTO ?1` 生成 `mcphub.db.bak`（先删旧 .bak，路径 bind 参数防引号注入）；无待迁移 no-op 不覆盖。回滚：关应用 → `.bak` 覆盖 `mcphub.db`（删 `-wal`/`-shm`）→ 重启。
+
+#### 3.15.2 fts_service 模块（`src/services/fts_service.rs`）
+
+- `FtsTable` 白名单枚举（Servers/Groups/RagDocs/Skills/Prompts/Resources/AppLog），SQL 由 `format!.leak()` 生成 `&'static str`（sqlx 0.9 约束），每种语句每表仅泄漏一次。
+- **FTS5 无 UPDATE/无 WHERE 删除**：`sync_upsert(_tx)` = 查 rowid → 命中则 DELETE → INSERT；`sync_delete(_tx)` = 查 rowid → 删；`clear_table(_tx)` 全表删。`_tx` 版本接收 `&mut sqlx::SqliteConnection`，供调用方与源表写**同事务**提交（§4.3 一致性铁律）。
+- `search_ref_ids(table, input, limit)`：MATCH + `ORDER BY rank` + ref_id 投影。`table_is_empty` 供空表兜底；`clear_table` 供清理。
+- `rebuild_all()`（lib.rs setup 后台 spawn，fire-and-forget）：只重建 5 张实体表（fts_rag_docs 归 RAG 服务、fts_app_log 归日志写路径），逐实体计时日志 `[fts] rebuild fts_x: N rows in Xms`；`rebuild_one(pool, table)` 读 `SELECT *` 按 TEXT 列拼接（P3 多字段单空格连接）。
+- `backfill_app_log_if_empty()`：fts_app_log 为空且 app_log 非空 → 单事务全量回填（升级后首次启动）。
+- **charabia Tokenizer 生命周期**：`Tokenizer<'tb>` 借用 builder → `Box::leak(Box::new(TokenizerBuilder::default()))` 得 `Tokenizer<'static>`（builder 默认值是 Owned Cow 不实际借用数据），OnceLock 持有。
+
+#### 3.15.3 写路径同步清单（§4.3 铁律，全部同事务）
+
+| 实体 | 同步点 | 说明 |
+| --- | --- | --- |
+| servers | `server_service::create/update/delete` | upsert（text=name+description）；**update 比对 name，改名=删旧插新**；`search_configs` 升级 FTS+rank |
+| groups | `group_service::create/update/delete` | upsert（text=name+description，ref_id=id）；`search_paged` 升级（FTS rank 序 + Rust 分页） |
+| rag_docs | `rag/service.rs` 的 `upsert_doc_sql`/`remove_doc_sql`/`rebuild_rag_sql_index`（全部写路径收敛于此） | upsert/delete/clear+insert（ref_id=id，text=name）；`search_docs_paged` 升级（FTS rank 序 + tag 白名单 Rust 过滤 + .meta 富化） |
+| skills | `skill_service` 安装 ok 信号 / 导入失败删 / reconcile 两处删 / uninstall | **特例**：安装为 FS 耦合多步非事务流，FTS 同步 best-effort（失败不回滚安装）；删除路径同事务；`search_library_paged` 升级（dir_name IN + FS 过滤 + rank 序） |
+| prompts/resources | `prompt_service`/`resource_service` create/update/delete | ref_id=name → **update/delete 前同事务先查 name**（改名删旧插新）；`search_paged` 升级（enabled 过滤 Rust 侧） |
+| app_log | `add_log`（唯一写入口）/`clear_logs`/`cleanup_old_logs` | add_log 同事务 upsert；clear_logs 同事务清空（VACUUM 在事务外）；cleanup 先取待删 id 集 → QueryBuilder 批量 `rowid IN (SELECT rowid WHERE ref_id IN)` 两步删 |
+
+#### 3.15.4 应用日志全文检索（Phase F）
+
+- `LogQuery` 加 `search: Option<String>`；`query_logs` search 非空时走 `search_ref_ids(AppLog)` → `QueryBuilder` IN 回表（含 level/server_name 过滤）→ FTS rank 序 → 内存分页；空表/Err 降级 `LOWER(message) LIKE`。
+- `cleanup_old_logs` 先 `SELECT id WHERE created_at < cutoff` 取待删集 → 同事务删 app_log + 按 ref_id 批量删 fts_app_log。
+- 前端契约不变（`/logs` 响应结构未动；`search` 为可选新增）。🆕 **2026-09-06：日志页搜索框接入后端**——此前 `LogViewer` 仅对已拉取的最新 50 条做客户端子串过滤（`/logs` GET 在 tauriClient 硬编码 `query:{}`，后端 FTS 从未被 UI 调用），多词输入「检查 更新」按整串 includes 几乎必空（实测最近 50 条恰含「检查」的仅 1 条 playwright 日志）。现 `fetchLogs(search?)` 带 `?search=&pageSize=200` → tauriClient 解析 query → `get_logs` FTS weighted（相关度优先、同数 created_at DESC）；`LogViewer` 桌面端搜索态走后端结果（仅再套 type/source 过滤，300ms 防抖 + 竞态守卫），web 端保留原客户端过滤行为。
+- `[http-server-watch]` heartbeat 周期调试任务已删（此前每 30s 一条刷屏）；保留 3 处一次性事件日志（SSE 流结束/serve task 结束）。
+
+#### 3.15.5 活动日志筛选优化（Phase G）
+
+- **去掉「用户」筛选**：ActivityPage username 筛选块删除（桌面端无用户追踪语义）。
+- **四条件可搜索分页下拉**：新组件 `components/ui/SearchableSelect.tsx`（loadOptions(search,page,pageSize) → {options,total}；输入防抖 300ms；滚动到底加载下一页；请求序号竞态守卫；键盘上下/回车/Esc；点击外部关闭；选中值清除）。server/tool/group/keyName 四筛选接入，候选来自新命令 `get_activity_filter_options(field, search, page, page_size)`（field 白名单枚举 server/tool/group/keyName → DISTINCT + LOWER LIKE + LIMIT/OFFSET）。
+- `tauriClient.ts`：`get_tool_activities` 透传 `group`/`keyName` → args `groupName`/`keyName`（此前被静默丢弃）；stats 同步透传（`get_activity_stats` Rust 命令加 group_name/key_name 参数，统计条与筛选联动）；新增 `activities/filter-options` 路由 + `FilterOptionsPage` 响应转换。
+- 旧 `get_activity_filters` 命令保留（web 兼容），前端不再调用。
+
+#### 3.15.6 验证
+
+- `ORT_SKIP_DOWNLOAD=1 cargo check` 通过（0 错 0 警）；`cargo test --lib` 33 passed（含 12 个 fts_service 单测：分词/拼音/注入/round-trip；v24 迁移幂等+备份语义测试；rebuild_one 行数对账测试）。
+- `npm run build` 通过（813ms）；`npx tsc --noEmit` 24 错误 = 基线 24（零新增）。
+- 版本：`1.0.33101 → 1.0.33102`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog `doc/upgrade/1.0.33102.md`。
+- 手动回归（E4，待用户）：中文/拼音/首字母搜索命中、server 改名/删除后搜索即时正确、旧库升级生成 .bak、活动日志四下拉真过滤。
+
+#### 3.15.7 五轮代码级复核（2026-09-05/06）
+
+> 用户要求对已完成的 FTS 功能做 5 轮详细复核（逻辑/性能/一致性/扩展性/回归，精准到代码级）。共发现 5 个问题，修复 4 个、验证放行 1 个。
+
+**第 1 轮（逻辑正确性）**
+
+- **F1 [严重，已修复]** `rebuild_one` 用 `SELECT *` 拼接源表全部 TEXT 列 → servers 表会把 `env`/`headers`/`openapi`/`proxy` JSON（**含密钥与超大 spec**）索引进 FTS（违反 P3 列白名单规范 + 敏感信息进索引 + 索引膨胀）；prompts 的 `template`、resources 的 `content` 同理。
+  - 修复：`FtsTable` 新增 `text_columns()` 返回每表白名单列（servers/groups=name+description、rag_docs=name、skills=dir_name+name+description、prompts=name+title+description、resources=name+uri+description、app_log=message），`rebuild_one` 改为 `SELECT {ref_column} AS fts_ref, {白名单列...} FROM {src}`，按位（0=ref，1..=白名单列）读取拼接，NULL/空列跳过、非 TEXT 列容错。
+- **F3 [已验证放行]** FTS5 多 token 隐式 AND 语义疑点：`zh:("數据" "庫"*)` 空格分隔多短语是否隐式 AND。用临时集成测试探针（建 FTS5 表 + charabia 同参数分词插入 + 三种查询形态）验证：多短语=隐式 AND（只命中同时含两词的行）、`zh:"a b"`=相邻 token 短语匹配、单 token 通配=前缀匹配，语义符合计划 §2 查询路由设计。**探针跑完已删**。
+
+**第 2 轮（性能与资源）**
+
+- **F2 [高，已修复]** 所有 `sql_*` SQL 生成函数每次调用 `format!(...).leak()` 泄漏——`add_log` 高频路径每写一条日志泄漏 3 个串（delete_by_rowid/insert/select_rowid），长期运行真实内存泄漏。
+  - 修复：SQL 生成区整块替换为 `FtsSql` 缓存结构体（`delete_by_rowid`/`insert`/`select_rowid`/`search`/`count`/`clear` 六个 `&'static str` 字段），`sqls(t) -> &'static FtsSql` 经 `OnceLock<Vec<FtsSql>>` + `FtsTable::ALL` 常量数组 + `idx()` 下标，**进程内只格式化一次**；同时删除重复/死代码（`sql_tx_delete_delete` 与 `sql_upsert_delete` 重复、`table_is_empty_sql` pub 未用）。
+- **F4 [已识别，按需优化]** servers/groups 搜索 FTS 命中路径 fetch 全表再 Rust 过滤；量大时可改 `WHERE name IN (ids)` 回表。当前表量级（几十~几百行）不构成瓶颈，保留现状。
+- **F5 [已随 F2 解决]** 死代码清理（见 F2）。
+
+**第 3/4/5 轮（一致性/扩展性/回归）**：写路径事务边界复核（settings_import 复用 server_service::create 继承 FTS 同步；7 张源表无 service 外直接写者；migration seed 由启动 rebuild_all 对账兜底）、新实体接入同步点核对（FtsTable 枚举/ALL/text_columns/REBUILD_TABLES 四处）、`cargo check`/`cargo test --lib` 33 passed/`npm run build` 回归通过。
+
+**收尾验证（复核修复全部落盘后）**：`cargo check` 0 错 0 警（含清除 `Column` 冗余导入）；`cargo test --lib` **33 passed / 0 failed**（12 个 fts_service 单测全过，含 `rebuild_one_reconciles_servers` 白名单路径回归）；`npm run build` 通过（839ms）；`npx tsc --noEmit` 24 = 基线。
+
+#### 3.15.8 多词 OR 语义 + LIKE 降级 + 相关度优先排序（2026-09-06）
+
+> 用户实测反馈驱动的四项修复：①多词查询查不到数据；②RAG 搜「中心数据」查不到存量文档；③要求搜索结果按相关度（命中词数）优先排序。
+
+**① build_match_query 多 token 改 OR 语义**
+- 原实现：多 zh token 生成 `zh:("a" "b"*)` 空格分隔 = FTS5 隐式 AND（必须全词命中）→「中心数据」只命中同时含两词的行，用户感知为"查不到"。
+- 修复：组内多 token 改 `zh:("中心"* OR "數据"*)`；zh 组与 ascii 组之间也 OR。单 token 形态不变。`match_query_cjk_route` 单测更新为断言 OR + 每 token 带 `*`。
+- charabia 行为注记：kvariants 归一简→繁（数据→數据），查询与写入同管道，简繁互通；归一不完全映射（中心→中心不变）。
+
+**② 全部 7 个搜索入口零结果降级 LIKE**
+- 原实现：FTS 命中 0 条时硬返回空。修复：`Ok(weighted)` 为空 / 空表（`table_is_empty`）/ `Err` 三种情况均落到原 LIKE 子串查询（补 FTS 词前缀只能从 token 头匹配的 CJK 内部子串盲区）。仅 `Err` 写 `[fts]` 警告日志，零结果静默降级。
+
+**③ fts_rag_docs 存量回填缺口（用户 DB 实测发现）**
+- 现象：用户 DB 中 `fts_rag_docs` 0 行而 `rag_docs` 8 行——`rebuild_rag_sql_index` 仅在 RAG enable 时运行，存量文档从未入索引。
+- 修复：临时集成测试回填 8 行（跑完已删）；应用重启 + RAG enable 时 rebuild 自愈清空重灌。
+
+**④ 相关度（命中词数）优先排序**
+- 需求：命中查询词元数第一优先——双词命中必须排在单词命中之前；同相关度层内保持各表原生序。
+- 实现：`fts_service` 抽出 `extract_tokens()`；新增 `search_ref_ids_weighted()`（逐 token 独立索引查询合并命中数，count 降序），`search_ref_ids()` 变为薄包装。不用单条 OR + bm25（文档长度/IDF 归一化会让稀有单词命中压过双词命中）。
+- 调用方改造（全部 8 处）：`server/group/prompt×2/resource/skill/log/rag` 命中分支改为 `HashMap counts` + `sort_by_key(Reverse(count))` **稳定排序**保留表原生序 tiebreak（servers/groups/prompts/resources=name ASC；skills=dir_name ASC；logs=created_at DESC；rag=uploaded_at DESC,id）。
+- `search_ref_ids_weighted_on(table, pool, ...)` 内部版本可注入 pool（单测用内存池），生产走全局池包装。
+- 新增单测 `weighted_orders_by_token_hits`：双 token 命中行排前、单 token 命中行排后，期望命中数用 `extract_tokens` 同口径动态计算（不硬编码切词结果）。
+- 途中修复：`resource_service.rs` `counts.contains(n)` → `contains_key(n)`（HashMap 无 `contains`）。
+
+**验证**：`cargo check` 0 错 0 警；`cargo test --lib` **34 passed / 0 failed**；`npm run build` 通过。**用户需重启应用**（旧二进制在跑；重启后 RAG enable 触发 rebuild 自愈索引）。
+
+#### 3.15.9 服务器搜索相关度排序被命令层破坏的修复（2026-09-06）
+
+> 用户实测："idea sse stream" 排序第一是 `Idea-mcp-server`（只命中 1 词），`-sse`/`-stream` 变体（各命中 2 词）反而在后面。
+
+**根因**：§3.15.8-④ 只升级了 service 层（`server_service::search_configs` 返回 weighted 序），但命令层 `commands/servers.rs::search_servers` 在「工具名兜底候选合并」后执行 `candidates.sort_by_key(|c| c.name.to_lowercase())`——**按名字母序重排，把 weighted 相关度顺序完全覆盖**。`Idea-mcp-server` 恰好是三个 `Idea-*` 中字母序最靠前的，故排第一。真实 DB 模拟证实 weighted 计数：`Idea-mcp-server-sse`(idea+sse=2)、`Idea-mcp-server-stream`(idea+stream=2)、`Idea-mcp-server`(idea=1)。
+
+**修复（`commands/servers.rs::search_servers`）**：
+- 命令层重新调 `fts_service::search_ref_ids_weighted(Servers, key, 1000)` 取 name/description 相关度计数（与 search_configs 主路径同源；FTS5 索引查询 µs 级，重复查询代价可忽略）。
+- **FTS 降级路径补齐计数**：weighted 为空（LIKE 兜底）时，用 Rust 侧空白分词对 name+description 逐 token 计数——LIKE 候选必含完整 key（=全部 token）计数相同，稳定排序保持 name 序；防止工具名命中反超名称命中。
+- **工具名兜底升级为 token 级计数**：原实现要求完整 key 子串匹配工具名（多词查询几乎永不命中），改为逐 token 计数（提高召回），并入同一 counts。
+- **统一排序**：删除按名重排，改 `sort_by_key(Reverse(counts[...]))` 稳定排序——命中 token 数降序，同数保持候选进入序（FTS 候选=weighted+name 序；LIKE 候选=name 序；工具兜底=list_all 序）。
+- 语义注记：FTS 路径下工具名命中的服务按自身命中数参与全局排序（如工具含 2 个查询词的服务会排在仅名称命中 1 词的服务之前）；降级路径名称命中（全 token）恒在工具命中之前。
+
+**验证**：`cargo check` 0 错 0 警；`cargo test --lib` 34 passed；真实 DB 模拟 "idea sse stream" 最终排序 = `Idea-mcp-server-sse`(2) → `Idea-mcp-server-stream`(2) → `Idea-mcp-server`(1)。
+
 ---
 
 ---
@@ -1830,6 +1969,10 @@ npm run build
 - [X]  stdio 服务器按需启动（startOnDemand：跳过启动连接、首次工具调用懒建进程、空闲超时自动关闭、缓存工具保留；详见 3.8）
 - [X]  stdio 连接错误包含上游 stderr（`stderr_tail` 滚动缓存拼接进 handshake 失败 error；详见 3.9）
 - [X]  编辑服务器避免无谓重连 + proxy 持久化（镜像上游 #1055：`update_server` 比对连接相关字段，仅访问/元数据变更时保留实时连接；`ServerConfig.proxy` + DB v20 持久化使前端 round-trip 生效；详见 3.11）
+- [X]  SQLite 全文索引（FTS5 + 中英/拼音分词，charabia 全语言）：DB v24 七张 FTS5 表 + 迁移前 `mcphub.db.bak` 备份（VACUUM INTO）+ `fts_service` 模块（分词/查询路由/同事务同步/对账回填/app_log 存量回填）+ servers/groups/rag_docs/skills/prompts/resources 写路径全同步 + 5 个搜索函数升级（rank 序 + LIKE 降级）；详见 3.15
+- [X]  活动日志筛选优化：移除「用户」筛选；server/tool/group/keyName 四条件改可搜索分页下拉（`SearchableSelect` 组件 + `get_activity_filter_options` 命令 + tauriClient 透传 groupName/keyName）；详见 3.15.5
+- [X]  应用日志全文检索：`get_logs` 支持可选 `search`（FTS5 匹配 message + LIKE 降级）；日志清理与 fts_app_log 同事务联动；详见 3.15.4
+- [X]  删除 `[http-server-watch]` 周期性 heartbeat 调试日志（此前每 30s 刷一条淹没正常日志，保留一次性事件日志）
 
 ### 待办
 

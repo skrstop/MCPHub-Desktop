@@ -558,6 +558,78 @@ pub async fn search_library_paged(
     let page_size = page_size.clamp(1, 200) as usize;
     let key = search_key.trim().to_lowercase();
 
+    // FTS5 路径（中/英/拼音分词；§4.4）：FS/exports 过滤在 Rust 侧；
+    // 命中词数（相关度）第一优先，同命中数保持 dir_name 原生序（稳定排序）；
+    // 空表/Err/零结果降级原 LIKE。
+    if !key.is_empty() {
+        match crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::Skills,
+            &key,
+            2000,
+        )
+        .await
+        {
+            Ok(weighted) if !weighted.is_empty() => {
+                // 全量读（原生 dir_name 序），Rust 侧 FS 过滤 + 命中数稳定排序
+                let counts: HashMap<String, i64> = weighted.into_iter().collect();
+                let rows = sqlx::query(
+                    "SELECT id, dir_name, name, description, source_agent, source_path, created_at \
+                     FROM skills WHERE status='ok' ORDER BY dir_name",
+                )
+                .fetch_all(db::pool())
+                .await?;
+                let mut all: Vec<Skill> = Vec::new();
+                for row in rows.iter() {
+                    let dn: String = row.try_get("dir_name").unwrap_or_default();
+                    if !counts.contains_key(&dn) {
+                        continue;
+                    }
+                    if !lib.join(&dn).exists() {
+                        continue; // FS 过滤（与原路径一致）
+                    }
+                    let id: String = row.try_get("id").unwrap_or_default();
+                    let exports = exports_by_skill.get(&id).cloned().unwrap_or_default();
+                    all.push(Skill {
+                        exports,
+                        id,
+                        dir_name: dn.clone(),
+                        name: row.try_get("name").ok().flatten(),
+                        description: row.try_get("description").ok().flatten(),
+                        source_agent: row.try_get("source_agent").ok().flatten(),
+                        source_path: row.try_get("source_path").ok().flatten(),
+                        created_at: row.try_get("created_at").ok().flatten(),
+                    });
+                }
+                all.sort_by_key(|sk| {
+                    std::cmp::Reverse(counts.get(&sk.dir_name).copied().unwrap_or(0))
+                });
+                let total = all.len() as u64;
+                let start = (page as usize) * page_size;
+                let items = all
+                    .into_iter()
+                    .skip(start)
+                    .take(page_size)
+                    .collect::<Vec<_>>();
+                return Ok(SkillPage { items, total, page, page_size: page_size as u32 });
+            }
+            Ok(_)
+                if crate::services::fts_service::table_is_empty(
+                    crate::services::fts_service::FtsTable::Skills,
+                )
+                .await
+                .unwrap_or(false) =>
+            {
+                // 空表兜底：走原 LIKE
+            }
+            Ok(_) => {
+                // 零结果/空表均不返回：落到下方原 LIKE（子串语义补 FTS 词前缀盲区）
+            }
+            Err(e) => {
+                log::warn!("[fts] search skills failed, fallback to LIKE: {e}");
+            }
+        }
+    }
+
     let rows = if key.is_empty() {
         sqlx::query(
             "SELECT id, dir_name, name, description, source_agent, source_path, created_at \
@@ -775,6 +847,17 @@ pub async fn import_skills(app: &AppHandle, items: Vec<ImportItem>) -> Result<Im
                     .bind(&id)
                     .execute(db::pool())
                     .await;
+                // FTS 同步（skills 特例：安装是 FS 耦合多步非事务流，FTS 同步
+                // best-effort——失败不回滚安装；漂移由启动 rebuild_all 对账自愈）
+                if let Err(e) = crate::services::fts_service::sync_upsert(
+                    crate::services::fts_service::FtsTable::Skills,
+                    &dir_name,
+                    &skill_fts_text(&dir_name, Some(&name), Some(&description)),
+                )
+                .await
+                {
+                    log::warn!("[fts] sync fts_skills upsert '{}': {e}", dir_name);
+                }
                 // Source-agent install record (copy) — ONLY for agent-grouped
                 // imports (manual imports have no default source agent).
                 if let Some(sa) = &source_agent_id {
@@ -797,6 +880,11 @@ pub async fn import_skills(app: &AppHandle, items: Vec<ImportItem>) -> Result<Im
                     .bind(&id)
                     .execute(db::pool())
                     .await;
+                let _ = crate::services::fts_service::sync_delete(
+                    crate::services::fts_service::FtsTable::Skills,
+                    &dir_name,
+                )
+                .await;
                 failure_count += 1;
                 results.push(ImportResultItem { dir_name, success: false, message: Some(format!("copy: {}", e)) });
             }
@@ -862,6 +950,16 @@ pub async fn scan_folder_for_skills(app: &AppHandle, folder: &str) -> Result<Vec
 
 // ── 2.3: reconcile (startup cleanup of crashed-pending) ─────────────────────
 
+/// skills 的 FTS 可搜索文本（P3）：dir_name + name + description
+fn skill_fts_text(dir_name: &str, name: Option<&str>, description: Option<&str>) -> String {
+    [Some(dir_name), name, description]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Remove `pending` skills/exports left by a crashed import/export:
 /// - pending skills: delete partial library dir + row.
 /// - pending exports: delete partial target at <agent_path>/<dir_name> + row.
@@ -882,6 +980,12 @@ pub async fn reconcile_pending(app: &AppHandle) -> Result<()> {
             let _ = remove_link(&lib.join(&dir_name));
         }
         let _ = sqlx::query("DELETE FROM skills WHERE id=?").bind(&id).execute(db::pool()).await;
+        // FTS 联动（pending 行通常无 FTS 行，删除为 no-op；防漂移兜底）
+        let _ = crate::services::fts_service::sync_delete(
+            crate::services::fts_service::FtsTable::Skills,
+            &dir_name,
+        )
+        .await;
     }
 
     let agents = list_agents().await?;
@@ -937,6 +1041,12 @@ pub async fn reconcile_pending(app: &AppHandle) -> Result<()> {
                 .bind(&id).execute(&mut *tx).await?;
             let _ = sqlx::query("DELETE FROM skills WHERE id=?")
                 .bind(&id).execute(&mut *tx).await?;
+            let _ = crate::services::fts_service::sync_delete_tx(
+                &mut tx,
+                crate::services::fts_service::FtsTable::Skills,
+                &dir_name,
+            )
+            .await;
             tx.commit().await?;
             gone_count += 1;
         }
@@ -1442,6 +1552,13 @@ pub async fn delete_skill(app: &AppHandle, id: &str, cleanup_agent_ids: Vec<Stri
         .execute(&mut *tx)
         .await?
         .rows_affected();
+    // FTS 同步（§4.3 铁律：同事务删 fts_skills；ref_id=dir_name）
+    let _ = crate::services::fts_service::sync_delete_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::Skills,
+        &dir_name,
+    )
+    .await;
     tx.commit().await?;
     if affected == 0 {
         return Err(anyhow::anyhow!("skill not deleted (0 rows affected): {}", id));

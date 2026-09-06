@@ -46,11 +46,15 @@ pub async fn get_activity_stats(
     server: Option<String>,
     status: Option<String>,
     tool: Option<String>,
+    group_name: Option<String>,
+    key_name: Option<String>,
 ) -> Result<ActivityStats, String> {
     log_service::get_activity_stats(
         server.as_deref(),
         status.as_deref(),
         tool.as_deref(),
+        group_name.as_deref(),
+        key_name.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())
@@ -63,11 +67,39 @@ pub async fn get_tool_activities(
     server: Option<String>,
     status: Option<String>,
     tool: Option<String>,
+    group_name: Option<String>,
+    key_name: Option<String>,
 ) -> Result<ActivityPage, String> {
-    let q = ActivityQuery { page, page_size, server, status, tool };
+    let q = ActivityQuery {
+        page,
+        page_size,
+        server,
+        status,
+        tool,
+        group_name,
+        key_name,
+    };
     log_service::query_tool_activities(&q)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 活动日志筛选候选（可搜索分页下拉，§8）：field ∈ server|tool|group|keyName
+#[tauri::command]
+pub async fn get_activity_filter_options(
+    field: String,
+    search: Option<String>,
+    page: Option<u32>,
+    page_size: Option<u32>,
+) -> Result<crate::models::log::ActivityFilterOptionsPage, String> {
+    log_service::get_activity_filter_options(
+        &field,
+        search.as_deref(),
+        page.unwrap_or(1),
+        page_size.unwrap_or(50),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

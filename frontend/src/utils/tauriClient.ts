@@ -352,7 +352,19 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (p === 'config/export' && m === 'GET') return { command: 'export_settings', args: {} };
 
   // Logs
-  if (p === 'logs' && m === 'GET') return { command: 'get_logs', args: { query: {} } };
+  if (p === 'logs' && m === 'GET') {
+    // Optional ?search=&pageSize= → LogQuery (backend FTS weighted search);
+    // empty query keeps the default latest-50 fetch used by polling.
+    let query: Record<string, unknown> = {};
+    const qsi = endpoint.indexOf('?');
+    if (qsi >= 0) {
+      const qs = new URLSearchParams(endpoint.slice(qsi + 1));
+      const search = qs.get('search')?.trim();
+      const pageSize = Number(qs.get('pageSize'));
+      if (search) query = { search, page: 1, pageSize: pageSize > 0 ? pageSize : 200 };
+    }
+    return { command: 'get_logs', args: { query } };
+  }
   if (p === 'logs' && m === 'DELETE') return { command: 'clear_logs', args: {} };
   if (p === 'logs/activity' && m === 'GET')
     return { command: 'get_tool_activities', args: { page: 1, pageSize: 50 } };
@@ -419,6 +431,20 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (segs[0] === 'activities') {
     if (p === 'activities/available') return { command: 'get_activity_available', args: {} };
     if (p === 'activities/filters') return { command: 'get_activity_filters', args: {} };
+    // Paginated searchable filter options (server/tool/group/keyName dropdowns)
+    if (p === 'activities/filter-options') {
+      const qsIdx = endpoint.indexOf('?');
+      const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
+      return {
+        command: 'get_activity_filter_options',
+        args: {
+          field: qs.get('field') ?? '',
+          search: qs.get('search') ?? null,
+          page: Number(qs.get('page') ?? 1),
+          pageSize: Number(qs.get('pageSize') ?? 50),
+        },
+      };
+    }
     if (segs[1] === 'stats') {
       // Pass filter params through to stats query
       const qsIdx = endpoint.indexOf('?');
@@ -429,6 +455,8 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
           server: qs.get('server') ?? null,
           status: qs.get('status') ?? null,
           tool: qs.get('tool') ?? null,
+          groupName: qs.get('group') ?? null,
+          keyName: qs.get('keyName') ?? null,
         },
       };
     }
@@ -449,6 +477,8 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
           server: qs.get('server') ?? null,
           status: qs.get('status') ?? null,
           tool: qs.get('tool') ?? null,
+          groupName: qs.get('group') ?? null,
+          keyName: qs.get('keyName') ?? null,
         },
       };
     }
@@ -1069,6 +1099,19 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   if (command === 'clear_tool_activities') {
     const r = result as Record<string, unknown> | null;
     return { success: true, data: { deletedCount: (r?.deletedCount as number) ?? 0 } };
+  }
+  if (command === 'get_activity_filter_options') {
+    const r = result as Record<string, unknown> | null;
+    if (!r) return { success: true, data: { options: [], total: 0, page: 1, pageSize: 50 } };
+    return {
+      success: true,
+      data: {
+        options: (r.options as string[]) ?? [],
+        total: (r.total as number) ?? 0,
+        page: (r.page as number) ?? 1,
+        pageSize: (r.pageSize as number) ?? 50,
+      },
+    };
   }
 
   // ── call_tool: frontend reads response.content directly (not response.data.content)

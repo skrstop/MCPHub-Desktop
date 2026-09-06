@@ -69,6 +69,40 @@ pub async fn search_servers(
     let mut matched_names: std::collections::HashSet<String> =
         candidates.iter().map(|c| c.name.clone()).collect();
 
+    // 相关度计数（2026-09-06 用户要求：命中查询词元数第一优先，同数保持原生序）。
+    // ① name/description：FTS weighted 口径（与 search_configs 主路径同源）；
+    //    FTS 降级（空表/Err/零结果走 LIKE）时 counts 为空，用 Rust token 计数补齐，
+    //    防止工具名命中反超名称命中（LIKE 候选必含完整 key=全部 token，计数最大）。
+    // ② 工具名兜底候选：token 级子串计数并入同一 counts（原来仅整 key 子串匹配，
+    //    多词查询时几乎永不命中；token 级提高召回且可参与相关度排序）。
+    let mut counts: std::collections::HashMap<String, i64> =
+        crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::Servers,
+            &key,
+            1000,
+        )
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let tokens: Vec<String> = key.split_whitespace().map(|s| s.to_string()).collect();
+    if counts.is_empty() && !candidates.is_empty() {
+        // FTS 降级路径：Rust 侧逐 token 计数（LIKE 候选均含完整 key → 计数相同
+        // → 稳定排序保持 name 序不变；工具名候选计数较小 → 排在名称命中之后）
+        for cfg in &candidates {
+            let hay = format!(
+                "{} {}",
+                cfg.name,
+                cfg.description.as_deref().unwrap_or("")
+            )
+            .to_lowercase();
+            counts.insert(
+                cfg.name.clone(),
+                tokens.iter().filter(|t| hay.contains(t.as_str())).count() as i64,
+            );
+        }
+    }
+
     // Tool-name fallback: tools live only in the runtime pool, so when a query
     // is active, additionally scan the full list's tool names and merge servers
     // not already matched (preserves the previous client-side haystack).
@@ -78,16 +112,26 @@ pub async fn search_servers(
             if matched_names.contains(&cfg.name) {
                 continue;
             }
-            let tool_match = pool::get_entry_info(&cfg.name)
+            let tool_hit = pool::get_entry_info(&cfg.name)
                 .await
-                .map(|(_, tools)| tools.iter().any(|t| t.name.to_lowercase().contains(&key)))
-                .unwrap_or(false);
-            if tool_match {
+                .map(|(_, tools)| {
+                    let hay = tools
+                        .iter()
+                        .map(|t| t.name.to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    tokens.iter().filter(|t| hay.contains(t.as_str())).count()
+                })
+                .unwrap_or(0);
+            if tool_hit > 0 {
                 matched_names.insert(cfg.name.clone());
+                counts.insert(cfg.name.clone(), tool_hit as i64);
                 candidates.push(cfg);
             }
         }
-        candidates.sort_by_key(|c| c.name.to_lowercase());
+        // 统一相关度排序：命中 token 数降序，稳定排序保持候选进入序
+        //（FTS 候选 = weighted+name 序；LIKE 候选 = name 序；工具兜底 = list_all 序）
+        candidates.sort_by_key(|c| std::cmp::Reverse(counts.get(&c.name).copied().unwrap_or(0)));
     }
 
     // Enrich candidates with runtime status + filtered tools (same as list_servers).

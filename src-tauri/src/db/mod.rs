@@ -47,6 +47,12 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
         .connect_with(options)
         .await?;
 
+    // Backup database before applying pending migrations (pre-migration copy
+    // for manual rollback, requirement: mcphub.db.bak). Only runs when
+    // migrations are pending; failure aborts startup — never migrate without
+    // a backup. See db/migration.rs::backup_before_migration.
+    migration::backup_before_migration(&pool, &db_path).await?;
+
     // Run version-wise migrations
     migration::run_pending(&pool).await?;
 

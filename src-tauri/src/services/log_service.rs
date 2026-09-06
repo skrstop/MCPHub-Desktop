@@ -1,5 +1,5 @@
 use crate::{db, models::log::{ActivityEntry, ActivityPage, ActivityQuery, ActivityStats, LogEntry, LogQuery}, services::config_service};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Local;
 use sqlx::Row;
 use uuid::Uuid;
@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub async fn add_log(level: &str, message: &str, server_name: Option<&str>) -> Result<()> {
     let id = Uuid::new_v4().to_string();
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut tx = db::pool().begin().await?;
     sqlx::query(
         "INSERT INTO app_log (id, level, message, server_name, created_at) VALUES (?, ?, ?, ?, ?)",
     )
@@ -15,8 +16,17 @@ pub async fn add_log(level: &str, message: &str, server_name: Option<&str>) -> R
     .bind(message)
     .bind(server_name)
     .bind(&now)
-    .execute(db::pool())
+    .execute(&mut *tx)
     .await?;
+    // FTS 同步（§4.3 铁律：同事务）。高频写路径，tokenize 单条消息开销 <0.1ms。
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::AppLog,
+        &id,
+        message,
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -24,6 +34,80 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(50).min(200) as i64;
     let offset = ((page - 1) as i64) * page_size;
+
+    // 全文搜索（F1d）：FTS5 中/英/拼音分词 + rank 排序；空关键词/空表/Err 降级原全量路径
+    let search_key = q.search.as_deref().map(str::trim).unwrap_or("");
+    if !search_key.is_empty() {
+        match crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::AppLog,
+            search_key,
+            5000,
+        )
+        .await
+        {
+            Ok(weighted) if !weighted.is_empty() => {
+                // 命中词数 map：相关度第一优先，同数保持 created_at DESC（稳定排序）
+                let counts: std::collections::HashMap<String, i64> =
+                    weighted.into_iter().collect();
+                // 回表 + level/server_name 过滤（原生 created_at DESC 序）
+                let mut qb = sqlx::QueryBuilder::new(
+                    "SELECT id, level, message, server_name, created_at FROM app_log WHERE id IN (",
+                );
+                let mut first = true;
+                for id in counts.keys() {
+                    qb.push(if first { "" } else { ", " });
+                    qb.push_bind(id.clone());
+                    first = false;
+                }
+                qb.push(") ORDER BY created_at DESC");
+                if let Some(level) = &q.level {
+                    qb.push(" AND level = ").push_bind(level);
+                }
+                if let Some(server) = &q.server_name {
+                    qb.push(" AND server_name = ").push_bind(server);
+                }
+                let rows = qb.build().fetch_all(db::pool()).await?;
+                let mut entries: Vec<LogEntry> = rows
+                    .into_iter()
+                    .map(|r| {
+                        Ok(LogEntry {
+                            id: r.try_get("id")?,
+                            level: r.try_get("level")?,
+                            message: r.try_get("message")?,
+                            server_name: r.try_get("server_name")?,
+                            created_at: r.try_get("created_at")?,
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                // 相关度第一优先（稳定排序：同命中数保持 created_at DESC）
+                entries.sort_by_key(|e| std::cmp::Reverse(counts.get(&e.id).copied().unwrap_or(0)));
+                let start = (offset.max(0)) as usize;
+                return Ok(entries
+                    .into_iter()
+                    .skip(start)
+                    .take(page_size as usize)
+                    .collect());
+            }
+            Ok(_)
+                if crate::services::fts_service::table_is_empty(
+                    crate::services::fts_service::FtsTable::AppLog,
+                )
+                .await
+                .unwrap_or(false) =>
+            {
+                // 空表兜底（启动对账前）：走原 LIKE
+                return like_search_logs(page_size, offset, search_key).await;
+            }
+            Ok(_) => {
+                // 零结果降级 LIKE：FTS 词前缀查不到的 CJK 内部子串仍可命中
+                return like_search_logs(page_size, offset, search_key).await;
+            }
+            Err(e) => {
+                log::warn!("[fts] search app_log failed, fallback to LIKE: {e}");
+                return like_search_logs(page_size, offset, search_key).await;
+            }
+        }
+    }
 
     let rows = sqlx::query(
         "SELECT id, level, message, server_name, created_at FROM app_log
@@ -34,6 +118,39 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
     .fetch_all(db::pool())
     .await?;
 
+    rows.into_iter()
+        .map(|r| {
+            Ok(LogEntry {
+                id: r.try_get("id")?,
+                level: r.try_get("level")?,
+                message: r.try_get("message")?,
+                server_name: r.try_get("server_name")?,
+                created_at: r.try_get("created_at")?,
+            })
+        })
+        .collect()
+}
+
+/// FTS 降级路径：message LIKE（§4.4 Err/空表兜底）
+async fn like_search_logs(
+    page_size: i64,
+    offset: i64,
+    search_key: &str,
+) -> Result<Vec<LogEntry>> {
+    let pattern = format!(
+        "%{}%",
+        search_key.to_lowercase().replace('%', "\\%").replace('_', "\\_")
+    );
+    let rows = sqlx::query(
+        "SELECT id, level, message, server_name, created_at FROM app_log
+         WHERE LOWER(message) LIKE ? ESCAPE '\\'
+         ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(&pattern)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(db::pool())
+    .await?;
     rows.into_iter()
         .map(|r| {
             Ok(LogEntry {
@@ -136,6 +253,12 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     if q.tool.is_some() {
         conditions.push("tool LIKE ?");
     }
+    if q.group_name.is_some() {
+        conditions.push("group_name = ?");
+    }
+    if q.key_name.is_some() {
+        conditions.push("key_name = ?");
+    }
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -148,6 +271,8 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     if let Some(ref s) = q.server { count_q = count_q.bind(s); }
     if let Some(ref s) = q.status { count_q = count_q.bind(s); }
     if let Some(ref t) = q.tool { count_q = count_q.bind(format!("%{}%", t)); }
+    if let Some(ref g) = q.group_name { count_q = count_q.bind(g); }
+    if let Some(ref k) = q.key_name { count_q = count_q.bind(k); }
     let total: i64 = count_q.fetch_one(db::pool()).await?.try_get("cnt")?;
 
     // Data query
@@ -161,6 +286,8 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     if let Some(ref s) = q.server { data_q = data_q.bind(s); }
     if let Some(ref s) = q.status { data_q = data_q.bind(s); }
     if let Some(ref t) = q.tool { data_q = data_q.bind(format!("%{}%", t)); }
+    if let Some(ref g) = q.group_name { data_q = data_q.bind(g); }
+    if let Some(ref k) = q.key_name { data_q = data_q.bind(k); }
     data_q = data_q.bind(page_size).bind(offset);
     let rows = data_q.fetch_all(db::pool()).await?;
     let data: Vec<ActivityEntry> = rows.iter().map(row_to_activity).collect::<Result<_>>()?;
@@ -168,12 +295,133 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     Ok(ActivityPage { data, page, page_size: page_size as u32, total })
 }
 
-pub async fn get_activity_stats(server: Option<&str>, status: Option<&str>, tool: Option<&str>) -> Result<ActivityStats> {
+/// 筛选候选字段白名单（G2：field 枚举 → 列名，杜绝注入）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityFilterField {
+    Server,
+    Tool,
+    Group,
+    KeyName,
+}
+
+impl ActivityFilterField {
+    pub fn parse(field: &str) -> Option<Self> {
+        match field {
+            "server" => Some(Self::Server),
+            "tool" => Some(Self::Tool),
+            "group" => Some(Self::Group),
+            "keyName" => Some(Self::KeyName),
+            _ => None,
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Tool => "tool",
+            Self::Group => "group_name",
+            Self::KeyName => "key_name",
+        }
+    }
+}
+
+/// 分页可搜索筛选候选（G2）：DISTINCT 列值 + LIKE 前缀过滤 + 分页。
+/// 供活动日志页的 SearchableSelect 下拉框调用（§8）。
+pub async fn get_activity_filter_options(
+    field: &str,
+    search: Option<&str>,
+    page: u32,
+    page_size: u32,
+) -> Result<crate::models::log::ActivityFilterOptionsPage> {
+    use crate::models::log::ActivityFilterOptionsPage;
+
+    let field = ActivityFilterField::parse(field)
+        .ok_or_else(|| anyhow!("invalid filter field '{}'", field))?;
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 100);
+    let offset = ((page - 1) as i64) * (page_size as i64);
+
+    let col = field.column();
+    let key = search.unwrap_or("").trim().to_lowercase();
+
+    let (count_sql, data_sql): (String, String) = if key.is_empty() {
+        (
+            format!("SELECT COUNT(*) FROM (SELECT DISTINCT {col} AS v FROM activity_log WHERE {col} IS NOT NULL AND {col} != '')"),
+            format!(
+                "SELECT DISTINCT {col} AS v FROM activity_log \
+                 WHERE {col} IS NOT NULL AND {col} != '' \
+                 ORDER BY v LIMIT ? OFFSET ?"
+            ),
+        )
+    } else {
+        (
+            format!(
+                "SELECT COUNT(*) FROM (SELECT DISTINCT {col} AS v FROM activity_log \
+                 WHERE {col} IS NOT NULL AND {col} != '' AND LOWER({col}) LIKE ?)"
+            ),
+            format!(
+                "SELECT DISTINCT {col} AS v FROM activity_log \
+                 WHERE {col} IS NOT NULL AND {col} != '' AND LOWER({col}) LIKE ? \
+                 ORDER BY v LIMIT ? OFFSET ?"
+            ),
+        )
+    };
+
+    let total: i64 = if key.is_empty() {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(&*count_sql))
+            .fetch_one(db::pool())
+            .await?
+    } else {
+        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        sqlx::query_scalar(sqlx::AssertSqlSafe(&*count_sql))
+            .bind(&pattern)
+            .fetch_one(db::pool())
+            .await?
+    };
+
+    let rows = if key.is_empty() {
+        sqlx::query(sqlx::AssertSqlSafe(&*data_sql))
+            .bind(page_size as i64)
+            .bind(offset)
+            .fetch_all(db::pool())
+            .await?
+    } else {
+        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        sqlx::query(sqlx::AssertSqlSafe(&*data_sql))
+            .bind(&pattern)
+            .bind(page_size as i64)
+            .bind(offset)
+            .fetch_all(db::pool())
+            .await?
+    };
+
+    let options: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.try_get::<Option<String>, _>("v").ok().flatten())
+        .collect();
+
+    Ok(ActivityFilterOptionsPage {
+        options,
+        total: total.max(0),
+        page,
+        page_size,
+    })
+}
+
+pub async fn get_activity_stats(
+    server: Option<&str>,
+    status: Option<&str>,
+    tool: Option<&str>,
+    group_name: Option<&str>,
+    key_name: Option<&str>,
+) -> Result<ActivityStats> {
     // Build optional WHERE clause from filters
     let mut conditions: Vec<String> = Vec::new();
     if server.is_some() { conditions.push("server = ?".into()); }
     if status.is_some() { conditions.push("status = ?".into()); }
     if tool.is_some() { conditions.push("tool LIKE ?".into()); }
+    if group_name.is_some() { conditions.push("group_name = ?".into()); }
+    if key_name.is_some() { conditions.push("key_name = ?".into()); }
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -193,6 +441,8 @@ pub async fn get_activity_stats(server: Option<&str>, status: Option<&str>, tool
     if let Some(s) = server { q = q.bind(s); }
     if let Some(s) = status { q = q.bind(s); }
     if let Some(t) = tool { q = q.bind(format!("%{}%", t)); }
+    if let Some(g) = group_name { q = q.bind(g); }
+    if let Some(k) = key_name { q = q.bind(k); }
     let row = q.fetch_one(db::pool()).await?;
     Ok(ActivityStats {
         total: row.try_get("total")?,
@@ -244,10 +494,15 @@ pub async fn cleanup_by_days(days_old: i64) -> Result<(i64, String)> {
 
 /// Delete all application log entries and vacuum.
 pub async fn clear_logs() -> Result<()> {
+    let mut tx = db::pool().begin().await?;
     sqlx::query("DELETE FROM app_log")
-        .execute(db::pool())
+        .execute(&mut *tx)
         .await?;
-    // Reclaim disk space after bulk delete
+    // FTS 联动（§4.3 铁律）：FTS5 无 WHERE 删除，全清即 DELETE 全表
+    crate::services::fts_service::clear_table(crate::services::fts_service::FtsTable::AppLog)
+        .await?;
+    tx.commit().await?;
+    // Reclaim disk space after bulk delete (VACUUM 不能在事务内，单独执行)
     let _ = sqlx::raw_sql("VACUUM").execute(db::pool()).await;
     Ok(())
 }
@@ -309,15 +564,40 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
         .unwrap_or(0);
     log::info!("[log_cleanup] Current entries: app_log={}, activity_log={}", app_log_total, activity_total);
 
-    // Delete old app_log entries (uses created_at column)
+    // Delete old app_log entries + FTS 联动（§4.3 铁律：先取待删 id 集 →
+    // 同事务删 app_log + 删 fts_app_log——FTS5 无范围删除，按 ref_id→rowid 两步删）
+    let ids_sql = format!(
+        "SELECT id FROM app_log WHERE created_at < {}",
+        cutoff
+    );
+    let stale_ids: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(&*ids_sql))
+        .fetch_all(db::pool())
+        .await
+        .unwrap_or_default();
+
+    let mut tx = db::pool().begin().await?;
     let app_log_sql = format!(
         "DELETE FROM app_log WHERE created_at < {}",
         cutoff
     );
     let app_result = sqlx::query(sqlx::AssertSqlSafe(&*app_log_sql))
-        .execute(db::pool())
+        .execute(&mut *tx)
         .await?;
     let app_deleted = app_result.rows_affected() as i64;
+
+    if !stale_ids.is_empty() {
+        // FTS5 无范围删除：rowid IN (SELECT rowid WHERE ref_id IN (...ids...))
+        let mut qb = sqlx::QueryBuilder::new(
+            "DELETE FROM fts_app_log WHERE rowid IN (SELECT rowid FROM fts_app_log WHERE ref_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in &stale_ids {
+            sep.push_bind(id);
+        }
+        qb.push("))");
+        qb.build().execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
 
     // Delete old activity_log entries (uses created_at column)
     let activity_sql = format!(

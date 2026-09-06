@@ -1660,32 +1660,6 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     log::info!("{}", http_msg);
     app_logger::log_to_db("info", &http_msg);
 
-    // Diagnostics heartbeat (2026-08-27): a 30s tick tagged [http-server-watch],
-    // written only to the DB log panel. If the server ever stops responding
-    // again, the heartbeat trail distinguishes "serve task dead, process alive"
-    // (heartbeats continue, port gone) from a process-level death (both stop).
-    // The fd count catches EMFILE death spirals (fds climbing toward the limit
-    // until accept() fails).
-    {
-        let hb_port = port;
-        tauri::async_runtime::spawn(async move {
-            let mut n: u64 = 0;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                n += 1;
-                #[cfg(unix)]
-                let fd_count = std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0);
-                #[cfg(not(unix))]
-                let fd_count = 0usize;
-                let line = format!(
-                    "[http-server-watch] heartbeat #{} port={} pid={} fds={}",
-                    n, hb_port, std::process::id(), fd_count
-                );
-                app_logger::log_to_db("debug", &line);
-            }
-        });
-    }
-
     // On Windows, external clients are commonly blocked by Windows Defender
     // Firewall even though the bind succeeded (loopback works, 0.0.0.0 inbound
     // doesn't). Log a proactive hint so "started but unreachable" shows up in the

@@ -1614,6 +1614,15 @@ async fn upsert_doc_sql(meta: &DocMeta) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // FTS 同步（§4.3 铁律：与 rag_docs 镜像同事务；ref_id=id，文本=name）
+    crate::services::fts_service::sync_upsert_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::RagDocs,
+        &meta.id,
+        &meta.name,
+    )
+    .await?;
+
     tx.commit().await?;
     Ok(())
 }
@@ -1642,6 +1651,13 @@ async fn remove_doc_sql(doc_id: &str) -> Result<()> {
         .bind(doc_id)
         .execute(&mut *tx)
         .await?;
+    // FTS 同步（§4.3 铁律：同事务删 fts_rag_docs）
+    crate::services::fts_service::sync_delete_tx(
+        &mut tx,
+        crate::services::fts_service::FtsTable::RagDocs,
+        doc_id,
+    )
+    .await?;
 
     tx.commit().await?;
     Ok(())
@@ -1732,6 +1748,18 @@ pub async fn rebuild_rag_sql_index(app: &AppHandle) -> Result<()> {
             .bind(&created)
             .execute(&mut *tx)
             .await?;
+    }
+
+    // FTS 同步（§4.3 铁律：对账重建含 fts_rag_docs，同一事务）
+    crate::services::fts_service::clear_table_tx(&mut tx, crate::services::fts_service::FtsTable::RagDocs).await?;
+    for meta in &docs {
+        crate::services::fts_service::sync_upsert_tx(
+            &mut tx,
+            crate::services::fts_service::FtsTable::RagDocs,
+            &meta.id,
+            &meta.name,
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1873,6 +1901,90 @@ pub async fn search_docs_paged(
     } else {
         format!("WHERE {}", conds.join(" AND "))
     };
+
+    // FTS5 路径（中/英/拼音分词；§4.4）：key 非空时优先走 FTS，tag 过滤仍走
+    // SQL 镜像（rag_doc_tags），结果按 FTS rank 序排列；空表/Err 降级原 LIKE。
+    if !key.is_empty() {
+        match crate::services::fts_service::search_ref_ids_weighted(
+            crate::services::fts_service::FtsTable::RagDocs,
+            &key,
+            5000,
+        )
+        .await
+        {
+            Ok(weighted) if !weighted.is_empty() => {
+                // 命中词数 map：相关度第一优先（命中越多越靠前），
+                // 同命中数保持原生 uploaded_at DESC, id 序（稳定排序）
+                let counts: std::collections::HashMap<String, i64> =
+                    weighted.into_iter().collect();
+                // tag 条件 → doc_id 白名单（SQL 镜像查询）
+                let allowed: Option<std::collections::HashSet<String>> =
+                    if want_tags.is_empty() {
+                        None
+                    } else {
+                        let mut qb = sqlx::QueryBuilder::new(
+                            "SELECT DISTINCT doc_id FROM rag_doc_tags WHERE tag IN (",
+                        );
+                        let mut sep = qb.separated(", ");
+                        for t in &want_tags {
+                            sep.push_bind(t);
+                        }
+                        qb.push(")");
+                        let rows = qb.build().fetch_all(crate::db::pool()).await?;
+                        Some(
+                            rows.iter()
+                                .filter_map(|r| sqlx::Row::try_get(r, "doc_id").ok())
+                                .collect(),
+                        )
+                    };
+                // 原生序（uploaded_at DESC, id）过滤命中集与 tag 白名单，
+                // 再稳定排序按命中词数降序——同相关度保持原生序
+                let nat_rows = sqlx::query("SELECT id FROM rag_docs ORDER BY uploaded_at DESC, id")
+                    .fetch_all(crate::db::pool())
+                    .await?;
+                let mut ordered: Vec<(String, i64)> = Vec::new();
+                for r in &nat_rows {
+                    let id: String = sqlx::Row::try_get(r, "id")?;
+                    if let Some(c) = counts.get(&id) {
+                        ordered.push((id, *c));
+                    }
+                }
+                ordered.retain(|(id, _)| allowed.as_ref().map_or(true, |s| s.contains(id)));
+                // 相关度第一优先（稳定排序：同命中数保持 uploaded_at DESC, id 序）
+                ordered.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+                let total = ordered.len() as u64;
+                let window: Vec<String> = ordered
+                    .iter()
+                    .skip(offset.max(0) as usize)
+                    .take(page_size as usize)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                let mut items = Vec::with_capacity(window.len());
+                for id in window {
+                    let meta_path = dir.join(format!("{}.meta", id));
+                    let Ok(bytes) = std::fs::read(&meta_path) else { continue };
+                    let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
+                    items.push(doc_info_from_meta(&dir, meta));
+                }
+                return Ok(RagDocPage { items, total, page, page_size });
+            }
+            Ok(_)
+                if crate::services::fts_service::table_is_empty(
+                    crate::services::fts_service::FtsTable::RagDocs,
+                )
+                .await
+                .unwrap_or(false) =>
+            {
+                // 空表兜底：继续走下方原 LIKE
+            }
+            Ok(_) => {
+                // 零结果/空表均不返回：落到下方原 LIKE（子串语义补 FTS 词前缀盲区）
+            }
+            Err(e) => {
+                log::warn!("[fts] search rag_docs failed, fallback to LIKE: {e}");
+            }
+        }
+    }
 
     let pool = crate::db::pool();
     // Count query (total across all pages, not just this one).

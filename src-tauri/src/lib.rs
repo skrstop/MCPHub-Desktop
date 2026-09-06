@@ -268,6 +268,19 @@ pub fn run() {
             services::app_logger::init(app.path().app_data_dir().ok());
             services::app_logger::log_to_db("info", "Application started, database initialized");
 
+            // Reconcile FTS5 full-text tables (§4.2: rebuild 5 entity tables;
+            // drift self-healing). Fire-and-forget — a slow first build must not
+            // block startup, and failures fall back to LIKE search (§4.4).
+            {
+                let app_handle_fts = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = &app_handle_fts; // handle reserved for future progress events
+                    services::fts_service::rebuild_all().await;
+                    // app_log 存量回填（升级后首次启动 fts_app_log 为空时一次性回填）
+                    services::fts_service::backfill_app_log_if_empty().await;
+                });
+            }
+
             // Log the enhanced PATH at startup (after DB is ready so it's persisted)
             {
                 let path = commands::runtime::get_enhanced_path_for_logging();
@@ -409,6 +422,7 @@ pub fn run() {
             commands::logs::log_event,
             commands::logs::get_activity_available,
             commands::logs::get_activity_filters,
+            commands::logs::get_activity_filter_options,
             commands::logs::get_activity_stats,
             commands::logs::get_tool_activities,
             commands::logs::clear_tool_activities,

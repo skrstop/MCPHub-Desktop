@@ -11,10 +11,13 @@ export interface LogEntry {
   processId?: string;
 }
 
-// Fetch all logs
-export const fetchLogs = async (): Promise<LogEntry[]> => {
+// Fetch logs; optional keyword routes to backend FTS search (desktop:
+// weighted relevance over the full app_log table, up to 200 rows)
+export const fetchLogs = async (search?: string): Promise<LogEntry[]> => {
   try {
-    const response = await apiGet<{ success: boolean; data: LogEntry[]; error?: string }>('/logs');
+    const key = search?.trim() ?? '';
+    const qs = key ? `?search=${encodeURIComponent(key)}&pageSize=200` : '';
+    const response = await apiGet<{ success: boolean; data: LogEntry[]; error?: string }>(`/logs${qs}`);
 
     if (!response.success) {
       throw new Error(response.error || 'Failed to fetch logs');

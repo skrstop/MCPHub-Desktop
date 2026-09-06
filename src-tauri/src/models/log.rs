@@ -38,6 +38,12 @@ pub struct ActivityQuery {
     pub server: Option<String>,
     pub status: Option<String>,
     pub tool: Option<String>,
+    /// 分组筛选（group_name 列等值；2026-09-05 新增——此前被 tauriClient 丢弃）
+    #[serde(default)]
+    pub group_name: Option<String>,
+    /// API 秘钥筛选（key_name 列等值；同上）
+    #[serde(default)]
+    pub key_name: Option<String>,
 }
 
 /// Aggregate counts returned by get_activity_stats.
@@ -60,11 +66,24 @@ pub struct ActivityPage {
     pub total: i64,
 }
 
-#[derive(Debug, Deserialize)]
+/// 分页筛选候选结果（get_activity_filter_options 返回）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityFilterOptionsPage {
+    pub options: Vec<String>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub level: Option<String>,
     pub server_name: Option<String>,
+    /// 全文搜索关键词（FTS5 中/英/拼音分词匹配 message；空/缺省=不过滤）
+    #[serde(default)]
+    pub search: Option<String>,
 }
