@@ -661,7 +661,7 @@ changelog 采用固定分节格式（参考既有文件如 `doc/upgrade/1.0.3310
 
 规范：
 
-- 文件名与版本号一致（如 `1.0.33102.md`），在四个版本源同步递增后创建
+- 文件名与版本号一致（如 `1.0.34001.md`），在四个版本源同步递增后创建
 - 面向用户写：不写实现细节/文件名堆砌，一个功能点一条 bullet，关键特性名加粗
 - 分节顺序固定：新功能 → 修复 → 限制（可选）→ 基线同步（仅含 origin 同步时）；无关的节省略
 - 发布时 CI 将全文作为 `latest.json` 的 `notes`，最终在「关于」对话框按 Markdown 渲染
@@ -1620,7 +1620,7 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 
 - `ORT_SKIP_DOWNLOAD=1 cargo check` 通过（0 错 0 警）；`cargo test --lib` 33 passed（含 12 个 fts_service 单测：分词/拼音/注入/round-trip；v24 迁移幂等+备份语义测试；rebuild_one 行数对账测试）。
 - `npm run build` 通过（813ms）；`npx tsc --noEmit` 24 错误 = 基线 24（零新增）。
-- 版本：`1.0.33101 → 1.0.33102`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog `doc/upgrade/1.0.33102.md`。
+- 版本：`1.0.33101 → 1.0.33102`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog `doc/upgrade/1.0.33102.md`（后与 1.0.34001 合并为单文件 `doc/upgrade/1.0.34001.md`，原文件已删）。
 - 手动回归（E4，待用户）：中文/拼音/首字母搜索命中、server 改名/删除后搜索即时正确、旧库升级生成 .bak、活动日志四下拉真过滤。
 
 #### 3.15.7 五轮代码级复核（2026-09-05/06）
@@ -1789,18 +1789,38 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `0f59780` (origin/main，v1.0.33 tag 之后 9 个未发布提交) |
-| **对应 origin tag**            | `v1.0.33`（最新 tag，指向 `41d34be`） |
-| **桌面端版本号**               | `1.0.33002` |
-| **同步执行日期**               | 2026-09-01              |
+| **当前已同步到 origin commit** | `8030868` (origin/main，v1.0.34 tag 之后 3 个未发布提交) |
+| **对应 origin tag**            | `v1.0.34`（最新 tag，指向 `40e7c74`） |
+| **桌面端版本号**               | `1.0.34001` |
+| **同步执行日期**               | 2026-09-06              |
 
-> 下次同步时，使用 `0f59780` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 0f59780..HEAD`）。
+> 下次同步时，使用 `8030868` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8030868..HEAD`）。
 >
-> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.33` tag 即 `41d34be`（上一轮基线同步的终点）。本轮为同日两轮同步（`41d34be → 7ed1637` → `0f59780`）**合并为一次发布**：桌面端版本号 `1.0.32003 → 1.0.33002`（origin 最新 tag 已是 v1.0.33，以 33 为基线，两轮序号 001/002 中仅发布 002），changelog 合并为 `doc/upgrade/1.0.33002.md` 单文件。
+> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.34` 是 lightweight tag，指向 `5fe212c`（typeorm bump #1121）；v1.0.34 之后 5 个未发布提交（f03eb10/40e7c74/ffcc5cd/b941d4d/8030868），指针已含全部。本轮版本号 `1.0.33102 → 1.0.34001`：基线跟随 origin 最新 tag v1.0.34（33 → 34），序号从 001 重新开始；changelog `1.0.33102.md` 与 `1.0.34001.md` **合并为 `doc/upgrade/1.0.34001.md` 单文件**（33102 的 FTS 功能内容并入，原文件已删）。
 >
-> ⚠️ **文档补齐说明**：上一次同步（2026-07-27，desktop commit `f417a12 feat: 基线同步`）已把子模块指针前进到 `a99c382`（= `v1.0.25` tag）、桌面端版本号提到 `1.0.25001`，但当时未更新本节「最近同步基线」与 §4.4「最近同步记录」。本次同步（2026-07-30）顺带补齐：把基线文档从陈旧的 `cb44e22`/`1.0.24003` 修正为实际状态 `a99c382`→`29c0704`/`1.0.26001`，并在 §4.4 补登 `a99c382 → 29c0704` 的同步条目（`a99c382..29c0704` 之间 origin 无 frontend/locales 改动，详见该条目）。
+> ⚠️ **文档补齐说明（第二次）**：上一次基线（2026-09-01，`0f59780`/`1.0.33002`）之后，feature 提交 `38d5691` 已把子模块指针无记录推进到 `40e7c74`（v1.0.34 之后第 2 个提交），但 §4.3/§4.4 未更新。2026-09-06 同步顺带补登该段（`f03eb10` #1124、`40e7c74` #1125，均无代码落点，详见 §4.4）。
 
 ### 4.4 最近同步记录
+
+#### 2026-09-06：同步 `40e7c74` -> `8030868`（3 个 commit，全为 Node 后端修复）+ 补登未记录段
+
+> ⚠️ **本轮补登**：上轮基线（2026-09-01，`0f59780`）之后，`38d5691 feat: 支持扫描子文件夹` 已把子模块指针无记录推进到 `40e7c74`（该段含 5 个 commit：`5fe212c` typeorm bump = v1.0.34 tag 点、`f03eb10` #1124、`40e7c74` #1125 等）。已提交部分均无 frontend/locales/Rust 落点：`f03eb10` #1124（commit message 提及 mcpService.ts，**实际 diff 仅 .agents/.claude 元数据文件，无代码改动**）、`40e7c74` #1125（纯文档）。本次基线顺带补齐。
+
+本轮 `cd mcphub-origin && git --no-pager log --oneline 40e7c74..HEAD` 共 3 个 commit（`ffcc5cd` #1095、`b941d4d` #1128、`8030868` #1130）；`git diff --stat 40e7c74..8030868 -- frontend/ locales/` **为空——本轮 origin 无任何 frontend/locales 改动**，桌面端前端零改动。
+
+**已镜像到 desktop（Rust 后端）**：无。逐项评估：
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `ffcc5cd` #1095 | fix: persist startOnDemand/idleTimeoutMs when running in database mode | **无需镜像** | origin 的 DB-backed `ServerDaoDbImpl` 无两字段专属列，保存时白名单列集静默丢弃 `startOnDemand`/`idleTimeoutMs`，修复靠塞进 schema-less `options` JSON blob 兜底。桌面端 `servers` 表已有专属列（migrate_v17），`server_service::create/update` INSERT/UPDATE 均绑定 `start_on_demand`/`idle_timeout_ms`，`map_row` 回读——不存在该 bug。 |
+| `b941d4d` #1128 | fix: reconnect upstream OAuth servers after reauthorization | **无需镜像** | 修复对象是 origin `oauthCallbackController.ts`（OAuth 重授权回调后重连上游 server）。桌面端无 OAuth 回调控制器（`grep oauthCallback` 无命中），OAuth2 仅静态配置透传存储，无重授权回调解链路。 |
+| `8030868` #1130 | fix: decode multipart binary file arrays | **无需镜像** | 修复对象是 origin 自有 `openApiRequestBody.ts` 的 `buildMultipartParts`（`type: 'array'` 且 items 为 binary 时 `isBinaryField` 误判）。桌面端 OpenAPI 传输由 `rmcp-openapi` 库内部处理 HTTP（无自有 multipart 构建器，`grep multipart` 无命中），无落点。 |
+
+其余依赖类 commit（`5fe212c` typeorm 0.3.31→1.1.0、`1d1b800`/`ea1c6e8`/`c93a40f`/`94fcb00` dev deps）按同步策略不同步（Node 依赖）。
+
+**同步操作**：子模块指针 `40e7c74 -> 8030868`；版本号 `1.0.33102 -> 1.0.34001`（基线跟随 origin 最新 tag v1.0.34，四源 + Cargo.lock）；changelog **合并为 `doc/upgrade/1.0.34001.md` 单文件**（并入 `1.0.33102.md` 的 FTS 功能内容，原 `1.0.33102.md` 已删）。
+
+**同步后验证**：`cd frontend && npm run build` 通过；locales JSON 四文件 `json.load` 校验通过（本轮无改动）；`cargo check` 通过（仅 Cargo.toml/Cargo.lock 版本号变更，无 Rust 源码改动）。
 
 #### 2026-09-01（第二轮）：同步 `7ed1637` -> `0f59780`（7 个 commit，含上游安全修复）
 

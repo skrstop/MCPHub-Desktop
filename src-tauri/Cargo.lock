@@ -6460,7 +6460,7 @@ dependencies = [
 
 [[package]]
 name = "mcphub"
-version = "1.0.33102"
+version = "1.0.34001"
 dependencies = [
  "ahash",
  "anyhow",
