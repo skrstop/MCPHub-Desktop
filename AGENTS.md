@@ -1813,6 +1813,9 @@ cd frontend && npm run build
 cd src-tauri && cargo check
 
 # 8. 更新本章节「最近同步基线」与「同步条目」
+# 9. 在本轮 §4.4 条目末尾写「影响功能点与结果」总结（MUST）：
+#    - 影响功能点：本轮同步实际影响哪些桌面端功能/模块（前端页面、Rust 命令/服务、i18n、DB 迁移等），逐条列出；无影响则明确写「无」
+#    - 结果：同步后桌面端行为与上一版本的差异（新增能力/修复的问题/行为不变），以及是否需要用户操作（如重启、数据迁移）
 ```
 
 ### 4.3 最近同步基线
@@ -1821,18 +1824,30 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `8030868` (origin/main，v1.0.34 tag 之后 3 个未发布提交) |
-| **对应 origin tag**            | `v1.0.34`（最新 tag，指向 `40e7c74`） |
+| **当前已同步到 origin commit** | `a67165e` (origin/main，v1.0.34 tag 之后 6 个未发布提交) |
+| **对应 origin tag**            | `v1.0.34`（最新 tag，指向 `5fe212c`） |
 | **桌面端版本号**               | `1.0.34001` |
-| **同步执行日期**               | 2026-09-06              |
+| **同步执行日期**               | 2026-09-07              |
 
-> 下次同步时，使用 `8030868` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8030868..HEAD`）。
+> 下次同步时，使用 `a67165e` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline a67165e..HEAD`）。
 >
-> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.34` 是 lightweight tag，指向 `5fe212c`（typeorm bump #1121）；v1.0.34 之后 5 个未发布提交（f03eb10/40e7c74/ffcc5cd/b941d4d/8030868），指针已含全部。本轮版本号 `1.0.33102 → 1.0.34001`：基线跟随 origin 最新 tag v1.0.34（33 → 34），序号从 001 重新开始；changelog `1.0.33102.md` 与 `1.0.34001.md` **合并为 `doc/upgrade/1.0.34001.md` 单文件**（33102 的 FTS 功能内容并入，原文件已删）。
+> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.34` 是 lightweight tag，指向 `5fe212c`（typeorm bump #1121）；v1.0.34 之后 6 个未发布提交（f03eb10/40e7c74/ffcc5cd/b941d4d/8030868/a67165e），指针已含全部。2026-09-06 轮版本号 `1.0.33102 → 1.0.34001`：基线跟随 origin 最新 tag v1.0.34（33 → 34），序号从 001 重新开始；changelog `1.0.33102.md` 与 `1.0.34001.md` **合并为 `doc/upgrade/1.0.34001.md` 单文件**（33102 的 FTS 功能内容并入，原文件已删）。
 >
 > ⚠️ **文档补齐说明（第二次）**：上一次基线（2026-09-01，`0f59780`/`1.0.33002`）之后，feature 提交 `38d5691` 已把子模块指针无记录推进到 `40e7c74`（v1.0.34 之后第 2 个提交），但 §4.3/§4.4 未更新。2026-09-06 同步顺带补登该段（`f03eb10` #1124、`40e7c74` #1125，均无代码落点，详见 §4.4）。
 
 ### 4.4 最近同步记录
+
+#### 2026-09-07：同步 `8030868` -> `a67165e`（1 个 commit，纯文档）
+
+`cd mcphub-origin && git --no-pager log --oneline 8030868..a67165e` 共 1 个 commit：`a67165e` #1136（docs: prefer gh CLI for GitHub operations in agent guides，改动仅 `AGENTS.md` + `docs/agents/git-and-contribution.md`）。`git diff --stat 8030868..a67165e -- frontend/ locales/ src/` **为空**——本轮 origin 无任何前端/locales/Node 后端代码改动。
+
+**已同步到 desktop（前端 / locales）**：无。**已镜像到 desktop（Rust 后端）**：无。docs/ 按同步策略不同步；桌面端有自己的 AGENTS.md 与 agent guide 体系，无落点。
+
+**同步操作**：仅子模块指针 `8030868 -> a67165e`。版本号维持 `1.0.34001` 不变（本轮零代码改动，无发布内容；origin 最新 tag 仍为 v1.0.34，下一轮有代码改动时基线仍是 34、序号从 002 递增）。
+
+**同步后验证**：本轮无任何源码改动，跳过 build/cargo check。
+
+**影响功能点与结果**：无。本轮 origin 仅 1 个纯文档 commit（agent guides 建议 gh CLI），桌面端无任何前端/Rust/locales/DB 落点，所有功能行为与上一版本（1.0.34001）完全一致，用户无需任何操作。
 
 #### 2026-09-06：同步 `40e7c74` -> `8030868`（3 个 commit，全为 Node 后端修复）+ 补登未记录段
 
