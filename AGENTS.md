@@ -1824,18 +1824,44 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `a67165e` (origin/main，v1.0.34 tag 之后 6 个未发布提交) |
+| **当前已同步到 origin commit** | `980ab4a` (origin/main，v1.0.34 tag 之后 7 个未发布提交) |
 | **对应 origin tag**            | `v1.0.34`（最新 tag，指向 `5fe212c`） |
-| **桌面端版本号**               | `1.0.34001` |
-| **同步执行日期**               | 2026-09-07              |
+| **桌面端版本号**               | `1.0.34002` |
+| **同步执行日期**               | 2026-09-07（第二轮）            |
 
-> 下次同步时，使用 `a67165e` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline a67165e..HEAD`）。
+> 下次同步时，使用 `980ab4a` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 980ab4a..HEAD`）。
 >
-> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.34` 是 lightweight tag，指向 `5fe212c`（typeorm bump #1121）；v1.0.34 之后 6 个未发布提交（f03eb10/40e7c74/ffcc5cd/b941d4d/8030868/a67165e），指针已含全部。2026-09-06 轮版本号 `1.0.33102 → 1.0.34001`：基线跟随 origin 最新 tag v1.0.34（33 → 34），序号从 001 重新开始；changelog `1.0.33102.md` 与 `1.0.34001.md` **合并为 `doc/upgrade/1.0.34001.md` 单文件**（33102 的 FTS 功能内容并入，原文件已删）。
+> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.34` 是 lightweight tag，指向 `5fe212c`（typeorm bump #1121）；v1.0.34 之后 7 个未发布提交（f03eb10/40e7c74/ffcc5cd/b941d4d/8030868/a67165e/980ab4a），指针已含全部。2026-09-06 轮版本号 `1.0.33102 → 1.0.34001`：基线跟随 origin 最新 tag v1.0.34（33 → 34），序号从 001 重新开始。**changelog 两轮合并**：`1.0.33102.md` → `1.0.34001.md`（2026-09-06 轮）→ `1.0.34002.md`（2026-09-07 第二轮，34001 的 FTS 功能内容 + 34002 的 MRL 修复合并为单文件，34001.md 已删）。
 >
 > ⚠️ **文档补齐说明（第二次）**：上一次基线（2026-09-01，`0f59780`/`1.0.33002`）之后，feature 提交 `38d5691` 已把子模块指针无记录推进到 `40e7c74`（v1.0.34 之后第 2 个提交），但 §4.3/§4.4 未更新。2026-09-06 同步顺带补登该段（`f03eb10` #1124、`40e7c74` #1125，均无代码落点，详见 §4.4）。
 
 ### 4.4 最近同步记录
+
+#### 2026-09-07（第二轮）：同步 `a67165e` -> `980ab4a`（1 个 commit，embedding dimensions MRL 修复）
+
+`cd mcphub-origin && git --no-pager log --oneline a67165e..980ab4a` 共 1 个 commit：`980ab4a` #1131/#1132（fix: only forward embedding dimensions to MRL-capable models）。`git diff --stat a67165e..980ab4a -- frontend/ locales/` 涉及 `SettingsContext.tsx`/`SettingsPage.tsx`/`configService.ts` + 4 个 locales。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `980ab4a` #1131/#1132 | fix: 嵌入维度参数仅对支持 MRL（Matryoshka，可配置输出维度）的模型转发 | 前端部分完整镜像：①`SettingsContext.tsx` `SmartRoutingConfig` 加 `embeddingDimensionsApiPassthrough: boolean`（类型 + 默认 `false` + 读取映射 `?? false`）；②`configService.ts` `SystemConfig.smartRouting` 加 `embeddingDimensionsApiPassthrough?: boolean`；③`SettingsPage.tsx` temp state 类型/默认值/初始化各加一字段 + embeddingDimensions 输入框下方新增「向 API 转发 dimensions 参数（MRL 透传）」Switch（`disabled={loading \|\| !smartRoutingConfig.enabled}`，`updateSmartRoutingConfig` 保存，与 origin 逐行一致）；④4 个 locales 各加 2 键（`embeddingDimensionsApiPassthrough` + `...Description`），与 origin 值逐语言核对一致。三个前端文件均为桌面端自定义文件，手动合并保留既有差异（本次改动区域与桌面差异无重叠，纯增量）。 |
+
+**已镜像到 desktop（Rust 后端）**：无。逐项评估：
+
+| 来源 commit | 后端部分 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `980ab4a` #1131/#1132 | `vectorSearchService.ts` 的 `supportsDimensionsParameter`/`shouldForwardDimensionsToApi`（白名单 text-embedding-3/gemini-embedding + 强制透传开关）+ `smartRouting.ts` 配置键校验 + `serverController.ts` 入参校验 | **无需镜像** | 后端改动全部在 Smart Routing 向量检索链路——桌面端 Smart Routing 未实现（§7 待办），Rust 侧无向量检索/维度转发落点（与 2026-09-01 #1113 轮同判）。新配置键 `embeddingDimensionsApiPassthrough` 经 `config_service::update` JSON 深合并自动 round-trip 持久化，无需 Rust 改动。待将来实现 Smart Routing 时一并落地 MRL 白名单转发逻辑。 |
+
+**同步操作**：子模块指针 `a67165e -> 980ab4a`；版本号 `1.0.34001 -> 1.0.34002`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog **最终合并为 `doc/upgrade/1.0.34002.md` 单文件**（`1.0.34001.md` 的 FTS 功能内容并入，`1.0.34001.md` 已删——覆盖 2026-09-06 轮「合并为 1.0.34001.md」的记录）。
+
+**同步后验证**：`cd frontend && npm run build` 通过；`npx tsc --noEmit` 24 错误 = 基线 24（零新增）；locales JSON 四文件 `json.load` 校验通过，2 个新键与 origin 逐语言一致；本轮无 Rust 源码改动，跳过 `cargo check`。
+
+**影响功能点与结果**：
+
+- **影响功能点**：①设置页 Smart Routing 区块（web dev 模式可见，桌面端 Tauri 运行时隐藏）：embeddingDimensions 输入框下新增 MRL 透传开关；②`SettingsContext`/`configService` 新增 `embeddingDimensionsApiPassthrough` 配置字段（类型 + 默认 false + 读取/保存链路）；③四语言 locales 各 +2 键；Rust/DB/迁移零改动。
+- **结果**：与上一版本（1.0.34002 前身 1.0.34001）相比，桌面端运行行为完全一致（Smart Routing 未实现，开关仅存在于 web dev 模式 UI）；新配置键可透传存储，为将来实现 Smart Routing 预留。用户无需任何操作。
+- **发布**：版本 `1.0.34002`，changelog `doc/upgrade/1.0.34002.md`（与 1.0.34001 的 FTS 功能内容合并为单文件，34001.md 已删）。
 
 #### 2026-09-07：同步 `8030868` -> `a67165e`（1 个 commit，纯文档）
 
