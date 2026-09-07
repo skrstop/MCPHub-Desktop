@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 24;
+pub const TARGET_VERSION: i64 = 25;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -163,6 +163,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         22 => migrate_v22(pool).await,
         23 => migrate_v23(pool).await,
         24 => migrate_v24(pool).await,
+        25 => migrate_v25(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -1210,6 +1211,64 @@ async fn migrate_v24(pool: &SqlitePool) -> Result<()> {
     }
 
     log::info!("[db] migration v24: FTS5 full-text tables created ({} tables)", fts_tables.len());
+    Ok(())
+}
+
+/// v24 → v25: Backfill newly added known-agent catalog entries into the
+/// existing `config_json.skills.agents` list.
+///
+/// The catalog (`runtimes/skill/install.json`) gained the generic agent
+/// "通用 Agent" → `~/.agent/skills`. `list_agents` only falls back to the
+/// bundled catalog when the user has never configured agents, so existing
+/// installs would never see the new entry without this backfill. Behavior
+/// mirrors the "user customized" branch of v14: append missing catalog ids,
+/// leave user additions/edits (and their order) intact. Idempotent — missing
+/// ids only.
+async fn migrate_v25(pool: &SqlitePool) -> Result<()> {
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(()); };
+    let s: Option<String> = row.try_get("config_json")?;
+    let mut config: serde_json::Value = match s.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
+        Some(v) if v.is_object() => v,
+        _ => serde_json::json!({}),
+    };
+
+    if config.get("skills").is_none() {
+        config["skills"] = serde_json::json!({});
+    }
+
+    let defaults = crate::services::skill_service::default_agents();
+    let arr = config["skills"].get("agents").and_then(|a| a.as_array()).cloned();
+    match arr {
+        None => {
+            config["skills"]["agents"] = serde_json::to_value(&defaults)?;
+        }
+        Some(agents) if agents.is_empty() => {
+            config["skills"]["agents"] = serde_json::to_value(&defaults)?;
+        }
+        Some(agents) => {
+            let current: std::collections::HashSet<String> = agents
+                .iter()
+                .filter_map(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+                .collect();
+            let mut merged = agents;
+            for def in &defaults {
+                if !current.contains(def.id.as_str()) {
+                    merged.push(serde_json::to_value(def)?);
+                }
+            }
+            config["skills"]["agents"] = serde_json::Value::Array(merged);
+        }
+    }
+
+    let json_str = serde_json::to_string(&config)?;
+    sqlx::query("UPDATE system_config SET config_json=?, updated_at=datetime('now','localtime') WHERE id=1")
+        .bind(&json_str)
+        .execute(pool)
+        .await?;
+    log::info!("[db] migration v25: known-agents catalog backfilled ({} agents total)", defaults.len());
     Ok(())
 }
 

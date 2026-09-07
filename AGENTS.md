@@ -1707,6 +1707,16 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 
 **验证**：`cargo check` 0 错 0 警；`cargo test --lib` 34 passed；真实 DB 模拟 "idea sse stream" 最终排序 = `Idea-mcp-server-sse`(2) → `Idea-mcp-server-stream`(2) → `Idea-mcp-server`(1)。
 
+### 3.16 已知 agent 目录补齐（对齐上游 vercel-labs/skills，2026-09-07）
+
+> skills 页的「已知 agent」catalog（`runtimes/skill/install.json`，编译期 `include_str!` 进二进制）对齐上游 `vercel-labs/skills` `src/agents.ts` 的 77 个 agent：补齐 19 个缺失条目（Amp/Antigravity/Antigravity CLI/Cline/Codex/Cursor/Deep Agents/Dexto/Firebender/Gemini CLI/GitHub Copilot/Kimi Code CLI/Loaf/MiniMax Code/OpenCode/Posit Assistant/Replit/Warp/Zed）+ 桌面端自定义两个通用目录条目：`"Common Agent": ".agents/skills"` 与 `"Common Agent Config": ".config/agents/skills"`（`.agents` 与 `.config/agents` 均为通用型目录，被 Cline/Dexto/Kimi Code CLI/Loaf/Warp/Zed、Amp/Replit 等共用；为免复合名过长且不指向具体 agent，统一以通用名展示）。**同路径合并**：catalog 内路径不允许重复，共享同一目录的 agent 合并为一条 `/` 分割的复合名（`Qoder/Qoder CN`、`Trae/Trae CN`、`Zencoder/Zenflow`），最终 65 条。**有意跳过** Eve / PromptScript（项目级 cwd 路径，桌面 home 扫描不适用）与 Universal（meta 条目，`~/.agents/skills` 语义已被 `.agents/skills` 复合条目覆盖）。新增条目路径采用上游 `globalSkillsDir`（用户级目录，符合桌面扫描语义）；存量条目路径（如 Devin/Crush/Goose 用项目级 `skillsDir`）保持不动，避免影响已持久化配置。
+
+- **catalog**：`src-tauri/runtimes/skill/install.json` 65 条（同路径复合名合并后）。`skill_service::default_agents()` 自动解析；slugify 对 `/` 产出连字符，全部 id 无冲突（如 "Common Agent" → `common-agent`）。
+- **存量库回填**：`db/migration.rs` 新增 `migrate_v25`（`TARGET_VERSION` 24 → 25，`apply_migration` 加 `25 => migrate_v25`，配套 `migrations/0025_generic_agent_backfill.sql` 占位）。**为何配置变更也要迁移**：agents 列表由 v13/v14 持久化进 `system_config.config_json.skills.agents`，`list_agents` 仅在该键缺失时才回退内置 catalog——存量库已存 56 条快照，不迁移则永远看不到新条目（含 Common Agent 与 19 个补齐条目）。v25 复用 v14 的「用户自定义」分支：只追加缺失的 catalog id（幂等），保留用户已有项与顺序。
+- **替代方案（已否决）**：运行时在 `list_agents` 动态合并 catalog——用户删除内置 agent 会被每次调用「复活」，语义更差。
+- **验证**：`cargo check` 通过；`cargo test --lib migration` 4 passed（v21/v23/v24 回归）；catalog JSON 解析 + 上游 77 agent 全量 diff（missing: none）。
+- 用户操作：重启应用后 DB 迁移自动执行，skills 页 agent 列表出现 20 个补齐条目（含 `.agents/skills` 复合条目，其名内含 Common Agent；目录不存在时安装/导出按既有逻辑处理）。
+
 ---
 
 ---

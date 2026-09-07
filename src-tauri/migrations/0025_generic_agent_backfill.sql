@@ -1,0 +1,3 @@
+-- v24 → v25: 回填新增的已知 agent 目录条目（"通用 Agent" → ~/.agent/skills）
+-- 本文件仅供 sqlx::migrate! 兼容；实际迁移由 src/db/migration.rs::migrate_v25 执行。
+-- agents 列表存于 system_config.config_json.skills.agents（JSON blob），无表结构变更。

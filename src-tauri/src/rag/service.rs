@@ -2284,8 +2284,9 @@ pub fn pick_folder(app: &AppHandle, recursive: bool) -> RagFolderScan {
 const SCAN_FOLDER_FILE_CAP: usize = 500;
 
 /// Lazily-compiled ignore-list from `runtimes/rag/folder_ignore.json`
-/// (directory names, exact match, any depth). Same include_str! pattern as
-/// `file_type_map()`.
+/// (directory names, exact match, any depth). Entries starting with `*` are
+/// suffix patterns (e.g. `*.egg-info`) and go to `folder_ignore_suffixes()`
+/// instead. Same include_str! pattern as `file_type_map()`.
 static FOLDER_IGNORE_SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
 
 fn folder_ignore_set() -> &'static std::collections::HashSet<String> {
@@ -2295,7 +2296,11 @@ fn folder_ignore_set() -> &'static std::collections::HashSet<String> {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(arr) = v.get("folders").and_then(|f| f.as_array()) {
                 for name in arr.iter().filter_map(|x| x.as_str()) {
-                    set.insert(name.to_lowercase());
+                    let name = name.to_lowercase();
+                    if name.starts_with('*') {
+                        continue;
+                    }
+                    set.insert(name);
                 }
             }
         }
@@ -2303,12 +2308,41 @@ fn folder_ignore_set() -> &'static std::collections::HashSet<String> {
     })
 }
 
+/// Suffix patterns from `folder_ignore.json` (entries like `*.egg-info`),
+/// lowercased with the leading `*` stripped; matched via `ends_with`.
+static FOLDER_IGNORE_SUFFIXES: OnceLock<Vec<String>> = OnceLock::new();
+
+fn folder_ignore_suffixes() -> &'static Vec<String> {
+    FOLDER_IGNORE_SUFFIXES.get_or_init(|| {
+        let raw = include_str!("../../runtimes/rag/folder_ignore.json");
+        let mut out = Vec::new();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(arr) = v.get("folders").and_then(|f| f.as_array()) {
+                for name in arr.iter().filter_map(|x| x.as_str()) {
+                    let name = name.to_lowercase();
+                    if let Some(suffix) = name.strip_prefix('*') {
+                        out.push(suffix.to_string());
+                    }
+                }
+            }
+        }
+        out
+    })
+}
+
+/// True when a directory is pruned by `folder_ignore.json`: exact
+/// (case-insensitive) name match, or a suffix pattern like `*.egg-info`.
+fn is_ignored_dir(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    folder_ignore_set().contains(&lower)
+        || folder_ignore_suffixes().iter().any(|s| lower.ends_with(s))
+}
+
 /// Scan `folder` for import candidates, grouped per sub-directory (recursive
 /// mode) or as one flat group (the root, flat mode). Shared filtering rules
 /// with `pick_files`' validation pipeline; see `pick_folder` for the list.
 /// Group/file order is stable (path-sorted), so rescans look identical.
 fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
-    let ignore = folder_ignore_set();
     // rel-path -> group index in `out.groups`.
     let mut group_idx: std::collections::HashMap<std::path::PathBuf, usize> =
         std::collections::HashMap::new();
@@ -2329,7 +2363,6 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
         dir: &Path,
         rel: &Path,
         recursive: bool,
-        ignore: &std::collections::HashSet<String>,
         out: &mut RagFolderScan,
         group_idx: &mut std::collections::HashMap<PathBuf, usize>,
         total: &mut usize,
@@ -2357,12 +2390,12 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
                 let name = name.to_string_lossy().to_string();
                 // Hidden dirs (any platform) + folder_ignore.json names are
                 // pruned from the walk — nothing beneath them is scanned.
-                if name.starts_with('.') || ignore.contains(&name.to_lowercase()) {
+                if name.starts_with('.') || is_ignored_dir(&name) {
                     out.skipped_dirs += 1;
                     continue;
                 }
                 let child_rel = rel.join(&name);
-                walk(&path, &child_rel, recursive, ignore, out, group_idx, total);
+                walk(&path, &child_rel, recursive, out, group_idx, total);
             } else if md.is_file() {
                 let Some(name) = path.file_name() else { continue };
                 let name = name.to_string_lossy().to_string();
@@ -2425,7 +2458,6 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
         folder,
         Path::new(""),
         recursive,
-        ignore,
         &mut out,
         &mut group_idx,
         &mut total,
