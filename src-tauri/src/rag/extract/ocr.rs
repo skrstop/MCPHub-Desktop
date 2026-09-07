@@ -207,10 +207,6 @@ mod windows_imp {
     }
 
     pub fn recognize(bytes: &[u8]) -> Result<String> {
-        use windows::Globalization::Language;
-        use windows::Graphics::Imaging::BitmapDecoder;
-        use windows::Media::Ocr::OcrEngine;
-        use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
         use windows::Win32::System::Com::{
             CoInitializeEx, CoUninitialize, COINIT, COINIT_MULTITHREADED,
         };
@@ -219,66 +215,74 @@ mod windows_imp {
         // blocking threads are fresh, so initialize (and release) around the
         // work. RPC_E_CHANGED_MODE means the thread already runs another
         // apartment mode — WinRT still works from it, just skip our init.
+        // windows 0.62: CoInitializeEx returns HRESULT directly (no Result).
+        use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
         unsafe {
-            match CoInitializeEx(None, COINIT(COINIT_MULTITHREADED.0)) {
-                Ok(()) => {
-                    let result = recognize_inner(bytes);
-                    CoUninitialize();
-                    result
-                },
-                Err(e) if e.code().0 == -2147417850 => recognize_inner(bytes),
-                Err(e) => Err(anyhow!("CoInitializeEx failed: {e}")),
+            let hr = CoInitializeEx(None, COINIT(COINIT_MULTITHREADED.0));
+            if hr.is_ok() {
+                let result = recognize_inner(bytes);
+                CoUninitialize();
+                result
+            } else if hr == RPC_E_CHANGED_MODE {
+                recognize_inner(bytes)
+            } else {
+                Err(anyhow!("CoInitializeEx failed: {hr:?}"))
             }
         }
     }
 
     fn recognize_inner(bytes: &[u8]) -> Result<String> {
         use windows::core::HSTRING;
+        use windows::Globalization::Language;
+        use windows::Graphics::Imaging::BitmapDecoder;
+        use windows::Media::Ocr::OcrEngine;
+        use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
         // Engine: prefer the user's profile languages, then explicit zh/en.
+        // windows 0.62: TryCreate* return Result<OcrEngine> (no Option inside).
         let engine = OcrEngine::TryCreateFromUserProfileLanguages()
-            .map_err(|e| anyhow!("OcrEngine creation failed: {e}"))?
+            .ok()
             .or_else(|| {
-                Language::new(&HSTRING::from("zh-Hans"))
+                Language::CreateLanguage(&HSTRING::from("zh-Hans"))
                     .ok()
-                    .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok().flatten())
+                    .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok())
             })
             .or_else(|| {
-                Language::new(&HSTRING::from("en-US"))
+                Language::CreateLanguage(&HSTRING::from("en-US"))
                     .ok()
-                    .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok().flatten())
+                    .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok())
             })
             .ok_or_else(|| anyhow!("no OCR language installed on this Windows system"))?;
 
         let stream = InMemoryRandomAccessStream::new()
             .map_err(|e| anyhow!("stream create failed: {e}"))?;
-        let writer = DataWriter::CreateAtStream(&stream)
+        let writer = DataWriter::CreateDataWriter(&stream)
             .map_err(|e| anyhow!("DataWriter create failed: {e}"))?;
         writer.WriteBytes(bytes).map_err(|e| anyhow!("write bytes failed: {e}"))?;
         writer.StoreAsync()
             .map_err(|e| anyhow!("store failed: {e}"))?
-            .get()
+            .join()
             .map_err(|e| anyhow!("store wait failed: {e}"))?;
         writer.FlushAsync()
             .map_err(|e| anyhow!("flush failed: {e}"))?
-            .get()
+            .join()
             .map_err(|e| anyhow!("flush wait failed: {e}"))?;
         writer.DetachStream().map_err(|e| anyhow!("detach failed: {e}"))?;
         stream.Seek(0).map_err(|e| anyhow!("seek failed: {e}"))?;
 
         let decoder = BitmapDecoder::CreateAsync(&stream)
             .map_err(|e| anyhow!("decoder create failed: {e}"))?
-            .get()
+            .join()
             .map_err(|e| anyhow!("decoder wait failed: {e}"))?;
         let bitmap = decoder
             .GetSoftwareBitmapAsync()
             .map_err(|e| anyhow!("decode failed: {e}"))?
-            .get()
+            .join()
             .map_err(|e| anyhow!("decode wait failed: {e}"))?;
         let ocr = engine
             .RecognizeAsync(&bitmap)
             .map_err(|e| anyhow!("recognize failed: {e}"))?
-            .get()
+            .join()
             .map_err(|e| anyhow!("recognize wait failed: {e}"))?;
 
         let lines = ocr.Lines().map_err(|e| anyhow!("lines failed: {e}"))?;

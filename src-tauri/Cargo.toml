@@ -218,6 +218,9 @@ windows = { version = "0.62", features = [
     # elevation check in lib::win_deelevate (relaunch non-elevated when the
     # NSIS installer auto-launches the app elevated after a per-machine install).
     "Win32_Security",
+    # CoInitializeEx / CoUninitialize apartment init for the WinRT OCR
+    # pipeline (rag/extract/ocr.rs recognize()).
+    "Win32_System_Com",
     # WinRT OCR pipeline (rag/extract/ocr.rs).
     "Foundation",
     "Globalization",

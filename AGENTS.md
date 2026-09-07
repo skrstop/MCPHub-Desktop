@@ -1571,6 +1571,28 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 - **Round 3 回归**：`cargo check` 0 错 0 警；`cargo test --lib` 19 passed；临时冒烟测试（真实 PDF doc/test/苏州2.pdf 提取成功、点号名拒绝、损坏 PDF EXTRACT_FAILED sentinel、二进制拒绝、文本往返、最小 docx 提取成功）全过，**跑完已删**；`npx tsc --noEmit` 24 错误 = 基线 24（全存量）；`npm run build` 通过。
 - 本轮复合验证结论：**未发现新的逻辑漏洞**；Round 1 期间修复的 2 处（ext_format 点号误认、update_doc_from_original 按显示名派发）+ delete/open/reindex 的 content_path_for 收敛已覆盖全部发现的问题。
 
+#### 3.14.8 Windows CI 构建失败修复（2026-09-07，windows 0.62 API 对齐）
+
+> 症状：Windows runner（`windows-latest`）CI 构建失败——E0432（`windows::Win32::System::Com` 未启用 feature）+ 9 个 E0433（`OcrEngine`/`Language`/`BitmapDecoder`/`DataWriter`/`InMemoryRandomAccessStream` cannot find type）+ 4 个 unused import 警告。macOS/Linux 不受影响。
+
+**根因两处**：
+
+1. **feature 缺失**：`Cargo.toml` 的 windows crate features 未启用 `Win32_System_Com`（`CoInitializeEx`/`CoUninitialize` 公寓初始化需要）。
+2. **import 作用域错位**：WinRT 类型 import 写在了 `recognize()` 里，但使用点全在 `recognize_inner()` 里——类型不可见时编译器不检查调用点类型，把真正的 API 不匹配全部掩盖了。
+
+**scope 修复后暴露的 windows 0.62 API 不匹配（scratch-crate 交叉 type-check 发现，共 10 处）**：
+
+| 原写法（错误） | windows 0.62 正确 API |
+| --- | --- |
+| `match CoInitializeEx(..) { Ok(()) => .., Err(e) if e.code().0 == .. }` | 返回 `HRESULT`（非 Result）：`hr.is_ok()` / `hr == RPC_E_CHANGED_MODE`（常量在 `Win32::Foundation`） |
+| `TryCreateFromUserProfileLanguages()?.or_else(..)` | 返回 `Result<OcrEngine>`（无内层 Option）→ engine 回退链改 Option 链（`.ok()` + `.or_else(││ ..)`） |
+| `Language::new(&HSTRING)` | `Language::CreateLanguage(&HSTRING) -> Result<Language>` |
+| `TryCreateFromLanguage(&l).ok().flatten()` | 返回 `Result<OcrEngine>` → `.ok()` 即可（无 flatten） |
+| `DataWriter::CreateAtStream(&stream)` | `DataWriter::CreateDataWriter(&stream)`（`P0: Param<IOutputStream>`，`&InMemoryRandomAccessStream` 直接满足） |
+| `IAsyncOperation::get()`（5 处阻塞等待） | windows-future 0.3 改名 `.join()` |
+
+**验证**：macOS `ORT_SKIP_DOWNLOAD=1 cargo check --lib` 通过（回归不受影响）；scratch crate（windows 0.62.2 + 同 feature 集）对 `x86_64-pc-windows-msvc` target 交叉 type-check 通过（跑完已删）。
+
 ### 3.15 SQLite 全文索引（FTS5 + 中英/拼音分词）+ 活动日志筛选优化（桌面端独有，2026-09-05）
 
 > 执行计划与五轮复核记录见 `doc/sqlite_fts_pinyin_plan_20260905.md`（Phase A-G 全部完成）。兑现 `doc/sql_index_rag_search_plan_20260823.md` 中「FTS5 暂不引入」的可选项。
