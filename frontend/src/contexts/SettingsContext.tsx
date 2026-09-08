@@ -39,9 +39,9 @@ interface SmartRoutingConfig {
   embeddingEncodingFormat?: 'auto' | 'base64' | 'float';
   embeddingDimensions?: number;
   embeddingDimensionsApiPassthrough: boolean;
-  openaiApiBaseUrl: string;
-  openaiApiKey: string;
-  openaiApiEmbeddingModel: string;
+  llmProviderBaseUrl: string;
+  llmProviderApiKey: string;
+  embeddingModel: string;
   azureOpenaiEndpoint?: string;
   azureOpenaiApiKey?: string;
   azureOpenaiApiVersion?: string;
@@ -362,9 +362,9 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     embeddingEncodingFormat: 'auto',
     embeddingDimensions: undefined,
     embeddingDimensionsApiPassthrough: false,
-    openaiApiBaseUrl: '',
-    openaiApiKey: '',
-    openaiApiEmbeddingModel: '',
+    llmProviderBaseUrl: '',
+    llmProviderApiKey: '',
+    embeddingModel: '',
     azureOpenaiEndpoint: '',
     azureOpenaiApiKey: '',
     azureOpenaiApiVersion: '',
@@ -457,10 +457,9 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           embeddingDimensions: data.data.systemConfig.smartRouting.embeddingDimensions,
           embeddingDimensionsApiPassthrough:
             data.data.systemConfig.smartRouting.embeddingDimensionsApiPassthrough ?? false,
-          openaiApiBaseUrl: data.data.systemConfig.smartRouting.openaiApiBaseUrl || '',
-          openaiApiKey: data.data.systemConfig.smartRouting.openaiApiKey || '',
-          openaiApiEmbeddingModel:
-            data.data.systemConfig.smartRouting.openaiApiEmbeddingModel || '',
+          llmProviderBaseUrl: data.data.systemConfig.smartRouting.llmProviderBaseUrl || '',
+          llmProviderApiKey: data.data.systemConfig.smartRouting.llmProviderApiKey || '',
+          embeddingModel: data.data.systemConfig.smartRouting.embeddingModel || '',
           azureOpenaiEndpoint: data.data.systemConfig.smartRouting.azureOpenaiEndpoint || '',
           azureOpenaiApiKey: data.data.systemConfig.smartRouting.azureOpenaiApiKey || '',
           azureOpenaiApiVersion: data.data.systemConfig.smartRouting.azureOpenaiApiVersion || '',

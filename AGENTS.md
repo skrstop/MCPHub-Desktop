@@ -1824,18 +1824,53 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `980ab4a` (origin/main，v1.0.34 tag 之后 7 个未发布提交) |
-| **对应 origin tag**            | `v1.0.34`（最新 tag，指向 `5fe212c`） |
-| **桌面端版本号**               | `1.0.34002` |
-| **同步执行日期**               | 2026-09-07（第二轮）            |
+| **当前已同步到 origin commit** | `6b1fdb7` (origin/main，v1.0.35 tag 之后 3 个未发布提交) |
+| **对应 origin tag**            | `v1.0.35`（最新 tag） |
+| **桌面端版本号**               | `1.0.35001` |
+| **同步执行日期**               | 2026-09-08            |
 
-> 下次同步时，使用 `980ab4a` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 980ab4a..HEAD`）。
+> 下次同步时，使用 `6b1fdb7` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 6b1fdb7..HEAD`）。
 >
-> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。`v1.0.34` 是 lightweight tag，指向 `5fe212c`（typeorm bump #1121）；v1.0.34 之后 7 个未发布提交（f03eb10/40e7c74/ffcc5cd/b941d4d/8030868/a67165e/980ab4a），指针已含全部。2026-09-06 轮版本号 `1.0.33102 → 1.0.34001`：基线跟随 origin 最新 tag v1.0.34（33 → 34），序号从 001 重新开始。**changelog 两轮合并**：`1.0.33102.md` → `1.0.34001.md`（2026-09-06 轮）→ `1.0.34002.md`（2026-09-07 第二轮，34001 的 FTS 功能内容 + 34002 的 MRL 修复合并为单文件，34001.md 已删）。
+> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。本轮基线跨 origin 两个 release（`v1.0.34`/`v1.0.35`，`980ab4a → 6b1fdb7`），前端/locales 改动集中在 #1133（Smart Routing 配置字段 provider-neutral 更名）、#1141（btn-primary 边框）与 #1131（MRL 透传，上一轮已同步本次去重确认）。版本号 `1.0.34003 → 1.0.35001`：基线跟随 origin 最新 tag v1.0.35（34 → 35），序号从 001 重新开始；changelog `doc/upgrade/1.0.35001.md` 单文件（34002/34003 历史文件保留）。
 >
 > ⚠️ **文档补齐说明（第二次）**：上一次基线（2026-09-01，`0f59780`/`1.0.33002`）之后，feature 提交 `38d5691` 已把子模块指针无记录推进到 `40e7c74`（v1.0.34 之后第 2 个提交），但 §4.3/§4.4 未更新。2026-09-06 同步顺带补登该段（`f03eb10` #1124、`40e7c74` #1125，均无代码落点，详见 §4.4）。
 
 ### 4.4 最近同步记录
+
+#### 2026-09-08：同步 `980ab4a` -> `6b1fdb7`（8 个 commit，跨 v1.0.35 release + 3 个未发布提交）
+
+origin 基线前进 8 个 commit（`6043a1f` #1133、`8f73e98` #1137、`dba3366` #1138、`4f40b1c` #1140、`6b1fdb7` #1141、`8030868`~`980ab4a` 之间无新增前端改动；v1.0.35 tag 指向本次范围内），本轮为跨越 v1.0.34/v1.0.35 两个 origin release 的基线同步。
+
+`cd mcphub-origin && git --no-pager log --oneline 980ab4a..6b1fdb7` 共 8 个 commit；`git diff --stat 980ab4a..6b1fdb7 -- frontend/ locales/` 涉及 `SettingsContext.tsx`/`SettingsPage.tsx`/`configService.ts`/`index.css` + 4 个 locales。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `6043a1f` #1133 | refactor: Smart Routing 配置字段 provider-neutral 更名 | 前端完整镜像：`SmartRoutingConfig`/temp state/表单 UI 中 `openaiApiBaseUrl`→`llmProviderBaseUrl`、`openaiApiKey`→`llmProviderApiKey`、`openaiApiEmbeddingModel`→`embeddingModel`（SettingsContext / SettingsPage / configService 三个桌面自定义文件手动合并，改动区域与桌面差异无重叠）；4 个 locales 键值对同步更名（zh 另带 `llmProviderApiKeyDescription`，en/fr/tr origin 无该键按 origin 为准）。Smart Routing 区块桌面 Tauri 下隐藏但代码保留对齐（既有策略）。 |
+| `6b1fdb7` #1141 | fix: `.btn-primary` 边框改透明（亮/暗两处） | `index.css` 直接 patch 应用（该区域与桌面 `.hub-icon-btn:disabled` 等差异无重叠）。 |
+| `980ab4a` #1131 确认 | MRL 透传开关（上一轮已同步） | 本轮 patch 重放时产生重复字段（桌面端已预合入 `embeddingDimensionsApiPassthrough`），去重后 tsc 与基线逐条一致——确认上一轮同步完整。 |
+
+**已镜像到 desktop（Rust 后端）**：无。逐项评估：
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `8f73e98` #1137 | fix: reject multipart content type line breaks | **无需镜像** | 修复对象 origin multipart 请求头解析；桌面端 Rust 无 multipart 处理链路（`grep multipart` 无命中）。 |
+| `dba3366` #1138 | fix: serialize OpenAPI query arrays correctly | **无需镜像** | 修复对象 origin 自有 OpenAPI 请求构建（query array 序列化）；桌面端 OpenAPI 传输由 `rmcp-openapi` 库内部处理，无自有序列化落点（同 2026-09-06 #1130 判定）。 |
+| `4f40b1c` #1140 | refactor: release-notes skill 更名 polish-release | **不同步** | 改动在 origin 仓库 `.claude`/skill 元数据，桌面端有自己的 skill 体系。 |
+| `6043a1f` #1133 后端 | `smartRouting.ts` 配置键校验更名 | **无需镜像** | 桌面端 Smart Routing 未实现；`config_service::update` JSON 深合并对任意键名透传，前端发什么存什么，无需 Rust 改动。 |
+
+其余依赖类 commit 按同步策略不同步（Node 依赖）。
+
+**同步操作**：子模块指针 `980ab4a -> 6b1fdb7`；版本号 `1.0.34003 -> 1.0.35001`（基线跟随 origin 最新 tag v1.0.35，34 → 35，四源 + Cargo.lock）；changelog `doc/upgrade/1.0.35001.md` 单文件。
+
+**同步后验证**：`cd frontend && npm run build` 通过；`npx tsc --noEmit` 24 错误 = 基线 24（经 `git stash` 对照 HEAD 逐条 diff，零新增；合并中产生的 3 处 `embeddingDimensionsApiPassthrough` 重复字段已去重）；locales JSON 四文件 `json.load` 校验通过，桌面端自定义键（runtime*/rag 全选/技能全选）完整；本轮无 Rust 源码改动，跳过 `cargo check`。
+
+**影响功能点与结果**：
+
+- **影响功能点**：①Smart Routing 表单配置键更名（桌面端 Tauri 运行时该区块隐藏，仅 web dev 模式可见，行为无变化）；②web 模式 `.btn-primary` 边框视觉微调；③locales settings 段 6 键更名 + zh 新增 1 键描述。
+- **结果**：桌面端运行行为不变（Smart Routing 未实现、隐藏区块代码保持与 origin 对齐）；存量配置中的旧键名经 JSON 深合并 round-trip 保留不丢。用户无需任何操作。
+- **发布**：版本 `1.0.35001`，changelog `doc/upgrade/1.0.35001.md`。
 
 #### 2026-09-07（第二轮）：同步 `a67165e` -> `980ab4a`（1 个 commit，embedding dimensions MRL 修复）
 

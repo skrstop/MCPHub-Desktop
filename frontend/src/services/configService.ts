@@ -24,9 +24,9 @@ export interface SystemConfig {
     embeddingEncodingFormat?: 'auto' | 'base64' | 'float';
     embeddingDimensions?: number;
     embeddingDimensionsApiPassthrough?: boolean;
-    openaiApiBaseUrl?: string;
-    openaiApiKey?: string;
-    openaiApiEmbeddingModel?: string;
+    llmProviderBaseUrl?: string;
+    llmProviderApiKey?: string;
+    embeddingModel?: string;
     azureOpenaiEndpoint?: string;
     azureOpenaiApiKey?: string;
     azureOpenaiApiVersion?: string;
