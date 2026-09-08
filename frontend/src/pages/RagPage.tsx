@@ -27,6 +27,7 @@ import {
   Copy as CopyIcon,
   HelpCircle,
   AlertTriangle,
+  ListChecks,
 } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
 import Pagination from '@/components/ui/Pagination';
@@ -729,6 +730,21 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     totalPages,
   };
 
+  // 全选本页：一键勾选/取消当前页全部文档。选择集跨页持久（selectedIds 可含
+  // 其他页的文档），本操作只影响当前页条目；已全选时按钮变「取消全选」。
+  const allVisibleDocsSelected =
+    visibleDocs.length > 0 && visibleDocs.every((d) => selectedIds.has(d.id));
+  const toggleSelectAllVisibleDocs = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const d of visibleDocs) {
+        if (allVisibleDocsSelected) next.delete(d.id);
+        else next.add(d.id);
+      }
+      return next;
+    });
+  };
+
   // Paths already imported — uploads record `originalPath`, so a file already
   // in the library (by path, not name) is flagged in the upload dialog. Name
   // collisions are NOT flagged: uploads never overwrite (fresh uuid per file),
@@ -1087,12 +1103,26 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           })}
           {/* 分页页脚：显示区间 + 翻页 + 每页数（与其他列表页一致） */}
           <div className="flex items-center mt-2 text-[12px]" style={{ color: 'var(--hub-ink-3)', borderTop: '1px solid var(--hub-line-2)', padding: '8px 16px' }}>
-            <div className="flex-[2]">
-              {t('common.showing', {
-                start: docPagination.total === 0 ? 0 : (docPagination.page - 1) * docPagination.limit + 1,
-                end: Math.min(docPagination.page * docPagination.limit, docPagination.total),
-                total: docPagination.total,
-              })}
+            <div className="flex-[2] flex items-center gap-2">
+              {visibleDocs.length > 0 && (
+                <button
+                  className="hub-btn sm whitespace-nowrap"
+                  style={{ flexShrink: 0 }}
+                  disabled={disabled}
+                  onClick={toggleSelectAllVisibleDocs}
+                  title={allVisibleDocsSelected ? t('pages.rag.deselectAllPage') : t('pages.rag.selectAllPage')}
+                >
+                  <ListChecks size={12} />
+                  {allVisibleDocsSelected ? t('pages.rag.deselectAllPage') : t('pages.rag.selectAllPage')}
+                </button>
+              )}
+              <span>
+                {t('common.showing', {
+                  start: docPagination.total === 0 ? 0 : (docPagination.page - 1) * docPagination.limit + 1,
+                  end: Math.min(docPagination.page * docPagination.limit, docPagination.total),
+                  total: docPagination.total,
+                })}
+              </span>
             </div>
             <div className="flex-[4] flex justify-center">
               {docPagination.totalPages > 1 && (

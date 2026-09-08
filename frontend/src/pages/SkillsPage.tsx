@@ -20,6 +20,7 @@ import {
   PackageCheck,
   AlertTriangle,
   FolderPlus,
+  ListChecks,
 } from 'lucide-react';
 import Pagination from '@/components/ui/Pagination';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
@@ -1754,6 +1755,21 @@ const SkillsPage: React.FC = () => {
     });
   };
 
+  // 全选本页：一键勾选/取消当前页全部技能。选择集跨页持久（selectedIds 可含
+  // 其他页的技能），本操作只影响当前页条目；已全选时按钮变「取消全选」。
+  const allVisibleSkillsSelected =
+    visibleSkills.length > 0 && visibleSkills.every((s) => selectedIds.has(s.id));
+  const toggleSelectAllVisibleSkills = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const s of visibleSkills) {
+        if (allVisibleSkillsSelected) next.delete(s.id);
+        else next.add(s.id);
+      }
+      return next;
+    });
+  };
+
   const handleImport = async (items: Array<{ agentId: string; dirName: string }>) => {
     const result = await importSkills(items);
     if (result.success) {
@@ -2049,12 +2065,25 @@ const SkillsPage: React.FC = () => {
 
           {/* Pagination footer */}
           <div className="flex items-center mt-4 text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
-            <div className="flex-[2]">
-              {t('common.showing', {
-                start: (pagination.page - 1) * pagination.limit + 1,
-                end: Math.min(pagination.page * pagination.limit, pagination.total),
-                total: pagination.total,
-              })}
+            <div className="flex-[2] flex items-center gap-2">
+              {visibleSkills.length > 0 && (
+                <button
+                  onClick={toggleSelectAllVisibleSkills}
+                  className="hub-btn sm whitespace-nowrap"
+                  style={{ flexShrink: 0 }}
+                  title={allVisibleSkillsSelected ? t('skills.deselectAllPage') : t('skills.selectAllPage')}
+                >
+                  <ListChecks size={12} />
+                  {allVisibleSkillsSelected ? t('skills.deselectAllPage') : t('skills.selectAllPage')}
+                </button>
+              )}
+              <span>
+                {t('common.showing', {
+                  start: (pagination.page - 1) * pagination.limit + 1,
+                  end: Math.min(pagination.page * pagination.limit, pagination.total),
+                  total: pagination.total,
+                })}
+              </span>
             </div>
             <div className="flex-[4] flex justify-center">
               {pagination.totalPages > 1 && (

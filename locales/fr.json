@@ -610,6 +610,8 @@
       "filterByTags": "Filtrer par tags (optionnel)",
       "filterByTagsHint": "Ne renvoyer que les documents contenant au moins un de ces tags.",
       "batchDelete": "Supprimer en lot",
+      "selectAllPage": "Tout sélectionner (page)",
+      "deselectAllPage": "Désélectionner",
       "batchDeleteConfirm": "Supprimer les {{count}} document(s) sélectionné(s) ? Cela supprime aussi leurs enregistrements vectoriels.",
       "deleteConfirmSymlinkCount": "{{count}} document(s) par lien symbolique : seul l'index est supprimé, les fichiers originaux sont conservés.",
       "deleteConfirmCopyCount": "{{count}} document(s) copié(s) : les fichiers copiés seront également supprimés.",
@@ -1542,5 +1544,9 @@
     "notConnected": "Non connecté",
     "connectedOf": "{{connected}} sur {{total}} serveurs connectés",
     "totalFootprint": "Empreinte contextuelle"
+  },
+  "skills": {
+    "selectAllPage": "Tout sélectionner (page)",
+    "deselectAllPage": "Désélectionner"
   }
 }

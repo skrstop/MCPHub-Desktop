@@ -610,6 +610,8 @@
       "filterByTags": "Etikete göre filtrele (opsiyonel)",
       "filterByTagsHint": "Yalnızca bu etiketlerden en az birini içeren dokümanları döndür.",
       "batchDelete": "Toplu Sil",
+      "selectAllPage": "Sayfadaki Tümünü Seç",
+      "deselectAllPage": "Seçimi Kaldır",
       "batchDeleteConfirm": "Seçili {{count}} doküman silinsin mi? Vektör kayıtları da silinir.",
       "deleteConfirmSymlinkCount": "{{count}} sembolik bağlantı dokümanı: yalnızca indeks kayıtları kaldırılır, gerçek dosyalar korunur.",
       "deleteConfirmCopyCount": "{{count}} kopya doküman: kopyalanan dosyalar da silinecek.",
@@ -1541,5 +1543,9 @@
     "notConnected": "Bağlı değil",
     "connectedOf": "{{total}} sunucudan {{connected}} tanesi bağlı",
     "totalFootprint": "Bağlam ayak izi"
+  },
+  "skills": {
+    "selectAllPage": "Sayfadaki Tümünü Seç",
+    "deselectAllPage": "Seçimi Kaldır"
   }
 }
