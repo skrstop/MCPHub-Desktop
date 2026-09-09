@@ -151,6 +151,13 @@ const ImportDialog: React.FC<ImportDialogProps> = ({ onImport, onClose }) => {
   // Manual folder selection (no source agent): skills found by scan-folder.
   const [manualSkills, setManualSkills] = useState<ScannedSkill[]>([]);
   const [manualFolderPath, setManualFolderPath] = useState('');
+  // Frontend-only filtering: agent search (group rows) + skill search
+  // (matches name / description / dirName within groups).
+  const [agentSearch, setAgentSearch] = useState('');
+  const [skillSearch, setSkillSearch] = useState('');
+  // One-click filter: show only agents that have at least one scanned skill.
+  // Default ON — empty agents are noise in the common import flow.
+  const [hideEmptyAgents, setHideEmptyAgents] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -227,6 +234,39 @@ const ImportDialog: React.FC<ImportDialogProps> = ({ onImport, onClose }) => {
     }
     return agentGroups;
   }, [agents, scanned, manualSkills, manualFolderPath, t]);
+
+  // Frontend filtering: agent search narrows group rows (name/path); skill
+  // search matches name/description/dirName, hides groups with no matches and
+  // force-expands the remaining ones (so results are visible immediately).
+  const filteredGroups = useMemo(() => {
+    const aKey = agentSearch.trim().toLowerCase();
+    const sKey = skillSearch.trim().toLowerCase();
+    let result = groups;
+    if (hideEmptyAgents || sKey) {
+      result = result.filter((g) => g.skills.length > 0);
+    }
+    if (aKey) {
+      result = result.filter(
+        (g) =>
+          g.agentName.toLowerCase().includes(aKey) ||
+          g.agentPath.toLowerCase().includes(aKey),
+      );
+    }
+    if (sKey) {
+      result = result
+        .map((g) => ({
+          ...g,
+          skills: g.skills.filter(
+            (s) =>
+              (s.name || '').toLowerCase().includes(sKey) ||
+              (s.description || '').toLowerCase().includes(sKey) ||
+              s.dirName.toLowerCase().includes(sKey),
+          ),
+        }))
+        .filter((g) => g.skills.length > 0);
+    }
+    return result;
+  }, [groups, agentSearch, skillSearch, hideEmptyAgents]);
 
   const handleOpenPath = async (path: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -307,8 +347,63 @@ const ImportDialog: React.FC<ImportDialogProps> = ({ onImport, onClose }) => {
             </div>
           ) : (
             <div className="space-y-2">
-              {groups.map((g) => {
-                const isCollapsed = !expanded.has(g.agentId);
+              <div className="flex gap-2 items-center">
+                <div className="relative flex-1">
+                  <Search
+                    size={14}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2"
+                    style={{ color: 'var(--hub-ink-3)' }}
+                  />
+                  <input
+                    value={agentSearch}
+                    onChange={(e) => setAgentSearch(e.target.value)}
+                    placeholder={t('skills.agentSearchPlaceholder')}
+                    className="hub-input w-full"
+                    style={{ paddingLeft: 30, fontSize: 12.5 }}
+                  />
+                </div>
+                <div className="relative flex-1">
+                  <Search
+                    size={14}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2"
+                    style={{ color: 'var(--hub-ink-3)' }}
+                  />
+                  <input
+                    value={skillSearch}
+                    onChange={(e) => setSkillSearch(e.target.value)}
+                    placeholder={t('skills.skillSearchPlaceholder')}
+                    className="hub-input w-full"
+                    style={{ paddingLeft: 30, fontSize: 12.5 }}
+                  />
+                </div>
+                <button
+                  onClick={() => setHideEmptyAgents((v) => !v)}
+                  className="hub-btn flex items-center gap-1.5 flex-shrink-0"
+                  style={{
+                    fontSize: 12,
+                    padding: '0 10px',
+                    height: 32,
+                    ...(hideEmptyAgents
+                      ? {
+                          background: 'var(--hub-primary)',
+                          color: '#fff',
+                          borderColor: 'var(--hub-primary)',
+                        }
+                      : {}),
+                  }}
+                  title={t('skills.hideEmptyAgents')}
+                >
+                  <ListChecks size={13} />
+                  {t('skills.hideEmptyAgents')}
+                </button>
+              </div>
+              {filteredGroups.length === 0 ? (
+                <div className="py-8 text-center text-[var(--hub-ink-3)] text-[13px]">
+                  {t('skills.noSearchResults')}
+                </div>
+              ) : (
+              filteredGroups.map((g) => {
+                const isCollapsed = skillSearch.trim() ? false : !expanded.has(g.agentId);
                 const selectableCount = g.skills.filter(
                   (s) => !s.alreadyImported && !s.isSymlink,
                 ).length;
@@ -454,7 +549,8 @@ const ImportDialog: React.FC<ImportDialogProps> = ({ onImport, onClose }) => {
                     )}
                   </div>
                 );
-              })}
+              })
+              )}
             </div>
           )}
         </div>

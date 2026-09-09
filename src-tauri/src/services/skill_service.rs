@@ -31,8 +31,11 @@ fn slugify(name: &str) -> String {
     let mut s = String::with_capacity(name.len());
     let mut prev_dash = true; // suppress leading hyphens
     for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            s.push(c.to_ascii_lowercase());
+        // Unicode alphanumeric: CJK names (e.g. "我的助手") stay usable as ids.
+        if c.is_alphanumeric() {
+            for lc in c.to_lowercase() {
+                s.push(lc);
+            }
             prev_dash = false;
         } else if !prev_dash {
             s.push('-');
@@ -122,10 +125,18 @@ pub async fn create_custom_agent(name: &str, skills_path: &str) -> Result<SkillA
     if skills_path.is_empty() {
         return Err(anyhow!("agent skills path is required"));
     }
-    let base = slugify(name);
-    if base.is_empty() {
-        return Err(anyhow!("agent name must contain alphanumeric chars"));
-    }
+    let base = {
+        let b = slugify(name);
+        if b.is_empty() {
+            // Name is all symbols — derive a stable id from the name hash.
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut h);
+            format!("agent-{:x}", h.finish())
+        } else {
+            b
+        }
+    };
     if is_builtin_id(&base) {
         return Err(anyhow!("'{}' is a built-in agent name", name));
     }
@@ -438,6 +449,11 @@ pub async fn scan_for_import(app: &AppHandle) -> Result<Vec<ScannedSkill>> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            // Hidden entries (dot-prefixed) are agent-internal, not user skills
+            // (e.g. Codex's `.system` built-in skills dir).
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let meta = match fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -938,6 +954,10 @@ pub async fn scan_folder_for_skills(app: &AppHandle, folder: &str) -> Result<Vec
     // Layer 2: direct children with SKILL.md.
     if let Ok(entries) = fs::read_dir(&root) {
         for entry in entries.flatten() {
+            // Hidden entries (dot-prefixed) are not user skills.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let child = entry.path();
             if read_skill_md(&child).is_some() {
                 let dir_name = entry.file_name().to_string_lossy().to_string();
