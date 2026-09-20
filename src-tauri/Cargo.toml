@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.35001"
+version = "1.0.35003"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -63,6 +63,15 @@ sqlx = { version = "0.9", features = [
   "chrono",
 ] }
 
+# Git data source (RAG): pure-Rust gitoxide, compiled into the binary (no
+# external git needed). blocking-network-client = synchronous network client
+# (used inside spawn_blocking); worktree-mutation = checkout support.
+gix = { version = "0.73", features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
+# HTTP(S) basic-auth over plain http:// (self-hosted GitLab/Gitea on intranets):
+# gix-transport refuses credentials on http by default; this feature flag lifts
+# that guard. Same 0.48 as gix uses -> feature unification applies.
+gix-transport = { version = "0.48", features = ["http-client-insecure-credentials"] }
+
 # Authentication
 # jsonwebtoken 11 requires exactly one CryptoProvider feature (or a manual
 # install_default()). We enable `rust_crypto` (pure-Rust, no C toolchain) so
@@ -92,7 +101,6 @@ thiserror = "2"
 anyhow = "1"
 
 # OS keychain (secure credential storage)
-keyring = { version = "4", features = ["v1"] }
 
 # HTTP server (expose MCP endpoints when expose_http = true)
 axum = { version = "0.8", features = ["json"] }

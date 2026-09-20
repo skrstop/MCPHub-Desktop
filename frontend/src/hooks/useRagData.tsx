@@ -69,7 +69,7 @@ const useRagDataState = () => {
   // `initializing` (toggle on/off) so the switch can show "切换中" instead of
   // "开启中". Either flag grays out the page.
   const [switchingModel, setSwitchingModel] = useState(false);
-  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0, autoUpdateEnabled: true, autoUpdateIntervalSecs: 300, docLoadChunkKb: 200 });
+  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0, autoUpdateEnabled: true, autoUpdateIntervalSecs: 300, docLoadChunkKb: 200, sourceSyncAddEnabled: false });
   const [modelLimits, setModelLimits] = useState<RagModelLimits>({ maxContext: 2048 });
   const [viewedDoc, setViewedDoc] = useState<RagDoc | null>(null);
   const [viewLoading, setViewLoading] = useState(false);
@@ -162,7 +162,7 @@ const useRagDataState = () => {
     current: number;
     total: number;
     name: string;
-    phase: 'checking' | 'reindexing' | 'done' | 'error';
+    phase: 'checking' | 'sync' | 'reindexing' | 'done' | 'error';
   } | null>(null);
   const mounted = useRef(true);
 
@@ -304,8 +304,8 @@ const useRagDataState = () => {
         const p = event.payload;
         if (!p || !mounted.current) return;
         const phase =
-          p.phase === 'checking' || p.phase === 'reindexing' || p.phase === 'done' || p.phase === 'error'
-            ? (p.phase as 'checking' | 'reindexing' | 'done' | 'error')
+          p.phase === 'checking' || p.phase === 'sync' || p.phase === 'reindexing' || p.phase === 'done' || p.phase === 'error'
+            ? (p.phase as 'checking' | 'sync' | 'reindexing' | 'done' | 'error')
             : 'checking';
         setBatchProgress({ current: p.current, total: p.total, name: p.name, phase });
         if (phase === 'done' || phase === 'error') {
@@ -579,7 +579,7 @@ const useRagDataState = () => {
           // once its embedding begins).
           setCharProgress({ name: files[i].name, charsDone: 0, charsTotal: 0 });
           try {
-            await uploadRagDoc(files[i].path, tags, method);
+            await uploadRagDoc(files[i].path, tags, method, files[i].source);
             success++;
           } catch (err) {
             failed++;

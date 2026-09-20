@@ -1,6 +1,7 @@
 //! Tauri command wrappers for the RAG service. Each maps 1:1 to a service
 //! function and returns `Result<T, String>` (Tauri's convention).
 
+use anyhow::Result;
 use tauri::AppHandle;
 
 use crate::models::rag::{
@@ -96,6 +97,64 @@ pub async fn pick_rag_folder(app: AppHandle, recursive: bool) -> Result<RagFolde
     Ok(service::pick_folder(&app, recursive))
 }
 
+/// Git data source: clone (shallow, into the OS temp dir) + scan the clone
+/// with the same candidate rules as the folder picker. Optional
+/// username/password (private repos; public repos pull anonymously). On
+/// success the credential (if given) is stored in the app's local credential
+/// file so later updates pull without re-entry. Auth failures surface as
+/// `GIT_AUTH_REQUIRED:<detail>` — the frontend shows the credential form.
+#[tauri::command]
+pub async fn pick_rag_git_repo(
+    app: AppHandle,
+    url: String,
+    branch: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    depth: Option<u32>,
+) -> Result<RagFolderScan, String> {
+    let scan = git_pick_inner(&app, &url, branch.as_deref(), username.as_deref(), password.as_deref(), depth.unwrap_or(1))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(scan)
+}
+
+/// Cancel an in-flight git pick/clone for `url` (the UI "取消" button).
+/// The backend abandons the clone wait and cleans the temp dir; the pending
+/// `pick_rag_git_repo` promise resolves with a `PICK_CANCELLED` error.
+#[tauri::command]
+pub async fn cancel_rag_git_pick(url: String) -> Result<bool, String> {
+    Ok(crate::rag::git::signal_abort_canonical(&url).await)
+}
+
+/// Shared body of `pick_rag_git_repo` (also called by the credential-retry
+/// command). Clone into temp + scan + persist the credential locally.
+async fn git_pick_inner(
+    app: &AppHandle,
+    url: &str,
+    branch: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
+    depth: u32,
+) -> Result<RagFolderScan> {
+    let result = crate::rag::git::clone_to_temp(Some(app), url, branch, username, password, depth).await?;
+    // Persist the credential in the app's local credential file so future
+    // refreshes re-use it without re-prompting.
+    if let (Some(u), Some(p)) = (username, password) {
+        if let Err(e) = crate::rag::git::store_credential_for(app, url, u, p).await {
+            crate::rag::service::rag_log("warn", format!("git: store credential failed: {e}"));
+        }
+    }
+    // A successful clone proves the source is reachable with the given
+    // credentials — drop any previously recorded refresh failure so the UI
+    // doesn't show a stale warning after the user fixes the source.
+    service::clear_git_source_error_for(url).await;
+    let mut scan = service::scan_folder_public(&result.dir, true);
+    // Stamp the scan with the head commit so uploads can record it in the
+    // doc source (display only).
+    scan.commit = Some(result.commit);
+    Ok(scan)
+}
+
 /// Read + decode-to-UTF-8 + chunk + embed + index a single file (by disk
 /// path). The frontend loops over the picked paths, calling this once per
 /// file so it can show per-file upload progress. `method` selects the import
@@ -108,8 +167,38 @@ pub async fn upload_rag_doc(
     file_path: String,
     tags: Vec<String>,
     method: Option<String>,
+    // Data-source provenance (camelCase from the frontend): kind/label/root/
+    // relPath/git{url,branch,commit}. None on legacy callers -> classified as
+    // "file" at read time.
+    source: Option<crate::models::rag::DocSource>,
 ) -> Result<(), String> {
-    service::upload_one_path(&app, &file_path, tags, method)
+    // Git source: the scan/selection happened in the OS temp clone. Before
+    // uploading, persist the repo into app-data (idempotent) and rewrite the
+    // file path prefix temp->persistent so the doc's original_path (md5
+    // update source + open-location target) survives temp cleanup.
+    let file_path = match source.as_ref().filter(|s| s.kind == "git") {
+        Some(src) => match crate::rag::git::map_temp_to_persistent(&app, &file_path) {
+            Ok(Some(persisted)) => {
+                // First import: copy temp -> persistent (needs the temp dir
+                // still present). Derive the repo's temp dir from the path.
+                let hash = crate::rag::git::repo_hash(src.git.as_ref().map(|g| g.url.as_str()).unwrap_or(""));
+                let temp_dir = crate::rag::git::temp_dir_for(&hash);
+                crate::rag::git::ensure_persisted(&app, &hash, &temp_dir).map_err(|e| e.to_string())?;
+                persisted
+            }
+            Ok(None) => file_path,
+            Err(e) => return Err(e.to_string()),
+        },
+        _ => file_path,
+    };
+    // Git imports always land as "copy" (the dialog hides the symlink/copy
+    // toggle for the git data source and documents forced-copy semantics —
+    // enforce it here so a stale 'symlink' UI state can't leak through).
+    let method = match source.as_ref().filter(|s| s.kind == "git") {
+        Some(_) => Some("copy".to_string()),
+        None => method,
+    };
+    service::upload_one_path(&app, &file_path, tags, method, source)
         .await
         .map_err(|e| e.to_string())
 }
@@ -162,6 +251,14 @@ pub async fn preview_batch_update(app: AppHandle) -> Result<BatchPreview, String
     service::preview_batch_update(&app)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Query the last recorded git-source refresh failures (no network I/O).
+/// Backs the batch-update progress dialog's warning icon: the user clicks it
+/// to see WHICH repos are failing and WHY (auth vs address/network).
+#[tauri::command]
+pub async fn get_git_source_errors(app: AppHandle) -> Result<Vec<crate::models::rag::GitSourceError>, String> {
+    Ok(service::get_git_source_errors(&app).await)
 }
 
 /// Run the batch update in the background: re-index every doc whose source

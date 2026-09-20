@@ -280,6 +280,14 @@ export interface RagDoc {
   /** Total size of the full decoded content in UTF-8 bytes (independent of how
    *  much was returned) — for the "已加载 X / 全部 Y KB" hint. */
   contentTotalBytes?: number;
+  /** Data-source display fields (kind "file"|"folder"|"git"|"tool" + label +
+   *  root + rel dir chain + git url/branch). Legacy docs classify as "file". */
+  sourceKind?: string;
+  sourceLabel?: string;
+  sourceRoot?: string;
+  relPath?: string;
+  gitUrl?: string;
+  gitBranch?: string;
 }
 
 // Document metadata for the list view (no content).
@@ -313,6 +321,36 @@ export interface RagDocInfo {
    *  exists; copy = the rag/files copy exists). View/open-location are gated
    *  on this — a copy doc whose original vanished still has its copy. */
   contentAvailable?: boolean;
+  /** Data-source display fields (see RagDoc) — tree-view grouping input. */
+  sourceKind?: string;
+  sourceLabel?: string;
+  sourceRoot?: string;
+  relPath?: string;
+  gitUrl?: string;
+  gitBranch?: string;
+}
+
+/** Git remote info attached to a doc's data source (kind = "git"). */
+export interface GitSourceInfo {
+  url: string;
+  branch?: string;
+  commit?: string;
+  subdir?: string;
+}
+
+/** Where a document came from ("data source"). Sent with uploads; persisted
+ *  in the doc meta by the backend. Legacy docs (no source) read back as
+ *  kind "file" — the tree view groups them under the file-pick node. */
+export interface DocSource {
+  /** "file" | "folder" | "git" | "tool" */
+  kind: string;
+  /** Display label for the source node in the tree view. */
+  label: string;
+  /** Source root (absolute dir / clone dir). */
+  root?: string;
+  /** Directory chain relative to root ("/"-separated, "" = root level). */
+  relPath?: string;
+  git?: GitSourceInfo;
 }
 
 /** Paged searchable filter options (desktop: Tauri backend get_activity_filter_options). */
@@ -338,6 +376,18 @@ export interface RagUpdateCheck {
   originalChanged: boolean;
   /** True iff symlink method + originalPath missing (UI: manual-upload only). */
   lostOriginal: boolean;
+  /** Git source refresh failure (credentials revoked / address moved). The
+   *  md5 check above may be against a stale clone. */
+  gitError?: GitSourceError | null;
+}
+
+/** One git repo's refresh failure (batch preview / per-doc update check). */
+export interface GitSourceError {
+  url: string;
+  branch: string;
+  /** True = credentials problem (re-enter them); false = not found / network. */
+  auth: boolean;
+  message: string;
 }
 
 /** OCR capability report from the backend (get_ocr_status command). */
@@ -359,6 +409,12 @@ export interface BatchPreview {
   total: number;  toUpdate: number;
   skipped: number;
   lost: number;
+  /** Files detected in folder/git sources that no doc references -> will be imported. */
+  added: number;
+  /** Docs whose source file vanished from a known folder/git source -> will be removed. */
+  removed: number;
+  /** Per-repo git refresh failures (credentials revoked / address moved). */
+  gitErrors?: GitSourceError[];
 }
 
 // RAG search settings: weights applied to hybrid search scoring.
@@ -385,6 +441,13 @@ export interface RagSettings {
   /** Doc-detail page size in KiB: how much content each View-dialog load
    *  returns. Default 200; clamped to [10, 65536] by the backend. */
   docLoadChunkKb: number;
+  /** Auto-import NEW files appearing in folder/git data sources during
+   *  update checks. Default false — only files selected at import time
+   *  update (removal sync always runs). */
+  sourceSyncAddEnabled: boolean;
+  /** Auto-remove docs whose source file vanished. Default true — off keeps
+   *  docs flagged "lost original" in the UI instead of deleting them. */
+  sourceSyncRemoveEnabled: boolean;
 }
 
 /** Model context window (tokens), read from the model's config.json. */
@@ -489,6 +552,10 @@ export interface RagDocPage {
 export interface RagPickedFile {
   path: string;
   name: string;
+  /** Data-source provenance for this file (kind/label/root/relPath/git) —
+   *  built by the Upload dialog from the active data source + scan group.
+   *  Omitted on legacy paths (backend classifies as "file"). */
+  source?: DocSource;
 }
 
 /** A scan-candidate file with its size, for the grouped folder-scan result
@@ -498,6 +565,9 @@ export interface RagScanFile {
   name: string;
   /** Bytes (0 if metadata failed — the file is still listed). */
   size: number;
+  /** Dir chain relative to the scan root ("/"-separated, "" = root level).
+   *  Carried into the imported doc's DocSource.relPath for the tree view. */
+  relPath?: string;
 }
 
 /** One folder group in a recursive folder-scan result: the folder's path
@@ -514,6 +584,8 @@ export interface RagScanGroup {
 export interface RagFolderScan {
   /** Absolute path of the scanned folder ('' for multi-file picks). */
   root: string;
+  /** HEAD commit sha of the scanned git clone (git data source only). */
+  commit?: string;
   /** Sub-directories skipped by folder_ignore.json (recursive only). */
   skippedDirs: number;
   /** Candidate files dropped (unsupported ext / binary sniff / over cap). */

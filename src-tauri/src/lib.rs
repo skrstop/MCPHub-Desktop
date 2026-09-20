@@ -323,6 +323,11 @@ pub fn run() {
                 }
                 services::http_server::maybe_start().await;
 
+                // Git data source: sweep crash leftovers of the persistent
+                // clone swap ({hash}.old / {hash}.new dirs). Cheap one-dir
+                // read; safe regardless of RAG enable state.
+                rag::git::sweep_stale_dirs(&app_handle2);
+
                 // Auto-restore RAG if it was enabled before restart. Reads the
                 // persisted `rag.enabled` intent; if true, load the embedding
                 // model + open the vector DB so /mcp rag_search/rag_get work
@@ -510,6 +515,8 @@ pub fn run() {
             commands::rag::get_rag_chunks_paged,
             commands::rag::pick_rag_files,
             commands::rag::pick_rag_folder,
+            commands::rag::pick_rag_git_repo,
+            commands::rag::cancel_rag_git_pick,
             commands::rag::upload_rag_doc,
             commands::rag::update_rag_doc,
             commands::rag::delete_rag_doc,
@@ -531,6 +538,7 @@ pub fn run() {
             commands::rag::rag_download_model,
             commands::rag::check_rag_update,
             commands::rag::preview_batch_update,
+            commands::rag::get_git_source_errors,
             commands::rag::batch_update_rag_docs,
         ])
         .run(tauri::generate_context!())

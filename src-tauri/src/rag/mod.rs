@@ -28,11 +28,14 @@
 //! - `extract`: content extraction strategies for binary imports (PDF /
 //!   Office / image-OCR) + the plain-text fallback, behind a
 //!   `ContentExtractor` trait (see `chunker.rs` for the pattern).
+//! - `git`: Git data source support (gix shallow clone / refresh / per-source
+//!   local credential file; two-staged storage temp→app-data).
 //! - `service`: high-level lifecycle + document + search operations.
 
 pub mod chunker;
 pub mod embedder;
 pub mod extract;
+pub mod git;
 pub mod gguf;
 pub mod gguf_gemma;
 pub mod gguf_lfm2;

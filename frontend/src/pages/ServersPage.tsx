@@ -336,9 +336,6 @@ const ServersPage: React.FC = () => {
           )}
         </div>
 
-        <div className="ml-auto hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
-          {pagination.total}/{typeFilteredServers.length}
-        </div>
       </div>
 
       {/* List */}

@@ -22,8 +22,9 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::models::rag::{
-    BatchPreview, RagDoc, RagDocInfo, RagFolderScan, RagPickedFile, RagScanFile, RagScanGroup,
-    RagSearchResult, RagSettings, RagStatus, RagDocPage, RagTagPage, RagTagStat, RagUpdateCheck,
+    BatchPreview, GitSourceError, RagDoc, RagDocInfo, RagFolderScan, RagPickedFile, RagScanFile,
+    RagScanGroup, RagSearchResult, RagSettings, RagStatus, RagDocPage, RagTagPage, RagTagStat,
+    RagUpdateCheck,
 };
 use crate::rag::chunker::chunk_document;
 use crate::rag::embedder::{check_memory_sufficient, detect_format, load_embedder, read_max_context, Embedder};
@@ -162,6 +163,386 @@ static META_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 async fn meta_lock() -> &'static Mutex<()> {
     META_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+// ── git data source refresh (P4) ───────────────────────────────────────────
+
+/// Dedup cache for git repo refreshes: repo_hash -> last successful refresh.
+/// Within GIT_REFRESH_TTL_SECS a second refresh attempt for the same repo is
+/// a no-op (batch preview + batch run + single-doc check can all fire in one
+/// user action; the clone itself is shallow depth-1 but still network-bound).
+static GIT_REFRESH_CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    OnceLock::new();
+const GIT_REFRESH_TTL_SECS: u64 = 60;
+
+fn git_refresh_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    GIT_REFRESH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Per-repo in-flight refresh locks. The TTL cache only records COMPLETED
+/// refreshes, so a single-doc check firing while a batch refresh for the same
+/// repo is mid-clone would race on the `{hash}.new` dir (both sides do
+/// remove_dir_all + write). Serializing per repo makes the second caller wait
+/// and then hit the TTL (no second clone).
+static GIT_REFRESH_LOCKS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Mutex<()>>>>,
+> = OnceLock::new();
+
+fn git_refresh_lock(hash: &str) -> std::sync::Arc<Mutex<()>> {
+    let m = GIT_REFRESH_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    m.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(hash.to_string())
+        .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Last refresh OUTCOME per repo (success + failure both recorded), so the
+/// UI can query "which git sources are failing and why" on demand (the
+/// progress dialog's warning icon) without triggering a network refresh.
+/// Failure entries hold the structured GitSourceError; success entries are
+/// cleared from this map (success = absence of an error).
+static GIT_REFRESH_ERRORS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, GitSourceError>>> =
+    OnceLock::new();
+
+fn git_refresh_errors() -> &'static std::sync::Mutex<std::collections::HashMap<String, GitSourceError>> {
+    GIT_REFRESH_ERRORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Refresh one git repo's persistent clone (local credential file ->
+/// re-clone + swap). Returns Ok(true) if refreshed now, Ok(false) if skipped
+/// (fresh within TTL). Failures return a structured `GitSourceError` (auth vs
+/// other) so callers can surface "credentials changed / address moved" to the
+/// user instead of silently checking md5 against a stale clone. Callers treat
+/// Err as "repo not updated" — the existing clone content is still usable for
+/// md5 classification.
+async fn refresh_git_repo(app: &AppHandle, repo_url: &str) -> Result<bool, GitSourceError> {
+    let hash = super::git::repo_hash(repo_url);
+    // Serialize per repo (see GIT_REFRESH_LOCKS), then re-check the TTL
+    // inside the lock — a concurrent caller may have just refreshed.
+    let repo_lock = git_refresh_lock(&hash);
+    let _repo_guard = repo_lock.lock().await;
+    if let Ok(cache) = git_refresh_cache().lock() {
+        if let Some(t) = cache.get(&hash) {
+            if t.elapsed().as_secs() < GIT_REFRESH_TTL_SECS {
+                return Ok(false);
+            }
+        }
+    }
+    match super::git::refresh_registered(app, repo_url).await {
+        Ok(res) => {
+            if let Ok(mut cache) = git_refresh_cache().lock() {
+                cache.insert(hash.clone(), std::time::Instant::now());
+            }
+            // Success clears any previously-recorded failure.
+            if let Ok(mut errs) = git_refresh_errors().lock() {
+                errs.remove(&hash);
+            }
+            let short = res.commit.chars().take(10).collect::<String>();
+            rag_log("info", format!("git: refreshed repo {repo_url} -> commit {short}"));
+            Ok(true)
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            // GIT_AUTH_REQUIRED prefix (from refresh_registered's auth
+            // mapping) -> the fix is credentials; anything else (not found /
+            // network) -> the address may have moved or be unreachable.
+            let auth = msg.starts_with("GIT_AUTH_REQUIRED");
+            let detail = msg
+                .strip_prefix("GIT_AUTH_REQUIRED:")
+                .unwrap_or(&msg)
+                .trim()
+                .to_string();
+            rag_log("warn", format!("git: refresh {repo_url} failed: {msg}"));
+            let branch = String::new();
+            let err = GitSourceError {
+                url: repo_url.to_string(),
+                branch,
+                auth,
+                message: detail,
+            };
+            // Record for the on-demand health query (progress dialog icon).
+            if let Ok(mut errs) = git_refresh_errors().lock() {
+                errs.insert(hash, err.clone());
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Report the last recorded refresh failure per git source (no network I/O —
+/// reads the failure cache written by `refresh_git_repo`). Sources that
+/// refreshed fine (or were never refreshed since startup) are absent.
+pub async fn get_git_source_errors(_app: &AppHandle) -> Vec<GitSourceError> {
+    // Best-effort label from the registry (url @ branch), falling back to the
+    // url captured in the error itself.
+    let errs = match git_refresh_errors().lock() {
+        Ok(m) => m.clone(),
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<GitSourceError> = Vec::new();
+    for (_hash, err) in errs {
+        let label_url = err.url.clone();
+        out.push(GitSourceError {
+            url: label_url,
+            branch: err.branch,
+            auth: err.auth,
+            message: err.message,
+        });
+    }
+    out.sort_by(|a, b| a.url.cmp(&b.url));
+    out
+}
+
+/// Best-effort variant: refresh and swallow the error (logged inside). Used by
+/// the batch RUN flow where one repo failing must not abort the whole batch
+/// (the preview already surfaced the errors to the user).
+async fn refresh_git_repo_best_effort(app: &AppHandle, repo_url: &str) {
+    let _ = refresh_git_repo(app, repo_url).await;
+}
+
+/// Drop the recorded refresh failure for a repo. Called after a successful
+/// re-pick with fresh credentials, so the progress dialog's warning icon
+/// clears immediately instead of showing a stale warning until the next
+/// successful refresh.
+pub async fn clear_git_source_error_for(repo_url: &str) {
+    let hash = super::git::repo_hash(repo_url);
+    if let Ok(mut errs) = git_refresh_errors().lock() {
+        errs.remove(&hash);
+    }
+}
+
+/// Collect the distinct git repo URLs referenced by `docs` (kind == "git").
+fn collect_git_repo_urls(docs: &[DocMeta]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut urls = Vec::new();
+    for meta in docs {
+        if let Some(src) = meta.source.as_ref() {
+            if src.kind == "git" {
+                if let Some(git) = src.git.as_ref() {
+                    if !git.url.is_empty() && seen.insert(git.url.clone()) {
+                        urls.push(git.url.clone());
+                    }
+                }
+            }
+        }
+    }
+    urls
+}
+
+// ── source-level sync: files added to / removed from folder & git sources ──
+
+/// A file detected in a source (folder dir / git clone) that no doc
+/// references yet — a batch sync will import it.
+struct SourceSyncAdd {
+    path: String,
+    source: crate::models::rag::DocSource,
+    /// Import method: folder additions use "symlink" (UI default, the file
+    /// stays where it is), git additions "copy" (matches the git force-copy
+    /// semantics).
+    method: &'static str,
+}
+
+/// Prefix helper: does `path` live inside `root`? String-prefix with an
+/// explicit separator so `/a/b` doesn't match `/a/bc/...`.
+fn path_under_root(path: &str, root: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return false;
+    }
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+/// Scan the known folder/git sources for level changes: files that appeared
+/// (no doc references them) and docs whose file vanished from the source.
+/// Pure detection (no writes) — the batch preview reports the counts and the
+/// batch run executes them. Sources whose scan hits the file cap
+/// (`truncated`) are SKIPPED entirely: a truncated scan is not authoritative
+/// and treating missing entries as deletions would mass-delete docs.
+async fn plan_source_sync(
+    app: &AppHandle,
+    docs: &[DocMeta],
+) -> Result<(Vec<SourceSyncAdd>, Vec<(String, String)>)> {
+    let dir = files_dir(app)?;
+    if !dir.exists() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    // Every original_path any doc references — a scanned file already
+    // referenced by ANY doc (even one from a different source) is not "new".
+    let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for meta in docs {
+        if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
+            referenced.insert(op.to_string());
+        }
+    }
+    let mut added: Vec<SourceSyncAdd> = Vec::new();
+    let mut removed: Vec<(String, String)> = Vec::new();
+
+    // Distinct folder roots (kind == "folder" with a recorded root).
+    let mut folder_roots: Vec<String> = Vec::new();
+    for meta in docs {
+        if let Some(src) = meta.source.as_ref() {
+            if src.kind == "folder" {
+                if let Some(root) = src.root.as_deref().filter(|r| !r.is_empty()) {
+                    if !folder_roots.iter().any(|r| r == root) {
+                        folder_roots.push(root.to_string());
+                    }
+                }
+            }
+        }
+    }
+    for root in &folder_roots {
+        let root_path = std::path::Path::new(root);
+        if !root_path.exists() {
+            // Root gone entirely: do NOT mass-delete its docs — the existing
+            // "lost original" badge + skip semantics cover this safely.
+            rag_log("warn", format!("sync: folder root missing, skipping: {root}"));
+            continue;
+        }
+        let scan = scan_folder_public(root_path, true);
+        if scan.truncated {
+            rag_log("warn", format!("sync: folder scan truncated, skipping add/remove detection: {root}"));
+            continue;
+        }
+        let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for group in &scan.groups {
+            for f in &group.files {
+                current.insert(f.path.clone());
+                if !referenced.contains(&f.path) {
+                    added.push(SourceSyncAdd {
+                        path: f.path.clone(),
+                        source: crate::models::rag::DocSource {
+                            kind: "folder".to_string(),
+                            label: root.clone(),
+                            root: Some(root.clone()),
+                            rel_path: Some(group.rel_path.clone()),
+                            git: None,
+                        },
+                        method: "symlink",
+                    });
+                }
+            }
+        }
+        for meta in docs {
+            if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
+                // Removal requires BOTH: not in the fresh scan AND actually
+                // gone from disk. The scan applies extension/ignore filters —
+                // a file that merely fell out of the scan's candidate set
+                // (filter drift) must not delete its doc.
+                if path_under_root(op, root) && !current.contains(op) && !std::path::Path::new(op).exists() {
+                    removed.push((meta.id.clone(), meta.name.clone()));
+                }
+            }
+        }
+    }
+
+    // Distinct git repos: scan the PERSISTENT clone (post-refresh content).
+    for url in collect_git_repo_urls(docs) {
+        let hash = super::git::repo_hash(&url);
+        let persistent = super::git::persistent_repo_dir_public(app, &hash);
+        let Some(persistent) = persistent else { continue };
+        if !persistent.exists() {
+            // Clone dir gone (fresh import never persisted / refresh failed):
+            // skip — never treat that as mass deletion.
+            rag_log("warn", format!("sync: git clone dir missing, skipping: {url}"));
+            continue;
+        }
+        let scan = scan_folder_public(&persistent, true);
+        if scan.truncated {
+            rag_log("warn", format!("sync: git scan truncated, skipping add/remove detection: {url}"));
+            continue;
+        }
+        // Branch for provenance: reuse any existing doc of this repo.
+        let branch = docs
+            .iter()
+            .find_map(|m| {
+                m.source.as_ref().filter(|s| s.kind == "git").and_then(|s| s.git.as_ref()).and_then(|g| {
+                    if g.url == url { g.branch.clone() } else { None }
+                })
+            });
+        let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for group in &scan.groups {
+            for f in &group.files {
+                current.insert(f.path.clone());
+                if !referenced.contains(&f.path) {
+                    added.push(SourceSyncAdd {
+                        path: f.path.clone(),
+                        source: crate::models::rag::DocSource {
+                            kind: "git".to_string(),
+                            label: match &branch {
+                                Some(b) => format!("{url} @ {b}"),
+                                None => url.clone(),
+                            },
+                            root: Some(persistent.to_string_lossy().into_owned()),
+                            rel_path: Some(group.rel_path.clone()),
+                            git: Some(crate::models::rag::GitSource {
+                                url: url.clone(),
+                                branch: branch.clone(),
+                                commit: None,
+                                subdir: None,
+                            }),
+                        },
+                        method: "copy",
+                    });
+                }
+            }
+        }
+        for meta in docs {
+            if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
+                // Same dual check as folders: scan-miss + file really gone.
+                if path_under_root(op, &persistent.to_string_lossy()) && !current.contains(op) && !std::path::Path::new(op).exists() {
+                    removed.push((meta.id.clone(), meta.name.clone()));
+                }
+            }
+        }
+    }
+
+    // Single-file data sources (kind == "file", incl. legacy docs with no
+    // recorded source): the original IS the source — vanished file = doc
+    // removable. Dual check unnecessary (no scan/filter involved): the file
+    // simply must not exist on disk.
+    for meta in docs {
+        let is_file_source = match meta.source.as_ref() {
+            Some(src) => src.kind == "file",
+            None => true,
+        };
+        if !is_file_source {
+            continue;
+        }
+        if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
+            if !removed.iter().any(|(id, _)| id == &meta.id) && !std::path::Path::new(op).exists() {
+                removed.push((meta.id.clone(), meta.name.clone()));
+            }
+        }
+    }
+    Ok((added, removed))
+}
+
+/// Execute a sync plan: import the added files, delete the removed docs.
+/// Called by run_batch_update AFTER the git refresh; returns (added, removed)
+/// counts actually applied.
+async fn run_source_sync(app: &AppHandle, added: Vec<SourceSyncAdd>, removed: Vec<(String, String)>) -> (u32, u32) {
+    let mut added_count = 0u32;
+    for a in added {
+        match upload_one_path(app, &a.path, Vec::new(), Some(a.method.to_string()), Some(a.source)).await {
+            Ok(()) => {
+                added_count += 1;
+                rag_log("info", format!("sync: imported new source file {}", a.path));
+            }
+            Err(e) => rag_log("warn", format!("sync: import {} failed: {:#}", a.path, e)),
+        }
+    }
+    let mut removed_count = 0u32;
+    for (id, name) in removed {
+        match delete_doc(app, &id).await {
+            Ok(()) => {
+                removed_count += 1;
+                rag_log("info", format!("sync: removed doc '{}' (source file gone)", name));
+            }
+            Err(e) => rag_log("warn", format!("sync: delete doc '{}' failed: {:#}", name, e)),
+        }
+    }
+    (added_count, removed_count)
 }
 
 /// Dedup gate for the deferred lancedb prune. LanceDB is append-only: `delete`
@@ -1402,6 +1783,11 @@ struct DocMeta {
     /// -> treated as "has update" by `check_rag_update`.
     #[serde(default)]
     md5: Option<String>,
+    /// Where the doc came from ("data source"): file / folder / git / tool.
+    /// `None` for legacy docs (pre-feature) — classified as kind "file" at
+    /// read time so the tree view groups them under the "file pick" node.
+    #[serde(default)]
+    source: Option<crate::models::rag::DocSource>,
 }
 
 /// Default content version for a freshly-uploaded doc + back-compat fallback
@@ -1663,6 +2049,54 @@ async fn remove_doc_sql(doc_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 定向对账：清除 `.meta` 文件已丢失的 SQL 镜像孤儿行（rag_docs /
+/// rag_doc_tags / rag_tags 计数 / fts_rag_docs，经 remove_doc_sql），并顺带
+/// 清掉 lancedb 里的孤儿向量。meta 是唯一事实源——list_docs /
+/// search_docs_paged 从 meta 富化条目并静默跳过丢失者，若只清文件不清 SQL，
+/// 前端就会看到「计数 N 但列表空」的幽灵条目。开销极低：一次 SELECT + 每行
+/// 一次 fs stat，仅在发现孤儿时才做删除。list_docs / search_docs_paged 入口
+/// 各调一次（此时 RAG 必然处于开启态，runtime 可用）。
+async fn prune_stale_sql_docs(app: &AppHandle, dir: &Path) -> Result<()> {
+    let pool = crate::db::pool();
+    let sql_ids: Vec<String> = sqlx::query("SELECT id FROM rag_docs")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .filter_map(|r| sqlx::Row::try_get(r, "id").ok())
+        .collect();
+    let stale: Vec<String> = sql_ids
+        .into_iter()
+        .filter(|id| !dir.join(format!("{}.meta", id)).exists())
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    // 孤儿向量清理（lancedb）——runtime 缺失时跳过（RAG 关闭态不会走到这里，
+    // 这里只是防御）；prune 去重调度一次即可。
+    {
+        let guard = runtime().lock().await;
+        if let Some(rt) = guard.as_ref() {
+            for id in &stale {
+                let _ = rt.db.delete_by_doc(id).await;
+            }
+            drop(guard);
+            schedule_deferred_prune(app);
+        }
+    }
+    for id in &stale {
+        remove_doc_sql(id).await?;
+    }
+    rag_log(
+        "warn",
+        &format!(
+            "[rag] pruned {} stale SQL doc rows whose .meta vanished: {}",
+            stale.len(),
+            stale.join(", ")
+        ),
+    );
+    Ok(())
+}
+
 /// 全量对账：扫描所有 `.meta` 文件，整表重建 `rag_docs` / `rag_doc_tags` /
 /// `rag_tags`（单一事务 DELETE + 批量 INSERT）。用于 RAG 启动时兜底漂移，以及
 /// reindex_all / batch_update 结束后的安全网。计数为 0 的标签自然不落表。
@@ -1770,8 +2204,14 @@ pub async fn rebuild_rag_sql_index(app: &AppHandle) -> Result<()> {
 pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
     let dir = files_dir(app)?;
     if !dir.exists() {
+        // SQL 镜像可能有 meta 已丢失的孤儿行（见 prune_stale_sql_docs）——
+        // 目录不存在时 meta 全部缺失，孤儿行必然陈旧，顺带清掉。
+        let _ = prune_stale_sql_docs(app, &dir).await;
         return Ok(Vec::new());
     }
+    // meta 是事实源：先把 SQL 镜像里 meta 已丢失的孤儿行清掉，否则计数
+    // （来自 SQL）与列表条目（来自 meta）不一致 →「计数 N 但列表空」。
+    let _ = prune_stale_sql_docs(app, &dir).await;
     let mut out = Vec::new();
     // Clone the dir into the read_dir closure so `dir` stays borrowable below
     // (used to resolve the on-disk file name per doc).
@@ -1840,6 +2280,8 @@ fn doc_info_from_meta(dir: &Path, meta: DocMeta) -> RagDocInfo {
     };
     // Compute the display file_type label BEFORE the struct moves `name`.
     let file_type = meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name));
+    let (source_kind, source_label, source_root, rel_path, git_url, git_branch) =
+        classify_source(&meta);
     RagDocInfo {
         id: meta.id,
         name: meta.name,
@@ -1855,6 +2297,12 @@ fn doc_info_from_meta(dir: &Path, meta: DocMeta) -> RagDocInfo {
         md5: meta.md5.clone().unwrap_or_default(),
         lost_original,
         content_available,
+        source_kind,
+        source_label,
+        source_root,
+        rel_path,
+        git_url,
+        git_branch,
     }
 }
 
@@ -1873,6 +2321,8 @@ pub async fn search_docs_paged(
     page_size: u32,
 ) -> Result<RagDocPage> {
     let dir = files_dir(app)?;
+    // 同 list_docs：先清 SQL 镜像孤儿行，保证 total（SQL）与 items（meta）一致。
+    let _ = prune_stale_sql_docs(app, &dir).await;
     let page = page.min(10_000);
     let page_size = page_size.clamp(1, 200);
     let key = search_key.trim().to_lowercase();
@@ -2120,6 +2570,8 @@ async fn get_doc_inner(
         (std::fs::read_to_string(&content_path).unwrap_or_default(), avail)
     };
     let total_bytes = content.len() as u64;
+    let (source_kind, source_label, source_root, rel_path, git_url, git_branch) =
+        classify_source(&meta);
     // Apply the byte window (paged read). `is_char_boundary` guarantees the
     // slices stay valid UTF-8 even when offset/limit land mid multi-byte char.
     let (paged, truncated, next_offset) = match range {
@@ -2158,6 +2610,12 @@ async fn get_doc_inner(
             truncated,
             next_offset,
             content_total_bytes: total_bytes,
+            source_kind,
+            source_label,
+            source_root,
+            rel_path,
+            git_url,
+            git_branch,
         },
         total_bytes,
     )))
@@ -2348,6 +2806,7 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
         std::collections::HashMap::new();
     let mut out = RagFolderScan {
         root: folder.to_string_lossy().to_string(),
+        commit: None,
         skipped_dirs: 0,
         skipped_files: 0,
         groups: Vec::new(),
@@ -2449,6 +2908,7 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
                     path: path.to_string_lossy().to_string(),
                     name,
                     size: md.len(),
+                    rel_path: rel.to_string_lossy().replace('\\', "/"),
                 });
                 *total += 1;
             }
@@ -2475,10 +2935,17 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
     out
 }
 
+/// Public wrapper around the private `scan_folder` for the git picker (same
+/// filtering/cap rules; recursive walk of the clone dir).
+pub fn scan_folder_public(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
+    scan_folder(folder, recursive)
+}
+
 impl RagFolderScan {
     fn empty() -> Self {
         Self {
             root: String::new(),
+            commit: None,
             skipped_dirs: 0,
             skipped_files: 0,
             groups: Vec::new(),
@@ -2521,6 +2988,9 @@ async fn write_doc_and_index(
     method: Option<String>,
     original_path: Option<String>,
     md5: Option<String>,
+    // Data-source provenance (file/folder/git/tool). `None` on legacy paths —
+    // `classify_source` falls back to kind "file" at read time.
+    source: Option<crate::models::rag::DocSource>,
 ) -> Result<u32> {
     let meta_path = dir.join(format!("{}.meta", doc_id));
     let uploaded_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
@@ -2546,6 +3016,7 @@ async fn write_doc_and_index(
         method,
         original_path,
         md5,
+        source,
     };
     write_meta_atomic(&meta_path, &meta)?;
     // 增量同步 SQL 镜像（rag_docs / rag_doc_tags / rag_tags）。镜像失败不阻断
@@ -2561,6 +3032,7 @@ pub async fn upload_one_path(
     file_path: &str,
     tags: Vec<String>,
     method: Option<String>,
+    source: Option<crate::models::rag::DocSource>,
 ) -> Result<()> {
     // Derive the display name first so we can attribute any failure to it in
     // the log (the body below returns early on many `?`, and without this
@@ -2571,7 +3043,7 @@ pub async fn upload_one_path(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| file_path.to_string());
 
-    let result = upload_one_path_inner(app, file_path, tags, method).await;
+    let result = upload_one_path_inner(app, file_path, tags, method, source).await;
     if let Err(ref e) = result {
         rag_log("error", format!("upload failed for '{}': {:#}", name, e));
     }
@@ -2662,6 +3134,13 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     };
     let new_original_path = Some(file_path.to_string());
     let new_md5 = Some(compute_md5(&raw));
+    // Manual file update REPLACES the provenance: the doc's content no longer
+    // comes from its recorded source (e.g. a git repo). Dropping `source`
+    // re-classifies at read time from the NEW original_path's parent dir
+    // (folder semantics) — keeping the old source would mis-group the doc in
+    // the tree (under a git repo it no longer belongs to) and miscount the
+    // repo's delete-time refcount.
+    let new_source: Option<crate::models::rag::DocSource> = None;
     // write_doc_and_index writes the new disk file, reindexes (reindex_doc
     // deletes the old vectors by id then adds the new ones), and overwrites
     // the meta with the new name/size/uploaded_at/title/version — id preserved.
@@ -2679,6 +3158,8 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
         new_method,
         new_original_path,
         new_md5,
+        // Manual file update replaces provenance (see comment above).
+        new_source,
     )
     .await?;
 
@@ -2783,6 +3264,8 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         if extractable { Some("copy".to_string()) } else { old_meta.method.clone() },
         Some(original_path.to_string()),
         new_md5,
+        // "From original" update: refresh content but keep the source record.
+        old_meta.source.clone(),
     )
     .await?;
 
@@ -2814,6 +3297,7 @@ async fn upload_one_path_inner(
     file_path: &str,
     tags: Vec<String>,
     method: Option<String>,
+    source: Option<crate::models::rag::DocSource>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
     let dir = files_dir(app)?;
@@ -2906,10 +3390,12 @@ async fn upload_one_path_inner(
         if extractable { Some("copy".to_string()) } else { method.clone() },
         original_path_str,
         md5_hex,
+        // Data source provenance: caller-supplied (folder scan root + rel dir
+        // chain for folder/git imports; parent dir for single-file picks;
+        // None on legacy callers -> classify as "file" at read time).
+        source,
     )
     .await?;
-
-    // Re-sync tag stats after this file's tags are written.
 
     // Per-file import summary — one structured line per file so the Logs page
     // (filter server=rag) gives an at-a-glance read of import cost for tuning
@@ -2929,29 +3415,6 @@ async fn upload_one_path_inner(
         ),
     );
     Ok(())
-}
-
-/// Find the ids of all docs whose stored display `name` equals `name` (for
-/// overwrite-on-re-upload). Reads `.meta` files; returns an empty vec if none.
-/// (meta files are named `{id}.meta`, so the id is the filename stem - but we
-/// return the id from inside the meta to be robust.)
-fn find_doc_ids_by_name(dir: &Path, name: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
-        if meta.name == name {
-            out.push(meta.id);
-        }
-    }
-    out
 }
 
 /// Resolve the content file path for a doc. Uploads name the content file by
@@ -3028,6 +3491,72 @@ fn md5_of_file(path: &Path) -> Result<String> {
 ///   - no `original_path` -> has_original_path=false (legacy, manual-upload only)
 ///   - no `md5`           -> has_md5=false (legacy -> original_changed=true if exists)
 /// `lost_original` is symlink-method + original_path missing.
+/// Classify a doc's data source for display (tree view grouping). Reads
+/// `meta.source`; legacy metas without the field (pre-feature) classify as
+/// kind "file" so all pre-existing docs group under the "file pick" source
+/// node. For file-kind docs without an explicit label, the label is derived
+/// from `original_path`'s parent dir (or a generic fallback). Returns the
+/// flat display tuple consumed by `RagDocInfo`/`RagDoc` — nothing is written
+/// back to disk (lazy classification, no meta rewrites).
+fn classify_source(meta: &DocMeta) -> (String, String, String, String, String, String) {
+    const FALLBACK_LABEL: &str = "文件";
+    if let Some(src) = &meta.source {
+        let kind = if src.kind.is_empty() { "file".to_string() } else { src.kind.clone() };
+        let mut label = src.label.clone();
+        if label.is_empty() {
+            label = match kind.as_str() {
+                "folder" => src.root.clone().unwrap_or_else(|| FALLBACK_LABEL.to_string()),
+                "git" => {
+                    let g = src.git.clone().unwrap_or_default();
+                    match (&g.branch, !g.url.is_empty()) {
+                        (Some(b), true) => format!("{} @ {}", g.url, b),
+                        (None, true) => g.url.clone(),
+                        _ => "Git".to_string(),
+                    }
+                }
+                "tool" => "MCP 工具".to_string(),
+                _ => FALLBACK_LABEL.to_string(),
+            };
+        }
+        let g = src.git.clone().unwrap_or_default();
+        return (
+            kind,
+            label,
+            src.root.clone().unwrap_or_default(),
+            src.rel_path.clone().unwrap_or_default(),
+            g.url,
+            g.branch.unwrap_or_default(),
+        );
+    }
+    // Legacy doc: no source recorded. When original_path is known, the doc's
+    // origin IS a directory (its parent) -> classify as kind "folder" so the
+    // tree shows it as a folder source (with the 文件夹 type tag, matching the
+    // user's expectation that a directory-labeled node displays as folder).
+    // No original_path at all -> kind "file" with the generic fallback label.
+    if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
+        if let Some(parent) = Path::new(op).parent().map(|d| d.to_string_lossy().into_owned())
+            .filter(|d| !d.is_empty())
+        {
+            return (
+                "folder".to_string(),
+                parent.clone(),
+                parent,
+                String::new(),
+                String::new(),
+                String::new(),
+            );
+        }
+    }
+    (
+        "file".to_string(),
+        FALLBACK_LABEL.to_string(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+    )
+}
+
 fn classify_original(meta: &DocMeta) -> RagUpdateCheck {
     let method = meta.method.clone().unwrap_or_else(|| "copy".to_string());
     let is_symlink = method == "symlink";
@@ -3062,6 +3591,7 @@ fn classify_original(meta: &DocMeta) -> RagUpdateCheck {
         has_md5,
         original_changed,
         lost_original,
+        git_error: None,
     }
 }
 
@@ -3150,22 +3680,9 @@ pub async fn create_doc_from_content(
         .filter(|t| !t.is_empty() && seen_lower.insert(t.to_lowercase()))
         .collect();
 
-    // Overwrite same-named doc (same as upload path).
-    let stale_ids = find_doc_ids_by_name(&dir, &file_name);
-    if !stale_ids.is_empty() {
-        for sid in &stale_ids {
-            let _ = std::fs::remove_file(content_path_for(&dir, sid, &file_name));
-            let _ = std::fs::remove_file(dir.join(format!("{}.meta", sid)));
-        }
-        rag_log(
-            "info",
-            format!(
-                "rag_file_create overwriting '{}' ({} doc(s))",
-                file_name,
-                stale_ids.len()
-            ),
-        );
-    }
+    // Overwrite semantics REMOVED (P2b): same-named docs coexist. Explicit
+    // updates go through rag_file_update / the update dialog; creation is
+    // always a fresh document (fresh uuid), matching the upload path.
 
     let id = Uuid::new_v4().to_string();
     rag_log(
@@ -3189,30 +3706,18 @@ pub async fn create_doc_from_content(
         Some("copy".to_string()),
         None,
         Some(compute_md5(content.as_bytes())),
+        // MCP tool creation: kind "tool" so new tool docs get their own tree
+        // node. Legacy tool docs (pre-feature) classify as "file" per spec.
+        Some(crate::models::rag::DocSource {
+            kind: "tool".to_string(),
+            label: "MCP 工具".to_string(),
+            root: None,
+            rel_path: None,
+            git: None,
+        }),
     )
     .await?;
 
-    // Remove overwritten docs' vector chunks + reclaim space.
-    if !stale_ids.is_empty() {
-        let guard = runtime().lock().await;
-        if let Some(rt) = guard.as_ref() {
-            for sid in &stale_ids {
-                let _ = rt.db.delete_by_doc(sid).await;
-            }
-            // Reclaim the overwritten docs' freed space in the background
-            // (deduped) instead of blocking this call on a slow inline Prune.
-            // See `schedule_deferred_prune`.
-            schedule_deferred_prune(app);
-        }
-    }
-    // The stale docs' .meta files were removed above; drop their SQL mirror
-    // rows too (their tags counted toward rag_tags). The new doc's mirror row
-    // is upserted inside write_doc_and_index.
-    for sid in &stale_ids {
-        if let Err(e) = remove_doc_sql(sid).await {
-            rag_log("warn", format!("remove_doc_sql for stale {} failed: {}", sid, e));
-        }
-    }
     Ok(id)
 }
 
@@ -3912,7 +4417,57 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
     if let Err(e) = remove_doc_sql(id).await {
         rag_log("warn", format!("remove_doc_sql for {} failed: {}", id, e));
     }
+
+    // Git data source refcount: if the deleted doc came from a git repo and
+    // no remaining doc references that repo, remove the persistent clone +
+    // local credential file (the temp dir self-heals via the OS).
+    if let Some(meta) = meta_opt.as_ref() {
+        if let Some(git_url) = meta
+            .source
+            .as_ref()
+            .filter(|s| s.kind == "git")
+            .and_then(|s| s.git.as_ref())
+            .map(|g| g.url.clone())
+            .filter(|u| !u.is_empty())
+        {
+            if count_git_docs_for_repo(app, &git_url).await == 0 {
+                let hash = super::git::repo_hash(&git_url);
+                if let Err(e) = super::git::remove_persistent(app, &hash) {
+                    rag_log("warn", format!("delete_doc: remove git clone {hash} failed: {e}"));
+                }
+                if let Err(e) = super::git::delete_credential(app, &hash) {
+                    rag_log("warn", format!("delete_doc: remove git credential {hash} failed: {e}"));
+                }
+                rag_log("info", format!("git: repo {git_url} has no docs left — clone + credential cleaned up"));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Count remaining docs whose source came from `repo_url` (kind == "git").
+async fn count_git_docs_for_repo(app: &AppHandle, repo_url: &str) -> usize {
+    let Ok(dir) = files_dir(app) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    let mut count = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+        if meta
+            .source
+            .as_ref()
+            .filter(|s| s.kind == "git")
+            .and_then(|s| s.git.as_ref())
+            .is_some_and(|g| g.url == repo_url)
+        {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Reveal a document's file location in the OS file manager.
@@ -4005,13 +4560,39 @@ pub async fn check_rag_update(app: &AppHandle, id: &str) -> Result<RagUpdateChec
     let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id)))
         .map_err(|e| anyhow!("check: read meta {} failed: {}", id, e))?;
     let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
-    Ok(classify_original(&meta))
+    // Git data source: refresh the repo's persistent clone first so the md5
+    // classification reflects the remote's current content. Best-effort — a
+    // failed refresh (offline / auth required) still classifies against the
+    // existing clone, but the failure is REPORTED in the result (gitError)
+    // so the UpdateDialog can tell the user why the check may be stale
+    // (credentials revoked / address moved).
+    let mut git_error: Option<GitSourceError> = None;
+    if let Some(src) = meta.source.as_ref() {
+        if src.kind == "git" {
+            if let Some(git) = src.git.as_ref() {
+                if !git.url.is_empty() {
+                    if let Err(err) = refresh_git_repo(app, &git.url).await {
+                        git_error = Some(err);
+                    }
+                }
+            }
+        }
+    }
+    let mut result = classify_original(&meta);
+    result.git_error = git_error;
+    Ok(result)
 }
 
 /// Batch-update preview: classify every doc and return the aggregate counts
 /// the confirm dialog shows before the expensive re-index pass runs. No
-/// embedding, no progress events — just a fast filesystem scan.
+/// embedding, no progress events — just a fast filesystem scan. When
+/// `refresh_git` is true (manual batch button + auto tick), git repos are
+/// refreshed first so git docs' md5 classification sees the remote state.
 pub async fn preview_batch_update(app: &AppHandle) -> Result<BatchPreview> {
+    preview_batch_update_inner(app, true).await
+}
+
+async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Result<BatchPreview> {
     let dir = files_dir(app)?;
     if !dir.exists() {
         return Ok(BatchPreview {
@@ -4019,12 +4600,18 @@ pub async fn preview_batch_update(app: &AppHandle) -> Result<BatchPreview> {
             to_update: 0,
             skipped: 0,
             lost: 0,
+            added: 0,
+            removed: 0,
+            git_errors: Vec::new(),
         });
     }
     let mut total = 0u32;
     let mut to_update = 0u32;
     let mut skipped = 0u32;
     let mut lost = 0u32;
+    // First pass: collect metas (needed both for the git-repo refresh pass
+    // and the classification loop).
+    let mut docs: Vec<DocMeta> = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) != Some("meta") {
@@ -4032,8 +4619,68 @@ pub async fn preview_batch_update(app: &AppHandle) -> Result<BatchPreview> {
         }
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+        docs.push(meta);
+    }
+    // Git repos: refresh each distinct repo once before classification so the
+    // md5 check sees the remote content. Refreshes run CONCURRENTLY (N offline
+    // repos cost one timeout, not N); failures are collected and reported to
+    // the confirm dialog (gitErrors) instead of being silently swallowed.
+    let mut git_errors: Vec<GitSourceError> = Vec::new();
+    if refresh_git {
+        let urls = collect_git_repo_urls(&docs);
+        if !urls.is_empty() {
+            let app2 = app.clone();
+            let futs: Vec<_> = urls
+                .iter()
+                .map(|u| {
+                    let app = app2.clone();
+                    let u = u.clone();
+                    async move { refresh_git_repo(&app, &u).await }
+                })
+                .collect();
+            for res in futures_util::future::join_all(futs).await {
+                if let Err(err) = res {
+                    git_errors.push(err);
+                }
+            }
+        }
+    }
+    // Source-level sync plan (dry run): files added/removed in folder/git
+    // sources. Docs that the sync will REMOVE are counted as `removed`, not
+    // `lost` (they'd otherwise double-report as lost originals).
+    let (mut sync_added, mut sync_removed) = plan_source_sync(app, &docs).await.unwrap_or_default();
+    // Apply the SAME "自动同步新增文件" gate as run_batch_update — otherwise the
+    // confirm dialog would advertise adds that never happen, and the auto-tick
+    // idle check (added==0) would never idle while a new file sits in a source.
+    // Removal sync always runs (its file vanished), regardless of this gate.
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_add_enabled)
+        .unwrap_or(false)
+    {
+        sync_added.clear();
+    }
+    // Gate removal sync too: with "自动同步删除文件" off, vanished originals are
+    // kept (the list rows show the "原始丢失" lost-original badge instead).
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_remove_enabled)
+        .unwrap_or(true)
+    {
+        sync_removed.clear();
+    }
+    let removed_ids: std::collections::HashSet<&str> =
+        sync_removed.iter().map(|(id, _)| id.as_str()).collect();
+    let added_count = sync_added.len() as u32;
+    let removed_count = sync_removed.len() as u32;
+    for meta in &docs {
         total += 1;
-        let c = classify_original(&meta);
+        if removed_ids.contains(meta.id.as_str()) {
+            // The sync will delete this doc — counted via `removed` below
+            // (= sync plan size), not as a lost original.
+            continue;
+        }
+        let c = classify_original(meta);
         if c.lost_original {
             lost += 1;
         } else if !c.has_original_path {
@@ -4051,6 +4698,9 @@ pub async fn preview_batch_update(app: &AppHandle) -> Result<BatchPreview> {
         to_update,
         skipped,
         lost,
+        added: added_count,
+        removed: removed_count,
+        git_errors,
     })
 }
 
@@ -4124,6 +4774,73 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
     }
     let total = docs.len() as u32;
     rag_log("info", format!("batch_update: scanning {} docs", total));
+    // Git repos: refresh each distinct repo once before the doc loop (the TTL
+    // dedup makes this a no-op if preview already refreshed seconds ago).
+    // Concurrent — same rationale as the preview pass.
+    {
+        let urls = collect_git_repo_urls(&docs);
+        if !urls.is_empty() {
+            emit_batch_update_progress(app, 0, total, &urls[0], "checking");
+            let app2 = app.clone();
+            let futs: Vec<_> = urls
+                .iter()
+                .map(|u| {
+                    let app = app2.clone();
+                    let u = u.clone();
+                    async move { refresh_git_repo_best_effort(&app, &u).await }
+                })
+                .collect();
+            futures_util::future::join_all(futs).await;
+        }
+    }
+    // Source-level sync: import files added to folder/git sources and delete
+    // docs whose file vanished. Runs BEFORE the md5 pass so the re-collected
+    // doc set below reflects the sync result. Emits a "sync" phase so the
+    // progress dialog shows what's happening (the adds themselves re-emit
+    // rag://upload-progress for the char sub-bar).
+    let (mut sync_added, mut sync_removed) = plan_source_sync(app, &docs).await.unwrap_or_default();
+    // Config gate: auto-import of NEW files is opt-in ("自动同步新增文件");
+    // removal sync always runs (its file vanished). With the gate off only the
+    // docs selected at import time ever update — the sync pass then just
+    // prunes vanished originals.
+    if !get_settings().await.map(|s| s.source_sync_add_enabled).unwrap_or(false) {
+        sync_added.clear();
+    }
+    // Gate removal sync ("自动同步删除文件", default on): off = keep vanished
+    // docs, only flagged lost-original in the UI.
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_remove_enabled)
+        .unwrap_or(true)
+    {
+        sync_removed.clear();
+    }
+    if !sync_added.is_empty() || !sync_removed.is_empty() {
+        rag_log(
+            "info",
+            format!(
+                "batch_update: source sync -> {} file(s) to import, {} doc(s) to remove",
+                sync_added.len(),
+                sync_removed.len()
+            ),
+        );
+        emit_batch_update_progress(app, 0, total, "", "sync");
+        let (a, r) = run_source_sync(app, sync_added, sync_removed).await;
+        // Re-collect: the doc set changed (adds/removes affect both the loop
+        // range and the total shown in the progress dialog).
+        docs.clear();
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+            docs.push(meta);
+        }
+        rag_log("info", format!("batch_update: source sync applied (added {a}, removed {r})"));
+    }
+    let total = docs.len() as u32;
     for (i, meta) in docs.iter().enumerate() {
         let c = classify_original(meta);
         emit_batch_update_progress(app, i as u32, total, &meta.name, "checking");
@@ -4232,14 +4949,16 @@ pub fn restart_auto_update_timer(app: &AppHandle) {
             // events — an idle tick must not flash the header button to
             // "查看进度" or pop anything in the UI.
             if let Ok(preview) = preview_batch_update(&app).await {
-                if preview.to_update == 0 {
+                // Idle only when NOTHING changed: no md5 updates AND no
+                // source-level additions/removals (folder/git sync).
+                if preview.to_update == 0 && preview.added == 0 && preview.removed == 0 {
                     continue; // _guard drops -> BATCH_UPDATE_RUNNING = false
                 }
                 rag_log(
                     "info",
                     format!(
-                        "auto-update: {} of {} doc(s) changed, re-indexing…",
-                        preview.to_update, preview.total
+                        "auto-update: {} of {} doc(s) changed ({} source file(s) to import, {} to remove), syncing…",
+                        preview.to_update, preview.total, preview.added, preview.removed
                     ),
                 );
             }
@@ -4457,6 +5176,14 @@ pub async fn get_settings() -> Result<RagSettings> {
             .clamp(60, 86_400),
         // Clamp the doc-detail page size (min 10 KiB, max 64 MiB = the upload
         // cap) so a bad value can't crash the View dialog or underflow to 0.
+        source_sync_add_enabled: rag
+            .get("sourceSyncAddEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(d.source_sync_add_enabled),
+        source_sync_remove_enabled: rag
+            .get("sourceSyncRemoveEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(d.source_sync_remove_enabled),
         doc_load_chunk_kb: rag
             .get("docLoadChunkKb")
             .and_then(|v| v.as_u64())
@@ -4480,7 +5207,9 @@ pub async fn save_settings(settings: RagSettings) -> Result<()> {
             "chunkOverlap": settings.chunk_overlap,
             "autoUpdateEnabled": settings.auto_update_enabled,
             "autoUpdateIntervalSecs": interval,
-            "docLoadChunkKb": chunk_kb
+            "docLoadChunkKb": chunk_kb,
+            "sourceSyncAddEnabled": settings.source_sync_add_enabled,
+            "sourceSyncRemoveEnabled": settings.source_sync_remove_enabled
         }
     });
     crate::services::config_service::update(&patch).await?;

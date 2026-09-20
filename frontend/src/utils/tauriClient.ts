@@ -795,18 +795,41 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       const b = body as { recursive?: boolean } | null;
       return { command: 'pick_rag_folder', args: { recursive: b?.recursive ?? false } };
     }
+    // POST /rag/pick-git — Git data source: clone/pull the repo (optional
+    // username/password for auth) and scan the clone dir, returning the same
+    // grouped scan shape as the folder picker. GIT_AUTH_REQUIRED-prefixed
+    // errors are shown inline in the Git form (advanced section auto-expands).
+    if (segs[1] === 'pick-git' && m === 'POST') {
+      const b = body as { url?: string; branch?: string; username?: string; password?: string; depth?: number } | null;
+      return {
+        command: 'pick_rag_git_repo',
+        args: {
+          url: b?.url ?? '',
+          branch: b?.branch ?? null,
+          username: b?.username ?? null,
+          password: b?.password ?? null,
+          depth: b?.depth ?? 1,
+        },
+      };
+    }
+    // POST /rag/cancel-git-pick — cancel an in-flight git pick/clone.
+    if (segs[1] === 'cancel-git-pick' && m === 'POST') {
+      const b = body as { url?: string } | null;
+      return { command: 'cancel_rag_git_pick', args: { url: b?.url ?? '' } };
+    }
     // POST /rag/docs/upload — upload a single file by disk path (backend reads
     // bytes from disk + detects encoding; no base64/JSON byte transfer). `method`
     // selects the import method: "symlink" (default — record original_path, no
-    // copy) or "copy".
+    // copy) or "copy". `source` carries data-source provenance (file/folder/git).
     if (segs[1] === 'docs' && segs[2] === 'upload' && m === 'POST') {
-      const b = body as { filePath?: string; tags?: string[]; method?: string } | null;
+      const b = body as { filePath?: string; tags?: string[]; method?: string; source?: unknown } | null;
       return {
         command: 'upload_rag_doc',
         args: {
           filePath: b?.filePath ?? '',
           tags: b?.tags ?? [],
           method: b?.method ?? 'symlink',
+          source: b?.source ?? null,
         },
       };
     }
@@ -839,6 +862,11 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // POST /rag/docs/batch-preview - aggregate counts for the confirm dialog.
     if (segs[1] === 'docs' && segs[2] === 'batch-preview' && m === 'POST') {
       return { command: 'preview_batch_update', args: {} };
+    }
+    // GET /rag/git-errors - last recorded git-source refresh failures (no
+    // network I/O). Backs the progress dialog's warning icon.
+    if (segs[1] === 'git-errors' && m === 'GET') {
+      return { command: 'get_git_source_errors', args: {} };
     }
     // POST /rag/docs/batch-update - kick off the background re-index pass.
     if (segs[1] === 'docs' && segs[2] === 'batch-update' && m === 'POST') {

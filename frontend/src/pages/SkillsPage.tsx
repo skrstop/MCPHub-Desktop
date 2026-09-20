@@ -1997,9 +1997,6 @@ const SkillsPage: React.FC = () => {
                 </span>
               </button>
             )}
-            <div className="hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
-              {pagination.total}/{skills.length}
-            </div>
           </div>
         </div>
       )}

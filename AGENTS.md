@@ -1717,6 +1717,219 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 - **验证**：`cargo check` 通过；`cargo test --lib migration` 4 passed（v21/v23/v24 回归）；catalog JSON 解析 + 上游 77 agent 全量 diff（missing: none）。
 - 用户操作：重启应用后 DB 迁移自动执行，skills 页 agent 列表出现 20 个补齐条目（含 `.agents/skills` 复合条目，其名内含 Common Agent；目录不存在时安装/导出按既有逻辑处理）。
 
+### 3.17 RAG 数据源统一 + Git 数据源 + 树形列表视图（桌面端独有，2026-09-09）
+
+> 设计与执行计划见 `doc/rag_data_source_tree_plan_20260909.md`。三大需求：①导入入口统一为「数据源选择」（文件/文件夹只是选项）；②新增 Git 数据源（gix 纯 Rust 集成、支持认证）；③列表增加树形视图（存量归「文件」节点）。版本 `1.0.35002`（后并入 1.0.35003 发布），changelog 已合并进 `doc/upgrade/1.0.35003.md`。
+
+#### 3.17.1 数据模型 + 存量兼容（P1）
+
+- `models/rag.rs`：`DocSource`（kind/label/root/relPath/git{url,branch,commit}）+ `RagGitSource`（id=repo_hash/url/branch/label/addedAt，前端下拉用）；`DocMeta.source: Option<DocSource>`（serde default，旧 meta 兼容，**不进 DB 无迁移**）；`RagScanFile.relPath` + `RagFolderScan.commit`（git 扫描的 HEAD sha，展示用）。
+- `rag/service.rs::classify_source(meta)`（集中式 helper）：有 source → 直接用；存量有 original_path → kind="folder"（label=父目录）、无 → kind="file"（label=「文件」）。**惰性分类**（读时填充 `RagDocInfo`/`RagDoc` 的 sourceKind/Label/Root/relPath/gitUrl/gitBranch 6 展示字段），不改写 meta 文件。
+- 前端 `types/index.ts`：`RagDocInfo`/`RagDoc`/`RagScanFile`/`DocSource`/`RagGitSource` 对应字段。
+
+#### 3.17.2 写路径注入（P2）+ rag_file_create 不覆盖（P2b）
+
+- `write_doc_and_index` 加末位 `source` 参数（全部 4 调用点）；`upload_rag_doc` 命令加 `source: Option<DocSource>`；手动/from-original 更新保留原 source。
+- `rag_file_create` 注入 kind="tool" label「MCP 工具」（新工具文档归独立树节点）。
+- **P2b 不覆盖**：删除 `create_doc_from_content` 的 `find_doc_ids_by_name` 覆盖块（文件/向量/meta/SQL 清理 + rag_log overwriting），重名一律并存；`find_doc_ids_by_name` 函数随之删除（无调用方）。
+
+#### 3.17.3 Git 集成（P3，`src-tauri/src/rag/git.rs` 新模块）
+
+- **gix 0.73**（gitoxide，纯 Rust，无外部 git 依赖）：features `blocking-network-client` + **`blocking-http-transport-reqwest-rust-tls`**（⚠️ blocking-network-client 不带 HTTP backend，必须显式加；gix-transport 0.48 用 reqwest 0.12 blocking 与项目主 reqwest 0.13 共存，已验证归并 OK）+ `worktree-mutation`。
+- **Clone API 要点**：`gix::clone::PrepareFetch::new(url, dest, Kind::WithWorktree, create::Options, open::Options)` → `.with_ref_name(Some(branch))`（⚠️ 选 checkout 分支用 ref_name，`with_remote_name` 是设 remote 名不是分支）→ `.with_shallow(Shallow::DepthAtRemote(NonZeroU32))` → `fetch_then_checkout(...)` + `main_worktree(...)`（⚠️ `fetch_only` 不 checkout 工作区，树是空的——冒烟测试踩过）。
+- **认证**：`build_clone_url` 把账密 percent-encode 注入 URL userinfo——gix HTTP transport 读 `url.user().zip(url.password())` 直接作 basic auth（已读 gix-transport 0.48 源码确认）。仅支持 https；拒内嵌凭证 URL。
+- **两段式存储**：clone 到 OS 临时目录 `std::env::temp_dir()/mcphub-rag-git/{repo_hash}`（clone 前清临时根）；确认导入时 `ensure_persisted` copy 到 `<app_data>/rag/git/{hash}` + `map_temp_to_persistent` 改写上传路径（doc 的 original_path 落持久目录，md5 更新检测/open-location 天然可用）。取消导入零残留（OS 自愈临时目录）。
+- **更新刷新**：`refresh_persistent` = 重克隆到 `{hash}.new` + 原子 rename swap（main→.old→删）；`sweep_stale_dirs` 清崩溃残留（lib.rs setup 调用）。浅克隆 depth=1 下重克隆比 fetch 便宜且免疫 dirty-tree/shallow-fetch 边界。
+- **凭证存储（2026-09-16 起唯一持久化）**：本地文件 `<app_data>/rag/git-credentials.json`（map: repo_hash → {username,password}，原子写 tmp+rename，unix 0600，`creds_lock()` RwLock 串行读改写）。**为何弃用 OS keyring（2026-09-16）**：macOS/Windows 每次 keyring 读取会弹授权确认框，自动更新几分钟一次直接把无人值守流程打死；改本地文件后零交互（文件在应用数据目录内，权限 0600）。接口：`store_credential(app,hash,u,p)`/`load_credential(app,hash)`/`delete_credential(app,hash)`/`store_credential_for(app,url,u,p)`（canonicalize 后取 hash，需 AppHandle）。**数据源注册表（rag/sources.json + RegistryEntry）已删除**——每次导入重新输入地址，不独立维护数据源列表；refresh 无 branch（重 clone 用远端 HEAD）。keyring crate 依赖已从 Cargo.toml 移除。
+- **错误约定**：`GIT_AUTH_REQUIRED:<detail>` 前缀结构化错误（`is_auth_error` 按消息关键字分类 401/403 等）；前端表单内联报错 + 自动展开账密区，无独立弹框。
+- **canonicalize_url 走 `.no_proxy()`（2026-09-16 修复）**：reqwest 0.13 默认读系统代理（macOS Clash 7890 等）——即使用户已把 `*.haidaifu.net` 加进绕过列表，reqwest 的 from_system 通配符解析仍把请求送进代理，代理对 git smart-protocol 的 /info/refs 返回 404（curl/raw TCP 直接连接看到的是 308）→ http→https 升级失效、探测结果错误。修复：探测客户端显式 `.no_proxy()`（Git 地址是用户显式配置的直连目标）。
+- **取消拉取（2026-09-16 修复）**：`cancel_rag_git_pick` → `signal_abort_canonical`——先 canonicalize 再查 `PICK_ABORTS`，找不到再回退原始 URL key（修复：pick 把令牌注册在 canonicalize 后的 URL 上，前端传原始 URL（http→https 升级/尾斜杠场景）查不到 → 取消静默无效）。令牌为 `{notify, cancelled: AtomicBool}`——signal 置 flag + notify_waiters；clone 的 select 循环「注册 waker → 复查 flag → await」，关闭注册与 select 之间丢信号的竞态。
+- **命令**：`pick_rag_git_repo(url,branch,username,password,depth)`（clone→scan→账密入本地凭证文件）+ `cancel_rag_git_pick`；`list_rag_git_sources` 已随注册表删除；上传时 git 源路径在 `upload_rag_doc` 内 map+persist。
+- **拉取进度（2026-09-16，含实证调优）**：`rag://git-clone-progress` 事件——gix `NestedProgress` 自实现（`CloneProgress`）累计**字节**（unit 按 hash 判别：`progress::bytes()` 合成参照比对——独立 probe 实证 clone 全链路 unit 动态生成但 hash 等价、判别有效；objects/refs 等 unit 不计入）。**字节更新路径**（probe 实证）：pack 读取走 `progress::Read` wrapper 每次网络 read 调 `inc_by` → `ThroughputOnDrop` 透传到 `read pack` 子任务（`add_child` 共享 Arc 计数器）——小仓库每秒数千次 inc_by、连续分布，120ms 采样足够顺滑；`total`（pack size）在流式接收时**始终未知**（`init(None, bytes())`），故 UI 恒为 indeterminate 流动条 + 已接收字节/速度（除非未来切 `write_to_directory_eagerly` 拿到 pack_size）。采样任务 120ms 间隔 + 启动即发首帧；clone 结束后**补发终帧**（真实最终字节数）再退出，防止 UI 冻结在上一采样。仅 pick 流程发射（`clone_to_temp` 加 `Option<&AppHandle>`，refresh 路径 None）。前端 RagPage 监听，进度条渲染在下方扫描占位卡片的 spinner/「正在拉取仓库…」文字之下（`maxWidth:360`），取消/完成即随占位消失。
+- **冒烟**：真实公共仓库（octocat/Hello-World，depth=1，branch=master）clone+checkout+HEAD sha 测试通过（临时测试跑完已删）。
+
+#### 3.17.4 更新链路（P4）
+
+- `service.rs` 新增 `refresh_git_repo`（60s TTL 去重缓存 `GIT_REFRESH_CACHE`，`git::refresh_registered` = 本地凭证文件→refresh_persistent，无注册表读取）+ `refresh_git_repo_best_effort` + `collect_git_repo_urls`。
+- **三个接入点**：①`check_rag_update`（单条检查，best-effort 刷新后 classify）；②`preview_batch_update`（手动按钮+自动 tick 均刷新，保证 preview 的 md5 判定反映远端）；③`run_batch_update`（doc 循环前逐 repo 刷新，去重缓存使 preview+run 双刷新只 clone 一次）。
+- 凭证缺失的认证仓库：自动更新/批量刷新失败 → warn 日志跳过（不弹框打断后台）；单条检查同样降级用现有 clone 分类。
+- **引用计数清理**：`delete_doc` 后若被删文档 kind=git 且 `count_git_docs_for_repo`==0 → `remove_persistent` + 删本地凭证。
+- `open_file_location` git 分支无需改动——git 文档 original_path 已指向持久 clone 内文件，reveal 天然工作。
+
+#### 3.17.5 前端（P5，已获用户确认的 UI）
+
+- `RagPage.tsx` UploadDialog：数据源分段切换（文件/文件夹/Git）+ Git 表单（地址常显；branch/depth/账密折叠在「更多参数」后，认证失败自动展开 + 内联错误）；`gitSourceMeta` 记录 url/branch 供 confirm 构建 DocSource。**重新点「拉取并扫描」时清空上一轮的扫描结果/勾选/仓库元信息**（防旧仓库文件残留在确认列表里误导导入，2026-09-16）。
+- 新组件 `components/ui/RagDocTree.tsx`：forwardRef + useImperativeHandle（expandAll/collapseAll）+ 类型徽章（git/文件夹；内置文件/tool 不显示）+ 目录树折叠。
+- 工具栏：平铺/树形切换按钮 + 一键展开/收起（带文案的 hub-btn）。
+- **mock 已全部移除**（P4 ⑤）：`MOCK_DATA_SOURCE`/`MOCK_GIT_SOURCES`/`MOCK_SOURCE_DOCS`/`MOCK_GIT_SCAN`/`mkMockDoc` 及合并分支全删，全部走真实后端。
+- i18n 四语言 ~35 键（git*/dataSource*/tree* 等）。
+
+#### 3.17.6 边界 / 已知限制
+
+- 仅支持 HTTPS（SSH 不支持，后续增强）；树形视图一次渲染全量（量大后虚拟滚动待办）。
+- `rag://git-sync-progress` 进度事件未实现（clone 有 120s timeout + spinner；低优先级）。
+- 多音字/拼音等 FTS 语义不变；树形纯 GUI 展示，不影响后端分页/搜索契约。
+- 私有仓库真机冒烟（GitHub PAT / GitLab）留给用户手动验证。
+
+#### 3.17.7 五轮全量复核（2026-09-09）
+
+> 对已完成功能做 5 轮复核（后端逻辑 / 更新链路 / 前端链路 / 并发竞态 / 回归边界），发现 9 个问题，全部修复。
+
+- **R1 后端 git.rs 逻辑**：①`validate_url` 只拒「带密码」的内嵌凭证，`https://user@host` 型漏放（注入凭证后会成畸形 URL）→ 收紧为拒绝 authority 中任何 `@`；②注释被终端脱敏工具损坏成 `******`（写码时误存）→ 修复；③`is_auth_error` 裸 `"401"/"403"` 子串匹配会误伤 URL 含数字的错误文本（如 repo 名 `issue-1401`）→ 改为短语匹配（`http status 401/403`，对应 gix-transport reqwest 后端 `Received HTTP status NNN` 文本）+ 补 GitHub/GitLab 私有仓库匿名 404 的 `repository not found`。
+- **R2 更新链路**：④`update_doc_from_file` 手动换源更新保留了旧 `source`（git 文档手动更新后仍归 git 节点 + 引用计数误算）→ 改置 `None`，读时从新 `original_path` 父目录重新归类；⑤`classify_source` 的 tool 兜底 label 旧文案「工具创建」→「MCP 工具」（与写侧一致）。
+- **R3 前端链路**：⑥Git 导入的「强制 copy 语义」只有 UI 注释、后端未强制（隐藏的方式切换 state 默认 symlink 会透传）→ `upload_rag_doc` 命令层对 `kind=git` 强制 `method="copy"`；⑦关弹框不清 git 密码/表单错误 → 抽 `closeUploadDialog`（凭证已入本地凭证文件，不留前端 state；切 tab 不清避免重输）。
+- **R4 并发竞态**：⑧`clone_to_temp` 每次清空**整个临时根**、无锁 → 并发 pick（Enter 双击等）互相摧毁 clone → 加全局 `PICK_LOCK` 串行化（refresh 不受影响，自有锁）；⑨`refresh_persistent` swap 中段失败（`.new→main` rename 失败）会让 main 缺失、`.old` 有旧数据且运行时无自愈 → 失败时回滚 `.old→main` + 清 `.new`；⑩单条检查与批量刷新并发时竞态操作 `{hash}.new`（TTL 缓存只记已完成，挡不住进行中）→ per-repo `GIT_REFRESH_LOCKS` 进行中锁 + 锁内 TTL 复查。
+- **R5 回归边界**：i18n 260 个 `pages.rag.*` 键四语言全齐（脚本核对）；后端 serde 字段 ↔ 前端 types 逐一比对全匹配（DocSource/GitSource/RagGitSource/RagFolderScan/RagScanFile）；tauriClient 一处过时注释（"credential dialog" → 内联报错）修正；锁序复核：PICK→SOURCES 无反向、META→runtime 恒定、refresh 锁为叶子。
+- **回归验证**：`cargo check` 0 错 0 警；`cargo test --lib` 34 passed；`npm run build` ✓；`npx tsc --noEmit` 24 = 基线。
+
+#### 3.17.8 数据源级同步：新增/删除文件随更新检查同步（2026-09-10）
+
+> 用户需求：文件夹/Git 数据源做更新检查时，除了已变更文档的 md5 重索引，**新添加的文件要自动导入、源文件已删除的文档要自动移除**（尤其是文件夹选择）。
+
+- **核心**：`service.rs` 新增 `plan_source_sync`（纯检测）+ `run_source_sync`（执行）。
+  - **检测范围**：①文件夹源——`source.kind=="folder"` 的去重 root（存在才参与，root 整体丢失 → 跳过删除判定走既有 lost 语义）；②Git 源——refresh 后的**持久 clone** 目录（clone 缺失/refresh 失败 → 跳过）。两者都用 `scan_folder_public(root, recursive=true)`。
+  - **新增判定**：扫描出的文件不被**任何**文档的 original_path 引用（全局引用集，防跨源重复导入）→ `SourceSyncAdd{path, source, method}`；文件夹新增走 `symlink`（UI 默认，文件原地）、Git 新增走 `copy`（与强制 copy 语义一致），tags 为空。
+  - **删除判定（双重条件防误删）**：文档 original_path 在 root 前缀下 **且** 不在新扫描集 **且** 磁盘上确实不存在——扫描有扩展/ignore 过滤器，「仅仅掉出扫描候选集」的文件不删其文档（防过滤器漂移误删）。扫描 `truncated`（撞 cap）的源整体跳过增删检测（截断结果不作删除依据）。
+  - **前缀匹配**：`path_under_root` 带 `/` 分隔符比较，防 `/a/b` 误配 `/a/bc`。
+- **接入点**：①`preview_batch_update`（refresh 后 plan，被同步删除的文档计 `removed` 而非 `lost`，不再双报）；②`run_batch_update`（refresh → plan → 有变化则发 `phase="sync"` 事件 → 执行 → **重收 docs**（增删改变集合与 total）→ md5 pass）；③自动 tick 门槛扩为 `to_update==0 && added==0 && removed==0` 才空转放行。
+- **模型/前端**：`BatchPreview` 加 `added`/`removed`（serde camelCase 自动透传）；确认弹框加两格计数 + 同步提示行；进度弹框加 `phase="sync"` 文案；`BatchProgress` 类型（RagPage 本地别名 + useRagData state）补 `'sync'`；i18n 四语言 4 键（batchScanAdded/batchScanRemoved/batchScanSyncHint/batchSyncingSources）。
+- **语义注记**：文件夹同步递归扫描（原导入可能是扁平模式——新增检测按递归算，用户「尤其是文件夹」的诉求优先）；legacy 文档（source=None 但 original_path 在已知 root 下）同样参与删除判定（其原始文件确实没了）；被同步删除的 git 文档走 `delete_doc` → 引用归零自动清 clone/本地凭证。
+- **验证**：cargo check 0 错 0 警；cargo test --lib 34 passed；npm build ✓；tsc 24=基线。
+- **⚠️ 开关门一致性修复（2026-09-18）**：`sourceSyncAddEnabled`（「自动同步新增文件」）此前**只在 `run_batch_update` 执行阶段生效，`preview_batch_update` 未应用**——两个 bug：①开关关闭时确认弹框仍显示「N 个新文件待导入」（实际不导入，数字误导）；②自动 tick 的空转判定 `added==0` 永不成立（只要源目录有新文件），每个 tick 都唤醒 UI 跑一遍空扫描。修复：preview 阶段应用同一开关（关闭时 `sync_added.clear()`，删除侧不受开关影响照常计数）。cargo check ✓；cargo test --lib 42 passed。
+
+#### 3.17.9 Git 数据源失效提示（账密修改/地址变更，2026-09-11）
+
+> 用户问题：git 仓库可能因外部原因拉取失败（地址变更、账密被改/吊销），更新检查此前静默降级（只记日志，用户无感知地基于旧克隆判定 md5）。如何提示？
+
+- **结构化错误**：`refresh_git_repo` 失败改为返回 `GitSourceError{url, branch, auth, message}`（models/rag.rs）——`auth=true`（GIT_AUTH_REQUIRED 前缀映射，gix-transport reqwest 后端 401 文本）→ 修复方式是重新输入账密；`auth=false`（not found / 网络）→ 地址可能已迁移。message 已剥前缀（不泄露内部错误链）。
+- **上报通道（四处）**：
+  - **批量预览**：`BatchPreview.gitErrors: Vec<GitSourceError>`（并发刷新收集，按仓库去重），确认弹框红色警示块逐仓库列出 + 修复指引（i18n `batchGitAuthError`/`batchGitOtherError`）。
+  - **单文档检查**：`RagUpdateCheck.gitError: Option<GitSourceError>`，UpdateDialog 顶部琥珀色警示（i18n `updateGitAuthError`/`updateGitOtherError`）——明确告知「本次检查基于旧克隆」。
+  - **进度弹框状态图标**（2026-09-11 补充，用户需求）：`BatchUpdateDialog` 右上角状态按钮——查询前中性灰（未知），点击调 `get_git_source_errors`（读 `GIT_REFRESH_ERRORS` 缓存，**无网络 I/O**）后：无失败变绿色对勾 + 「所有 Git 数据源状态正常」，有失败变琥珀色 ⚠ + 展开错误面板（逐仓库列 url@branch + auth 分支文案，maxHeight 160 滚动）。`refresh_git_repo` 成功时清该仓库的失败记录（恢复即对勾）。
+  - **自动定时 tick**：保持静默（只记日志）——后台任务不弹框打断用户（既有设计原则）；用户通过批量按钮、进度弹框图标或单条检查会看到失败态。
+- **修复路径**：导入弹框重新输入地址 + 新账密 → 拉取成功即 `store_credential_for` 覆盖本地凭证文件（后续 refresh 自动用新凭证）。地址变更则输入新 URL 后同样走该流程（新 URL = 新 hash = 新数据源，旧仓库文档按引用计数自然清理）。数据源下拉已删除，无快捷重选。
+- **失败时语义**：md5 判定基于旧克隆继续工作（不会因拉取失败中断批量/自动流程），仅提示可能过期。
+
+#### 3.17.10 Git 数据源支持 http://（自建 GitLab 场景，2026-09-11）
+
+> 用户场景：自建 GitLab 常走 http://（内网无 TLS），此前 `validate_url` 仅放行 https。
+
+- `validate_url`：`http://` 与 `https://` 均放行（SSH 仍不支持）；内嵌凭证拒绝规则对两 scheme 一致（authority 含任何 `@` 即拒，path 含 `@` 不误杀）。
+- `build_clone_url`：凭证注入时**保留原 scheme**（此前硬编码 `https://` 前缀剥离，http URL 会拼出错误 scheme）。
+- 单测：`rag::git::url_tests` 3 个（两 scheme 放行/凭证拒绝/凭证注入 scheme 保留 + percent-encoding），`cargo test --lib` 37 passed。
+- **http 明文 basic-auth 放行（2026-09-14 补充）**：gix-transport 默认拒绝在 http:// 上发凭证（`Will not send credentials in clear text over http`，`add_basic_auth_if_present` 的 `http-client-insecure-credentials` 守卫）——自建 GitLab/Gitea 走 http + 账密必失败。Cargo.toml 直接依赖 `gix-transport = { version = "0.48", features = ["http-client-insecure-credentials"] }`（与 gix 同版本 feature unification 生效，`cargo tree` 已验证），放行明文凭证。风险注记：仅用户显式配置 http 数据源时才可能走此路径；https 不受影响。
+- **http→https 重定向凭证剥离修复（2026-09-16 补充，用户真机 git.haidaifu.net）**：该服务器对 http 返回 308→https。gix/reqwest 在**跨 scheme 重定向时剥离 Authorization 头**（http 请求带的凭证到 https 跟随请求时被丢），gix 重试仍从原 http URL 发起 → 死循环 → 报 `Didn't find smart protocol header`/`InvalidCredentials`（本地 git CLI 能用是因为 curl 会对最终 URL 重新认证）。修复：新增 `canonicalize_url`（reqwest 探测 `/info/refs` 跟随重定向取最终 URL，**先升级 scheme 再 hash + clone**，10 分钟 per-origin 缓存，探测失败非致命回退原 URL），接入 `clone_to_temp` / `refresh_persistent` / `refresh_registered` 三入口——canonicalize 在 hash 之前，保证 http/https 两种写法落到同一存储身份。单测 `canonicalize_upgrades_http_redirect`（真实网络：https 直连不变、http 升级为 https、ssh 原样）。`cargo test --lib` **42 passed**。
+
+#### 3.17.11 匿名拉取认证仓库无报错修复（2026-09-11）
+
+> 用户反馈：无账密访问需认证的 http 仓库，拉取失败但前端**没有**内联认证提示（只显示普通失败，不展开账密区）。
+
+- **根因**（读 gix-protocol 0.51 handshake 源码确认）：gix 收到 401 后**不直接抛 401**，而是走 credential-helper 重试流程——helper 返回 None（我们没有配 helper，凭证来自表单）→ 抛 `EmptyCredentials`，错误链文本是 **"No credentials were returned at all as if the credential helper isn't functioning unknowingly"**，不含任何 "401"/"unauthorized" 字样 → `is_auth_error` 短语全部不命中 → 误判为普通失败。
+- **修复**：`is_auth_error` 补 5 条 gix 凭证流程短语（`no credentials were returned` / `credential helper isn't functioning` / `credentials provided` + `were not accepted by the remote`（InvalidCredentials，凭证错误重试后仍 401）/ `failed to obtain credentials`）。
+- **过期警示清理**：`GIT_REFRESH_ERRORS` 记录最近一次刷新失败；`refresh_git_repo` 成功即清该仓库记录；`git_pick_inner` 成功拉取（clone + 账密入本地凭证文件）后调 `service::clear_git_source_error_for(url)` 立即清记录，避免进度弹框图标在下次成功刷新前一直显示过期警示。
+- 新增单测 `is_auth_error_matches_gix_credential_flow`（EmptyCredentials/InvalidCredentials/FailedToObtain 三文本命中 + 数字 URL 不误报）；`cargo test --lib` **38 passed**。
+
+#### 3.17.12 验证
+
+- `ORT_SKIP_DOWNLOAD=1 cargo check` 0 错 0 警；`cargo test --lib` 34 passed；`npm run build` ✓；`npx tsc --noEmit` 24 = 基线。
+- 版本：`1.0.35001 → 1.0.35003`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog **与 1.0.35003 合并为单文件 `doc/upgrade/1.0.35003.md`**（原 `1.0.35002.md` 已删——覆盖 1.0.35002 的数据源/树形功能与 1.0.35003 的 SSH/http 修复）。
+
+#### 3.17.13 Git 数据源支持 SSH 连接（2026-09-13）
+
+> 需求：RAG Git 数据源在 http/https 之外支持 SSH 远程。gix 0.73 原生支持 `Scheme::Ssh`（`gix-transport::blocking_io::ssh`，无需新增 Cargo feature），实现方式是 **spawn 系统 `ssh` 程序**——认证完全走本机 SSH 体系（key/ssh-agent/`~/.ssh/config`/known_hosts），现有账密表单 + 本地凭证文件对 SSH 不适用（key 路径）。
+
+**后端（`src-tauri/src/rag/git.rs`）**
+
+- `validate_url`：放行 `ssh://[user@]host[:port]/path.git` 与 SCP 风格 `[user@]host:path.git`（新增 `is_scp_style` helper：`:` 在 `/` 前且 `@` 在 `:` 前；**显式 user@ 必须**，否则 `host:path`/`C:\...` 本地路径有歧义被拒）。凭证拒绝规则分流：http(s) 任何 userinfo 都拒（凭证表单唯一路径）；SSH 的 `user@host` 是标准登录名**放行**，仅拒 `user:pass@`（ssh URL 不支持密码注入）。
+- `build_clone_url`：SSH 分支原样返回（无凭证注入）——即使表单误输账密也不进 URL，认证走系统 ssh key/agent。
+- `is_auth_error`：补 SSH 失败短语（`permission denied (publickey/password/keyboard-interactive`、`host key verification failed`、`could not read from remote repository`），SSH 认证失败同样映射 `GIT_AUTH_REQUIRED` 前端可感知。
+- **Pick 取消（2026-09-16）**：`PICK_ABORTS` per-canonical-URL notify 令牌表 + `register/signal/unregister_abort`；`clone_to_temp` 用 `tokio::select!` 抢占 clone 等待（阻塞 gix 线程无法中断 → 弃等 + 删临时目录，结果丢弃），PICK_LOCK 排队中也可短路；取消错误哨兵 `PICK_CANCELLED`（前端静默不清账密）。新命令 `cancel_rag_git_pick` + 前端 `cancelRagGitPick`（`/rag/cancel-git-pick` 路由）+ 拉取中「取消」按钮（i18n `gitCancelFetch` ×4）。
+- **SSH stderr 过滤 wrapper（关键修复）**：gix 的 `supervise_stderr` 逐行解析 ssh stderr，任何含 `Connection to ` 的行被判为连接错误（`line_to_err` 启发式）——但 `nc -v`（`~/.ssh/config` ProxyCommand 常见写法，如 GitHub 走 443 代理）成功时输出 `Connection to ssh.github.com port 443 [tcp/https] succeeded!`，**每次握手必死**（scratch crate 独立复现，错误链 caused by 就是该行）。修复：`ensure_ssh_stderr_wrapper()` 写 POSIX sh wrapper 到 `$TMPDIR/mcphub-rag-git-ssh/ssh`（fd-swap：`{ ssh "$@" 2>&1 1>&3 | sed -l/-u -e '/Connection to .* succeeded/d' >&2; } 3>&1`，Darwin 用 BSD sed `-l`、其余 GNU `-u` 行缓冲保错误即时分类），经 `gix::open::Options::config_overrides(["core.sshCommand=..."])` 注入 clone——`remote.connect()` 会从 repo config 读 `core.sshCommand`（已读 gix 0.73 `ssh_connect_options` 源码确认链路）。**文件名必须叫 `ssh`**：gix 按 basename 推导 ProgramKind，非 ssh 名降级 Simple kind（不能传端口、丢错误分类）。Windows 跳过（无 POSIX shell；`nc -v` ProxyCommand 非 Windows 模式）。
+- 单测 +2：`validate_accepts_ssh_forms`（两写法/端口/SCP 判定/本地路径拒绝）、`validate_rejects_ssh_embedded_password`；`build_clone_url_preserves_scheme` 补 2 断言（SSH 带表单凭证仍原样返回）；`is_auth_error` 补 3 个 SSH 文本断言。
+- 真机冒烟（octocat/Hello-World，本机 ssh key + ProxyCommand nc -v 环境）：`git@host:path` 与 `ssh://` 两写法 clone 均成功（临时测试跑完已删）。
+
+**前端（`frontend/src/pages/RagPage.tsx` + locales 四语言）**
+
+- 新增 `isSshGitUrl` helper（与后端同口径）；Git 表单：SSH 地址时**隐藏账密输入行**（显示 `gitSshHint` 提示：认证走本机 key/agent，支持两种写法）、底部提示行同步切换、placeholder 更新为含 ssh 写法。
+- `handlePickGit`：`GIT_AUTH_REQUIRED` 且 URL 为 SSH 时**不展开账密区**（无意义），改引导文案 `gitSshAuthFailed`（检查 SSH key / ssh-agent / known_hosts / `ssh -T git@host` 验证）。
+- locales：`gitSshHint`/`gitSshAuthFailed` 2 新键 ×4 + `gitRepoUrl` placeholder 更新 ×4（rag keys 289→291）。
+
+**SSH 密码认证支持（2026-09-14 补充，用户真机反馈：git.haidaifu.net 为密码认证，无 TTY 无法输密码）**
+
+- `ensure_ssh_stderr_wrapper` 升级为 `ensure_ssh_wrapper(password)`：每 clone 一个**唯一临时目录**（并发 clone 账密不同不互踩，0700），内含
+  1. stderr 过滤 wrapper（原 `nc -v` 修复保留）；
+  2. `StrictHostKeyChecking=accept-new`（spawn 的 ssh 无 TTY，交互确认 host key 必挂，改为自动接受新主机键——已在 wrapper 内注释说明）；
+  3. 密码非空时另装 **SSH_ASKPASS helper**（`askpass.sh`，**0700 必须可执行**——首版 0600 导致 ssh `exec` 失败输出 "Permission denied" 被 gix 误判 InvalidCredentials，真机踩坑）：**无条件应答所有 prompt**（服务器 kbdint 提示词可能本地化如「密码:」，`*assword*` 文本守卫会静默漏答；本受控调用中交互 prompt 只可能是密码类——host key 已 accept-new、用户名来自 URL），密码经单引号转义嵌入（shell probe 验证 round-trip），`SSH_ASKPASS_REQUIRE=force` + `DISPLAY=dummy:0`（兼容旧 OpenSSH）。clone 结束 Drop guard 删整个目录（密码不落盘残留）。
+  4. **诊断日志**：wrapper 把 ssh stderr 全量 tee 到 `${TMPDIR:-/tmp}/mcphub-ssh-debug.log`，askpass 把收到的 prompt 文本（**不含密码**）追加到同一日志——密码认证连不上时看这个文件即可定位（服务器拒绝原因 / askpass 是否被调用）。
+  5. **setsid TTY 脱离 + 无密码 BatchMode（2026-09-15 补充，真机反馈：无账密时页面永远「正在拉取中」+ 控制台出现 `git@host's password:` 交互提示）**：两层修复——①wrapper 用 `setsid`（存在时）把 ssh 脱离控制终端，`/dev/tty` 打不开 → ssh 回落 askpass；②**不填密码时无 askpass 可装**，ssh 仍会 open `/dev/tty` 要密码（挂起 + 控制台提示），故无密码时给 ssh 追加 `-o BatchMode=yes` 立即失败（`Permission denied` → GIT_AUTH_REQUIRED → 前端弹账密表单）；有密码时不加 BatchMode（会禁用 askpass 查询），统一 `-o NumberOfPasswordPrompts=1` 错密码快速失败。真机端到端验证（git.haidaifu.net）：无密码 BatchMode 路径 0.7s 快速失败零 TTY 泄露；错密码 askpass 路径 3.3s 快速失败零 TTY 泄露。
+- `build_clone_url` SSH 分支：表单用户名是 ssh **登录名权威来源**——URL 无 userinfo 时注入，URL 带惯例 `git@` 时**覆盖**（真机反馈：git.haidaifu.net 密码认证，登录账户是用户自己的账号而非 `git`，连 `git` + 用户密码必被拒，gix 报 `InvalidCredentials: Credentials provided ... were not accepted by the remote`）；密钥登录（GitHub）表单留空用户名即不受影响。ssh:// 带端口 userinfo swap 保留端口；SCP 风格同规则。
+- `clone_blocking`/`clone_async` 增加 `ssh_password` 参数（clone_to_temp / refresh_persistent 透传表单密码）；refresh_registered 走本地凭证文件自动适用（SSH 密码仓库的更新检查免重输）。
+- Windows：wrapper 整体跳过（无 POSIX shell；旧代码在 Windows 返回了**未写盘的路径**是 bug，已改为返回 None）。Windows 下 SSH 仅支持 key 认证（无 askpass）。
+- 前端：SSH 地址**同样显示账密输入**（密码认证服务器直接填）；`handlePickGit` SSH 认证失败也展开账密区；`gitSshHint`/`gitSshAuthFailed` 文案更新为「key 优先 + 密码可用」双语义（×4 语言）。
+- 单测：`ssh_wrapper_renders_filter_and_askpass`（无密码无 askpass / 有密码 askpass 0600 + 单引号转义 `p@ss'w` round-trip + prompt 守卫）；GitHub SSH 冒烟回归（key 路径 + wrapper）通过（临时测试已删）。`cargo test --lib` **41 passed**。
+
+**http 路径 TTY 提示修复（2026-09-15 补充，用户反馈：http 导入时控制台出现密码输入提示）**：gix 的 credential cascade 走空（http 401 + 无/错凭证）后调 `gix-prompt` **直接 open `/dev/tty`** 向用户要账密——提示打到 app 控制台并阻塞。修复：clone 的 `config_overrides` 加 `gitoxide.credentials.terminalPrompt=false`（gix 的 `Mode::Disable` 只禁 TTY 交互、askpass 程序不受影响；http 与 SSH 双路径生效）→ cascade 失败即快速返回 → `GIT_AUTH_REQUIRED` → 前端表单提示账密。端到端验证（GitHub 对不存在私有 repo 返回 401）：1.4s 快速失败、分类为 auth error、零 TTY 交互（临时测试已删）。
+
+**验证**：`cargo test --lib` **41 passed**；`cargo check` 0 错 0 警；`npm run build` ✓；`npx tsc --noEmit` 24 = 基线。版本 `1.0.35002 → 1.0.35003`（四源 + Cargo.lock）；changelog `doc/upgrade/1.0.35003.md`。
+
+#### 3.17.15 文件夹级联勾选（主页树形 + 导入弹框，2026-09-17）
+
+> 用户需求：RAG 主页文件列表与导入的文件列表中，**文件夹可以被勾选，勾选则级联选中其下所有文件（含子文件夹内的文件）**。文件夹本身无独立持久状态——勾选是纯级联语义（子树文件全选/全不选）。
+
+- **主页树形列表**（`frontend/src/components/ui/RagDocTree.tsx`）：
+  - props 新增 `selectedIds?: Set<string>`（与平铺列表共享同一勾选状态）+ `onToggleDocs?: (docs: RagDocInfo[]) => void`。
+  - 新增模块级 helper `collectDocs(node)`：深度优先收集目录子树内全部文档（与既有 `countDocs` 同遍历口径）；新增 `DirCheckbox` 组件（`hub-checkbox`，`ref` 设 `el.indeterminate` 支持半选态，`onClick` stopPropagation 避免触发整行折叠/展开）。
+  - **目录行（DirNode）** 头部最左侧渲染 checkbox：checked = 子树文档全选；indeterminate = 部分选中；onChange → `onToggleDocs(collectDocs(node))`。数据源（kind）节点行同样加 checkbox（`src.docs` 全量）。
+  - DirNode props 透传 `selectedIds`/`onToggleDocs`（两处递归调用点）。
+- **导入弹框**（`frontend/src/pages/RagPage.tsx`）：
+  - 新增 `ScanDirCheckbox` 组件（同 DirCheckbox 语义）。
+  - **树形目录头（ScanDirNode）**：最左侧 checkbox → `onToggleGroup(node.files)`（`node.files` 本就是子树全部文件）；**平铺分组头**：checkbox → `onToggleGroup(g.files)`。勾选态：`sel.length === files.length` 全选 / 部分选 → indeterminate。
+  - `toggleGroupSelected` 语义天然匹配 checkbox（全选中→清空，否则全选）。
+- **RagPage 接线**：新增 `toggleSelectDocs(docs)`（子树全选→全部取消，否则全部选中；updater 内 `new Set(prev)` 复制，遵守 Object.is 突变禁令）；`<RagDocTree>` 调用处传 `selectedIds` + `onToggleDocs`。
+- **验证**：`npx tsc --noEmit` 24 = 基线（零新增）；`npm run build` 通过。Rust 无改动。
+- **导入弹框布局重设计（9-18 定稿）**：全新「导入配置分区」卡片（`hub-bg-2` + 边框圆角），内部固定顺序 = 数据源切换 → 导入方式（file/folder）→ 选择入口 + 递归（file/folder）→ **Git 表单**（git）→ 自动同步开关组（新增[folder/git] + 删除[file/folder/git] 并排一行）；格式说明文案（uploadHint）+ OCR 预检提示放卡片下方，其后扫描占位/扫描树/标签/footer。⚠️ **事故与恢复**：重做过程中用 `join('\n')` 整文件行手术切错块边界，随后误执行 `git checkout -- RagPage.tsx` 把 9 天未提交改动还原到 HEAD（9-09）；**唯一完整恢复源 = Vite 构建 sourcemap 的 `sourcesContent`**（`dist/assets/RagPage-*.js.map` 保存构建时原始 TSX 源码，含 19:13 前全部改动），提取即完整还原（tsc 25 基线 + build ✓）。教训：①工作树有大量未提交改动时严禁 checkout/stash 丢弃；②vite sourcemap 是应急源码恢复源；③大范围 JSX 重组应小步替换 + 每步 tsc 验证。
+- **导入弹框底部「全选/清除」按钮移除（同日）**：footer 只保留「已选择 N / M 个文件」计数 + 取消 + 导入；组头/目录头的勾选框已覆盖批量选择语义（文件夹级联），顶部全选按钮冗余。`onSetAll` prop 保留（组头逻辑仍用）。
+- **单文件数据源纳入删除同步（同日，用户需求）**：`plan_source_sync` 末尾新增 file 源检测——`source.kind=="file"`（含 legacy 无 source 的文档）且 `original_path` 在磁盘上不存在 → 加入 removed（受「自动同步删除文件」开关控制；关闭时保留 + lostOriginal 徽章）。文件源无扫描/过滤环节，无需 folder/git 的双条件（扫描集 + 磁盘双查），仅「文件不存在」即判定；`!removed.iter().any(id)` 防与 folder root 重叠路径重复入列。tool 源（无 original_path）天然跳过。
+- **「自动同步删除文件」开关（同日，用户需求）**：删除同步从「始终运行」改为受控开关（默认开）——①RagSettings 加 `source_sync_remove_enabled`（serde default true，配置键 `sourceSyncRemoveEnabled`，deep-merge 持久化）；②`preview_batch_update` 与 `run_batch_update` 在开关关闭时 `sync_removed.clear()`（不删文档、确认弹框不显示「移除 N」）；③关闭时列表行沿用既有 `lostOriginal` ⚠️「原始丢失」徽章告警（判定独立于删除：original_path 不存在即亮，symlink/copy/git 通用）；④导入弹框设置区新增「自动同步删除文件」Switch（file/folder/git 三种数据源均显示，与「自动同步新增文件」并排一行；新增开关仅 folder/git 显示——file 数据源无目录可扫），inline fallback 文案（跟随既有开关模式）。开关组位置在**数据源分段切换行正下方**（格式提示文案之前）。注意 run/preview 两处 `sync_removed` 需 `mut`（E0596 曾踩）。
+- **批量进度弹框 Git 状态图标默认态修正（同日）**：右上角 Git 数据源状态按钮未查询时渲染 AlertTriangle（灰），用户误以为有错误——未查询态改为中性 CircleHelp；点击查询后无失败=绿勾、有失败=琥珀警告（语义不变，见 §3.17.9）。
+- **RAG 标题计数补齐（同日）**：RAG 页标题下方新增「N 篇文档」副标题（`hub-num` + `hub-sub`），与其他页面（提示词/资源/Skill）的标题计数样式一致；计数取 `docPagination.total`；i18n 新键 `pages.rag.docCount` ×4 语言。
+- **搜索栏计数移除（同日）**：Servers / Prompts / Resources / Skills / RAG 五个页面搜索栏右侧的「N/M」总数统计移除（信息价值低且挤占工具栏宽度）；RAG 移除的是工具栏计数 span（批量条计数此前已删）。
+- **样式修复（同日）**：批量勾选条/树形「展开收起」按钮出现时工具栏宽度不足——容器无 `flex-wrap` 且子项默认收缩，按钮被压缩致「批量添加标签/平铺/树形」等文字换行错乱。修复：工具栏容器加 `flex-wrap`；批量条、计数+视图切换组、展开收起按钮加 `flex-shrink-0`；全局 `.hub-btn` 加 `white-space: nowrap` + `flex-shrink: 0`（按钮文字永不换行）。**后续补充**：`flex-wrap` 导致平铺勾选时批量条整体换行——去掉换行需求不现实（窗口小必换），改为优先收缩可收缩项：文件名搜索卡片加 `min-w-[160px]`、TagSearchSelect 根加 `min-w-[150px] shrink`——宽度不足时先缩搜索区，仅在极窄窗口才换行；批量条不再单独换行。
+
+#### 3.17.14 导入弹框勾选冻结 / 树形空 / 模态点击穿透修复（2026-09-16）
+
+> 用户反馈三个交互问题：①文件行点击取消选中一次后，后续点击完全无响应；②文件夹扫描的树形视图空白（只有平铺有数据）；③RAG 关闭时导入弹框整体不可点击。
+
+**修复一：勾选状态 updater 重放丢失（根因修复）**
+- React 19 dev 模式（StrictMode）会把 `setState` 的 **updater 函数以不同 base 重放执行**。toggle 类 updater（`has ? delete : add`）以 `{b}` 重放 → `{}`，再以 `{}` 重放 → `{b}`——两次重放**相互抵消，更新静默丢失**，表现为「取消选中一次后，再点击毫无效果」。
+- **修复**（`RagPage.tsx`）：引入 `selectedRef`（与 state 同步的 ref），所有勾选变更先从 ref 读「最新已提交值」计算出**绝对新集合**，经统一入口 `applySelected(next)` 一次性写入（ref + setState）。绝对写入幂等，不受重放次数影响。全部勾选操作（单行/整组/清除组/全选/重置/合并扫描/handlePickFolder/handlePickGit/resetPickState）都改走该入口。
+- **同时禁用 StrictMode**（`main.tsx`）：桌面端开发不需要其副作用双重检查，注释说明原因。两道防线叠加。
+
+**修复二：文件夹扫描树形视图空白**
+- 根因：`scanTreeNodes` useMemo 只返回 `root.children`；扁平文件夹（文件 relPath='' 挂在 `root.rootFiles`）的文件从未被返回 → 树形视图空。
+- **修复**：根层级文件存在时前置一个虚拟「(根目录)」节点（key=`'__root__'`），并加入默认收起 effect 的依赖键。
+
+**修复四：取消勾选后行消失 → 后续点击「无效果」（2026-09-17，用户复测反馈）**
+- 根因：此前把「未勾选即隐藏」做进了列表渲染——树形 `prune` 把无已勾选文件的目录分支整个删除、虚拟根节点仅在有已勾选文件时渲染；平铺 `sel.length===0 return null` 隐藏整个分组。**取消勾选（尤其组内最后一个选中文件）后行/分支立即从 DOM 消失，用户无法再点击重新勾选**，感知为「第一次取消选中有效，后续点击无任何效果」。这不是 React 调度问题。
+- **修复**：删除 prune 与分组隐藏逻辑——扫描到的所有文件/分组**常显**（未勾选 = 弱化态灰字 + 空心图标，样式已有），虚拟根节点在 `root.rootFiles.length > 0` 时始终渲染。
+- **同修：平铺「全部收起」失效**：平铺分组折叠 key 用 `g.relPath`（根分组为 `''`），而 collapsed 集合存的是 `'__root__'`（树形节点 key）——key 不匹配导致根分组永远收不起来。修复：平铺分组折叠 key 归一化 `relPath || '__root__'`（渲染判断 + 点击 toggle 两处）；`toggleCollapse` 改为基于最新 state 的绝对值写入（不再用 updater 形式，与 applySelected 同源防重放抵消）。
+
+**修复五：勾选更新的真正根因——原地突变 Set + Object.is 吞更新（2026-09-17 第二轮深挖，生产构建无头复现钉死）**
+- 此前归因于「StrictMode updater 重放」不完整——生产构建（无 StrictMode、无 HMR、react 19.1.1/19.2.8 双版本实测）同样复现「第一次点击生效、后续全部无效」。
+- **完整排查链**（生产构建 + headless Chrome + React DevTools hook 注入）：handler 内状态每次都正确（ref/state 日志）→ render 计数器停在第一次更新 → 注入 `onCommitFiberRoot` 确认 commit 存在但不含变化 → 交替点击实验发现**更新总是「慢一拍」显现**（下一次任意无关 setState 时状态追上）→ fiber 检查发现 hook 的 `lastRenderedState` 已是新值但未触发渲染。
+- **根因**：`resolveSelected(prev)` 在 prev 非空时**返回原 Set 实例**，toggle 类操作（`delete`/`add`）**原地突变**该实例——而它同时是 React `useState` queue 里的 `lastRenderedState`。下次 dispatch 时 React 的 eager 优化比较 `Object.is(eagerState, currentState)`——**action 与 lastRenderedState 是同一个对象**，恒相等 → 更新被判定「无变化」**直接跳过，连调度都不发生**。第一次点击有效是因为全选哨兵物化时创建了新实例。
+- **修复**：所有变更路径先 `new Set(...)` **复制再增删**（`toggleFileSelected`/`toggleGroupSelected`/`clearGroupSelected`；`setAllSelected`/`mergeIntoScan`/`resetSelectedPaths` 本就新建/置 null 无需改），并加注释说明缘由。`toggleCollapse` 同步改为绝对值写入。
+- **教训**：**放进 setState 的对象绝不能与 React 内部持有的对象是同一实例且被原地突变**——`Object.is` 相等时 React 会合法地吞掉更新。可变对象（Set/Map/数组）作 state 必须不可变更新。
+- **验证**：生产构建 + headless 8 连击（3 文件 × 选中/取消交替）全部正确；平铺 Collapse all 生效；`tsc` 24=基线；build ✓。排查用临时代码（bridge/MiniTest/flushSync/dbg 日志/react 降级）全部还原。
+
+**修复三：RAG 禁用时模态点击穿透**
+- 根因：页面根容器 `disabled` 时带 `pointer-events-none`，模态（fixed 定位在其内部）被连坐——`elementFromPoint` 命中的是底层页面，所有点击静默丢失。
+- **修复**：`UploadDialog`（及批量更新等模态）根节点显式 `pointerEvents: 'auto'`。
+
+**注**：排查中还确认了一个无头测试环境伪影（502 请求风暴 + dev 双调用下 React 同步渲染偶发半途而废，无错误、无提交），不影响真实 Tauri 运行环境，未做处理。
+
+**验证**：`npx tsc --noEmit` 24 = 基线（零新增）；`npm run build` ✓；Rust 无改动。
+
 ---
 
 ---

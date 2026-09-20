@@ -49,6 +49,22 @@ pub struct RagSettings {
     /// [10, 65536] at read time (the upload cap is 64 MiB).
     #[serde(default = "default_doc_load_chunk_kb")]
     pub doc_load_chunk_kb: u32,
+    /// Auto-sync NEW files appearing in folder/git data sources during update
+    /// checks (batch/auto). Off (default) = only re-index the files that were
+    /// selected at import time; on = newly added source files are imported
+    /// automatically too (removal sync always runs).
+    #[serde(default)]
+    pub source_sync_add_enabled: bool,
+    /// Auto-remove docs whose source file vanished from the data source
+    /// during update checks. On (default) = vanished docs are deleted
+    /// automatically; off = docs are kept and only flagged "lost original"
+    /// in the UI.
+    #[serde(default = "default_source_sync_remove_enabled")]
+    pub source_sync_remove_enabled: bool,
+}
+
+fn default_source_sync_remove_enabled() -> bool {
+    true
 }
 
 fn default_vector_weight() -> f32 {
@@ -112,6 +128,8 @@ impl Default for RagSettings {
             auto_update_enabled: true,
             auto_update_interval_secs: 300,
             doc_load_chunk_kb: 200,
+            source_sync_add_enabled: false,
+            source_sync_remove_enabled: true,
         }
     }
 }
@@ -177,6 +195,23 @@ pub struct RagDocInfo {
     /// the user view its imported copy.
     #[serde(default)]
     pub content_available: bool,
+    /// Data-source display fields (kind + label + root + rel dir chain +
+    /// git url/branch), filled by `classify_source` at read time. Legacy
+    /// docs (no `source` in meta) classify as kind "file" — the tree view
+    /// groups them under the "file pick" node. `source_kind` is one of
+    /// "file" | "folder" | "git" | "tool".
+    #[serde(default)]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_label: String,
+    #[serde(default)]
+    pub source_root: String,
+    #[serde(default)]
+    pub rel_path: String,
+    #[serde(default)]
+    pub git_url: String,
+    #[serde(default)]
+    pub git_branch: String,
 }
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -225,6 +260,19 @@ pub struct RagDoc {
     /// "已加载 X / 全部 Y KB" without an extra round-trip.
     #[serde(default)]
     pub content_total_bytes: u64,
+    /// Data-source display fields — same semantics as `RagDocInfo`.
+    #[serde(default)]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_label: String,
+    #[serde(default)]
+    pub source_root: String,
+    #[serde(default)]
+    pub rel_path: String,
+    #[serde(default)]
+    pub git_url: String,
+    #[serde(default)]
+    pub git_branch: String,
 }
 
 /// A search result fragment.
@@ -313,6 +361,53 @@ pub struct RagScanFile {
     pub name: String,
     /// File size in bytes (0 if metadata failed — the file is still listed).
     pub size: u64,
+    /// Path relative to the scan root ("" for root-level files). Carried into
+    /// each imported doc's `DocSource.rel_path` so the tree view can place it
+    /// under the right directory chain. Empty for multi-file picks.
+    #[serde(default)]
+    pub rel_path: String,
+}
+
+/// Git source remote info attached to a doc's `DocSource` (kind = "git").
+/// Auth credentials are deliberately NOT stored here — they live in the
+/// app's local credential file.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GitSource {
+    pub url: String,
+    pub branch: Option<String>,
+    /// Commit sha at the time of the import/sync that produced this doc
+    /// (display only; update detection re-fetches and re-hashes files).
+    pub commit: Option<String>,
+    /// Sub-directory inside the repo the doc came from (reserved; not
+    /// exposed in the UI yet — the whole repo is scanned).
+    pub subdir: Option<String>,
+}
+
+/// Where a document came from ("data source"). Serialized into the doc's
+/// `{id}.meta` JSON (no DB column — RAG docs don't live in DB tables). Legacy
+/// metas without a `source` field deserialize as `None` and are classified as
+/// kind "file" at read time (`classify_source`), so the tree view groups all
+/// pre-existing docs under the "file pick" source node.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DocSource {
+    /// "file" | "folder" | "git" | "tool"
+    pub kind: String,
+    /// Display label for the source node in the tree view: file = parent
+    /// dir (or "文件选择" fallback), folder = chosen folder path, git =
+    /// `url @ branch`, tool = "工具创建".
+    #[serde(default)]
+    pub label: String,
+    /// Source root: absolute dir for file/folder, clone dir for git.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Directory chain relative to `root` ("/"-separated, "" = root level).
+    #[serde(default)]
+    pub rel_path: Option<String>,
+    /// Present only when kind = "git".
+    #[serde(default)]
+    pub git: Option<GitSource>,
 }
 
 /// One folder group in a recursive folder-scan result: the folder's path
@@ -336,6 +431,10 @@ pub struct RagScanGroup {
 pub struct RagFolderScan {
     /// Absolute path of the scanned folder ("" for multi-file picks).
     pub root: String,
+    /// HEAD commit sha of the scanned git clone (git data source only; None
+    /// for file/folder scans). Display-only — update detection is md5-based.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// Number of sub-directories that were skipped by folder_ignore.json
     /// (recursive scans only; 0 for flat scans).
     pub skipped_dirs: u32,
@@ -390,6 +489,10 @@ pub struct RagUpdateCheck {
     /// True iff symlink method + original_path missing (UI: only manual-upload
     /// is offered).
     pub lost_original: bool,
+    /// Git source refresh failure for this doc's repo (address changed /
+    /// credentials revoked). None = repo refreshed fine or doc isn't git.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_error: Option<GitSourceError>,
 }
 
 /// Batch-update preview: classification counts over all docs, shown in the
@@ -408,4 +511,35 @@ pub struct BatchPreview {
     /// Docs whose original_path is missing on disk (skipped; user can manually
     /// upload to overwrite).
     pub lost: u32,
+    /// Files detected in folder/git sources that no doc references yet ->
+    /// will be imported by the batch (source-level sync).
+    pub added: u32,
+    /// Docs whose recorded original_path is under a KNOWN source root
+    /// (folder/git) but no longer present in a fresh scan of that source ->
+    /// will be deleted by the batch (source-level sync).
+    pub removed: u32,
+    /// Per-repo refresh failures (address changed / credentials revoked /
+    /// network down). `label` = repo url @ branch, `auth` = true means the
+    /// fix is credentials (re-pick in the import dialog), false = network /
+    /// not-found (address may have moved). Empty when every repo refreshed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_errors: Vec<GitSourceError>,
+}
+
+/// One git repo's refresh failure, surfaced to the UI so the user can fix the
+/// source (re-enter credentials / update the URL) instead of silently getting
+/// stale md5 checks.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSourceError {
+    /// Repo URL (no credentials).
+    pub url: String,
+    /// Branch as recorded on the source (may be empty = remote default).
+    pub branch: String,
+    /// True = auth problem (401/403/credentials) -> re-enter credentials;
+    /// false = other (not found / network) -> URL may have changed or be
+    /// unreachable.
+    pub auth: bool,
+    /// Short error detail (already stripped of the GIT_AUTH_REQUIRED prefix).
+    pub message: String,
 }

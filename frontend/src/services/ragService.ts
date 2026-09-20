@@ -8,6 +8,7 @@ import {
   RagPickedFile,
   RagSettings,
   RagSearchResult,
+  GitSourceError,
   RagStatus,
   RagTagStat,
   RagTagPage,
@@ -17,6 +18,7 @@ import {
   RagUpdateCheck,
   RagOcrStatus,
   BatchPreview,
+  DocSource,
   ApiResponse,
 } from '@/types';
 
@@ -130,9 +132,41 @@ export const uploadRagDoc = async (
   filePath: string,
   tags: string[] = [],
   method: 'symlink' | 'copy' = 'symlink',
+  source?: DocSource,
 ): Promise<void> => {
-  const response: ApiResponse = await apiPost('/rag/docs/upload', { filePath, tags, method });
+  const response: ApiResponse = await apiPost('/rag/docs/upload', { filePath, tags, method, source: source ?? null });
   if (!response.success) throw new Error(response.message || 'Failed to upload RAG doc');
+};
+
+/**
+ * Git data source: clone (first time) or refresh the repo into the app-data
+ * clone dir, then scan it with the same candidate rules as the folder picker.
+ * `username`/`password` are optional (public repos pull anonymously). Throws
+ * an `GIT_AUTH_REQUIRED:`-prefixed error when the remote demands credentials.
+ */
+export const pickRagGitRepo = async (
+  url: string,
+  branch?: string,
+  username?: string,
+  password?: string,
+  depth: number = 1,
+): Promise<RagFolderScan> => {
+  const response: ApiResponse<RagFolderScan> = await apiPost('/rag/pick-git', {
+    url,
+    branch: branch ?? '',
+    username: username ?? '',
+    password: password ?? '',
+    depth,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to fetch git repo');
+  return response.data || { root: '', skippedDirs: 0, skippedFiles: 0, groups: [], truncated: false };
+};
+
+/** Cancel an in-flight git pick/clone (the "取消" button). The pending
+ *  pickRagGitRepo promise then rejects with a PICK_CANCELLED error. */
+export const cancelRagGitPick = async (url: string): Promise<boolean> => {
+  const response: ApiResponse<boolean> = await apiPost('/rag/cancel-git-pick', { url });
+  return response.success ? !!response.data : false;
 };
 
 /** Delete a document: removes its files + vector DB records. For "symlink"
@@ -185,7 +219,15 @@ export const checkRagUpdate = async (id: string): Promise<RagUpdateCheck> => {
 export const previewBatchUpdate = async (): Promise<BatchPreview> => {
   const response: ApiResponse<BatchPreview> = await apiPost('/rag/docs/batch-preview', {});
   if (!response.success) throw new Error(response.message || 'Failed to preview batch update');
-  return response.data ?? { total: 0, toUpdate: 0, skipped: 0, lost: 0 };
+  return response.data ?? { total: 0, toUpdate: 0, skipped: 0, lost: 0, added: 0, removed: 0 };
+};
+
+/** Last recorded git-source refresh failures (no network I/O). Backs the
+ *  batch-update progress dialog's warning icon (click -> error list). */
+export const getGitSourceErrors = async (): Promise<GitSourceError[]> => {
+  const response: ApiResponse<GitSourceError[]> = await apiGet('/rag/git-errors');
+  if (!response.success) throw new Error(response.message || 'Failed to query git source errors');
+  return response.data ?? [];
 };
 
 /** OCR capability probe: upload-dialog pre-flight + the OCR-missing failure
@@ -279,6 +321,8 @@ export const getRagSettings = async (): Promise<RagSettings> => {
       autoUpdateEnabled: true,
       autoUpdateIntervalSecs: 300,
       docLoadChunkKb: 200,
+      sourceSyncAddEnabled: false,
+      sourceSyncRemoveEnabled: true,
     }
   );
 };

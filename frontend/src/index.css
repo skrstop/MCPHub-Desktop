@@ -91,7 +91,7 @@
 .hub-tag {
   display: inline-flex;
   align-items: center;
-  padding: 1px 7px;
+  padding: 2px 8px;
   border-radius: 5px;
   font-size: 11px;
   color: var(--hub-ink-2);
@@ -143,6 +143,8 @@
   gap: 6px;
   height: 30px;
   padding: 0 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: 7px;
   border: 1px solid var(--hub-line);
   background: var(--hub-surface);
