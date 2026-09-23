@@ -817,6 +817,16 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       const b = body as { url?: string } | null;
       return { command: 'cancel_rag_git_pick', args: { url: b?.url ?? '' } };
     }
+    // POST /rag/import-session/begin|end — bracket the frontend upload loop.
+    // While the session is active the backend defers git-source refreshes +
+    // the auto-update tick (no clone-swap racing per-file imports) and can
+    // request a cancel when the window is closed mid-import.
+    if (segs[1] === 'import-session' && m === 'POST') {
+      return {
+        command: segs[2] === 'end' ? 'end_rag_import_session' : 'begin_rag_import_session',
+        args: {},
+      };
+    }
     // POST /rag/docs/upload — upload a single file by disk path (backend reads
     // bytes from disk + detects encoding; no base64/JSON byte transfer). `method`
     // selects the import method: "symlink" (default — record original_path, no

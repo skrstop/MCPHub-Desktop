@@ -552,6 +552,9 @@ export interface RagDocPage {
 export interface RagPickedFile {
   path: string;
   name: string;
+  /** Bytes (0/undefined if unknown — e.g. single-file picks that skipped the
+   *  folder scan). Used by the import overlay to show a "large file" hint. */
+  size?: number;
   /** Data-source provenance for this file (kind/label/root/relPath/git) —
    *  built by the Upload dialog from the active data source + scan group.
    *  Omitted on legacy paths (backend classifies as "file"). */

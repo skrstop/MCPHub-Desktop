@@ -420,6 +420,23 @@ impl VectorDb {
         Ok(())
     }
 
+    /// Total vector rows in the table. Used by the startup consistency check:
+    /// metas claiming chunks while this returns 0 means the vector data was
+    /// lost (dir wiped / corrupted) while the doc list stayed — every listed
+    /// doc MUST be vector-searchable, so that state triggers a full reindex.
+    pub async fn count_rows(&self) -> Result<usize> {
+        let table = self
+            .conn
+            .open_table(TABLE_NAME)
+            .execute()
+            .await
+            .map_err(|e| anyhow!("open table: {}", e))?;
+        table
+            .count_rows(None)
+            .await
+            .map_err(|e| anyhow!("count rows: {}", e))
+    }
+
     /// Keyword search: return chunks whose `chunk_text` contains any of the
     /// query terms (case-insensitive LIKE). `distance` is 0.0 (the service
     /// scores keyword hits by term frequency, not by vector distance).

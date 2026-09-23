@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Download, Upload, AlertCircle, X } from 'lucide-react';
+import { Plus, Download, Upload, AlertCircle, X, RefreshCw } from 'lucide-react';
 import { Group } from '@/types';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useServerData } from '@/hooks/useServerData';
@@ -36,6 +36,15 @@ const GroupsPage: React.FC = () => {
   const [showTemplateExport, setShowTemplateExport] = useState(false);
   const [showTemplateImport, setShowTemplateImport] = useState(false);
 
+  // 顶部「刷新」按钮（同服务器页）。
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const handleRefresh = () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    triggerRefresh();
+    setTimeout(() => setIsRefreshing(false), 600);
+  };
+
   const handleDeleteGroup = async (groupId: string) => {
     const result = await deleteGroup(groupId);
     if (!result || !result.success) {
@@ -64,6 +73,10 @@ const GroupsPage: React.FC = () => {
           </button>
           <button className="hub-btn primary" onClick={() => setShowAddForm(true)}>
             <Plus size={13} /> {t('groups.add')}
+          </button>
+          <button className="hub-btn" onClick={handleRefresh} disabled={isRefreshing} aria-label={t('common.refresh')}>
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+            {t('common.refresh')}
           </button>
         </div>
       </div>

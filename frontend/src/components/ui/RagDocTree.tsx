@@ -1,6 +1,8 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronsDownUp, ChevronsUpDown, FileText, FolderOpen, FolderTree, GitBranch, Globe, Wrench } from 'lucide-react';
+import { fileIcon } from '@/utils/fileIcon';
+import { ChevronDown, ChevronsDownUp, ChevronsUpDown, FileText, FolderOpen, FolderTree, Globe, Wrench } from 'lucide-react';
+import GitIcon from '@/components/icons/GitIcon';
 import { RagDocInfo } from '@/types';
 
 /**
@@ -178,9 +180,10 @@ const RagDocTree = React.forwardRef<RagDocTreeHandle, {
 
   const kindIcon = (kind: string, size = 13) => {
     const style = { color: 'var(--hub-ink-3)', flexShrink: 0 };
-    if (kind === 'git') return <GitBranch size={size} style={style} />;
+    if (kind === 'git') return <GitIcon width={size} height={size} style={{ flexShrink: 0 }} />;
     if (kind === 'folder') return <FolderOpen size={size} style={style} />;
     if (kind === 'tool') return <Wrench size={size} style={style} />;
+    if (kind === 'file') return fileIcon('', size);
     return <FileText size={size} style={style} />;
   };
 
@@ -240,7 +243,7 @@ const RagDocTree = React.forwardRef<RagDocTreeHandle, {
                   className="hub-tag flex-shrink-0 inline-flex items-center gap-0.5"
                   style={{ fontSize: 10, color: 'var(--hub-ink-3)' }}
                 >
-                  {src.kind === 'git' ? <GitBranch size={10} /> : <FolderOpen size={10} />}
+                  {src.kind === 'git' ? <GitIcon width={10} height={10} /> : <FolderOpen size={10} />}
                   {src.kind === 'git'
                     ? t('pages.rag.dataSourceGit', 'Git')
                     : t('pages.rag.dataSourceFolder', '文件夹')}
@@ -334,11 +337,12 @@ const DirNode: React.FC<{
       </div>
       {!isCollapsed && (
         <div style={{ paddingLeft: 14 }}>
-          {node.children.filter((c) => !c.doc).map((c) => (
-            <DirNode key={c.name} node={c} path={dirPath} sourceKey={sourceKey} collapsed={collapsed} onToggle={onToggle} forceExpanded={forceExpanded} override={override} kindIcon={kindIcon} renderRow={renderRow} depth={depth + 1} selectedIds={selectedIds} onToggleDocs={onToggleDocs} />
-          ))}
+          {/* 本目录直属文档在前、子目录在后（文件管理器惯例，与导入弹框扫描树一致）。 */}
           {node.children.filter((c) => c.doc).map((c) => (
             <React.Fragment key={c.doc!.id}>{renderRow(c.doc!)}</React.Fragment>
+          ))}
+          {node.children.filter((c) => !c.doc).map((c) => (
+            <DirNode key={c.name} node={c} path={dirPath} sourceKey={sourceKey} collapsed={collapsed} onToggle={onToggle} forceExpanded={forceExpanded} override={override} kindIcon={kindIcon} renderRow={renderRow} depth={depth + 1} selectedIds={selectedIds} onToggleDocs={onToggleDocs} />
           ))}
         </div>
       )}

@@ -70,6 +70,18 @@ fn persistent_repo_dir(app: &tauri::AppHandle, repo_hash: &str) -> Result<PathBu
 
 /// Public accessor for the persistent clone dir (the source-sync scan uses
 /// it to detect files added/removed in a repo). `None` on app-data errors.
+/// Persistent clone dir for a RAW url: canonicalizes first (http->https
+/// redirect probe etc.), then hashes — the same identity `refresh_persistent`
+/// / `clone_to_temp` use. Callers MUST go through this instead of hashing the
+/// raw url themselves, or they will miss the clone dir whenever the canonical
+/// form differs from what the frontend stored (e.g. http repos behind a
+/// redirect) and silently skip add/remove sync for that source.
+pub async fn persistent_repo_dir_for_url(app: &tauri::AppHandle, url: &str) -> Option<PathBuf> {
+    let c = canonicalize_url(url).await;
+    let hash = repo_hash(&c);
+    persistent_repo_dir_public(app, &hash)
+}
+
 pub fn persistent_repo_dir_public(app: &tauri::AppHandle, repo_hash: &str) -> Option<PathBuf> {
     persistent_repo_dir(app, repo_hash).ok()
 }
@@ -1032,7 +1044,7 @@ pub fn ensure_persisted(app: &tauri::AppHandle, repo_hash: &str, temp_dir: &Path
 /// (prefix swap by repo hash dir). Returns None when `path` isn't under the
 /// temp root. Used by the upload command so `original_path` recorded in doc
 /// metas points at the persistent copy (survives temp cleanup).
-pub fn map_temp_to_persistent(app: &tauri::AppHandle, path: &str) -> Result<Option<String>> {
+pub fn map_temp_to_persistent(app: &tauri::AppHandle, path: &str) -> Result<Option<(String, String)>> {
     let temp_root = temp_root();
     let p = PathBuf::from(path);
     let Ok(rel) = p.strip_prefix(&temp_root) else {
@@ -1050,7 +1062,7 @@ pub fn map_temp_to_persistent(app: &tauri::AppHandle, path: &str) -> Result<Opti
     } else {
         persisted.join(rest)
     };
-    Ok(Some(mapped.to_string_lossy().into_owned()))
+    Ok(Some((hash, mapped.to_string_lossy().into_owned())))
 }
 
 /// Update-stage fetch into the **persistent** dir: re-clone to

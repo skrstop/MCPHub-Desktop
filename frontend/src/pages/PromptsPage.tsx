@@ -4,7 +4,7 @@ import { BuiltinPrompt, PromptArgument } from '@/types';
 import { useBuiltinPromptData } from '@/hooks/useBuiltinPromptData';
 import { searchBuiltinPrompts } from '@/services/builtinPromptService';
 import { useAuth } from '@/contexts/AuthContext';
-import { Edit, Trash, Plus, MessageSquare, X, ChevronDown, Search } from 'lucide-react';
+import { Edit, Trash, Plus, MessageSquare, X, ChevronDown, Search, RefreshCw } from 'lucide-react';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { StatusDot } from '@/components/ui/StatusDot';
 import Pagination from '@/components/ui/Pagination';
@@ -255,7 +255,17 @@ const PromptsPage: React.FC = () => {
     addPrompt,
     editPrompt,
     removePrompt,
+    triggerRefresh: refreshPrompts,
   } = useBuiltinPromptData();
+
+  // 顶部「刷新」按钮（同服务器页）。
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const handleRefresh = () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    refreshPrompts();
+    setTimeout(() => setIsRefreshing(false), 600);
+  };
 
   const [showForm, setShowForm] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<BuiltinPrompt | null>(null);
@@ -358,11 +368,17 @@ const PromptsPage: React.FC = () => {
             <span className="hub-num">{prompts.length}</span> {t('nav.prompts').toLowerCase()}
           </p>
         </div>
-        {isAdmin && (
-          <button onClick={() => setShowForm(true)} className="hub-btn primary">
-            <Plus size={13} /> {t('builtinPrompts.add')}
+        <div className="flex gap-2">
+          <button onClick={handleRefresh} className="hub-btn" disabled={isRefreshing} aria-label={t('common.refresh')}>
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+            {t('common.refresh')}
           </button>
-        )}
+          {isAdmin && (
+            <button onClick={() => setShowForm(true)} className="hub-btn primary">
+              <Plus size={13} /> {t('builtinPrompts.add')}
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (

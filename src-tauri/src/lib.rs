@@ -368,6 +368,14 @@ pub fn run() {
             // Minimize to tray on close instead of quitting
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                // A RAG import in progress must NOT keep grinding in the
+                // hidden webview (the frontend upload loop survives a window
+                // hide): ask it to stop at the next file boundary. Only the
+                // files that actually finished importing stay in the doc
+                // list; the rest are left un-imported for the user to retry.
+                if rag::service::import_session_active() {
+                    rag::service::request_import_cancel(window.app_handle());
+                }
                 let _ = window.hide();
             }
         })
@@ -518,6 +526,8 @@ pub fn run() {
             commands::rag::pick_rag_git_repo,
             commands::rag::cancel_rag_git_pick,
             commands::rag::upload_rag_doc,
+            commands::rag::begin_rag_import_session,
+            commands::rag::end_rag_import_session,
             commands::rag::update_rag_doc,
             commands::rag::delete_rag_doc,
             commands::rag::rag_search_command,

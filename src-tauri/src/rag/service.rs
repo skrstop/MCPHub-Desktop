@@ -26,7 +26,7 @@ use crate::models::rag::{
     RagScanGroup, RagSearchResult, RagSettings, RagStatus, RagDocPage, RagTagPage, RagTagStat,
     RagUpdateCheck,
 };
-use crate::rag::chunker::chunk_document;
+use crate::rag::chunker::chunk_document_with_progress;
 use crate::rag::embedder::{check_memory_sufficient, detect_format, load_embedder, read_max_context, Embedder};
 use crate::rag::vectordb::{ChunkInput, VectorDb};
 
@@ -48,11 +48,15 @@ pub(crate) fn rag_log(level: &str, msg: impl std::fmt::Display) {
 /// can show a SECOND progress bar (character-based) under the per-file bar.
 /// Frontend listens on `rag://upload-progress` (see `useRagData.tsx`).
 ///
-/// `chars_done` / `chars_total` advance as each embedding batch finishes; the
-/// service caps `chars_done` at `chars_total` (chunk overlap double-counts a
-/// little, so the raw sum can slightly overshoot — the bar should never jump
-/// past 100% mid-file). `name` lets the UI match the event to the file the
-/// outer upload loop is currently on.
+/// `chars_done` / `chars_total` advance as each embedding batch finishes.
+/// During the embed loop `chars_total` is the SUM of chunk char counts (which
+/// includes the overlap text, since the loop accumulates per-chunk chars) so
+/// the bar reaches 100% exactly when the last chunk embeds — against the raw
+/// document char count the overlap double-count made the bar saturate EARLY
+/// (capped at 100%) while chunks still remained. The pre-chunking 0% tick
+/// uses the document char count (chunk sum unknown before chunking). The
+/// `min` cap stays as a safety net. `name` lets the UI match the event to the
+/// file the outer upload loop is currently on.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RagUploadProgress {
@@ -63,15 +67,70 @@ struct RagUploadProgress {
     chars_done: u64,
     /// Total characters in the document.
     chars_total: u64,
+    /// Chunks embedded so far (drives the third "chunks" progress bar).
+    /// 0 until chunking finishes and the embed loop starts ticking.
+    #[serde(default)]
+    chunks_done: u32,
+    /// Total chunks the document was split into (0 while still chunking —
+    /// the count is unknown until `chunk_document` returns).
+    #[serde(default)]
+    chunks_total: u32,
+    /// Chunking-phase progress: chars of source text scanned by the chunker
+    /// so far (fires per code AST partition on the >64KB path). Lets the UI
+    /// fill the "分片中…" row instead of a static label through the long
+    /// chunking pass. 0/0 = not applicable (small file / non-code strategy /
+    /// chunking already done).
+    #[serde(default)]
+    chunking_done: u64,
+    /// Total document chars for the chunking phase (matches `chars_total`).
+    #[serde(default)]
+    chunking_total: u64,
 }
 
 const UPLOAD_PROGRESS_EVENT: &str = "rag://upload-progress";
 
 fn emit_upload_progress(app: &AppHandle, name: &str, chars_done: u64, chars_total: u64) {
+    emit_upload_progress_chunks(app, name, chars_done, chars_total, 0, 0);
+}
+
+/// Same event with chunk counts filled in (embed-loop ticks). `chunks_total=0`
+/// means "not yet known" (still chunking); the frontend hides the chunk bar
+/// until the total is positive.
+fn emit_upload_progress_chunks(
+    app: &AppHandle,
+    name: &str,
+    chars_done: u64,
+    chars_total: u64,
+    chunks_done: u32,
+    chunks_total: u32,
+) {
     let payload = RagUploadProgress {
         name: name.to_string(),
         chars_done: chars_done.min(chars_total),
         chars_total,
+        chunks_done,
+        chunks_total,
+        chunking_done: 0,
+        chunking_total: 0,
+    };
+    if let Err(e) = app.emit(UPLOAD_PROGRESS_EVENT, &payload) {
+        log::warn!("[RAG] emit upload-progress failed: {e}");
+    }
+}
+
+/// Chunking-phase tick: `chunking_done`/`chunking_total` carry the chunker's
+/// scanned-chars progress (fired per code AST partition). `chars_done` stays 0
+/// so the embed bar doesn't move yet; `chars_total` mirrors the document total
+/// for a consistent bar denominator across the phase switch.
+fn emit_chunking_progress(app: &AppHandle, name: &str, chunking_done: u64, chunking_total: u64) {
+    let payload = RagUploadProgress {
+        name: name.to_string(),
+        chars_done: 0,
+        chars_total: chunking_total,
+        chunks_done: 0,
+        chunks_total: 0,
+        chunking_done: chunking_done.min(chunking_total),
+        chunking_total,
     };
     if let Err(e) = app.emit(UPLOAD_PROGRESS_EVENT, &payload) {
         log::warn!("[RAG] emit upload-progress failed: {e}");
@@ -165,15 +224,82 @@ async fn meta_lock() -> &'static Mutex<()> {
     META_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// True while a frontend import loop is running: the upload dialog calls
+/// `begin_rag_import_session` before iterating `upload_rag_doc` per file and
+/// `end_rag_import_session` when the loop finishes or is cancelled. While a
+/// session is active:
+/// - git-source refreshes are deferred (`refresh_git_repo`): a refresh
+///   re-clones and RENAMES the persistent clone dir into place, which must
+///   not race the in-flight per-file imports reading that same dir;
+/// - the auto-update tick skips itself entirely (its refresh + md5 pass +
+///   source sync would all contend with the import loop);
+/// - source-sync "add" imports are suppressed (they'd race the loop's own
+///   uploads of the same files and could double-import them).
+/// Bool-with-store semantics (not a counter): the import dialog is modal so
+/// at most one loop runs at a time, and `end` clearing unconditionally also
+/// self-heals a leaked session if a begin/end pair is ever interrupted.
+static IMPORT_SESSION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Begin an import session (see `IMPORT_SESSION`).
+pub fn begin_import_session() {
+    IMPORT_SESSION.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// End the import session — unconditional so a leaked `begin` can never pin
+/// the flag on (the next begin/end pair clears any stale state).
+pub fn end_import_session() {
+    IMPORT_SESSION.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether an import loop is currently running.
+pub fn import_session_active() -> bool {
+    IMPORT_SESSION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod import_session_tests {
+    use super::*;
+
+    /// Store semantics (not a counter): `end` clears unconditionally so a
+    /// leaked `begin` (interrupted pair) can never pin the flag on — a second
+    /// begin/end pair self-heals any stale state.
+    #[test]
+    fn import_session_end_clears_even_after_double_begin() {
+        begin_import_session();
+        begin_import_session();
+        assert!(import_session_active());
+        end_import_session();
+        assert!(!import_session_active());
+    }
+}
+
+/// Window closed mid-import: ask the frontend upload loop to stop at the
+/// next file boundary. The in-flight file still finishes and stays in the
+/// doc list; the remaining files are NOT imported. Without this the loop
+/// would keep importing everything in the hidden (tray-minimized) webview
+/// and the doc list would fill up as if the user had let the import run to
+/// completion — "closing" the app mid-import must mean "cancel the rest".
+pub fn request_import_cancel(app: &AppHandle) {
+    rag_log("info", "import: cancel requested (window closed mid-import)");
+    let _ = app.emit("rag://import-cancel-requested", ());
+}
+
 // ── git data source refresh (P4) ───────────────────────────────────────────
 
 /// Dedup cache for git repo refreshes: repo_hash -> last successful refresh.
 /// Within GIT_REFRESH_TTL_SECS a second refresh attempt for the same repo is
 /// a no-op (batch preview + batch run + single-doc check can all fire in one
 /// user action; the clone itself is shallow depth-1 but still network-bound).
+/// 10 min (was 60s): a refresh is a full network re-clone (~60s+ for a real
+/// repo), so a TTL at/below the clone duration made every auto-update tick
+/// (interval can be set to 60s) re-clone the same repo back-to-back — an
+/// infinite re-clone loop (269 refreshes/day observed) that also starved
+/// concurrent imports of network/CPU. 10 min bounds the re-clone frequency
+/// while still being fresh enough for update detection (md5 compares against
+/// a clone at most 10 min old).
 static GIT_REFRESH_CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
     OnceLock::new();
-const GIT_REFRESH_TTL_SECS: u64 = 60;
+const GIT_REFRESH_TTL_SECS: u64 = 600;
 
 fn git_refresh_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     GIT_REFRESH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -217,6 +343,16 @@ fn git_refresh_errors() -> &'static std::sync::Mutex<std::collections::HashMap<S
 /// Err as "repo not updated" — the existing clone content is still usable for
 /// md5 classification.
 async fn refresh_git_repo(app: &AppHandle, repo_url: &str) -> Result<bool, GitSourceError> {
+    // Defer while an import loop is running: the refresh re-clones and
+    // RENAMES the persistent clone dir into place — it must not race the
+    // in-flight per-file imports reading that same dir (and a "refreshed"
+    // log line mid-import is confusing + wasteful: the clone is at most a
+    // few minutes old). The next tick / manual batch after the import
+    // finishes picks it up (TTL cache is not written, so it refreshes then).
+    if import_session_active() {
+        rag_log("info", format!("git: refresh deferred (import in progress): {repo_url}"));
+        return Ok(false);
+    }
     let hash = super::git::repo_hash(repo_url);
     // Serialize per repo (see GIT_REFRESH_LOCKS), then re-check the TTL
     // inside the lock — a concurrent caller may have just refreshed.
@@ -438,8 +574,10 @@ async fn plan_source_sync(
 
     // Distinct git repos: scan the PERSISTENT clone (post-refresh content).
     for url in collect_git_repo_urls(docs) {
-        let hash = super::git::repo_hash(&url);
-        let persistent = super::git::persistent_repo_dir_public(app, &hash);
+        // Canonicalize first: the clone dir was created under the hash of
+        // the CANONICAL url (see git::clone_to_temp / refresh_persistent),
+        // which can differ from the raw url stored in the doc meta.
+        let persistent = super::git::persistent_repo_dir_for_url(app, &url).await;
         let Some(persistent) = persistent else { continue };
         if !persistent.exists() {
             // Clone dir gone (fresh import never persisted / refresh failed):
@@ -524,6 +662,46 @@ async fn plan_source_sync(
 async fn run_source_sync(app: &AppHandle, added: Vec<SourceSyncAdd>, removed: Vec<(String, String)>) -> (u32, u32) {
     let mut added_count = 0u32;
     for a in added {
+        // Race guard: the plan (plan_source_sync) classified this file as
+        // "unreferenced" from a meta snapshot taken BEFORE the import. Between
+        // then and now a concurrent manual upload / update may have recorded
+        // the same path as a doc's original_path — importing would create a
+        // duplicate doc for one file (observed: manual update while the auto
+        // tick ran -> same file twice in the tree). Re-scan the metas fresh,
+        // under META_LOCK (serializes against update_doc_from_file's write),
+        // and skip paths that are now referenced.
+        {
+            let _meta_guard = meta_lock().await.lock().await;
+            let dir = match files_dir(app) {
+                Ok(d) => d,
+                Err(e) => {
+                    rag_log("warn", format!("sync: files_dir failed: {:#}", e));
+                    continue;
+                }
+            };
+            let mut referenced = false;
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().and_then(|e| e.to_str()) != Some("meta") {
+                        continue;
+                    }
+                    let Ok(bytes) = std::fs::read(&p) else { continue };
+                    let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+                    if meta.original_path.as_deref() == Some(a.path.as_str()) {
+                        referenced = true;
+                        break;
+                    }
+                }
+            }
+            if referenced {
+                rag_log(
+                    "info",
+                    format!("sync: skip importing {} — a doc now references it (raced with manual update)", a.path),
+                );
+                continue;
+            }
+        }
         match upload_one_path(app, &a.path, Vec::new(), Some(a.method.to_string()), Some(a.source)).await {
             Ok(()) => {
                 added_count += 1;
@@ -1378,11 +1556,35 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         // `db.needs_reindex()` then tells us to re-index all docs (old
         // embeddings are gone / meaningless under the new model).
         let db = VectorDb::open(&lancedb_dir(app)?, model.embed_dim()).await?;
-        let needs_reindex = db.needs_reindex();
+        let mut needs_reindex = db.needs_reindex();
         if needs_reindex {
             // Old embeddings are gone; zero the on-disk `.meta` chunk_count so
             // the list view reflects reality (0) until reindex repopulates.
             zero_all_chunk_counts(app)?;
+        } else {
+            // List-vs-vector consistency check (the "起码的数据一致" invariant):
+            // every doc whose meta claims chunks must be vector-searchable.
+            // `open` above silently creates a FRESH table when the lancedb dir
+            // was wiped / corrupted / deleted — that case reports
+            // needs_reindex=false (no prior data from the table's view) while
+            // the .meta files still say chunk_count>0, which would leave the
+            // doc list showing "indexed" docs that vector search can never
+            // find. Detect it here and treat it exactly like a dim swap:
+            // zero the chunk counts + request a full reindex.
+            let indexed_metas = count_indexed_metas(app).unwrap_or(0);
+            if indexed_metas > 0 {
+                let rows = db.count_rows().await.unwrap_or(0);
+                if rows == 0 {
+                    rag_log(
+                        "warn",
+                        format!(
+                            "vector store is empty but {indexed_metas} doc(s) claim indexed chunks — vectors lost, reindex required"
+                        ),
+                    );
+                    zero_all_chunk_counts(app)?;
+                    needs_reindex = true;
+                }
+            }
         }
         let mut guard = runtime().lock().await;
         *guard = Some(Runtime {
@@ -3985,9 +4187,39 @@ async fn reindex_doc(
         // chunk_size maps directly to the model's context budget. Picked by
         // the file extension (CodeSplitter for source, MarkdownSplitter for
         // .md, TextSplitter otherwise). See `rag/chunker.rs`.
-        let chunks = chunk_document(doc_name, content, &*rt.model, chunk_size as u32, chunk_overlap as u32);
+        //
         // Total chars (UTF-8 chars, not bytes) drives the per-file progress bar.
+        // Emit the 0% tick BEFORE chunking: chunking a multi-MB code file can
+        // take tens of seconds (AST partitioning + tokenizer size probes);
+        // without this the bar sits in "Preparing…" with no visible total
+        // for that whole phase, which reads as a hung import.
         let total_chars = content.chars().count() as u64;
+        emit_upload_progress(app, doc_name, 0, total_chars);
+        // Route the chunker's per-partition progress to the frontend: for a
+        // multi-MB code file the chunking pass itself takes minutes, and
+        // without these ticks the "分片中…" row is static for that whole phase.
+        let chunks = chunk_document_with_progress(
+            doc_name,
+            content,
+            &*rt.model,
+            chunk_size as u32,
+            chunk_overlap as u32,
+            &|done, total| emit_chunking_progress(app, doc_name, done, total),
+        );
+        // Progress denominator for the embed loop: the SUM of chunk char
+        // counts, not the document char count. Consecutive chunks share
+        // `chunk_overlap` tokens of tail text, and the loop below accumulates
+        // per-chunk chars — against the document total that double-counts the
+        // overlap and saturates the bar EARLY (capped at 100%) while chunks
+        // still remain (observed: "char bar 100%, chunk bar still going").
+        // The chunk sum is exactly what the loop accumulates, so the bar hits
+        // 100% precisely when the last chunk embeds (sum ≈ doc chars + total
+        // overlap, typically ~10% larger with chunk_size=1024/overlap=100).
+        let progress_total_chars: u64 = if chunks.is_empty() {
+            total_chars
+        } else {
+            chunks.iter().map(|c| c.chars().count() as u64).sum()
+        };
 
         // Adaptive batch size: if the doc has few chunks (<=32), process them
         // ALL in one embed_batch call -> one big GEMM (max BLAS/AMX efficiency).
@@ -4000,11 +4232,8 @@ async fn reindex_doc(
         let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
         let mut chars_done: u64 = 0;
         let t_embed = std::time::Instant::now();
-        // Emit a 0% tick immediately so the UI's per-document bar shows the
-        // real char total (and leaves "Preparing…") before the first - possibly
-        // slow - forward finishes. Without this a large file shows no doc
-        // progress for the duration of its first embedding batch.
-        emit_upload_progress(app, doc_name, 0, total_chars);
+        // (The 0% tick was already emitted BEFORE chunking — see above — so
+        // the bar shows the real char total through the whole phase.)
         // Empty / whitespace-only docs produce no chunks (`chunk_document`
         // returns an empty vec after trim). Skip the batch loop in that case:
         // `Vec::chunks(0)` panics with "chunk size must be non-zero", so without
@@ -4022,8 +4251,10 @@ async fn reindex_doc(
         // For an empty doc the loop below doesn't run (no chunks to embed), so
         // emit the 100% tick here to finish its progress bar.
         if chunks.is_empty() {
-            emit_upload_progress(app, doc_name, total_chars, total_chars);
+            emit_upload_progress(app, doc_name, progress_total_chars, progress_total_chars);
         }
+        let total_chunks = chunks.len() as u32;
+        let mut chunks_done: u32 = 0;
         for sub in chunks.chunks(batch_size.max(1)) {
             let prefixed: Vec<String> = sub
                 .iter()
@@ -4039,8 +4270,16 @@ async fn reindex_doc(
             };
             let sub_chars: u64 = sub.iter().map(|c| c.chars().count() as u64).sum();
             chars_done = chars_done.saturating_add(sub_chars);
+            chunks_done = chunks_done.saturating_add(sub.len() as u32);
             embeddings.extend(embs);
-            emit_upload_progress(app, doc_name, chars_done, total_chars);
+            emit_upload_progress_chunks(
+                app,
+                doc_name,
+                chars_done,
+                progress_total_chars,
+                chunks_done,
+                total_chunks,
+            );
         }
         let embed_ms = t_embed.elapsed().as_millis();
 
@@ -4078,6 +4317,30 @@ async fn reindex_doc(
         n_chunks = chunks.len();
     }
     Ok(n_chunks)
+}
+
+/// Count docs whose `.meta` claims indexed chunks (chunk_count > 0). The
+/// startup consistency check compares this against the vector store's row
+/// count — indexed metas with an empty vector table means the vectors were
+/// lost and every listed doc would be unsearchable.
+fn count_indexed_metas(app: &AppHandle) -> Result<u32> {
+    let dir = files_dir(app)?;
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut n = 0u32;
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+        if meta.chunk_count > 0 {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Zero the on-disk `chunk_count` of every doc's `.meta` — called right after
@@ -4669,6 +4932,19 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
     {
         sync_removed.clear();
     }
+    // Import in progress: defer source-add imports — the import loop may be
+    // uploading the very files the sync would import (double-import race).
+    // Removal sync is doc-side only and can stay.
+    if import_session_active() && !sync_added.is_empty() {
+        rag_log(
+            "info",
+            format!(
+                "batch preview: deferring {} source file import(s) (import in progress)",
+                sync_added.len()
+            ),
+        );
+        sync_added.clear();
+    }
     let removed_ids: std::collections::HashSet<&str> =
         sync_removed.iter().map(|(id, _)| id.as_str()).collect();
     let added_count = sync_added.len() as u32;
@@ -4815,6 +5091,19 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
     {
         sync_removed.clear();
     }
+    // Import in progress: defer source-add imports — the import loop may be
+    // uploading the very files the sync would import (double-import race).
+    // Removal sync is doc-side only and can stay.
+    if import_session_active() && !sync_added.is_empty() {
+        rag_log(
+            "info",
+            format!(
+                "batch_update: deferring {} source file import(s) (import in progress)",
+                sync_added.len()
+            ),
+        );
+        sync_added.clear();
+    }
     if !sync_added.is_empty() || !sync_removed.is_empty() {
         rag_log(
             "info",
@@ -4923,6 +5212,14 @@ pub fn restart_auto_update_timer(app: &AppHandle) {
             if !is_enabled() {
                 continue;
             }
+            // Never tick while an import loop runs: the git refresh swaps
+            // the persistent clone dirs (must not race per-file imports), and
+            // the md5 / source-sync passes would contend with the loop (e.g.
+            // sync-add importing the very files the loop is still importing).
+            if import_session_active() {
+                rag_log("info", "auto-update: import in progress, skipping this tick");
+                continue;
+            }
             // Guard against overlap with a manual batch run + a still-running
             // previous tick (BATCH_UPDATE_RUNNING is the same CAS guard
             // batch_update_rag_docs uses, so auto/manual mutually exclude).
@@ -4952,6 +5249,19 @@ pub fn restart_auto_update_timer(app: &AppHandle) {
                 // Idle only when NOTHING changed: no md5 updates AND no
                 // source-level additions/removals (folder/git sync).
                 if preview.to_update == 0 && preview.added == 0 && preview.removed == 0 {
+                    // Idle pass, BUT lost originals may have appeared (source
+                    // file deleted elsewhere): the "原始丢失" badge is computed
+                    // at list time, so without a nudge the UI list stays stale
+                    // until a manual refresh. Emit a lightweight invalidation
+                    // event — the frontend refetches the list ONLY (no progress
+                    // dialog / button state, keeping the idle tick unobtrusive).
+                    if preview.lost > 0 {
+                        let _ = app.emit("rag://docs-invalidated", preview.lost);
+                        rag_log(
+                            "info",
+                            format!("auto-update: idle, but {} doc(s) lost their original — notifying UI", preview.lost),
+                        );
+                    }
                     continue; // _guard drops -> BATCH_UPDATE_RUNNING = false
                 }
                 rag_log(

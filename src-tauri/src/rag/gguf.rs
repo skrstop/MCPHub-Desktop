@@ -199,7 +199,15 @@ impl GgufEmbedder {
 
 impl Embedder for GgufEmbedder {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let ids = self.encode_ids(text)?;
+        let mut ids = self.encode_ids(text)?;
+        // Cap to max_context (parity with embed_batch's forward_sub_batch):
+        // an over-context input (e.g. a pathological single query) would build
+        // a [1, seq≫context] tensor — huge attention alloc, Metal buffer
+        // overflow / OOM instead of a clean truncation.
+        let cap = self.max_context.max(1) as usize;
+        if ids.len() > cap {
+            ids.truncate(cap);
+        }
         if ids.is_empty() {
             return Ok(vec![0.0; self.embed_dim]);
         }
@@ -223,24 +231,55 @@ impl Embedder for GgufEmbedder {
         if all_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // Single batched forward for BOTH CPU and GPU. The matmul library
-        // handles multi-threading internally:
-        //   - CPU + accelerate (macOS): AMX BLAS sgemm (internally multi-threaded).
-        //   - CPU + mkl (Linux x86_64): MKL BLAS sgemm (internally multi-threaded).
-        //   - CPU + gemm (other): pure-Rust gemm crate (rayon multi-threaded).
-        //   - GPU (Metal): quantized int4 kernels (inherently parallel).
-        // No external batch splitting needed — the BLAS/gemm handles it, and a
-        // bigger [batch*seq, hidden] GEMM is more efficient than N small ones.
+        // Length-bucketed batching: forward cost is [batch × max_len_in_batch]
+        // (right-padding to the longest row), so one long row in a batch of
+        // short rows makes EVERY row pay the long row's seq length. Chunk
+        // lengths vary wildly (statement-boundary chunking of minified JS:
+        // 300..2048 tokens), which measured ~6x wasted GEMM on a real 3.3MB
+        // import (embedMs=437s of a 522s total). Sorting rows by length and
+        // forwarding same-length runs together shrinks the padding waste to
+        // ~1.1x with ZERO semantic change (each row's embedding is identical;
+        // only the compute order differs). Rows are re-scattered to the
+        // caller's order below.
         let n = all_ids.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| all_ids[i].len().min(cap));
+        let mut rows_sorted: Vec<Vec<f32>> = Vec::with_capacity(n);
+        let mut bucket: Vec<usize> = Vec::new();
         let t0 = std::time::Instant::now();
-        let rows = forward_sub_batch(&*self.arch, &self.device, cap, &all_ids)?;
+        for &i in &order {
+            let len = all_ids[i].len().min(cap);
+            if let Some(&first) = bucket.first() {
+                let first_len = all_ids[first].len().min(cap);
+                // Close the bucket when the new row's length exceeds the
+                // bucket's first row by >12.5% (or >64 tokens) — beyond that
+                // the padding waste outweighs the bigger GEMM.
+                if len * 8 > first_len * 9 + 64 {
+                    let sub: Vec<Vec<u32>> = bucket.iter().map(|&j| all_ids[j].clone()).collect();
+                    let rows = forward_sub_batch(&*self.arch, &self.device, cap, &sub)?;
+                    rows_sorted.extend(rows);
+                    bucket.clear();
+                }
+            }
+            bucket.push(i);
+        }
+        if !bucket.is_empty() {
+            let sub: Vec<Vec<u32>> = bucket.iter().map(|&j| all_ids[j].clone()).collect();
+            let rows = forward_sub_batch(&*self.arch, &self.device, cap, &sub)?;
+            rows_sorted.extend(rows);
+        }
+        // Scatter back to the caller's order (rows_sorted is in sorted order).
+        let mut result: Vec<Vec<f32>> = vec![Vec::new(); n];
+        for (row, &orig_idx) in rows_sorted.into_iter().zip(order.iter()) {
+            result[orig_idx] = row;
+        }
         log::info!(
-            "[RAG] embed_batch: {} chunks on {:?} in {}ms",
+            "[RAG] embed_batch: {} chunks on {:?} in {}ms (length-bucketed)",
             n,
             self.device,
             t0.elapsed().as_millis()
         );
-        Ok(rows)
+        Ok(result)
     }
 
     fn embed_dim(&self) -> usize {

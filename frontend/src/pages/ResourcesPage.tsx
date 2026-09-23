@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { BuiltinResource } from '@/types';
 import { useBuiltinResourceData } from '@/hooks/useBuiltinResourceData';
 import { useAuth } from '@/contexts/AuthContext';
-import { Edit, Trash, Plus, FileText, X, ChevronDown, Search } from 'lucide-react';
+import { Edit, Trash, Plus, FileText, X, ChevronDown, Search, RefreshCw } from 'lucide-react';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { StatusDot } from '@/components/ui/StatusDot';
 import Pagination from '@/components/ui/Pagination';
@@ -198,7 +198,17 @@ const ResourcesPage: React.FC = () => {
     addResource,
     editResource,
     removeResource,
+    triggerRefresh: refreshResources,
   } = useBuiltinResourceData();
+
+  // 顶部「刷新」按钮（同服务器页）。
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const handleRefresh = () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    refreshResources();
+    setTimeout(() => setIsRefreshing(false), 600);
+  };
 
   const [showForm, setShowForm] = useState(false);
   const [editingResource, setEditingResource] = useState<BuiltinResource | null>(null);
@@ -301,11 +311,17 @@ const ResourcesPage: React.FC = () => {
             <span className="hub-num">{resources.length}</span> {t('nav.resources').toLowerCase()}
           </p>
         </div>
-        {isAdmin && (
-          <button onClick={() => setShowForm(true)} className="hub-btn primary">
-            <Plus size={13} /> {t('builtinResources.add')}
+        <div className="flex gap-2">
+          <button onClick={handleRefresh} className="hub-btn" disabled={isRefreshing} aria-label={t('common.refresh')}>
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+            {t('common.refresh')}
           </button>
-        )}
+          {isAdmin && (
+            <button onClick={() => setShowForm(true)} className="hub-btn primary">
+              <Plus size={13} /> {t('builtinResources.add')}
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (

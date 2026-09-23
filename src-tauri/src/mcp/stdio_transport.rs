@@ -423,8 +423,19 @@ impl McpTransport for StdioTransport {
             let mut last_pct: Option<u8> = None;
             let mut last_msg: String = String::new();
             while let Ok(Some(line)) = lines.next_line().await {
-                log::info!("[{}] stderr: {}", stderr_name, line);
-                app_logger::log_to_db("info", &format!("[stderr] {}", line));
+                // Cap display/DB length: an MCP server printing multi-KB lines
+                // (e.g. minified JSON dumps) would flood the console and app_log.
+                let shown = if line.len() > 2000 {
+                    let mut end = 2000;
+                    while !line.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    &line[..end]
+                } else {
+                    &line[..]
+                };
+                log::info!("[{}] stderr: {}", stderr_name, shown);
+                app_logger::log_to_db("info", &format!("[stderr] {}", shown));
 
                 // Accumulate a rolling tail (capped at ~32KB) so connection
                 // errors can include the upstream stderr. Drop from the front

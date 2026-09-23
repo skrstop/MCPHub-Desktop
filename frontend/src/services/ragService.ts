@@ -139,6 +139,24 @@ export const uploadRagDoc = async (
 };
 
 /**
+ * Bracket an import batch: `begin` before the per-file upload loop, `end`
+ * when the loop finishes (or is cancelled — the caller's finally block must
+ * always end it). While the session is active the backend defers git-source
+ * refreshes + the auto-update tick so they can't race the in-flight imports,
+ * and a window close asks the loop to stop at the next file boundary
+ * (rag://import-cancel-requested).
+ */
+export const beginRagImportSession = async (): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/import-session/begin', {});
+  if (!response.success) throw new Error(response.message || 'Failed to begin import session');
+};
+
+export const endRagImportSession = async (): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/import-session/end', {});
+  if (!response.success) throw new Error(response.message || 'Failed to end import session');
+};
+
+/**
  * Git data source: clone (first time) or refresh the repo into the app-data
  * clone dir, then scan it with the same candidate rules as the folder picker.
  * `username`/`password` are optional (public repos pull anonymously). Throws

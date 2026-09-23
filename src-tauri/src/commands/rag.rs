@@ -178,12 +178,15 @@ pub async fn upload_rag_doc(
     // update source + open-location target) survives temp cleanup.
     let file_path = match source.as_ref().filter(|s| s.kind == "git") {
         Some(src) => match crate::rag::git::map_temp_to_persistent(&app, &file_path) {
-            Ok(Some(persisted)) => {
+            Ok(Some((hash, persisted))) => {
                 // First import: copy temp -> persistent (needs the temp dir
-                // still present). Derive the repo's temp dir from the path.
-                let hash = crate::rag::git::repo_hash(src.git.as_ref().map(|g| g.url.as_str()).unwrap_or(""));
+                // still present). The hash comes from the path prefix under
+                // the temp root — the SAME hash clone_to_temp used (it hashes
+                // the canonicalized URL, which can differ from the raw
+                // frontend url, e.g. after an http->https redirect probe).
                 let temp_dir = crate::rag::git::temp_dir_for(&hash);
                 crate::rag::git::ensure_persisted(&app, &hash, &temp_dir).map_err(|e| e.to_string())?;
+                let _ = src;
                 persisted
             }
             Ok(None) => file_path,
@@ -201,6 +204,23 @@ pub async fn upload_rag_doc(
     service::upload_one_path(&app, &file_path, tags, method, source)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Bracket an import session around the frontend's upload loop: `begin`
+/// before the first `upload_rag_doc`, `end` when the loop finishes (or is
+/// cancelled — the frontend's finally block always ends it). While a session
+/// is active the backend defers git-source refreshes + the auto-update tick
+/// and suppresses source-sync add imports (see service::IMPORT_SESSION).
+#[tauri::command]
+pub async fn begin_rag_import_session() -> Result<(), String> {
+    service::begin_import_session();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn end_rag_import_session() -> Result<(), String> {
+    service::end_import_session();
+    Ok(())
 }
 
 /// Update an existing document in place. `mode`:

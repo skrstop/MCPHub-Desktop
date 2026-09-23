@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "MCPHub Desktop",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 600,
+        "width": 1520,
+        "height": 950,
+        "minWidth": 1080,
+        "minHeight": 675,
         "resizable": true,
         "fullscreen": false,
         "center": true,

@@ -1,6 +1,14 @@
 [registries.crates-io]
 protocol = "sparse"
 
+# Local override of the machine-global ~/.cargo/config.toml, which pins
+# [source.crates-io] registry to the GitHub GIT index — that stalls the
+# build whenever github.com is unreachable. Pinning to the sparse endpoint
+# makes the `sparse` protocol actually effective. Lock-file source ids are
+# unaffected (cargo canonicalizes crates.io to the github url either way).
+[source.crates-io]
+registry = "sparse+https://index.crates.io/"
+
 [net]
 retry = 5
 git-fetch-with-cli = false

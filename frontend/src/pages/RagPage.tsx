@@ -29,7 +29,6 @@ import {
   AlertTriangle,
   CircleHelp,
   ListChecks,
-  GitBranch,
   FolderTree,
   List as ListIcon,
   Globe,
@@ -37,10 +36,12 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
 } from 'lucide-react';
+import GitIcon from '@/components/icons/GitIcon';
 import { Switch } from '@/components/ui/ToggleGroup';
 import Pagination from '@/components/ui/Pagination';
 import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
 import { isExtractedSource } from '@/utils/fileType';
+import { fileIcon } from '@/utils/fileIcon';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauri } from '@/utils/tauriClient';
 import { useToast } from '@/contexts/ToastContext';
@@ -73,6 +74,18 @@ const formatBytes = (n: number): string => {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 };
+
+// 秒 → m分s秒 / m分（导入浮层耗时显示用；负值/NaN 兜底为 0）。
+const formatElapsed = (ms: number): string => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}m${s.toString().padStart(2, '0')}s` : `${s}s`;
+};
+
+// 「大文件」提示阈值：与后端 chunker 的 >1MB 源码警告同一量级——超过该大小的
+// 文件提取/分片/嵌入耗时显著（数十秒级），导入浮层显示「耗时较长请耐心等待」。
+const LARGE_FILE_HINT_BYTES = 1024 * 1024;
 
 // SSH 远程识别（与后端 git.rs::validate_url 同口径）：`ssh://[user@]host/...`
 // 或 SCP 风格 `[user@]host:path`（显式 user@ 才算，避免误吞本地路径）。
@@ -244,6 +257,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     uploading,
     uploadProgress,
     charProgress,
+    uploadTiming,
     reindexing,
     updatingDoc,
     reindexConfirm,
@@ -282,11 +296,25 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     batchUpdate,
     batchUpdateRunning,
     batchProgress,
+    batchTiming,
     ocrMissing,
     dismissOcrMissing,
     reportOcrMissingIf,
     docsVersion,
+    refresh: refreshDocs,
   } = useRagData();
+
+  // 顶部「刷新」按钮（同服务器页）：重新拉取文档列表，转圈提示。
+  const [refreshingDocs, setRefreshingDocs] = useState(false);
+  const handleRefreshDocs = async () => {
+    if (refreshingDocs) return;
+    setRefreshingDocs(true);
+    try {
+      await refreshDocs();
+    } finally {
+      setRefreshingDocs(false);
+    }
+  };
 
   const [showUpload, setShowUpload] = useState(false);
 
@@ -622,6 +650,8 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
       .map((f) => ({
         path: f.path,
         name: f.name,
+        // 文件大小（扫描结果自带）——导入浮层据此对大文件显示「耗时较长」提示。
+        size: f.size,
         // 数据源 provenance：Git → git 信息；文件夹 → root + 分组目录链；
         // 文件 → kind=file（后端按 original_path 父目录派生 label）。
         source: buildDocSource(
@@ -653,6 +683,9 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   // 切换数据源：清空当前扫描树（不同源的扫描树混在一起会误导）。
   const handleDataSourceChange = (ds: 'file' | 'folder' | 'git') => {
     setUploadDataSource(ds);
+    // 设计稿 v9 移除了「导入方式」切换器：Git 数据源后端强制 copy；
+    // file/folder 恢复默认软链接（用户在旧弹框里切到 copy 后切数据源需复位）。
+    setUploadMethod(ds === 'git' ? 'copy' : 'symlink');
     resetPickState();
   };
 
@@ -662,15 +695,10 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
       return;
     }
     const { success, failed } = await upload(selectedPickedFiles, uploadTags, uploadMethod);
-    // Only claim success when nothing failed - per-file errors are already
-    // toasted inside upload. Showing a green "success" while files actually
-    // failed (and thus aren't in the list) was misleading.
-    if (failed === 0) {
-      showToast(t('pages.rag.uploadConfirm') + ' ✓', 'success');
-    } else if (success === 0) {
-      showToast(t('pages.rag.uploadAllFailed'), 'error');
-    } else {
-      showToast(t('pages.rag.uploadPartialFailed', { success, failed }), 'error');
+    // Failures are aggregated into a single summary toast inside upload()
+    // (reasons + totals); only the all-success case toasts here.
+    if (failed === 0 && success > 0) {
+      showToast(t('pages.rag.uploadConfirm'), 'success');
     }
     closeUploadDialog();
   };
@@ -690,14 +718,14 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
       else cleaned.forEach((x) => set.delete(x));
       await setTags(doc.id, Array.from(set));
     }
-    showToast(t('pages.rag.tagsSaved') + ' ✓', 'success');
+    showToast(t('pages.rag.tagsSaved'), 'success');
     setShowBatchTags(false);
   };
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
     await remove(deleteTarget.id);
-    showToast(t('pages.rag.delete') + ' ✓', 'success');
+    showToast(t('pages.rag.delete'), 'success');
     setDeleteTarget(null);
   };
 
@@ -711,7 +739,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     setBatchDeleting(true);
     try {
       await removeMany(ids);
-      showToast(t('pages.rag.delete') + ' ✓', 'success');
+      showToast(t('pages.rag.delete'), 'success');
       setSelectedIds(new Set());
       setShowBatchDelete(false);
     } catch (err) {
@@ -1001,7 +1029,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                     onChange={() => toggleSelect(doc.id)}
                     className="hub-checkbox"
                   />
-                  <FileText size={14} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+                  {fileIcon(doc.name)}
                   <span className="truncate text-[13px]" style={{ color: 'var(--hub-ink)' }} title={doc.name}>
                     {doc.name}
                   </span>
@@ -1015,18 +1043,8 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                       v{doc.version}
                     </span>
                   )}
-                  {/* 数据源徽章（需求3）：Git / 文件夹 / MCP 工具；存量 file 文档
-                      不加徽章（平铺视图保持原貌，树形视图已按数据源分组）。 */}
-                  {mDoc.sourceKind === 'git' && (
-                    <span
-                      className="hub-tag flex-shrink-0 inline-flex items-center gap-0.5"
-                      title={[mDoc.gitUrl, mDoc.gitBranch].filter(Boolean).join(' @ ')}
-                      style={{ fontSize: 10, color: 'var(--hub-ink-3)' }}
-                    >
-                      <GitBranch size={10} />
-                      Git
-                    </span>
-                  )}
+                  {/* 文件行不显示数据源徽章（用户反馈）：树形/分组视图已按数据源组织，
+                      行内标识冗余。 */}
                   {/* 文件夹数据源不显示徽章：树形/分组视图已按目录组织，
                       行内再标一次文件夹名是冗余（用户反馈）。 */}
                   {mDoc.sourceKind === 'tool' && (
@@ -1247,6 +1265,15 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           </button>
           <button onClick={() => setShowSettings(true)} className="hub-btn" disabled={disabled}>
             <SlidersHorizontal size={13} /> {t('pages.rag.searchSettings')}
+          </button>
+          <button
+            onClick={handleRefreshDocs}
+            disabled={disabled || refreshingDocs}
+            className="hub-btn"
+            aria-label={t('common.refresh')}
+          >
+            <RefreshCw size={13} className={refreshingDocs ? 'animate-spin' : ''} />
+            {t('common.refresh')}
           </button>
         </div>
       </div>
@@ -1542,11 +1569,13 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
         />
       )}
 
-      {/* 批量更新进度弹框（需求6：可关闭，再点按钮重开；上传同款双进度条） */}
+      {/* 批量更新进度弹框（需求6：可关闭，再点按钮重开；上传同款双进度条）。
+          batchTiming 由 hook 层维护（跨弹框开关存活），重开不重置计时。 */}
       {showBatchUpdateDialog && batchProgressTyped && (
         <BatchUpdateDialog
           progress={batchProgressTyped}
           charProgress={charProgress}
+          timing={batchTiming}
           onClose={() => setShowBatchUpdateDialog(false)}
         />
       )}
@@ -1564,7 +1593,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           onClose={() => setShowSettings(false)}
           onSave={(s) => {
             updateSettings(s);
-            showToast(t('pages.rag.save') + ' ✓', 'success');
+            showToast(t('pages.rag.save'), 'success');
             setShowSettings(false);
           }}
         />
@@ -1654,7 +1683,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                 {t('pages.rag.deleteConfirm')}
               </p>
               <div className="mt-3 hub-card flex items-center gap-2" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
-                <FileText size={14} style={{ color: 'var(--hub-ink-3)' }} />
+                {fileIcon(deleteTarget.name)}
                 <span className="truncate text-[13px]" style={{ color: 'var(--hub-ink)' }} title={deleteTarget.name}>
                   {deleteTarget.name}
                 </span>
@@ -1821,6 +1850,27 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
               {uploadProgress.current}/{uploadProgress.total}
             </div>
 
+            {/* 耗时行：总耗时（本批开始至今）+ 单文件耗时（当前文件开始至今）。
+                uploadTiming.tick 每秒 +1 驱动重渲染（见 useRagData）；null 时
+                （理论不可达——overlay 只在 timing 存在时显示）不渲染。 */}
+            {uploadTiming &&
+              (() => {
+                const now = Date.now();
+                const totalMs = now - uploadTiming.startedAt;
+                const fileMs = now - uploadTiming.fileStartedAt;
+                return (
+                  <div className="flex items-center justify-center gap-3 hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                    <span>
+                      {t('pages.rag.totalElapsed', '总耗时')} {formatElapsed(totalMs)}
+                    </span>
+                    <span style={{ color: 'var(--hub-line-2, var(--hub-line))' }}>|</span>
+                    <span>
+                      {t('pages.rag.fileElapsed', '单文件')} {formatElapsed(fileMs)}
+                    </span>
+                  </div>
+                );
+              })()}
+
             {/* Per-document (character-based) progress bar — always shown while a
                 file is actively being indexed (uploadProgress.name is non-empty),
                 so the second bar is visible immediately rather than waiting for
@@ -1836,6 +1886,24 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                 const pct =
                   charsTotal > 0
                     ? Math.min(100, Math.round((charsDone / charsTotal) * 100))
+                    : 0;
+                // Chunk-level progress (third bar): total is 0 while still
+                // chunking (the count is unknown until chunk_document returns),
+                // so the bar only renders once embedding has begun.
+                const chunksDone = matches ? charProgress!.chunksDone : 0;
+                const chunksTotal = matches ? charProgress!.chunksTotal : 0;
+                const chunkPct =
+                  chunksTotal > 0
+                    ? Math.min(100, Math.round((chunksDone / chunksTotal) * 100))
+                    : 0;
+                // Chunking-phase fill: chars scanned by the chunker (per code
+                // AST partition) — drives "分片中… N%" so the long chunking
+                // pass isn't a static label.
+                const chunkingDone = matches ? charProgress!.chunkingDone : 0;
+                const chunkingTotal = matches ? charProgress!.chunkingTotal : 0;
+                const chunkingPct =
+                  chunkingTotal > 0
+                    ? Math.min(100, Math.round((chunkingDone / chunkingTotal) * 100))
                     : 0;
                 return (
                   <div className="w-full flex flex-col gap-1" style={{ marginTop: 2 }}>
@@ -1869,6 +1937,61 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                         ? `${charsDone.toLocaleString()} / ${charsTotal.toLocaleString()} ${t('pages.rag.chars')}`
                         : t('pages.rag.docProgressPreparing')}
                     </div>
+                    {/* 分片进度（第三条）：分片完成后（chunksTotal>0）显示
+                        「已嵌入分片 / 总分片」计数；仍在分片时显示「分片中… N%」
+                        （chunkingPct 由后端逐分区上报，分片正是最久、此前最无
+                        反馈的阶段）。下方填充条贯穿两阶段：分片期按 chunkingPct、
+                        嵌入期按 chunkPct 填充。 */}
+                    <div className="flex items-center justify-between" style={{ marginTop: 2 }}>
+                      <span className="text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                        {t('pages.rag.chunkProgress', '分片进度')}
+                      </span>
+                      <span className="hub-mono text-[10px]" style={{ color: 'var(--hub-ink-3)' }}>
+                        {chunksTotal > 0
+                         ? `${chunksDone.toLocaleString()} / ${chunksTotal.toLocaleString()} · ${chunkPct}%`
+                         : chunkingTotal > 0
+                         ? `${t('pages.rag.chunkingInProgress', '分片中…')} ${chunkingPct}%`
+                         : t('pages.rag.chunkingInProgress', '分片中…')}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        height: 6,
+                        borderRadius: 3,
+                        background: 'var(--hub-line)',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <div
+                        style={{
+                         width: `${chunksTotal > 0 ? chunkPct : chunkingPct}%`,
+                         height: '100%',
+                         background: 'var(--hub-accent, var(--hub-ink))',
+                         transition: 'width 0.15s ease',
+                        }}
+                      />
+                    </div>
+                    {/* 大文件提示（通用，不分入口）：优先用扫描结果的 fileSize
+                        （导入）；没有 size 的入口（单文档更新/模型重载）退化为
+                        用 charTotal（字符数≈内容量）判断。分片阶段（charsTotal=0
+                        但 timing 已知大）同样显示——这正是最久的一段。 */}
+                    {(() => {
+                      const sizeBytes = uploadTiming?.fileSize ?? 0;
+                      // 无 fileSize 时用字符数近似（UTF-8 中文 ~3B/字、ASCII 1B/字，
+                      // 取 1 字符 ≈ 1.5 字节的保守折中，只用于提示不用于逻辑）。
+                      const approxBytes =
+                        sizeBytes > 0 ? sizeBytes : Math.round(charsTotal * 1.5);
+                      if (approxBytes < LARGE_FILE_HINT_BYTES) return null;
+                      return (
+                        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--hub-ink-3)', marginTop: 2 }}>
+                          <span>
+                            {t('pages.rag.largeFileHint', '大文件导入耗时较长（分片与向量化），请耐心等待')}
+                            {' · '}
+                            {formatBytes(approxBytes)}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })()}
@@ -2344,115 +2467,115 @@ const UploadDialog: React.FC<{
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-3">
-          {/* 导入配置分区：数据源 / 导入方式 / 选择入口 / 自动同步开关收进
-              同一分组卡片，层次清晰；格式说明文案放卡片下方。 */}
+          {/* 导入配置区（设计稿 v9）：数据源三选卡片 → 自动同步卡片（新增/删除
+              子卡片）→ 选择入口行 → 说明文字。切换数据源由父级清空扫描树。 */}
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+            {([
+              { id: 'file' as const, icon: <span style={{ fontSize: 22, lineHeight: 1 }}>📄</span>, label: t('pages.rag.dataSourceFile', '文件'), title: t('pages.rag.dataSourceFileHint', '从本机选择一个或多个文件') },
+              { id: 'folder' as const, icon: <span style={{ fontSize: 22, lineHeight: 1 }}>📁</span>, label: t('pages.rag.dataSourceFolder', '文件夹'), title: t('pages.rag.dataSourceFolderHint', '从本机选择文件夹，可递归扫描子目录') },
+              { id: 'git' as const, icon: <GitIcon width={22} height={22} />, label: t('pages.rag.dataSourceGit', 'Git'), title: t('pages.rag.dataSourceGitHint', '通过 Git 拉取远程仓库文件') },
+            ]).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => onDataSourceChange(opt.id)}
+                title={opt.title}
+                className="flex flex-col items-center cursor-pointer transition-colors"
+                style={{
+                  borderRadius: 10,
+                  padding: '14px 10px',
+                  border: `1px solid ${dataSource === opt.id ? 'var(--hub-accent, #316dca)' : 'var(--hub-line)'}`,
+                  background: dataSource === opt.id ? 'var(--hub-bg-3, rgba(49,109,202,0.10))' : 'transparent',
+                  color: dataSource === opt.id ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
+                }}
+              >
+                {opt.icon}
+                <span className="font-semibold" style={{ fontSize: 12.5, marginTop: 6 }}>{opt.label}</span>
+                <span style={{ fontSize: 10.5, marginTop: 4, lineHeight: 1.4, color: 'var(--hub-ink-3)' }}>
+                  {t(
+                    opt.id === 'file'
+                      ? 'pages.rag.dataSourceFileDesc'
+                      : opt.id === 'folder'
+                      ? 'pages.rag.dataSourceFolderDesc'
+                      : 'pages.rag.dataSourceGitDesc',
+                    opt.id === 'file'
+                      ? '选择一个或多个本地文件'
+                      : opt.id === 'folder'
+                      ? '可递归扫描子目录'
+                      : '拉取远程仓库文件'
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+          {/* 自动同步卡片：子卡片可整卡点击切换开关；子卡片 flex:1 同行等分 */}
           <div
-            className="rounded-lg flex flex-col gap-2.5"
-            style={{ background: 'var(--hub-bg-2)', border: '1px solid var(--hub-line)', padding: '12px 14px' }}
+            style={{
+              borderRadius: 10, padding: '12px 14px',
+              border: '1px solid var(--hub-line)', background: 'var(--hub-bg-2)',
+            }}
           >
-          {/* 数据源选择（需求1）：文件 | 文件夹 | Git 三选一分段切换。
-              切换由父级清空当前扫描树（不同源的树混在一起会误导）。 */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
-              {t('pages.rag.dataSource', '数据源')}
-            </label>
-            <div
-              className="inline-flex items-center rounded-md"
-              style={{ border: '1px solid var(--hub-line)', background: 'var(--hub-bg-2)' }}
-            >
-              {([
-                { id: 'file' as const, icon: <FileText size={12} />, label: t('pages.rag.dataSourceFile', '文件'), title: t('pages.rag.dataSourceFileHint', '从本机选择一个或多个文件') },
-                { id: 'folder' as const, icon: <FolderOpen size={12} />, label: t('pages.rag.dataSourceFolder', '文件夹'), title: t('pages.rag.dataSourceFolderHint', '从本机选择文件夹，可递归扫描子目录') },
-                { id: 'git' as const, icon: <GitBranch size={12} />, label: t('pages.rag.dataSourceGit', 'Git'), title: t('pages.rag.dataSourceGitHint', '通过 Git 拉取远程仓库文件') },
-              ]).map((opt) => (
+            <div className="hub-sect" style={{ marginBottom: 10 }}>
+              {t('pages.rag.sourceSyncTitle', '自动同步')}
+              <span style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 6 }}>
+                {t('pages.rag.sourceSyncSub', '更新检查时执行')}
+              </span>
+            </div>
+            <div className="flex items-stretch" style={{ gap: 10 }}>
+              {dataSource !== 'file' && (
                 <button
-                  key={opt.id}
                   type="button"
-                  onClick={() => onDataSourceChange(opt.id)}
-                  title={opt.title}
-                  className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] transition-colors"
+                  className="flex flex-col items-stretch cursor-pointer text-left"
                   style={{
-                    borderRadius: 5,
-                    background: dataSource === opt.id ? 'var(--hub-surface)' : 'transparent',
-                    color: dataSource === opt.id ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: dataSource === opt.id ? 600 : 400,
+                    flex: 1, borderRadius: 8, padding: '10px 12px',
+                    border: `1px solid ${sourceSyncAddEnabled ? 'var(--hub-accent, #316dca)' : 'var(--hub-line)'}`,
+                    background: 'var(--hub-surface)',
                   }}
+                  onClick={() => onSourceSyncAddChange(!sourceSyncAddEnabled)}
                 >
-                  {opt.icon}
-                  {opt.label}
+                  <span className="flex items-center" style={{ gap: 8 }}>
+                    <Switch checked={sourceSyncAddEnabled} onCheckedChange={onSourceSyncAddChange} size="compact" />
+                    <b style={{ fontSize: 12.5, color: 'var(--hub-ink)' }}>{t('pages.rag.sourceSyncAddShort', '同步新增文件')}</b>
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--hub-ink-3)', marginTop: 5, lineHeight: 1.4 }}>
+                    {t('pages.rag.sourceSyncAddDesc', '数据源里出现新文件时自动导入')}
+                  </span>
                 </button>
-              ))}
+              )}
+              <button
+                type="button"
+                className="flex flex-col items-stretch cursor-pointer text-left"
+                style={{
+                  flex: 1, borderRadius: 8, padding: '10px 12px',
+                  border: `1px solid ${sourceSyncRemoveEnabled ? 'var(--hub-accent, #316dca)' : 'var(--hub-line)'}`,
+                  background: 'var(--hub-surface)',
+                }}
+                onClick={() => onSourceSyncRemoveChange(!sourceSyncRemoveEnabled)}
+              >
+                <span className="flex items-center" style={{ gap: 8 }}>
+                  <Switch checked={sourceSyncRemoveEnabled} onCheckedChange={onSourceSyncRemoveChange} size="compact" />
+                  <b style={{ fontSize: 12.5, color: 'var(--hub-ink)' }}>{t('pages.rag.sourceSyncRemoveShort', '同步删除文件')}</b>
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--hub-ink-3)', marginTop: 5, lineHeight: 1.4 }}>
+                  {t('pages.rag.sourceSyncRemoveDesc', '源文件被删时同步移除文档')}
+                </span>
+              </button>
             </div>
           </div>
-          {/* 导入方式选择(软链接 / 文件拷贝)+ 帮助按钮 —— 仿 skill 安装的分段切换样式。
-              Git 数据源下隐藏：clone 目录本身是仓库的拷贝，强制 copy。 */}
-          {showMethod && dataSource !== 'git' && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
-                {t('pages.rag.importMethod', '导入方式')}
-              </label>
-              <RagMethodHelpIcon />
-              <div
-                className="inline-flex items-center rounded-md"
-                style={{ border: '1px solid var(--hub-line)', background: 'var(--hub-bg-2)' }}
-              >
-                <button
-                  type="button"
-                  onClick={() => onMethodChange!('symlink')}
-                  title={t('pages.rag.symlink', '软链接')}
-                  className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] transition-colors"
-                  style={{
-                    borderRadius: 5,
-                    background: method === 'symlink' ? 'var(--hub-surface)' : 'transparent',
-                    color: method === 'symlink' ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: method === 'symlink' ? 600 : 400,
-                  }}
-                >
-                  <Link2 size={12} />
-                  {t('pages.rag.symlink', '软链接')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onMethodChange!('copy')}
-                  title={t('pages.rag.fileCopy', '文件拷贝')}
-                  className="flex items-center gap-1 px-2.5 py-1.5 text-[12px] transition-colors"
-                  style={{
-                    borderRadius: 5,
-                    background: method === 'copy' ? 'var(--hub-surface)' : 'transparent',
-                    color: method === 'copy' ? 'var(--hub-ink)' : 'var(--hub-ink-3)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: method === 'copy' ? 600 : 400,
-                  }}
-                >
-                  <CopyIcon size={12} />
-                  {t('pages.rag.fileCopy', '文件拷贝')}
-                </button>
-              </div>
-            </div>
-          )}
-          {/* OS pickers (Tauri dialog) — backend reads from disk by path,
-              no bytes/base64 over IPC. Git 数据源走上方表单，此处按数据源
-              只渲染对应入口（分组区块内）：file → 多选文件；folder → 文件夹 + 递归开关。 */}
-
+          {/* 选择入口（Tauri dialog）：file → 多选文件；folder → 文件夹 + 递归。 */}
           {dataSource === 'file' && (
             <div className="flex items-center gap-2 flex-wrap">
-              <button type="button" onClick={onPick} className="hub-btn">
+              <button type="button" onClick={onPick} className="hub-btn primary">
                 <Upload size={13} /> {t('pages.rag.uploadSelect')}
               </button>
             </div>
           )}
           {dataSource === 'folder' && (
             <div className="flex items-center gap-2 flex-wrap">
-              <button type="button" onClick={onPickFolder} className="hub-btn" disabled={scanning}>
+              <button type="button" onClick={onPickFolder} className="hub-btn primary" disabled={scanning}>
                 {scanning ? <Loader2 size={13} className="animate-spin" /> : <FolderOpen size={13} />}{' '}
                 {t('pages.rag.uploadSelectFolder')}
               </button>
-              {/* 递归开关:仅影响「选择文件夹」的扫描深度(hub-switch,同全局开关样式) */}
               <span
                 className="flex items-center gap-1.5 text-[12px] cursor-pointer select-none"
                 style={{ color: 'var(--hub-ink-2)' }}
@@ -2471,7 +2594,6 @@ const UploadDialog: React.FC<{
             <div className="space-y-2">
               {/* Git 参数默认只露地址；分支/depth/账密收进「更多参数」展开区 */}
               <div className="flex items-center gap-2">
-                <GitBranch size={13} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
                 <input
                   value={gitUrl}
                   onChange={(e) => onGitUrlChange(e.target.value)}
@@ -2492,7 +2614,7 @@ const UploadDialog: React.FC<{
                 </button>
               </div>
               {gitAdvancedOpen && (
-                <div className="space-y-2" style={{ paddingLeft: 21 }}>
+                <div className="space-y-2">
                   <div className="flex items-center gap-2">
                     <input
                       value={gitBranch}
@@ -2552,7 +2674,7 @@ const UploadDialog: React.FC<{
                   disabled={gitScanning || !gitUrl.trim()}
                   onClick={() => onPickGit()}
                 >
-                  {gitScanning ? <Loader2 size={13} className="animate-spin" /> : <GitBranch size={13} />}{' '}
+                  {gitScanning ? <Loader2 size={13} className="animate-spin" /> : <GitIcon width={13} height={13} />}{' '}
                   {gitScanning ? t('pages.rag.gitCloning', '正在拉取仓库…') : t('pages.rag.gitFetchAndScan', '拉取并扫描')}
                 </button>
                 {gitScanning && (
@@ -2573,35 +2695,17 @@ const UploadDialog: React.FC<{
               </div>
             </div>
           )}
-          {/* 自动同步开关组——两个开关并排一行。新增仅 folder/git 有意义
-              （文件数据源无目录可扫）；删除对 file/folder/git 均生效。 */}
-          {(dataSource === 'file' || dataSource === 'folder' || dataSource === 'git') && (
-            <div className="flex items-center gap-x-6 gap-y-1.5 flex-wrap">
-              {dataSource !== 'file' && (
-                <span
-                  className="flex items-center gap-1.5 text-[12px] cursor-pointer select-none"
-                  style={{ color: 'var(--hub-ink-2)' }}
-                  onClick={() => onSourceSyncAddChange(!sourceSyncAddEnabled)}
-                >
-                  <Switch checked={sourceSyncAddEnabled} onCheckedChange={onSourceSyncAddChange} size="compact" />
-                  {t('pages.rag.sourceSyncAdd', '自动同步新增文件')}
-                </span>
-              )}
-              <span
-                className="flex items-center gap-1.5 text-[12px] cursor-pointer select-none"
-                style={{ color: 'var(--hub-ink-2)' }}
-                onClick={() => onSourceSyncRemoveChange(!sourceSyncRemoveEnabled)}
-              >
-                <Switch checked={sourceSyncRemoveEnabled} onCheckedChange={onSourceSyncRemoveChange} size="compact" />
-                {t('pages.rag.sourceSyncRemove', '自动同步删除文件')}
-              </span>
-            </div>
-          )}
-          </div>
           <p className="text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
             {t('pages.rag.uploadHint')}
           </p>
           {/* OCR 预检提示：Linux 无 tesseract 时提前告知（图片/PDF/Office 依赖） */}
+          {ocrStatus && !ocrStatus.available && (
+            <p className="text-[12px] flex items-start gap-1.5" style={{ color: 'var(--hub-ink-3)' }}>
+              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" style={{ color: '#d97706' }} />
+              {t('pages.rag.ocrPreflightHint')}
+            </p>
+          )}
+                    {/* OCR 预检提示：Linux 无 tesseract 时提前告知（图片/PDF/Office 依赖） */}
           {ocrStatus && !ocrStatus.available && (
             <p className="text-[12px] flex items-start gap-1.5" style={{ color: 'var(--hub-ink-3)' }}>
               <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" style={{ color: '#d97706' }} />
@@ -2659,7 +2763,7 @@ const UploadDialog: React.FC<{
                     style={{ fontSize: 10 }}
                     title={gitSourceMeta.branch ? `${gitSourceMeta.url} @ ${gitSourceMeta.branch}` : gitSourceMeta.url}
                   >
-                    <GitBranch size={10} />
+                    <GitIcon width={10} height={10} />
                     {gitSourceMeta.branch ? `${gitSourceMeta.url} @ ${gitSourceMeta.branch}` : gitSourceMeta.url}
                   </span>
                 )}
@@ -2815,7 +2919,7 @@ const UploadDialog: React.FC<{
                           />
                         ))}
                         {gCollapsed && (
-                          <div className="text-[10.5px]" style={{ padding: '4px 10px 6px 32px', color: 'var(--hub-ink-3)' }}>
+                          <div className="text-[10.5px]" style={{ padding: '4px 10px 6px 34px', color: 'var(--hub-ink-3)' }}>
                             {t('pages.rag.scanCollapsedHint', '{{count}} 个文件（已选 {{sel}}）', { count: g.files.length, sel: sel.length })}
                           </div>
                         )}
@@ -3062,7 +3166,11 @@ const FlatScanFileRow: React.FC<{
     <div
       className="group/file relative flex items-center gap-2 select-none cursor-pointer transition-colors"
       style={{
-        padding: '5px 10px 5px 14px',
+        // 缩进对齐：分组头 = 10px padding + checkbox(13) + gap(8) + chevron(17)
+        // + gap(8) → folder 图标起点 x≈56。文件行 padding-left 取同值，使文件
+        // 图标落在分组头 folder 图标列之下（此前 14px 使文件内容比分组头名字
+        // 还靠左，视觉上「文件顶到头」、与分组头平级——用户实测截图）。
+        padding: '5px 10px 5px 56px',
         background: checked ? 'var(--hub-surface-hover)' : undefined,
       }}
       onClick={() => onToggleFile(file.path)}
@@ -3187,22 +3295,9 @@ const ScanDirNode: React.FC<{
       </div>
       {!isCollapsed && (
         <>
-          {node.children.map((c) => (
-            <ScanDirNode
-              key={c.key}
-              node={c as never}
-              depth={depth + 1}
-              collapsed={collapsed}
-              onToggle={onToggle}
-              selectedPaths={selectedPaths}
-              onToggleFile={onToggleFile}
-              onToggleGroup={onToggleGroup}
-              onClearGroup={onClearGroup}
-              existingPaths={existingPaths}
-              formatSize={formatSize}
-              t={t}
-            />
-          ))}
+          {/* 本目录直属文件在前、子目录在后（文件管理器惯例）：此前先渲染
+              children 再渲染 rootFiles，直属文件被推到子目录内容之后，视觉上
+              「文件比目录还靠前」且脱离父级缩进层级（用户实测截图）。 */}
           {node.rootFiles.map((file) => {
             const exists = existingPaths.has(file.path);
             const checked = selectedPaths.has(file.path);
@@ -3211,8 +3306,12 @@ const ScanDirNode: React.FC<{
                 key={file.path}
                 className="group/file relative flex items-center gap-2 select-none cursor-pointer transition-colors"
                 style={{
-                  padding: '5px 10px 5px 14px',
-                  paddingLeft: 24 + depth * 14,
+                  // 对齐分组头 folder 图标列（10 + checkbox13 + gap6 + chevron17
+                  // + gap6 = 52），文件图标落在 folder 列之下。
+                  paddingLeft: 52 + depth * 14,
+                  paddingRight: 10,
+                  paddingTop: 5,
+                  paddingBottom: 5,
                   background: checked ? 'var(--hub-surface-hover)' : undefined,
                 }}
                 onClick={() => onToggleFile(file.path)}
@@ -3248,6 +3347,23 @@ const ScanDirNode: React.FC<{
               </div>
             );
           })}
+          {/* 子目录在本目录直属文件之后渲染（文件管理器惯例，见上）。 */}
+          {node.children.map((c) => (
+            <ScanDirNode
+              key={c.key}
+              node={c as never}
+              depth={depth + 1}
+              collapsed={collapsed}
+              onToggle={onToggle}
+              selectedPaths={selectedPaths}
+              onToggleFile={onToggleFile}
+              onToggleGroup={onToggleGroup}
+              onClearGroup={onClearGroup}
+              existingPaths={existingPaths}
+              formatSize={formatSize}
+              t={t}
+            />
+          ))}
           {isCollapsed === false && node.children.length === 0 && node.rootFiles.length === 0 && null}
         </>
       )}
@@ -4435,7 +4551,7 @@ const UpdateDialog: React.FC<{
         <div className="flex-1 overflow-y-auto p-5 space-y-3">
           {/* 文档信息 */}
           <div className="hub-card flex items-center gap-2" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
-            <FileText size={14} style={{ color: 'var(--hub-ink-3)' }} />
+            {fileIcon(doc.name)}
             <span className="truncate text-[13px]" style={{ color: 'var(--hub-ink)' }} title={doc.name}>{doc.name}</span>
             <span className="hub-tag flex-shrink-0" style={{ fontSize: 10 }}>
               {method === 'symlink' ? (
@@ -4909,9 +5025,12 @@ const BatchUpdateConfirmDialog: React.FC<{
 // 与上传浮层同范式：按 name 匹配当前文档，用 charsDone/charsTotal 算百分比。
 const BatchUpdateDialog: React.FC<{
   progress: BatchProgress;
-  charProgress: { name: string; charsDone: number; charsTotal: number } | null;
+  charProgress: { name: string; charsDone: number; charsTotal: number; chunksDone: number; chunksTotal: number; chunkingDone: number; chunkingTotal: number } | null;
+  /** Elapsed timing from the hook (batch start + per-doc start). Lives at hook
+   *  level so closing/reopening the dialog does NOT reset the clock. */
+  timing: { startedAt: number; fileStartedAt: number; tick: number } | null;
   onClose: () => void;
-}> = ({ progress, charProgress, onClose }) => {
+}> = ({ progress, charProgress, timing, onClose }) => {
   const { t } = useTranslation();
   const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
   const done = progress.phase === 'done' && progress.current >= progress.total;
@@ -4933,11 +5052,25 @@ const BatchUpdateDialog: React.FC<{
       setGitErrorsLoading(false);
     }
   };
+  // 打开弹框即查询（读后端缓存，无网络 I/O）：仅在确有 Git 刷新失败时显示 ⚠ 按钮，
+  // 无失败/无 Git 数据源则完全不渲染图标（用户反馈：? 图标像帮助按钮，易困惑）。
+  useEffect(() => {
+    void loadGitErrors();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // 向量进度：charProgress 与当前文档 name 匹配时取 charsDone/charsTotal。
   const matches = charProgress && charProgress.name === progress.name;
   const charsDone = matches ? charProgress!.charsDone : 0;
   const charsTotal = matches ? charProgress!.charsTotal : 0;
   const docPct = charsTotal > 0 ? Math.min(100, Math.round((charsDone / charsTotal) * 100)) : 0;
+  // Chunk-level progress (third bar in the batch dialog too) + the
+  // chunking-phase fill ("分片中… N%" while the chunker scans partitions).
+  const chunksDone = matches ? charProgress!.chunksDone : 0;
+  const chunksTotal = matches ? charProgress!.chunksTotal : 0;
+  const chunkPct = chunksTotal > 0 ? Math.min(100, Math.round((chunksDone / chunksTotal) * 100)) : 0;
+  const chunkingDone = matches ? charProgress!.chunkingDone : 0;
+  const chunkingTotal = matches ? charProgress!.chunkingTotal : 0;
+  const chunkingPct = chunkingTotal > 0 ? Math.min(100, Math.round((chunkingDone / chunkingTotal) * 100)) : 0;
   return (
     <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
       <div
@@ -4953,32 +5086,22 @@ const BatchUpdateDialog: React.FC<{
         >
           <X size={14} />
         </button>
-        {/* Git 数据源警告图标：点击查询后端记录的最近刷新失败（无网络 I/O）。
-            查询前中性灰（未知），查到失败变琥珀色，无失败变绿色对勾。 */}
-        <button
-          onClick={() => {
-            const next = !gitErrorsOpen;
-            setGitErrorsOpen(next);
-            if (next) void loadGitErrors();
-          }}
-          className="hub-icon-btn sm"
-          style={{
-            position: 'absolute',
-            top: 8,
-            right: 38,
-            color: gitErrors === null ? 'var(--hub-ink-3)' : gitErrors.length > 0 ? '#d97706' : 'var(--hub-accent)',
-          }}
-          title={t('pages.rag.batchGitWarningsTitle', 'Git 数据源状态（点击查看）')}
-        >
-          {/* 未查询：中性帮助圈（避免误导为有错误）；查询后无失败=绿勾，有失败=琥珀警告 */}
-          {gitErrors === null ? (
-            <CircleHelp size={14} />
-          ) : gitErrors.length === 0 ? (
-            <Check size={14} />
-          ) : (
+        {/* Git 数据源警告图标：仅在确有记录的刷新失败时渲染（打开弹框即查询）。
+            无失败/无 Git 数据源完全不显示——避免 ？ 图标被误认为帮助按钮。 */}
+        {gitErrors !== null && gitErrors.length > 0 && (
+          <button
+            onClick={() => {
+              const next = !gitErrorsOpen;
+              setGitErrorsOpen(next);
+              if (next) void loadGitErrors();
+            }}
+            className="hub-icon-btn sm"
+            style={{ position: 'absolute', top: 8, right: 38, color: '#d97706' }}
+            title={t('pages.rag.batchGitWarningsTitle', 'Git 数据源状态（点击查看）')}
+          >
             <AlertTriangle size={14} />
-          )}
-        </button>
+          </button>
+        )}
         {errored ? (
           <AlertTriangle size={22} style={{ color: 'var(--hub-err)' }} />
         ) : done ? (
@@ -5042,6 +5165,26 @@ const BatchUpdateDialog: React.FC<{
         <div className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
           {progress.current}/{progress.total}
         </div>
+        {/* 耗时行：总耗时（本轮开始至今）+ 单文档耗时（当前文档开始至今）。
+            timing 由 hook 层维护——弹框关闭再重开不会重置计时（用户需求）。
+            done/error 后 timing 为 null，终态不再显示时间。 */}
+        {timing &&
+          !done &&
+          !errored &&
+          (() => {
+            const now = Date.now();
+            return (
+              <div className="flex items-center justify-center gap-3 hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                <span>
+                  {t('pages.rag.totalElapsed', '总耗时')} {formatElapsed(now - timing.startedAt)}
+                </span>
+                <span style={{ color: 'var(--hub-line-2, var(--hub-line))' }}>|</span>
+                <span>
+                  {t('pages.rag.fileElapsed', '单文件')} {formatElapsed(now - timing.fileStartedAt)}
+                </span>
+              </div>
+            );
+          })()}
         {/* 向量进度条（当前文档 char 级子进度，复用 charProgress）——同上传浮层单文档进度样式 */}
         {reindexing && (
           <div className="w-full flex flex-col gap-1" style={{ marginTop: 2 }}>
@@ -5062,6 +5205,30 @@ const BatchUpdateDialog: React.FC<{
               {charsTotal > 0
                 ? `${charsDone.toLocaleString()} / ${charsTotal.toLocaleString()} ${t('pages.rag.chars', '字符')}`
                 : t('pages.rag.docProgressPreparing', '准备中…')}
+            </div>
+            {/* 分片进度（第三条）：分片完成后显示计数；仍在分片时显示
+                 「分片中… N%」（chunkingPct 逐分区上报）。填充条贯穿两阶段。 */}
+            <div className="flex items-center justify-between" style={{ marginTop: 2 }}>
+              <span className="text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {t('pages.rag.chunkProgress', '分片进度')}
+              </span>
+              <span className="hub-mono text-[10px]" style={{ color: 'var(--hub-ink-3)' }}>
+                {chunksTotal > 0
+                  ? `${chunksDone.toLocaleString()} / ${chunksTotal.toLocaleString()} · ${chunkPct}%`
+                  : chunkingTotal > 0
+                  ? `${t('pages.rag.chunkingInProgress', '分片中…')} ${chunkingPct}%`
+                  : t('pages.rag.chunkingInProgress', '分片中…')}
+              </span>
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: 'var(--hub-line)', overflow: 'hidden' }}>
+              <div
+                style={{
+                  width: `${chunksTotal > 0 ? chunkPct : chunkingPct}%`,
+                  height: '100%',
+                  background: 'var(--hub-accent, var(--hub-ink))',
+                  transition: 'width 0.15s ease',
+                }}
+              />
             </div>
           </div>
         )}

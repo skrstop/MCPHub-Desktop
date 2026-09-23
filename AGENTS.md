@@ -1887,14 +1887,193 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
   - `toggleGroupSelected` 语义天然匹配 checkbox（全选中→清空，否则全选）。
 - **RagPage 接线**：新增 `toggleSelectDocs(docs)`（子树全选→全部取消，否则全部选中；updater 内 `new Set(prev)` 复制，遵守 Object.is 突变禁令）；`<RagDocTree>` 调用处传 `selectedIds` + `onToggleDocs`。
 - **验证**：`npx tsc --noEmit` 24 = 基线（零新增）；`npm run build` 通过。Rust 无改动。
+- **导入弹框配置区对齐优化（9-20）**：「数据源」「导入方式」两行改为 2 列 grid（`max-content 1fr`，label 左列对齐、切换器右列），分段切换器底色统一 `hub-surface`（与卡片内层对比清晰）；网格在导入方式行后闭合，选择入口/Git 表单/开关组仍为卡片纵向子项。
 - **导入弹框布局重设计（9-18 定稿）**：全新「导入配置分区」卡片（`hub-bg-2` + 边框圆角），内部固定顺序 = 数据源切换 → 导入方式（file/folder）→ 选择入口 + 递归（file/folder）→ **Git 表单**（git）→ 自动同步开关组（新增[folder/git] + 删除[file/folder/git] 并排一行）；格式说明文案（uploadHint）+ OCR 预检提示放卡片下方，其后扫描占位/扫描树/标签/footer。⚠️ **事故与恢复**：重做过程中用 `join('\n')` 整文件行手术切错块边界，随后误执行 `git checkout -- RagPage.tsx` 把 9 天未提交改动还原到 HEAD（9-09）；**唯一完整恢复源 = Vite 构建 sourcemap 的 `sourcesContent`**（`dist/assets/RagPage-*.js.map` 保存构建时原始 TSX 源码，含 19:13 前全部改动），提取即完整还原（tsc 25 基线 + build ✓）。教训：①工作树有大量未提交改动时严禁 checkout/stash 丢弃；②vite sourcemap 是应急源码恢复源；③大范围 JSX 重组应小步替换 + 每步 tsc 验证。
 - **导入弹框底部「全选/清除」按钮移除（同日）**：footer 只保留「已选择 N / M 个文件」计数 + 取消 + 导入；组头/目录头的勾选框已覆盖批量选择语义（文件夹级联），顶部全选按钮冗余。`onSetAll` prop 保留（组头逻辑仍用）。
 - **单文件数据源纳入删除同步（同日，用户需求）**：`plan_source_sync` 末尾新增 file 源检测——`source.kind=="file"`（含 legacy 无 source 的文档）且 `original_path` 在磁盘上不存在 → 加入 removed（受「自动同步删除文件」开关控制；关闭时保留 + lostOriginal 徽章）。文件源无扫描/过滤环节，无需 folder/git 的双条件（扫描集 + 磁盘双查），仅「文件不存在」即判定；`!removed.iter().any(id)` 防与 folder root 重叠路径重复入列。tool 源（无 original_path）天然跳过。
 - **「自动同步删除文件」开关（同日，用户需求）**：删除同步从「始终运行」改为受控开关（默认开）——①RagSettings 加 `source_sync_remove_enabled`（serde default true，配置键 `sourceSyncRemoveEnabled`，deep-merge 持久化）；②`preview_batch_update` 与 `run_batch_update` 在开关关闭时 `sync_removed.clear()`（不删文档、确认弹框不显示「移除 N」）；③关闭时列表行沿用既有 `lostOriginal` ⚠️「原始丢失」徽章告警（判定独立于删除：original_path 不存在即亮，symlink/copy/git 通用）；④导入弹框设置区新增「自动同步删除文件」Switch（file/folder/git 三种数据源均显示，与「自动同步新增文件」并排一行；新增开关仅 folder/git 显示——file 数据源无目录可扫），inline fallback 文案（跟随既有开关模式）。开关组位置在**数据源分段切换行正下方**（格式提示文案之前）。注意 run/preview 两处 `sync_removed` 需 `mut`（E0596 曾踩）。
 - **批量进度弹框 Git 状态图标默认态修正（同日）**：右上角 Git 数据源状态按钮未查询时渲染 AlertTriangle（灰），用户误以为有错误——未查询态改为中性 CircleHelp；点击查询后无失败=绿勾、有失败=琥珀警告（语义不变，见 §3.17.9）。
+- **手动更新与数据源同步竞态导致重复文档修复（9-20）**：用户手动上传更新（update_doc_from_file 记录新 original_path）的同一分钟，auto tick 的 plan_source_sync 用**更早的 meta 快照**判定该文件「无文档引用」→ run_source_sync 导入了第二个同路径文档（树里出现两个同名文件，一 v1 一 v2，DB 证实两条 meta 同 original_path）。修复：`run_source_sync` 每次导入前在 **META_LOCK 内**重扫全部 .meta，若已有文档的 original_path == 待导入路径则跳过（日志 "raced with manual update"）——锁序 META → runtime 与既有规则一致；plan 阶段的 referenced 检查保留（快照过滤大集合），执行期重查兜底竞态。
+- **自动更新空转时「原始丢失」徽章不出现修复（9-20）**：根因——auto tick 的空转分支（to_update==0 && added==0 && removed==0）静默 `continue` 不发任何事件，而 lostOriginal 徽章在列表加载时计算，源文件被删后列表停留旧数据直到手动刷新。修复：空转但 `preview.lost > 0` 时发轻量事件 `rag://docs-invalidated`（payload=lost 数），useRagData 监听后仅 `fetchDocs()`（不弹进度框/不动按钮状态，保持空转不打扰 UI 原则）；有实际工作的 pass 走既有 done 事件重拉，不受影响。
+- **批量进度弹框 Git 状态按钮改为「仅失败时显示」（9-20）**：此前未查询时渲染中性 ？（CircleHelp），用户误认为帮助按钮。改为弹框打开即自动查询（读后端 GIT_REFRESH_ERRORS 缓存，无网络 I/O），**仅在确有 Git 刷新失败时渲染琥珀 ⚠ 按钮**，无失败/无 Git 数据源完全不显示图标。查询逻辑仍在点击展开时复用（已加载则跳过）。
+- **导入弹框卡片化布局落地（9-20，设计稿 v9 定稿）**：按确认的方案 B 重写 UploadDialog 配置区——①**数据源三选大卡片**（3 列 grid，emoji 图标 📄/📁/🌿 22px + 名称 + 描述居中，选中蓝边+浅蓝底，点卡片即选）；②**「自动同步」卡片**（hub-sect 小标题 +「更新检查时执行」副注）：「新增文件」/「删除文件」两张**可整卡点击的子卡片**（flex:1 等分同行，内含 compact Switch + 加粗标签 + 一行灰色说明，开启蓝边高亮；新增子卡仅 folder/git 渲染）；③选择入口行（选择按钮改 `hub-btn primary` 主色 + 递归开关）；④Git 表单不变；⑤**「导入方式（软链接/拷贝）」切换器 UI 移除**——`handleDataSourceChange` 按数据源自动设 method（git=copy、file/folder=symlink），后端强制 Git copy 语义不变；⑥uploadHint 文案优化（"支持 Markdown、代码、Office 文档、PDF 与图片，导入时自动提取内容并建立检索索引。"）。新 i18n 键 ×4 语言：sourceSyncTitle/Sub/AddShort/AddDesc/RemoveShort/RemoveDesc + uploadHint 更新；数据源卡片描述 dataSourceFile/Folder/GitDesc ×4（对齐设计稿，首版遗漏后补）。⚠️ 该轮曾因整块字符串替换切错边界致 JSX 断裂（tsc 424），通过会话备份（files/RagPage.tsx.bak-20260920）恢复 git 表单块 + 清除旧开关组残留修复。
+- **RAG 文件类型图标（9-20）**：新增 `frontend/src/utils/fileIcon.tsx` 统一映射器——按扩展名/精确文件名（Dockerfile/Makefile/README/LICENSE）返回 lucide 图标：md→BookOpen、pdf→BookOpen(红调)、图片→FileImage、表格→FileSpreadsheet、演示→Presentation、压缩→FileArchive、shell→FileTerminal、json/配置→FileJson、代码→FileCode、未知→FileType。接入点：平铺/树形叶子行（renderDocRow）、删除确认弹框、文档详情弹框；树形数据源节点图标（kind）不变。样式统一 `var(--hub-ink-3)`。
 - **RAG 标题计数补齐（同日）**：RAG 页标题下方新增「N 篇文档」副标题（`hub-num` + `hub-sub`），与其他页面（提示词/资源/Skill）的标题计数样式一致；计数取 `docPagination.total`；i18n 新键 `pages.rag.docCount` ×4 语言。
 - **搜索栏计数移除（同日）**：Servers / Prompts / Resources / Skills / RAG 五个页面搜索栏右侧的「N/M」总数统计移除（信息价值低且挤占工具栏宽度）；RAG 移除的是工具栏计数 span（批量条计数此前已删）。
 - **样式修复（同日）**：批量勾选条/树形「展开收起」按钮出现时工具栏宽度不足——容器无 `flex-wrap` 且子项默认收缩，按钮被压缩致「批量添加标签/平铺/树形」等文字换行错乱。修复：工具栏容器加 `flex-wrap`；批量条、计数+视图切换组、展开收起按钮加 `flex-shrink-0`；全局 `.hub-btn` 加 `white-space: nowrap` + `flex-shrink: 0`（按钮文字永不换行）。**后续补充**：`flex-wrap` 导致平铺勾选时批量条整体换行——去掉换行需求不现实（窗口小必换），改为优先收缩可收缩项：文件名搜索卡片加 `min-w-[160px]`、TagSearchSelect 根加 `min-w-[150px] shrink`——宽度不足时先缩搜索区，仅在极窄窗口才换行；批量条不再单独换行。
+
+#### 3.17.15 分片策略修正 + Git 图标 + skill 多选样式 + 刷新按钮（2026-09-22）
+
+> 用户五项需求的落地与一次**方案纠偏**（3.17.15 内分片部分曾按「固定长度窗口 + 超长降级 text」实现，用户明确否定，已按本节最终方案重写）。
+
+**① RAG 导入 Git 图标（用户需求1）**：`components/icons/GitIcon.tsx` 新增——simple-icons 官方 Git logo path（viewBox 24，默认色 `#f05032` 官方橙，`style.color` 可覆盖、其余 style merge）。替换点：RagPage 导入弹框数据源卡片/地址输入行/拉取按钮/扫描统计条/文档列表 Git 徽章（5 处 `GitBranch`→`GitIcon`）+ RagDocTree 树形数据源节点与类型徽章（2 处）；RagPage 移除 `GitBranch` import。
+
+**② skill 页多选样式统一（用户需求2）**：InstallDialog 的「独立搜索框 + checkbox 平铺列表」改为与 RAG TagSearchSelect 同视觉语言的 `AgentMultiSelect`（此前 ExportDialog 已接入）：触发按钮 + portal 下拉（搜索输入/已选 chips 带清除/方框勾选项行）。`AgentMultiSelect` 扩展三个可选 prop 支撑 InstallDialog 特性：`sections`（分节渲染「已安装/未安装」，sticky 节头，查询在节内过滤）、`renderRowMeta`（行内徽章：当前安装方式 + switching 提示）、`renderRowExtra`（行尾控件：symlink/copy 切换器 + 卸载按钮，stopPropagation 不触发行选择）。列表 maxHeight 200→240。删除 InstallDialog 的 `search` state / `filtered` / 旧 `renderRow` / `toggle`。
+
+**③ 五页刷新按钮（用户需求3）**：核查确认 Groups/Prompts/Resources/Skills/RAG 五页头部均已有「刷新」按钮（`hub-btn` + `RefreshCw` + animate-spin，同 Servers 页模式，前轮已落地）；本轮无改动。
+
+**④ 内容提取产物分片路由（用户需求4）**：`extract/mod.rs` 新增 `produces_markdown(filename)`（PDF/Office → true 产出 Markdown；image → false 产出纯 OCR 文本）。`chunker.rs::semantic_strategy` 最前分支：`produces_markdown` → `MarkdownChunkStrategy`；其余照旧（`.md` → markdown、代码见⑤、其他 → text）。即「看产出内容」：md 产物走 mdsplit、其他（OCR 文本）走 text。新增测试 `extracted_products_route_to_markdown_splitter`（report.pdf 的 md 内容按标题切 2 块、report.txt 同内容合 1 块作对照）。
+
+**⑤ 代码分片路由（用户需求5，两次纠偏后的最终方案）**：
+- **第一次纠偏**：9-20 曾实现「>256KB 的语义文件按行对齐切 256KB 窗口、窗口内重跑 splitter」；用户明确要求**不使用固定长度、不用超长降级**。已移除 `SEMANTIC_WINDOW_BYTES`/`split_line_windows` 及其测试。
+- **第二次纠偏（linthis 整体撤回）**：曾引入 `linthis = "0.28"` 做「支持语言先格式化再走 code-spliter、不支持走 text-spliter」。核实后发现 **linthis 只是聚合器**——每个语言的 formatter 都 shell-out 到外部二进制（rustfmt/prettier/ruff/gofmt…），等于要求用户安装外部工具，违背「内置工具、不外部安装」预期。用户决定**暂时不处理格式化**，已完整撤回：删除 `src/rag/format.rs`、Cargo.toml 的 linthis 依赖、`rag/mod.rs` 的 `pub mod format`、`chunk_document` 内的格式化步骤与 `semantic_strategy` 的 linthis 门控。
+- **最终路由**（与项目最早逻辑一致 + 防挂死守护）：`chunk_document` 依次判定——提取产物（`produces_markdown`，见④）→ `.md` → `MarkdownChunkStrategy`；代码扩展（tree-sitter 语法支持，js/ts/py/rs/go/java/c/cpp…）→ `CodeSplitter`；其余 → `TextSplitter`。整文件单一策略一次完成，无窗口、无格式化、无降级。
+- **保留的防挂死机制**（非窗口、非降级）：`TokenChunkSizer::size` 快速否决——`len > capacity * MAX_TOKEN_BYTES(64)` 时直接返回超容量哨兵，不经 tokenizer。**该机制正是「压缩 JS 跑一整晚」的根因修复**：临时探针实测（见下），未加否决时 1.8MB 单巨型 AST 节点的 minified JS 分片 **>19 分钟仍不结束**（text-splitter 二分探测反复 tokenize 永远装不下多 MB 候选），真实模型 tokenizer 下即「过夜」量级；加否决后同一文件 1.7s 完成（整文件作为一个超容 chunk 返回）。另一形态（海量小语句，3.2MB/14k AST 节点）两种状态均 ~70s：每 chunk 恒定 ~0.1s 的库内 AST range 扫描开销，耗时与 chunk 数线性相关（chunk_size 128 → 2593 chunks → 259s），tree-sitter 解析本身 <1s 非瓶颈。`minified_js_terminates_quickly`（30k 行 <120s）与 `giant_single_line_js_terminates_quickly` 两个回归测试守护该机制。
+- **同类问题全面复查（2026-09-22 第二轮，用户要求「再次检查是否还有类似问题」）**：发现并修复 3 处——①**超长 chunk 安全阀**（`chunker.rs::split_oversized_chunks`）：text-splitter 的「至少保留一个 section」保证会让不可再分的巨型节点（单巨型 AST 节点/无边界行）输出一个远超容量的整块，embed 端 forward 有 max_context 截断不会挂，但该块会**原样存库**，检索命中时把 MB 级文本推进 UI；现于 `chunk_document` 出口把超过 `capacity×64` 字节的 chunk 按字符边界硬切窗口（内容零丢失，正常分片输出不受影响），新增测试 `oversized_unsplittable_chunks_are_hard_split`（含多字节 UTF-8 边界断言）。②**单条 `embed()` 无截断**（`gguf.rs`）：`embed_batch` 走 `forward_sub_batch` 按 max_context 截断，但单条 `embed()`（查询路径）直接构造 `[1, seq]` 张量——超长查询会分配超额 attention 内存（Metal buffer overflow/OOM 风险）；已对齐截断。③**测试桩 tokenizer 退化行为修复**（`chunker.rs` 测试模块 `WhitespaceTokenizer`）：原实现 `split_whitespace().find()` 对无空白文本把任意长候选坍缩成 1 个 token，在快速否决边界制造 fits/非 fits 悬崖，令 text-splitter 二分在悬崖处字符级碎裂——50KB "xxx…" 实测 428s/17,233 个单字节 chunk（真实 tokenizer 每字符出 token、单调平滑无此问题，**生产不受影响**，纯测试桩伪影）；桩改为顺序 8 字符分组 token（对候选长度单调，镜像真实 tokenizer 行为），相关测试判别尺寸同步重调。
+- **第三轮横向排查（同日第四轮）**：发现并加固**活动日志载荷无界写入**——`log_service::write_activity`（5 个调用点：Tauri tools 命令 ×2、http_server ×2、mcp_tasks）把工具调用的 `input`/`output`（serde_json 序列化）与 `error_message` 原样写入 `activity_log`，无长度限制——MCP 工具传大文件内容（如 rag_file_create 的 docContent）或返回大结果时整块入库（ActivityPage 详情弹窗也会整块渲染）。收口截断：input/output/error_message 各 64KB（字节 + 字符边界对齐，超出附 `…(truncated)` 标记）。其余排查项：Rust 侧剩余 `.repeat` 全为 gguf 张量广播/测试；extract 层 markdown 构建由库线性完成；前端无 indexOf-in-loop/repeat 平方模式，ViewDialog/分片弹框已有分页，chunk_text 经安全阀 ≤32KB。**回归**：`cargo test --lib` 46 passed / 0 failed。
+- **第二轮横向排查（同日第三轮）**：以「无界输入 × 重复扫描 / 无界写入」为模式横扫 rag/、skill_service、fts_service、http_server、app_logger——发现并加固 2 处日志写入无界点：①`app_logger::log_to_db`（**117 个调用点的唯一收口**，前端 `log_event` 也经此）原来对 message 无长度限制，超长消息直接进 `app_log` 表并被 FTS tokenize（写放大）；现收口处截断 4000 字符（字符边界对齐）。②`stdio_transport` stderr drain 逐行 `log_to_db`/`log::info!` 无截断——输出多 KB 行（如 minified JSON dump）的 MCP server 会刷爆控制台与日志表；现单行 2000 字符截断（`stderr_tail` 32KB 滚动缓存语义不变）。其余排查项均线性或有界：正则零使用；http_server 有 `parse_body_limit`；skill frontmatter 解析单遍线性；自动更新定时器有代数守卫；SSE/http/openapi transport 的 log_to_db 均为有界 format! 状态消息；`decode_text` SIMD 线性；提取层受 64MiB 上传硬顶约束。**回归**：`cargo test --lib` 46 passed / 0 failed。
+- **审计覆盖面**：三个 splitter 共用同一 `TokenChunkSizer`（快速否决全域生效）；上传读取有 `MAX_UPLOAD_BYTES` 64MiB 硬顶；搜索 snippet 即 chunk_text（阀后 ≤32KB）；`to_lowercase`/find/decode 等 O(n) 操作无平方级路径；`reindex_doc`/批量/自动更新均为逐文档线性。**结论：无其余同类无界开销路径**。
+- **cargo 配置**：机器全局 `~/.cargo/config.toml` 把 crates.io 指到 GitHub GIT index，github 不稳时 `cargo` 卡「Updating crates.io index」超时；`src-tauri/.cargo/config.toml` 追加 `[source.crates-io] registry = "sparse+https://index.crates.io/"`（注意**末尾斜杠必需**，否则 "sparse registry url must end in a slash"）本地覆写强制 sparse 协议。
+
+#### 3.17.16 深层多行 AST 生产挂死根治：CodeSplitter AST 预分区（2026-09-22 第三轮，release 实测确认）
+
+> 用户实测反馈：`mermaid.min.js`（3.3MB）RAG 导入在 **release 生产包**依旧挂死，前两轮修复（快速否决 / 安全阀）无效。本轮以真实文件 + 真实模型 tokenizer 复现出真正的根因。
+
+**根因：测试桩 tokenizer 掩盖了 1000 倍的真实成本**
+
+- 前两轮的所有回归测试（`minified_js_terminates_quickly` / `giant_single_line_js_terminates_quickly`）用 `WhitespaceTokenizer` 测试桩——每次 `size()` 探测 ~**µs** 级；生产用 granite 97m GGUF BPE tokenizer——每次 32KB 候选探测 ~**7ms**（快 1000 倍成本）。测试全绿对生产行为**毫无证明力**。
+- 真实复现 bench（`cargo test --test bench_tmp --release`，真实模型 + 真实 mermaid.min.js）：全量 tokenize 3.3MB 仅 **1.0s**（tokenizer 本身不慢）；但 unpartitioned `CodeSplitter` 跑了 **2 分 48 秒 + 98.5% CPU 仍未完成**（debug），release 下同样挂死。
+- mermaid.min.js 的真实形态是关键：**3587 行、184 行 >1KB、最长单行 324KB**——不是此前测试假设的「单行巨型文件」，而是「**深层多行 AST + 多条超长行**」。text-splitter 生成每个 chunk 时都要做二分探测（`MemoizedChunkSizer` 缓存在**每个 chunk 生成后就清空**，见 `next_chunk` 里 `clear_cache()`），7717 个 chunk × 每 chunk ~20 次探测 × 每次 ms 级真实 tokenize ≈ 数小时。快速否决只挡住了「>32KB 不可 fits 的候选」，挡不住**决定 chunk 边界时必须精确定位的 ≤32KB 候选探测**。
+
+**修复：AST 预分区（非窗口、非降级——分区边界就是语句边界）**
+
+- `chunker.rs::CodeChunkStrategy` 新增 `partition_offsets`：文件 >`CODE_PARTITION_BYTES`(256KB) 时，先用 tree-sitter 把文件解析成语法树，按「最浅可分节点」递归切出原子区间（`push_atoms`，子节点之间的空隙也作为 gap 原子，**区间精确铺满全文、零字节丢失**），贪心装箱成 ≤256KB 的分区；每个分区独立跑 `CodeSplitter`。
+- **语义不变**：分区边界 = AST 节点边界（语句/块结束处），与任何 chunk 边界同类；每个 chunk 依然在 AST 节点处切分。这是「分层」而非「定长窗口」（用户已明确否定定长窗口方案）——window 大小由语法树结构决定，不由字节位置决定。
+- **代价**：`chunk_overlap` 只在分区内生效（跨分区边界无重叠）——分区边界是语句结束，与普通 chunk 边界同类，语义可接受。
+- 解析失败（语法不支持/半途解析错误）回退历史单遍路径（warn 日志），导入永不因此报错。
+- **release 实测**（真实模型 + 真实 mermaid.min.js）：分区 256KB → **47.6s** / 7717 chunks；分区 64KB → **37.3s** / 7722 chunks（overlap=0 时 16.5s）；max chunk 2021 bytes（=512 token 正确）；内容零丢失（3,493,058 字符精确对齐）。从「数小时挂死」到 37s。**收益递减**：256→64KB（分区数 4 倍）仅快 1.3 倍——剩余成本主要是 splitter 每分区的固定遍历开销而非探测前缀长度，不再调小（更小分区把语句子树切碎成噪声）。debug 构建同文件 396s（release/debug 约 10 倍差）。
+
+**配套修复：分片阶段 UI 进度反馈**
+
+- `service.rs::reindex_doc` 的 0% 进度 tick（`emit_upload_progress(0, total_chars)`）从 chunking 之后**提前到 chunking 之前**——大文件分片阶段（现在也可能几十秒）进度条不再停留在「Preparing…」无响应，而是立即显示真实总字数。
+
+**「分片中…」5 分钟根因：git 刷新风暴 + TTL 竞速（2026-09-23，日志实证）**
+
+- **现象**：单文档更新时「分片中…」卡 ~5 分钟（总 296s 中嵌入仅 211s）。日志实证：更新窗口内 **4-6 次 `git: refreshed repo`（每次 ~63s 网络重克隆）与分片/嵌入并发**，抢光网络/CPU。
+- **根因是定时器风暴**：用户把自动更新间隔设为最小 60s，而每次 git 刷新本身 ~63s（重新克隆 hdf-book 仓库）+ TTL 缓存只有 60s——刷新完 TTL 刚好过期，下一个 tick 又刷新，**无限重克隆循环**（日志 269 次/天，空闲时也在每分钟克隆）。
+- **修复①**：`GIT_REFRESH_TTL_SECS` 60 → **600**（10 分钟）。刷新是全量网络重克隆，TTL ≤ 克隆时长必然循环；10 分钟既封顶克隆频率又足够新鲜（md5 对比最多滞后 10 分钟）。
+- **修复②**：`updateDoc`（单文档更新）补上 **import-session 括号**（与批量导入相同）——会话期间后端 defer git 刷新 + 自动更新 tick，更新不再被后台克隆拖慢。
+- **大文件提示通用化**（用户需求「提示是通用的，不分入口」）：无 fileSize 的入口（单文档更新/模型重载）退化为用 `charsTotal × 1.5` 近似字节判断（只用于提示不用于逻辑），≥1MB 同样显示。
+- 回归：`cargo check` ✓；`cargo test --lib` **48 passed**；tsc 24 = 基线；build ✓。
+
+**嵌入阶段 padding 浪费根治：embed_batch 长度分桶（2026-09-23，用户「耗时还是太长」）**
+
+- **生产日志揭示真瓶颈**：mermaid.min.js 实测 `totalMs=522253`，其中 **embedMs=436611（84%）**——分片（前轮已优化到 ~37s）不是大头，**嵌入才是**。6199 chunks ÷ 32 批 = 194 次 forward，每次 ~2.2s。
+- **根因**：`forward_sub_batch` 的 forward 成本 = `[batch × 批内最长序列]`（右 padding），一条 2048-token 长尾 chunk 混进 31 条 300-token 短 chunk，全批按 2048 算——语句边界分片的长短方差极大，实测 padding 浪费 ~6 倍 GEMM。
+- **修复**（`gguf.rs::embed_batch`）：**长度分桶**——tokenize 后按长度排序，长度相近（新行超过桶首行 12.5%+64 token 即封桶）的行一起 forward，最后按原下标 scatter 回调用方顺序。**零语义变化**（每行 embedding 逐位相同，只有计算顺序不同），padding 浪费 ~6x → ~1.1x，预期嵌入阶段 437s → ~90-120s（Metal/CPU 同样受益）。
+- 逐行 embedding 的正确性不依赖批内组成（attention mask 隔离 padding），排序不改变任何输出值。
+- 回归：`cargo check` ✓；`cargo test --lib` **48 passed** / 0 failed。
+
+**导入浮层耗时显示 + 大文件提示（2026-09-23，用户需求）**
+
+- **耗时显示**（总耗时 + 单文件耗时）：`useRagData.tsx` 新增 `uploadTiming` state（`startedAt` 批次起点 / `fileStartedAt` 当前文件起点 / `fileSize` 当前文件字节 / `tick` 每秒 +1 驱动重渲染；interval 仅在 overlay 存在时挂载）。`upload()`（批次起点 + 每文件切换时更新 fileStartedAt/fileSize）、`updateDoc()`、`reindexAll()` 三处接入，finally 清空。`RagPage.tsx` 导入浮层在文件计数下新增耗时行：`总耗时 m分s秒 | 单文件 m分s秒`（`formatElapsed` helper，mm:ss 中文习惯 m分s秒）。
+- **大文件提示**：`RagPickedFile` 加可选 `size`（`selectedPickedFiles` 从扫描结果 `RagScanFile.size` 透传；单文件 pick 无 size=0 不提示）。浮层单文档进度条下方，`fileSize >= 1MB`（`LARGE_FILE_HINT_BYTES`，与后端 chunker >1MB 源码警告同量级）时显示 spinner + 「大文件导入耗时较长（分片与向量化），请耐心等待 · N MB」——**分片阶段（charsTotal=0）同样显示**，这正是最久的一段。文件级提示（不分大小）在 overlay 中始终可见的耗时行承担。
+- **批量更新/自动同步弹框同款耗时**（2026-09-23 追加，用户需求）：`BatchUpdateDialog` 也显示「总耗时 | 单文件」。`useRagData` 新增 `batchTiming`（startedAt/fileStartedAt/name/tick）——**hook 层持有，弹框可关闭重开而计时不清零**（用户明确要求：关闭后再打开不能重置时间）。起点取**首个 `rag://batch-update-progress` 事件到达时刻**（事件驱动——定时自动同步不是前端发起的，事件是唯一可靠起点；手动按钮启动时先行初始化填补确认到首事件的间隙）；文档名变化重置单文档时钟；done/error 终态清空（终态不显示时间）。i18n 复用同两键。
+- **分片进度（第三条进度条，2026-09-23 追加，用户需求）**：`rag://upload-progress` 事件加 `chunksDone`/`chunksTotal` 字段（serde default 向后兼容）——`reindex_doc` 嵌入循环逐批推进 chunk 计数（`emit_upload_progress_chunks`）；分片阶段 total=0（数量未知）前端隐藏该条，分片完成嵌入开始后显示「分片进度 N / M · P%」。导入浮层与批量更新弹框都加（共用 charProgress，其类型扩为 5 字段，4 个构造点同步）。**分片阶段显示「分片中…」占位而非隐藏**（初版隐藏导致分片期间整条消失——恰是最长最无反馈的阶段，用户实测反馈）。i18n 新键 `pages.rag.chunkProgress` / `chunkingInProgress` ×4。
+- i18n 新键 ×4 语言：`pages.rag.totalElapsed` / `fileElapsed` / `largeFileHint`（inline fallback 已带）。
+- 验证：`npx tsc --noEmit` 24 = 基线（零新增）；`npm run build` ✓（1.22s）；四语言 JSON 解析 + 键存在性校验通过。
+
+
+- `service.rs::reindex_doc` 的 0% 进度 tick（`emit_upload_progress(0, total_chars)`）从 chunking 之后**提前到 chunking 之前**——大文件分片阶段（现在也可能几十秒）进度条不再停留在「Preparing…」无响应，而是立即显示真实总字数。
+
+**字符进度条分母修复（2026-09-23，用户实测反馈：字符条已 100% 而分片条未满）**
+
+- **根因**：`rag://upload-progress` 的 `charsTotal` 用**文档字符数**作分母，而 `charsDone` 是嵌入循环**逐 chunk 累加**——相邻 chunk 共享 `chunk_overlap` token 的尾部文本被重复计数，累加值提前到达文档总数后被 `min()` 钳制，字符条先满、chunk 条还在走（重叠占比 ≈ overlap/(chunk_size+overlap) ≈ 10%，几千 chunk 的大文件提前量非常明显）。
+- **修复**（`service.rs::reindex_doc`）：分片完成后计算 `progress_total_chars` = **所有 chunk 字符数之和**，嵌入循环 tick 与空 chunk 兜底分支都用它作分母——恰为循环累加口径，两进度条严格同步、最后一片嵌入完成时恰好 100%。分片前的 0% 预 tick 仍用文档字符数（此时 chunk 未知，占比 0% 不受影响）。`RagUploadProgress` 结构体注释同步更新。
+- 验证：`cargo check --lib` ✓；`cargo test --lib` **48 passed**。
+
+**分片阶段进度可视化（2026-09-23，用户需求：1m30s 的分片期也要有进度）**
+
+- **后端**：`RagUploadProgress` 加 `chunkingDone`/`chunkingTotal`（serde default，0/0=不适用）；`ChunkStrategy::chunks` trait 加 `on_progress: Option<&dyn Fn(u64, u64)>` 参数（Text/Markdown/Empty 忽略，Code 策略用）；`chunk_document` 拆为 `chunk_document_inner` + 公开的 `chunk_document_with_progress`（旧签名 wrapper 保留，测试不动）。**进度来源**：大文件（>64KB）代码分片本就逐 AST 分区处理（`CODE_PARTITION_BYTES`），每完成一个分区回调 `(累计已扫描字符, 文档总字符)`——分区铺满输入无间隙，最后一次 tick 恰好 100%。单分区小文件/解析失败回退路径在结束时补发一帧 100%。`reindex_doc` 用闭包接 `emit_chunking_progress` 发同一 `rag://upload-progress` 事件（charsDone 保持 0、charsTotal=文档总字符，嵌入条不受扰动）。⚠️ 仅代码策略有粒度钩子（text-splitter 无 per-chunk 回调），纯文本/Markdown 大文件分片期仍无细分进度（相对快）。
+- **前端**：`charProgress` 类型（useRagData state + BatchUpdateDialog prop + 2 处种子）扩 `chunkingDone`/`chunkingTotal` 字段；「分片进度」行在分片期显示「分片中… N%」，并新增贯穿两阶段的 6px 填充条（分片期按 chunkingPct、嵌入期按 chunkPct 填充）。导入浮层与批量更新弹框同款。
+- 验证：`cargo check --lib` ✓；`cargo test --lib` **48 passed**；`npx tsc --noEmit` 24 = 基线；`npm run build` ✓。
+
+**新回归测试**
+
+- `huge_multiline_bundle_partitions_and_tiles`：12 行 × 2000 语句的仿 mermaid 形态（>256KB 深层多行 AST），断言 <60s 完成 + 内容零丢失（空白剥离后拼接 == 输入）+ chunk 全部 ≤ 容量阀。**注意**：该测试仍用桩 tokenizer，只能守护「分区逻辑 + 内容不丢失」；性能守护依赖 `bench_tmp` 人工 bench（见下）。
+- **教训（MUST FOLLOW）**：涉及性能的回归测试，**测试桩与生产实现的成本特征必须同量级**——桩 tokenizer µs 级 vs 真实 BPE ms 级，1000 倍差距下「测试绿」对生产毫无证明力。真实模型 bench（临时 `src-tauri/tests/bench_tmp.rs`，跑完已删）：`#[ignore]` 测试 + `GgufEmbedder::load(runtimes/rag/model/granite/97m/model.gguf)` + 真实文件路径，release 下需 `CARGO_PROFILE_RELEASE_PANIC=unwind` 覆盖 tauri 的 `panic="abort"` 配置（否则 test harness 与 abort 依赖树冲突，712 个链接错误）。需复现时按此重建。
+
+#### 3.17.17 导入会话守卫：导入中不刷新 Git 仓库 + 关窗取消剩余导入（2026-09-23）
+
+> 用户反馈两个问题：①导入进行中日志出现 `[RAG] git: refreshed repo ... -> commit ...`——还没导入完就开始刷新仓库，不对；②导入文件还没解析完时关闭程序，下次进来文件全在列表里了——只有导入完成过的文件才应该出现在列表中。
+
+**根因**
+
+1. **导入中刷新**：自动定时 tick（默认 5 分钟）→ `preview_batch_update` → `collect_git_repo_urls(docs)` 收集已有 git 文档引用的仓库并 `refresh_persistent`（重克隆 + **rename swap** 持久目录）。导入循环（每文件 `upload_rag_doc`，读的正是该持久目录）一旦跑过 5 分钟，tick 就在导入中途 swap 目录——既浪费（克隆至多几分钟旧）又有 `ensure_persisted`/文件读取与 swap 的竞态，且日志误导。
+2. **关窗后文件全在列表**：`lib.rs` 的窗口关闭 = **隐藏到托盘（`window.hide()`），进程与 webview 继续运行**——前端上传循环在隐藏窗口里继续跑完全部文件并落盘。用户以为「关闭程序」取消了导入，实际上导入在后台全部完成。真正的进程退出（托盘退出/Cmd+Q）反而是对的：`write_doc_and_index` 的顺序是 写 content → reindex（分片+嵌入）→ **写 meta** → SQL upsert，meta 是列表事实源（`list_docs` 扫 `.meta`），中途杀进程只有已完成文件入列——符合「只有导入进来的才会出现」。
+
+**修复一：导入会话（IMPORT_SESSION）+ 全链路守卫**
+
+- `rag/service.rs` 新增 `IMPORT_SESSION: AtomicBool` + `begin_import_session()`/`end_import_session()`/`import_session_active()`。store 语义（非计数器）：导入弹框是模态的、同时最多一个循环，且 `end` 无条件清零可自愈泄漏的 begin。
+- 新命令 `commands::rag::begin_rag_import_session`/`end_rag_import_session`（lib.rs 注册；tauriClient 路由 `/rag/import-session/begin|end`；ragService `beginRagImportSession`/`endRagImportSession`）。
+- `useRagData.upload()`：循环前注册 `rag://import-cancel-requested` 监听（**先注册后 begin**，杜绝事件落入无监听的间隙）→ best-effort `begin` → 循环每迭代检查取消标志 → finally 中 `unlisten` + **await `end` 放最后**（新 upload 的 begin 不会越过旧 end）。
+- 守卫生效点（全部在 `rag/service.rs`）：
+  - `refresh_git_repo`：会话激活时直接 `Ok(false)` 跳过 + 日志 `git: refresh deferred (import in progress)`，**不写 TTL 缓存**（导入结束后的下一次 tick/manual batch 立即补刷）；
+  - 自动 tick（`restart_auto_update_timer` 循环）：`is_enabled()` 检查后新增 `import_session_active()` → `continue` 跳过整轮（refresh + md5 + source sync 全不跑），日志 `auto-update: import in progress, skipping this tick`；
+  - `preview_batch_update_inner` 与 `run_batch_update`：source-sync 的 `sync_added` 在会话激活时清空（防 sync-add 与导入循环互抢同批文件造成重复文档），removal 同步不受影响照常。
+- `check_rag_update`（单条检查）经 `refresh_git_repo` 的守卫自动获得同样语义（对既有克隆分类，不报 gitError）。
+
+**修复二：关窗 = 取消剩余导入**
+
+- `lib.rs` `CloseRequested`：`api.prevent_close()` 后检查 `rag::service::import_session_active()`，为真则 `rag::service::request_import_cancel(window.app_handle())`——写日志 `import: cancel requested (window closed mid-import)` + emit `rag://import-cancel-requested`，然后照常 `window.hide()`。
+- 前端循环在**下一个文件边界**停止：正在解析中的当前文件照常完成并入列（属于「导入进来的」），其余文件不再导入。重开窗口后列表只含已完成文件。
+- 兜底：真退出（托盘退出/Cmd+Q/杀进程）时循环随进程消亡，per-file 原子性已保证列表只含完成文件，无需额外处理。
+
+**边界**
+
+- 会话由前端 bracket，前端若崩溃不调用 end → 静态标志随进程消亡（重启自然复位）；单进程内 begin/end 的 store 语义自愈任何泄漏。
+- pick/scan 阶段（未点导入）无会话：首次导入前无 git 文档 → tick 无 URL 可刷；重复导入同一仓库时 pick 期间 tick 可刷新**既有**仓库——无害（pick 用 temp 克隆，refresh 只动持久目录）。
+- 「自动同步新增文件」开关若开启，**设计上**会在后续更新检查中把源目录/仓库里未导入的文件自动导入——被中断导入遗留的未选文件同样会被同步进来（与「新文件」语义无法区分）；不希望如此时关闭该开关（默认关闭）。
+
+**验证**：`ORT_SKIP_DOWNLOAD=1 cargo check --lib` 通过（11.08s）；`npm run build` 通过（1.24s）；`npx tsc --noEmit` 24 错误 = 基线 24（零新增）。
+
+#### 3.17.18 列表⟺向量一致性：诊断澄清 + lancedb 清空自愈（2026-09-23 第二轮）
+
+> 用户二次澄清：卡在 6/xxx（大 JS 分片慢）时杀掉程序，重开后列表全在但「向量没跑完」；明确需求——**导入多少列表就多少，不要排除机制，未导入的下轮更新自然同步（已接受），但列表里绝不能出现向量搜不到的文档（起码的数据一致）**。据此回退了首轮起草的「排除清单」方案（未落地，仅 models/rag.rs/service.rs 两处草稿已撤）。
+
+**真实数据诊断（临时审计测试，跑完已删）**
+
+对用户机器实际数据跑 `meta.chunk_count>0 ⟹ lancedb.read_chunks_by_doc 非空` 全量核对：**121 个 meta 全部有向量，0 缺失、0 数量不符**。所报现象的真相：卡在 6/xxx 期间，**60 秒自动 tick 的 source-sync 在后台把剩余 87 个文件全部带向量导入**（日志 `10:40:14 batch_update: source sync applied (added 87, removed 0)`，逐条 `indexed ... chunks=N`）——列表全在且可搜是 tick 干的活，进度条 6/xxx 之所以不动是前端循环卡在大 JS；「向量没跑完」是进度条误导下的推断。**§3.17.17 的会话守卫正是根治**：导入期间 tick 全跳过 → 进度真实（6/xxx 就是 6）、杀掉后列表只有 6、下轮 tick 自然补齐（用户接受的语义）。
+
+**数据一致性防线（真正的洞 + 修复）**
+
+写路径顺序（`write_doc_and_index`：向量 add_chunks → meta 原子写 → SQL 镜像）已保证「列表 ⊆ 向量」。唯一真实漏洞：**lancedb 目录被清空/损坏/误删时，`VectorDb::open` 静默重建空表且 `needs_reindex=false`**（「全新创建无旧数据」语义），而 meta 仍记 chunk_count>0 → 列表显示「已索引」但向量搜索永远搜不到——与用户投诉的形态完全一致。修复：
+
+- `vectordb.rs` 新增 `count_rows()`（lancedb `Table::count_rows(None)`）。
+- `service.rs::start()`：`!needs_reindex` 分支新增一致性检查——`count_indexed_metas(app)`（新 helper，扫 meta 数 chunk_count>0 的文档数）> 0 且 `db.count_rows()==0` → 判定向量丢失，warn 日志 + `zero_all_chunk_counts` + 置 `needs_reindex=true`，与模型换维路径同构（前端按既有 needs_reindex 流程提示重建）。
+- 刻意只做「空表 vs 有索引 meta」判定：lancedb 可能存在孤儿向量（杀进程在 add_chunks 后、meta 写前），严格按行数对账会误报。
+
+**验证**：`cargo check --lib` 0 错 0 警；`cargo test --lib` 48 passed / 0 failed（含 §3.17.17 的 import_session 测试）。前端无改动。
+
+#### 3.17.19 树形视图「文件比目录还靠前」渲染顺序修复（2026-09-23）
+
+> 用户截图：导入弹框扫描树中，「技术选型」目录展开后，其直属 `README.md`（443B）被渲染在子目录「存储选型」的展开内容（README.md 231B + 数据存储.md）**之后**，视觉上文件脱离父级缩进、混在子目录文件中间——「文件比目录还靠前」。
+
+**根因**（纯前端渲染顺序，两处同病）：
+
+- 导入弹框扫描树 `RagPage.tsx::ScanDirNode`：`!isCollapsed` 分支**先渲染 `node.children`（子目录）再渲染 `node.rootFiles`（本目录直属文件）**——直属文件被推到子目录的展开内容之后，缩进层级（`depth`）不变导致视觉错位。
+- 主页文档树 `RagDocTree.tsx::DirNode`：同样先 `children.filter(!c.doc)`（子目录）后 `children.filter(c.doc)`（直属文档）。
+
+**修复**（文件管理器惯例：直属文件在前、子目录在后）：
+
+- `ScanDirNode`：渲染顺序改为 `node.rootFiles`（直属文件）→ `node.children`（子目录递归），附注释说明。
+- `DirNode`：直属文档 → 子目录，同注释。
+
+数据层无需改动：`scan_folder` 的 groups 排序（root 优先 + 路径序）与 `RagDocTree` 的 `sortRec`（目录/文件各自排序后拼接）本就正确，问题只在组件渲染拼接顺序。
+
+**验证**：`npx tsc --noEmit` 24 = 基线（零新增）；`npm run build` 通过（981ms）。Rust 无改动。
+
+#### 3.17.20 平铺扫描视图文件行「顶到头」缩进修复（2026-09-23）
+
+> 用户截图（平铺视图）：`scripts/honkit-plugin-image-zoom 2/2` 分组头下的 `index.js`/`package.json` 文件行内容起点比分组头名字**更靠左**——分组头 = 10px padding + checkbox/chevron/folder 三图标（名字起点 ~73px），文件行仅 `padding-left: 14px`（起点 ~27px），视觉上文件「顶到头」、与分组头平级。
+
+**修复**（两轮，最终对齐 folder 图标列）：
+
+- **平铺**（`FlatScanFileRow`）：`padding-left` 14px → **56px**（= 10 + checkbox13 + gap8 + chevron17 + gap8，文件图标正落在分组头 folder 图标列之下）；收起提示行同步 32px → 34px。
+- **树形**（`ScanDirNode` rootFiles 行）：`paddingLeft` 24 + depth×14 → **52 + depth×14**（树形头 gap-1.5：10 + 13 + 6 + 17 + 6 = 52），同一对齐语义。
+- 首轮 34px 修正后用户反馈「没有变化」——排查确认 vite dev server 已 serve 新代码（curl 验证），是 **webview 未热重载**（HMR socket 失效）；第二轮顺手把对齐目标从「名字起点下」改为更标准的「folder 图标列下」。用户需重开导入弹框 / Cmd+R 刷新 webview 才能看到。
+
+**验证**：`npx tsc --noEmit` 24 = 基线；`npm run build` 通过（1.01s）；curl 确认 vite serve 新代码。Rust 无改动。
 
 #### 3.17.14 导入弹框勾选冻结 / 树形空 / 模态点击穿透修复（2026-09-16）
 

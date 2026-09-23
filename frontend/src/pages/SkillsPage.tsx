@@ -21,7 +21,10 @@ import {
   AlertTriangle,
   FolderPlus,
   ListChecks,
+  RefreshCw,
+  Check,
 } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import Pagination from '@/components/ui/Pagination';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import {
@@ -499,7 +502,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({ onImport, onClose }) => {
                                 checked={checked}
                                 disabled={disabled}
                                 onChange={() => toggleSelect(key)}
-                                className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                                className="hub-checkbox"
                               />
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap min-w-0">
@@ -768,6 +771,331 @@ const ViewDialog: React.FC<ViewDialogProps> = ({ skillId, onUninstall, onClose }
 };
 
 // ───────────────────────────────────────────────────────────────────────────
+// AgentMultiSelect: RAG page TagSearchSelect-style searchable multi-select —
+// trigger button + portal dropdown with search input, selected chips and
+// check-square option rows (same visual language as the RAG tag select).
+// Optional extensions (used by InstallDialog):
+// - `sections`: grouped option list (e.g. 已安装 / 未安装) with sticky headers;
+//   the search query filters within each section.
+// - `renderRowMeta`: inline badges after the agent name.
+// - `renderRowExtra`: trailing per-row controls (method toggle / uninstall);
+//   clicks there don't toggle selection (row-left click does).
+// ───────────────────────────────────────────────────────────────────────────
+interface AnchoredPos {
+  top?: number;
+  bottom?: number;
+  left: number;
+  width: number;
+  placement: 'bottom' | 'top';
+}
+
+/** Grouped section rendered inside the dropdown when `sections` is provided. */
+export interface AgentSelectSection {
+  key: string;
+  label: string;
+  agents: SkillAgent[];
+}
+
+const useAnchoredPos = (
+  anchorRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  maxHeight: number,
+  gap = 4
+): AnchoredPos | null => {
+  const [pos, setPos] = useState<AnchoredPos | null>(null);
+  useEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const measure = () => {
+      const el = anchorRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const below = vh - r.bottom;
+      const placement: 'bottom' | 'top' = below >= Math.min(maxHeight, 160) || below >= r.top ? 'bottom' : 'top';
+      setPos({
+        left: r.left,
+        width: r.width,
+        placement,
+        top: placement === 'bottom' ? r.bottom + gap : undefined,
+        bottom: placement === 'top' ? vh - r.top + gap : undefined,
+      });
+    };
+    measure();
+    document.addEventListener('scroll', measure, true);
+    window.addEventListener('resize', measure);
+    return () => {
+      document.removeEventListener('scroll', measure, true);
+      window.removeEventListener('resize', measure);
+    };
+  }, [open, maxHeight, gap, anchorRef]);
+  return pos;
+};
+
+const AgentMultiSelect: React.FC<{
+  agents: SkillAgent[];
+  loading: boolean;
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+  placeholder: string;
+  sections?: AgentSelectSection[];
+  renderRowMeta?: (agent: SkillAgent) => React.ReactNode;
+  renderRowExtra?: (agent: SkillAgent) => React.ReactNode;
+}> = ({ agents, loading, selected, onChange, placeholder, sections, renderRowMeta, renderRowExtra }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPos(wrapRef, open, 310);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const tgt = e.target as Node;
+      const inside =
+        (wrapRef.current && wrapRef.current.contains(tgt)) ||
+        (menuRef.current && menuRef.current.contains(tgt));
+      if (!inside) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const filterList = useCallback(
+    (list: SkillAgent[]) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return list;
+      return list.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q));
+    },
+    [query],
+  );
+
+  const filtered = useMemo(() => filterList(agents), [agents, filterList]);
+
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  };
+
+  const selectedList = Array.from(selected)
+    .map((id) => agents.find((a) => a.id === id))
+    .filter((a): a is SkillAgent => Boolean(a));
+
+  const renderRow = (a: SkillAgent) => {
+    const checked = selected.has(a.id);
+    return (
+      <div
+        key={a.id}
+        className="flex items-center gap-2 w-full text-left"
+        style={{
+          padding: '7px 10px',
+          background: checked ? 'var(--hub-surface-hover, var(--hub-surface))' : 'transparent',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => toggle(a.id)}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0 }}
+        >
+          <span
+            style={{
+              width: 14,
+              height: 14,
+              borderRadius: 3,
+              flexShrink: 0,
+              border: '1px solid var(--hub-line)',
+              background: checked ? 'var(--hub-accent)' : 'transparent',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {checked && <Check size={10} style={{ color: '#fff' }} />}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span className="block truncate text-[12.5px]" style={{ color: 'var(--hub-ink)' }}>
+                {a.name}
+              </span>
+              {renderRowMeta?.(a)}
+            </span>
+            <span
+              className="block truncate hub-mono"
+              style={{ fontSize: 10.5, color: 'var(--hub-ink-3)' }}
+              title={a.skillsPath}
+            >
+              {a.skillsPath}
+            </span>
+          </span>
+        </button>
+        {renderRowExtra && (
+          <div className="flex items-center gap-1.5 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+            {renderRowExtra(a)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Sectioned list: header rows are sticky so long lists keep context while
+  // scrolling; sections that the current query empties out are hidden.
+  const sectionNodes = (sections || []).map((sec) => {
+    const visible = filterList(sec.agents);
+    if (visible.length === 0) return null;
+    return (
+      <div key={sec.key}>
+        <div
+          className="hub-sect sticky top-0"
+          style={{
+            padding: '7px 10px 4px',
+            fontSize: 11,
+            color: 'var(--hub-ink-3)',
+            borderBottom: '1px solid var(--hub-line-2)',
+            background: 'var(--hub-surface)',
+            zIndex: 1,
+          }}
+        >
+          {sec.label} ({visible.length})
+        </div>
+        {visible.map(renderRow)}
+      </div>
+    );
+  });
+  const sectionsEmpty = sections !== undefined && sectionNodes.every((n) => n === null);
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="hub-card flex items-center gap-1.5"
+        style={{
+          height: 30,
+          background: 'var(--hub-surface)',
+          padding: '0 8px',
+          minWidth: 240,
+          width: '100%',
+          cursor: 'pointer',
+          borderColor: open ? 'var(--hub-accent)' : undefined,
+        }}
+      >
+        <ListChecks size={13} style={{ color: 'var(--hub-ink-3)' }} />
+        <span
+          className="truncate text-[13px]"
+          style={{ color: selectedList.length > 0 ? 'var(--hub-ink)' : 'var(--hub-ink-3)' }}
+        >
+          {selectedList.length > 0
+            ? t('skills.exportSelectedAgents', '{{count}} 个目标', { count: selectedList.length })
+            : placeholder}
+        </span>
+        <ChevronDown size={12} style={{ marginLeft: 'auto', color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+      </button>
+
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="fixed z-[60] rounded-lg shadow-2xl border overflow-hidden"
+            style={{
+              top: pos.top,
+              bottom: pos.bottom,
+              left: pos.left,
+              width: Math.max(pos.width, 220),
+              background: 'var(--hub-surface)',
+              borderColor: 'var(--hub-line-2)',
+              maxHeight: pos.placement === 'top' ? 310 : undefined,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            {/* 搜索输入 */}
+            <div
+              className="flex items-center gap-1.5 px-2.5"
+              style={{ padding: '8px 10px', borderBottom: '1px solid var(--hub-line)' }}
+            >
+              <Search size={12} style={{ color: 'var(--hub-ink-3)' }} />
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t('skills.searchAgents')}
+                className="flex-1 bg-transparent outline-none text-[12.5px]"
+                style={{ color: 'var(--hub-ink)' }}
+              />
+              {query && (
+                <button onClick={() => setQuery('')} className="hub-icon-btn sm">
+                  <X size={10} />
+                </button>
+              )}
+            </div>
+            {/* 已选 chips */}
+            {selectedList.length > 0 && (
+              <div
+                className="flex flex-wrap gap-1"
+                style={{ padding: '8px 10px', borderBottom: '1px solid var(--hub-line)' }}
+              >
+                {selectedList.map((a) => (
+                  <span
+                    key={a.id}
+                    className="hub-tag inline-flex items-center gap-1"
+                    style={{ fontSize: 11, padding: '2px 6px', cursor: 'pointer' }}
+                    onClick={() => toggle(a.id)}
+                  >
+                    {a.name}
+                    <X size={10} />
+                  </span>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => onChange(new Set())}
+                  className="text-[11px]"
+                  style={{ color: 'var(--hub-ink-3)' }}
+                >
+                  {t('pages.rag.tagSearchClear', '清除')}
+                </button>
+              </div>
+            )}
+            {/* 选项列表 */}
+            <div className="overflow-y-auto" style={{ maxHeight: 240, overscrollBehavior: 'contain' }}>
+              {loading ? (
+                <div
+                  className="flex items-center justify-center gap-1.5 text-[12px]"
+                  style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}
+                >
+                  <Loader2 size={12} className="animate-spin" />
+                  {t('pages.rag.tagSearchLoading', '搜索中…')}
+                </div>
+              ) : sections ? (
+                sectionsEmpty ? (
+                  <div className="text-[12px] text-center" style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}>
+                    {t('skills.noAgents')}
+                  </div>
+                ) : (
+                  sectionNodes
+                )
+              ) : filtered.length === 0 ? (
+                <div className="text-[12px] text-center" style={{ color: 'var(--hub-ink-3)', padding: '12px 0' }}>
+                  {t('skills.noAgents')}
+                </div>
+              ) : (
+                filtered.map(renderRow)
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
+    </div>
+  );
+};
+
+// ───────────────────────────────────────────────────────────────────────────
 // Export dialog: pick target agents (searchable multiselect) + method
 // (symlink / copy) with a ? help popover. Exports selected skills.
 // ───────────────────────────────────────────────────────────────────────────
@@ -784,7 +1112,6 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ selectedCount, onExport, on
   const { t } = useTranslation();
   const [agents, setAgents] = useState<SkillAgent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [agentSearch, setAgentSearch] = useState('');
   const [selectedAgents, setSelectedAgents] = useState<Set<string>>(new Set());
   const [method, setMethod] = useState<'symlink' | 'copy'>('symlink');
   const [exporting, setExporting] = useState(false);
@@ -807,12 +1134,6 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ selectedCount, onExport, on
       cancelled = true;
     };
   }, []);
-
-  const filteredAgents = useMemo(() => {
-    const q = agentSearch.trim().toLowerCase();
-    if (!q) return agents;
-    return agents.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q));
-  }, [agents, agentSearch]);
 
   const toggleAgent = (id: string) => {
     setSelectedAgents((prev) => {
@@ -851,7 +1172,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ selectedCount, onExport, on
             <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-md text-sm">{error}</div>
           )}
 
-          {/* Searchable agent multiselect */}
+          {/* Searchable agent multiselect (RAG TagSearchSelect style) */}
           <div>
             <div className="flex items-center gap-1.5 mb-2">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -859,61 +1180,13 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ selectedCount, onExport, on
               </label>
               <MethodHelpIcon />
             </div>
-            <div
-              className="hub-card flex items-center gap-2 px-2.5 mb-2"
-              style={{ height: 30, background: 'var(--hub-surface)' }}
-            >
-              <Search size={13} style={{ color: 'var(--hub-ink-3)' }} />
-              <input
-                value={agentSearch}
-                onChange={(e) => setAgentSearch(e.target.value)}
-                placeholder={t('skills.searchAgents')}
-                className="flex-1 bg-transparent outline-none text-[13px]"
-                style={{ color: 'var(--hub-ink)' }}
-              />
-              {agentSearch && (
-                <button onClick={() => setAgentSearch('')} className="hub-icon-btn sm">
-                  <X size={11} />
-                </button>
-              )}
-            </div>
-            <div className="hub-card max-h-56 overflow-y-auto" style={{ background: 'var(--hub-surface)' }}>
-              {loading ? (
-                <div className="flex items-center justify-center py-6 text-[var(--hub-ink-3)]">
-                  <Loader2 size={15} className="animate-spin" />
-                </div>
-              ) : filteredAgents.length === 0 ? (
-                <div className="py-6 text-center text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
-                  {t('skills.noAgents')}
-                </div>
-              ) : (
-                filteredAgents.map((a) => {
-                  const checked = selectedAgents.has(a.id);
-                  return (
-                    <label
-                      key={a.id}
-                      className="flex items-center gap-2.5 cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)]"
-                      style={{ padding: '8px 12px' }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleAgent(a.id)}
-                        className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[13px] truncate" style={{ color: 'var(--hub-ink)' }} title={a.name}>
-                          {a.name}
-                        </div>
-                        <div className="hub-mono truncate" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }} title={a.skillsPath}>
-                          {a.skillsPath}
-                        </div>
-                      </div>
-                    </label>
-                  );
-                })
-              )}
-            </div>
+            <AgentMultiSelect
+              agents={agents}
+              loading={loading}
+              selected={selectedAgents}
+              onChange={setSelectedAgents}
+              placeholder={t('skills.searchAgents')}
+            />
           </div>
 
           {/* Method radio with ? help */}
@@ -995,7 +1268,6 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
   const { showToast } = useToast();
   const [agents, setAgents] = useState<SkillAgent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Per-agent chosen install method. Initialized from each agent's current
   // method (if already installed) once the agent list loads; defaults to
@@ -1044,74 +1316,60 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
     };
   }, [currentMethodByAgent]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return agents;
-    return agents.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q));
-  }, [agents, search]);
-
   // Split into already-installed vs not-yet-installed so installed agents are
-  // displayed distinctly (with their current method), per requirement.
+  // displayed distinctly (with their current method), per requirement. The
+  // search lives INSIDE AgentMultiSelect (filters within each section).
   const installedList = useMemo(
-    () => filtered.filter((a) => installedMethods.has(a.id)),
-    [filtered, installedMethods],
+    () => agents.filter((a) => installedMethods.has(a.id)),
+    [agents, installedMethods],
   );
   const availableList = useMemo(
-    () => filtered.filter((a) => !installedMethods.has(a.id)),
-    [filtered, installedMethods],
+    () => agents.filter((a) => !installedMethods.has(a.id)),
+    [agents, installedMethods],
   );
 
-  const renderRow = (a: SkillAgent) => {
-    const checked = selected.has(a.id);
+  // Row meta for AgentMultiSelect: current-method badge (已安装方式) plus a
+  // "switching" accent badge when the chosen method differs from the current.
+  const rowMeta = (a: SkillAgent) => {
     const current = installedMethods.get(a.id);
     const chosen = agentMethod[a.id] ?? 'symlink';
     const switching = current && current !== chosen;
     return (
-      <div
-        key={a.id}
-        className="flex items-center gap-2.5 transition-colors hover:bg-[var(--hub-surface-hover)]"
-        style={{ padding: '8px 12px' }}
-      >
-        <label className="flex items-center gap-2.5 cursor-pointer min-w-0 flex-1">
-          <input
-            type="checkbox"
-            checked={checked}
-            onChange={() => toggle(a.id)}
-            className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 flex-shrink-0"
-          />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[13px] truncate" style={{ color: 'var(--hub-ink)', maxWidth: 320 }} title={a.name}>
-                {a.name}
-              </span>
-              {current && (
-                <span
-                  className="hub-tag"
-                  style={{
-                    fontSize: 10,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    background: 'var(--hub-bg-2)',
-                    color: 'var(--hub-ink-3)',
-                  }}
-                >
-                  {current === 'symlink' ? <Link2 size={10} /> : <CopyIcon size={10} />}
-                  {t('skills.currentMethod')} {current === 'symlink' ? t('skills.symlink') : t('skills.fileCopy')}
-                </span>
-              )}
-              {switching && (
-                <span className="hub-tag accent" style={{ fontSize: 10 }}>
-                  {t('skills.switchTo')} {chosen === 'symlink' ? t('skills.symlink') : t('skills.fileCopy')}
-                </span>
-              )}
-            </div>
-            <div className="hub-mono truncate" style={{ fontSize: 11, color: 'var(--hub-ink-3)' }} title={a.skillsPath}>
-              {a.skillsPath}
-            </div>
-          </div>
-        </label>
-        {/* Per-agent method toggle */}
+      <>
+        {current && (
+          <span
+            className="hub-tag"
+            style={{
+              fontSize: 10,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              background: 'var(--hub-bg-2)',
+              color: 'var(--hub-ink-3)',
+              flexShrink: 0,
+            }}
+          >
+            {current === 'symlink' ? <Link2 size={10} /> : <CopyIcon size={10} />}
+            {t('skills.currentMethod')} {current === 'symlink' ? t('skills.symlink') : t('skills.fileCopy')}
+          </span>
+        )}
+        {switching && (
+          <span className="hub-tag accent" style={{ fontSize: 10, flexShrink: 0 }}>
+            {t('skills.switchTo')} {chosen === 'symlink' ? t('skills.symlink') : t('skills.fileCopy')}
+          </span>
+        )}
+      </>
+    );
+  };
+
+  // Row extras for AgentMultiSelect: per-agent method toggle (symlink/copy)
+  // and, for installed agents, the uninstall button. Clicks land in the
+  // isolated extra area — they never toggle row selection.
+  const rowExtra = (a: SkillAgent) => {
+    const current = installedMethods.get(a.id);
+    const chosen = agentMethod[a.id] ?? 'symlink';
+    return (
+      <>
         <div
           className="flex items-center flex-shrink-0 rounded-md"
           style={{ border: '1px solid var(--hub-line)', background: 'var(--hub-bg-2)' }}
@@ -1160,17 +1418,8 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
             <Trash2 size={13} />
           </button>
         )}
-      </div>
+      </>
     );
-  };
-
-  const toggle = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   };
 
   const setMethodFor = (id: string, method: 'symlink' | 'copy') => {
@@ -1271,66 +1520,22 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
               </label>
               <MethodHelpIcon />
             </div>
-            <div
-              className="hub-card flex items-center gap-2 px-2.5 mb-2"
-              style={{ height: 30, background: 'var(--hub-surface)' }}
-            >
-              <Search size={13} style={{ color: 'var(--hub-ink-3)' }} />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t('skills.searchAgents')}
-                className="flex-1 bg-transparent outline-none text-[13px]"
-                style={{ color: 'var(--hub-ink)' }}
-              />
-              {search && (
-                <button onClick={() => setSearch('')} className="hub-icon-btn sm">
-                  <X size={11} />
-                </button>
-              )}
-            </div>
-            <div className="hub-card max-h-56 overflow-y-auto" style={{ background: 'var(--hub-surface)' }}>
-              {loading ? (
-                <div className="flex items-center justify-center py-6 text-[var(--hub-ink-3)]">
-                  <Loader2 size={15} className="animate-spin" />
-                </div>
-              ) : filtered.length === 0 ? (
-                <div className="py-6 text-center text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
-                  {t('skills.noAgents')}
-                </div>
-              ) : (
-                <>
-                  {installedList.length > 0 && (
-                    <div
-                      className="hub-sect"
-                      style={{
-                        padding: '8px 12px 4px',
-                        fontSize: 11,
-                        color: 'var(--hub-ink-3)',
-                        borderBottom: '1px solid var(--hub-line-2)',
-                      }}
-                    >
-                      {t('skills.installedSection')} ({installedList.length})
-                    </div>
-                  )}
-                  {installedList.map(renderRow)}
-                  {availableList.length > 0 && (
-                    <div
-                      className="hub-sect"
-                      style={{
-                        padding: '8px 12px 4px',
-                        fontSize: 11,
-                        color: 'var(--hub-ink-3)',
-                        borderBottom: '1px solid var(--hub-line-2)',
-                      }}
-                    >
-                      {t('skills.notInstalledSection')} ({availableList.length})
-                    </div>
-                  )}
-                  {availableList.map(renderRow)}
-                </>
-              )}
-            </div>
+            {/* RAG TagSearchSelect-style searchable multi-select with grouped
+                sections (已安装 / 未安装), per-agent method toggle + uninstall
+                as row extras — same visual language as the export dialog. */}
+            <AgentMultiSelect
+              agents={agents}
+              loading={loading}
+              selected={selected}
+              onChange={setSelected}
+              placeholder={t('skills.searchAgents')}
+              sections={[
+                { key: 'installed', label: t('skills.installedSection'), agents: installedList },
+                { key: 'available', label: t('skills.notInstalledSection'), agents: availableList },
+              ]}
+              renderRowMeta={rowMeta}
+              renderRowExtra={rowExtra}
+            />
           </div>
         </div>
 
@@ -1489,7 +1694,7 @@ const DeleteSkillDialog: React.FC<DeleteSkillDialogProps> = ({ skill, onDelete, 
                             type="checkbox"
                             checked={checked}
                             onChange={() => toggleCopy(ex.agentId)}
-                            className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                            className="hub-checkbox"
                           />
                           <CopyIcon size={12} style={{ color: 'var(--hub-ink-3)' }} />
                           <span className="text-[13px] truncate" style={{ color: 'var(--hub-ink)', maxWidth: 400 }} title={ex.agentName}>
@@ -1779,7 +1984,16 @@ const SkillsPage: React.FC = () => {
   const { t } = useTranslation();
   const { auth } = useAuth();
   const { showToast } = useToast();
-  const { skills, loading, error, setError, importSkills, exportSkills, removeSkill, uninstallSkill } = useSkillData();
+  const { skills, loading, error, setError, importSkills, exportSkills, removeSkill, uninstallSkill, triggerRefresh: refreshSkills } = useSkillData();
+
+  // 顶部「刷新」按钮（同服务器页）。
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const handleRefresh = () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    refreshSkills();
+    setTimeout(() => setIsRefreshing(false), 600);
+  };
 
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -1934,16 +2148,22 @@ const SkillsPage: React.FC = () => {
             <span className="hub-num">{skills.length}</span> {t('nav.skills').toLowerCase()}
           </p>
         </div>
-        {isAdmin && (
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowAgentMgmt(true)} className="hub-btn">
-              <FolderPlus size={13} /> {t('skills.agentManagement')}
-            </button>
-            <button onClick={() => setShowImport(true)} className="hub-btn primary">
-              <Plus size={13} /> {t('skills.importExisting')}
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          <button onClick={handleRefresh} className="hub-btn" disabled={isRefreshing} aria-label={t('common.refresh')}>
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+            {t('common.refresh')}
+          </button>
+          {isAdmin && (
+            <>
+              <button onClick={() => setShowAgentMgmt(true)} className="hub-btn">
+                <FolderPlus size={13} /> {t('skills.agentManagement')}
+              </button>
+              <button onClick={() => setShowImport(true)} className="hub-btn primary">
+                <Plus size={13} /> {t('skills.importExisting')}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -2059,7 +2279,7 @@ const SkillsPage: React.FC = () => {
                         type="checkbox"
                         checked={checked}
                         onChange={() => toggleSelect(skill.id)}
-                        className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 flex-shrink-0"
+                        className="hub-checkbox flex-shrink-0"
                       />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap min-w-0">

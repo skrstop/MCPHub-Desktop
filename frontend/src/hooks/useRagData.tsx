@@ -15,6 +15,8 @@ import {
   getRagDocPaged,
   getRagChunksPaged,
   uploadRagDoc,
+  beginRagImportSession,
+  endRagImportSession,
   pickRagFiles,
   pickRagFolder,
   openRagFileLocation,
@@ -69,7 +71,7 @@ const useRagDataState = () => {
   // `initializing` (toggle on/off) so the switch can show "切换中" instead of
   // "开启中". Either flag grays out the page.
   const [switchingModel, setSwitchingModel] = useState(false);
-  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0, autoUpdateEnabled: true, autoUpdateIntervalSecs: 300, docLoadChunkKb: 200, sourceSyncAddEnabled: false });
+  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0, autoUpdateEnabled: true, autoUpdateIntervalSecs: 300, docLoadChunkKb: 200, sourceSyncAddEnabled: false, sourceSyncRemoveEnabled: true });
   const [modelLimits, setModelLimits] = useState<RagModelLimits>({ maxContext: 2048 });
   const [viewedDoc, setViewedDoc] = useState<RagDoc | null>(null);
   const [viewLoading, setViewLoading] = useState(false);
@@ -90,11 +92,43 @@ const useRagDataState = () => {
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; name: string } | null>(null);
+  // Elapsed-time tracking for the import overlay: `startedAt` = batch start
+  // (total elapsed), `fileStartedAt` = current file's start (per-file elapsed),
+  // `fileSize` = current file's byte size (drives the "large file" hint).
+  // `tick` re-renders once per second so the mm:ss labels advance. Set by
+  // `upload`/`updateDoc`/`reindexAll`; cleared in their finally blocks.
+  const [uploadTiming, setUploadTiming] = useState<{
+    startedAt: number;
+    fileStartedAt: number;
+    fileSize: number;
+    tick: number;
+  } | null>(null);
+  // One re-render per second while the overlay is up, so elapsed labels tick.
+  // Interval lives only while `uploadTiming` is non-null (no timers otherwise).
+  useEffect(() => {
+    if (!uploadTiming) return;
+    const id = window.setInterval(() => {
+      setUploadTiming((prev) => (prev ? { ...prev, tick: prev.tick + 1 } : prev));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [uploadTiming !== null]);
   // Per-document (character-based) progress, updated from the backend's
   // `rag://upload-progress` event during indexing. `null` outside an upload;
   // the UI shows it as a SECOND bar under the per-file bar. `charsDone` is the
   // number of document characters embedded so far, `charsTotal` the whole doc.
-  const [charProgress, setCharProgress] = useState<{ name: string; charsDone: number; charsTotal: number } | null>(null);
+  // `chunksDone`/`chunksTotal` drive a THIRD bar (chunk-level); total is 0
+  // while still chunking (count unknown) and the UI hides the bar then.
+  // `chunkingDone`/`chunkingTotal` fill the "分片中…" row during the chunking
+  // phase (chars scanned by the chunker, per code AST partition).
+  const [charProgress, setCharProgress] = useState<{
+    name: string;
+    charsDone: number;
+    charsTotal: number;
+    chunksDone: number;
+    chunksTotal: number;
+    chunkingDone: number;
+    chunkingTotal: number;
+  } | null>(null);
   // True while a model-swap-triggered reindex of all docs is running. The
   // upload overlay is reused (same bars); `reindexing` just switches the
   // title text from "uploading" to "reindexing".
@@ -164,6 +198,30 @@ const useRagDataState = () => {
     name: string;
     phase: 'checking' | 'sync' | 'reindexing' | 'done' | 'error';
   } | null>(null);
+  // Batch-update elapsed timing: `startedAt` = when the FIRST progress event of
+  // the current pass arrived (works for both the manual button and the timed
+  // auto-update — neither the dialog nor the hook initiated the auto pass, so
+  // the event itself is the only reliable start signal). `fileStartedAt` =
+  // when the current doc's first event arrived (per-doc elapsed); `name` tracks
+  // the doc the clock is for (a name change resets it). `tick` bumps once per
+  // second to re-render the mm:ss labels. Lives HERE (hook level), not in the
+  // dialog component: the dialog can be closed/reopened mid-pass and must NOT
+  // reset the clock on remount. Cleared on terminal phases (done/error).
+  const [batchTiming, setBatchTiming] = useState<{
+    startedAt: number;
+    fileStartedAt: number;
+    name: string;
+    tick: number;
+  } | null>(null);
+  // Per-second tick for the batch dialog's elapsed labels. Lives only while
+  // `batchTiming` is non-null (a pass is in flight).
+  useEffect(() => {
+    if (!batchTiming) return;
+    const id = window.setInterval(() => {
+      setBatchTiming((prev) => (prev ? { ...prev, tick: prev.tick + 1 } : prev));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [batchTiming !== null]);
   const mounted = useRef(true);
 
   const fetchDocs = useCallback(async () => {
@@ -263,12 +321,21 @@ const useRagDataState = () => {
     let unlistenUpload: UnlistenFn | undefined;
     let unlistenReindex: UnlistenFn | undefined;
     let unlistenDownload: UnlistenFn | undefined;
+    let unlistenInvalidated: (() => void) | undefined;
     let unlistenBatch: UnlistenFn | undefined;
     let cancelled = false;
-    listen<{ name: string; charsDone: number; charsTotal: number }>('rag://upload-progress', (event) => {
+    listen<{ name: string; charsDone: number; charsTotal: number; chunksDone?: number; chunksTotal?: number; chunkingDone?: number; chunkingTotal?: number }>('rag://upload-progress', (event) => {
       const p = event.payload;
       if (!p || !mounted.current) return;
-      setCharProgress({ name: p.name, charsDone: p.charsDone, charsTotal: p.charsTotal });
+      setCharProgress({
+        name: p.name,
+        charsDone: p.charsDone,
+        charsTotal: p.charsTotal,
+        chunksDone: p.chunksDone ?? 0,
+        chunksTotal: p.chunksTotal ?? 0,
+        chunkingDone: p.chunkingDone ?? 0,
+        chunkingTotal: p.chunkingTotal ?? 0,
+      });
     }).then((un) => {
       if (cancelled) un();
       else unlistenUpload = un;
@@ -308,6 +375,18 @@ const useRagDataState = () => {
             ? (p.phase as 'checking' | 'sync' | 'reindexing' | 'done' | 'error')
             : 'checking';
         setBatchProgress({ current: p.current, total: p.total, name: p.name, phase });
+        // Elapsed timing: the FIRST event of a pass starts the batch clock;
+        // a doc-name change (or the pass's very first event) starts the
+        // per-doc clock. Cleared on terminal phases. Event-driven so the
+        // timed auto-update (which no frontend code initiated) is timed too.
+        setBatchTiming((prev) => {
+          if (phase === 'done' || phase === 'error') return null;
+          if (!prev) return { startedAt: Date.now(), fileStartedAt: Date.now(), name: p.name, tick: 0 };
+          if (p.name && p.name !== prev.name) {
+            return { ...prev, fileStartedAt: Date.now(), name: p.name };
+          }
+          return prev;
+        });
         if (phase === 'done' || phase === 'error') {
           // Both terminal phases clear the running flag. On either terminal
           // phase we also refetch the doc list: "done" because chunk counts /
@@ -333,6 +412,18 @@ const useRagDataState = () => {
     ).then((un) => {
       if (cancelled) un();
       else unlistenBatch = un;
+    });
+
+    // Backend nudge: the timed auto-update's IDLE pass found docs whose
+    // original vanished (nothing to update/import/remove, so no progress
+    // events were emitted). The "原始丢失" badge is computed at list time —
+    // refetch the list so it appears without a manual page refresh. List-only
+    // refresh: no dialog, no button state.
+    listen<number>('rag://docs-invalidated', () => {
+      if (mounted.current) fetchDocs();
+    }).then((un) => {
+      if (cancelled) un();
+      else unlistenInvalidated = un;
     });
 
     // Model download progress (download.url -> .zip extract). Drives the
@@ -374,6 +465,7 @@ const useRagDataState = () => {
       unlistenReindex?.();
       unlistenDownload?.();
       unlistenBatch?.();
+      unlistenInvalidated?.();
     };
   }, [fetchModels]);
 
@@ -407,6 +499,8 @@ const useRagDataState = () => {
     setUploading(true);
     setUploadProgress({ current: 0, total: 0, name: '' });
     setCharProgress(null);
+    const startedAt = Date.now();
+    setUploadTiming({ startedAt, fileStartedAt: startedAt, fileSize: 0, tick: 0 });
     try {
       const done = await reindexAllRag();
       console.log('[RAG] reindexAll: backend returned', done);
@@ -424,6 +518,7 @@ const useRagDataState = () => {
         setUploading(false);
         setUploadProgress(null);
         setCharProgress(null);
+        setUploadTiming(null);
       }
     }
   }, [fetchDocs, t, showToast]);
@@ -565,19 +660,53 @@ const useRagDataState = () => {
       if (files.length === 0) return { success: 0, failed: 0 };
       setUploading(true);
       setUploadProgress({ current: 0, total: files.length, name: files[0].name });
+      const batchStart = Date.now();
+      setUploadTiming({ startedAt: batchStart, fileStartedAt: batchStart, fileSize: files[0].size ?? 0, tick: 0 });
       // Reset the per-document bar at the start of each batch; the backend
       // emits fresh events as each file is indexed.
       setCharProgress(null);
       let success = 0;
       let failed = 0;
+      // Aggregate failure reasons instead of toasting per file — a 100-file
+      // batch must not flood the screen. Toast shows a summary (first few
+      // distinct reasons + totals) at the end; full details go to console.
+      const failureLines: string[] = [];
+      let ocrMissingShown = false;
+      // Window closed mid-import: the backend emits rag://import-cancel-requested
+      // so the loop stops at the next file boundary. Only the files that
+      // actually finished importing stay in the doc list; the rest are NOT
+      // imported (closing the window mid-import means "cancel the remainder",
+      // not "keep importing in the hidden tray webview").
+      let importCancelled = false;
+      let unlistenImportCancel: UnlistenFn | undefined;
       try {
+        // Register the cancel listener BEFORE opening the session — the
+        // close-to-tray handler only emits while a session is active, so
+        // this ordering guarantees no emitted event can fall into a gap
+        // before the listener exists.
+        if (isTauri()) {
+          unlistenImportCancel = await listen('rag://import-cancel-requested', () => {
+            importCancelled = true;
+          });
+        }
+        // Session bracket: while active the backend defers git refreshes +
+        // the auto-update tick (no persistent-clone swap racing per-file
+        // imports, no source-sync importing the files this loop handles).
+        // Best-effort: a bracket failure (e.g. web dev mode) must not break
+        // the actual import.
+        await beginRagImportSession().catch((e) =>
+          console.warn('[RAG] begin import session failed:', e),
+        );
         for (let i = 0; i < files.length; i++) {
-          if (!mounted.current) break;
+          if (!mounted.current || importCancelled) break;
           setUploadProgress({ current: i, total: files.length, name: files[i].name });
+          setUploadTiming((prev) =>
+            prev ? { ...prev, fileStartedAt: Date.now(), fileSize: files[i].size ?? 0 } : prev,
+          );
           // Drop the previous file's char progress so the second bar restarts
           // from 0 for the next file (the backend pushes the new file's events
           // once its embedding begins).
-          setCharProgress({ name: files[i].name, charsDone: 0, charsTotal: 0 });
+          setCharProgress({ name: files[i].name, charsDone: 0, charsTotal: 0, chunksDone: 0, chunksTotal: 0, chunkingDone: 0, chunkingTotal: 0 });
           try {
             await uploadRagDoc(files[i].path, tags, method, files[i].source);
             success++;
@@ -587,30 +716,57 @@ const useRagDataState = () => {
             const msg = err instanceof Error ? err.message : String(err);
             if (msg.startsWith('OCR_MISSING')) {
               // No OCR engine on this platform -> dialog with install
-              // commands (not a toast).
-              await reportOcrMissingIf(err);
+              // commands (once per batch, not per file).
+              if (!ocrMissingShown) {
+                ocrMissingShown = true;
+                await reportOcrMissingIf(err);
+              }
             } else if (msg.startsWith('UNSUPPORTED_FORMAT')) {
-              showToast(t('pages.rag.unsupportedFile', { name: files[i].name }), 'error');
+              failureLines.push(`${files[i].name}: ${msg.replace('UNSUPPORTED_FORMAT:', '').trim()}`);
             } else if (msg.startsWith('EXTRACT_FAILED')) {
               // Supported document kind but extraction produced nothing
-              // usable — show the backend's concrete reason (e.g. scanned
+              // usable — keep the backend's concrete reason (e.g. scanned
               // PDF without a text layer).
               const reason = msg.split(':').slice(1).join(':').trim();
-              showToast(t('pages.rag.extractFailed', { name: files[i].name, reason }), 'error');
+              failureLines.push(`${files[i].name}: ${reason}`);
             } else {
-              showToast(`${t('pages.rag.uploadFailedFile', { name: files[i].name })}: ${msg}`, 'error');
+              failureLines.push(`${files[i].name}: ${msg}`);
             }
             console.error('[RAG] upload failed for', files[i].name, err);
           }
         }
         setUploadProgress({ current: files.length, total: files.length, name: '' });
+        if (importCancelled) {
+          console.log(
+            `[RAG] import cancelled by window close — ${success} of ${files.length} file(s) imported; the rest were skipped`,
+          );
+        }
         await fetchDocs();
+        if (failed > 0) {
+          const MAX_LINES = 5;
+          const shown = failureLines.slice(0, MAX_LINES).join('\n');
+          const more =
+            failureLines.length > MAX_LINES
+              ? `\n…${t('pages.rag.andMoreFailures', { count: failureLines.length - MAX_LINES })}`
+              : '';
+          showToast(
+            `${t('pages.rag.uploadSummary', { success, failed })}\n${shown}${more}`,
+            'error',
+          );
+        }
       } finally {
+        unlistenImportCancel?.();
         if (mounted.current) {
           setUploading(false);
           setUploadProgress(null);
           setCharProgress(null);
+          setUploadTiming(null);
         }
+        // Always end the session, even on cancel/error — a leaked session
+        // would block git refreshes + auto-update ticks until app restart.
+        // Awaited LAST so a new upload() starting right after this finally
+        // cannot race its begin past this end.
+        await endRagImportSession().catch((e) => console.warn('[RAG] end import session failed:', e));
       }
       return { success, failed };
     },
@@ -651,7 +807,17 @@ const useRagDataState = () => {
       setUploading(true);
       setUpdatingDoc(true);
       setUploadProgress({ current: 0, total: 1, name });
-      setCharProgress({ name, charsDone: 0, charsTotal: 0 });
+      setCharProgress({ name, charsDone: 0, charsTotal: 0, chunksDone: 0, chunksTotal: 0, chunkingDone: 0, chunkingTotal: 0 });
+      const startedAt = Date.now();
+      setUploadTiming({ startedAt, fileStartedAt: startedAt, fileSize: 0, tick: 0 });
+      // Import-session bracket (same as batch upload): while a single-doc
+      // update runs, the backend defers git refreshes + the auto-update tick.
+      // Without this, the 60s auto tick's git re-clone (~60s+ of network/CPU)
+      // races the update's chunking + embedding and stretches it severalfold
+      // (measured: a 37s chunk+embed took 5min with clones interleaved).
+      await beginRagImportSession().catch((e) =>
+        console.warn('[RAG] begin import session (update) failed:', e),
+      );
       try {
         await updateRagDoc(id, opts);
         setUploadProgress({ current: 1, total: 1, name });
@@ -660,6 +826,11 @@ const useRagDataState = () => {
         setUpdatingDoc(false);
         setUploadProgress(null);
         setCharProgress(null);
+        setUploadTiming(null);
+        // Always end the session, even on error (same rationale as upload).
+        await endRagImportSession().catch((e) =>
+          console.warn('[RAG] end import session (update) failed:', e),
+        );
         // Refresh in `finally` regardless of success: the backend re-index
         // (reindex_doc) returns once chunks are re-embedded, and even on error
         // the on-disk meta/version may have partially changed. Without this, a
@@ -692,10 +863,15 @@ const useRagDataState = () => {
     if (batchUpdateRunning) return;
     setBatchUpdateRunning(true);
     setBatchProgress({ current: 0, total: 0, name: '', phase: 'checking' });
+    const startedAt = Date.now();
+    setBatchTiming({ startedAt, fileStartedAt: startedAt, name: '', tick: 0 });
     try {
       await batchUpdateRagDocs();
     } catch (err) {
-      if (mounted.current) setBatchUpdateRunning(false);
+      if (mounted.current) {
+        setBatchUpdateRunning(false);
+        setBatchTiming(null);
+      }
       throw err;
     }
   }, [batchUpdateRunning]);
@@ -910,6 +1086,7 @@ const useRagDataState = () => {
     uploading,
     uploadProgress,
     charProgress,
+    uploadTiming,
     reindexing,
     updatingDoc,
     reindexConfirm,
@@ -949,6 +1126,7 @@ const useRagDataState = () => {
     batchUpdate,
     batchUpdateRunning,
     batchProgress,
+    batchTiming,
     // OCR-missing dialog (image/PDF/Office imports on Linux w/o tesseract).
     ocrMissing,
     dismissOcrMissing,

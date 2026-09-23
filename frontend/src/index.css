@@ -1440,3 +1440,9 @@ button.text-white.is-loading::after {
   outline: none;
   box-shadow: 0 0 0 2px var(--hub-surface), 0 0 0 3px #2563eb;
 }
+
+@keyframes toast-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-toast-in { animation: toast-in 0.25s ease-out; }

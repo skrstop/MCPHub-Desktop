@@ -76,6 +76,21 @@ pub fn init(app_data_dir: Option<PathBuf>) {
 /// Extracts server name from messages like "[server-name] Connected ..."
 pub fn log_to_db(level: &str, message: &str) {
     let server_name = extract_server_name(message);
+    // Single choke-point cap: messages land in app_log AND get FTS-tokenized
+    // (write amplification). Callers are mostly bounded format! strings, but
+    // unbounded sources exist (stdio stderr lines, frontend log_event) — a
+    // chatty MCP server emitting multi-KB lines would flood both. 4000 chars
+    // preserves any useful diagnostic tail context.
+    const MAX_MESSAGE_CHARS: usize = 4000;
+    let message = if message.chars().count() > MAX_MESSAGE_CHARS {
+        let mut end = MAX_MESSAGE_CHARS;
+        while !message.is_char_boundary(end) {
+            end += 1;
+        }
+        &message[..end]
+    } else {
+        message
+    };
     if let Some(sender) = LOG_SENDER.get() {
         let _ = sender.send(LogEntry {
             level: level.to_string(),

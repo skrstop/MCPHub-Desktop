@@ -191,10 +191,29 @@ pub async fn write_activity(
         .unwrap_or(true);
 
     let id = Uuid::new_v4().to_string();
+    const MAX_PAYLOAD_BYTES: usize = 64 * 1024; // 64KB per field
+    let truncate_payload = |s: String| -> String {
+        if s.len() <= MAX_PAYLOAD_BYTES {
+            return s;
+        }
+        // Byte-cap with char-boundary alignment (payload is user/tool data,
+        // may be arbitrary UTF-8).
+        let mut end = MAX_PAYLOAD_BYTES;
+        while !s.is_char_boundary(end) {
+            end += 1;
+        }
+        format!("{}\n…(truncated)", &s[..end])
+    };
     let (input_str, output_str) = if store_payload {
         (
-            input.map(|v| serde_json::to_string(&v)).transpose()?,
-            output.map(|v| serde_json::to_string(&v)).transpose()?,
+            input
+                .map(|v| serde_json::to_string(&v))
+                .transpose()?
+                .map(truncate_payload),
+            output
+                .map(|v| serde_json::to_string(&v))
+                .transpose()?
+                .map(truncate_payload),
         )
     } else {
         (None, None)
@@ -210,7 +229,19 @@ pub async fn write_activity(
     .bind(status)
     .bind(&input_str)
     .bind(&output_str)
-    .bind(error_message)
+    .bind(error_message.map(|e| {
+        // Error chains can embed upstream payloads (e.g. the 32KB stderr
+        // tail) — cap for parity with input/output.
+        if e.len() <= MAX_PAYLOAD_BYTES {
+            e.to_string()
+        } else {
+            let mut end = MAX_PAYLOAD_BYTES;
+            while !e.is_char_boundary(end) {
+                end += 1;
+            }
+            format!("{}\n…(truncated)", &e[..end])
+        }
+    }))
     .bind(source_ip)
     .execute(db::pool())
     .await?;

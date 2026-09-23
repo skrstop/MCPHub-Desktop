@@ -61,6 +61,16 @@ pub fn can_extract(filename: &str) -> bool {
         .any(|e| e.can_handle(filename))
 }
 
+/// Whether the extraction product for `filename` is Markdown. PDF and Office
+/// strategies produce Markdown (via pdf_oxide / office_oxide `to_markdown`),
+/// while the image strategy produces plain OCR text — the chunker routes by
+/// the PRODUCED content: Markdown products use the markdown splitter
+/// (heading/block boundaries), everything else (incl. OCR text) the plain
+/// text splitter (2026-09 requirement).
+pub fn produces_markdown(filename: &str) -> bool {
+    pdf::PdfExtractor.can_handle(filename) || office::OfficeExtractor.can_handle(filename)
+}
+
 /// Dispatch entry: run the first strategy whose `can_handle` matches.
 /// Heavy work (PDF parsing, OCR) runs on a blocking thread so the async
 /// runtime's workers stay free. Never fails without a sentinel prefix.
