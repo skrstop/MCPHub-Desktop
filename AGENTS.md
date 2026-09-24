@@ -1733,7 +1733,7 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 
 ### 3.17 RAG 数据源统一 + Git 数据源 + 树形列表视图（桌面端独有，2026-09-09）
 
-> 设计与执行计划见 `doc/rag_data_source_tree_plan_20260909.md`。三大需求：①导入入口统一为「数据源选择」（文件/文件夹只是选项）；②新增 Git 数据源（gix 纯 Rust 集成、支持认证）；③列表增加树形视图（存量归「文件」节点）。版本 `1.0.35002`（后并入 1.0.35003 发布），changelog 已合并进 `doc/upgrade/1.0.35003.md`。
+> 设计与执行计划见 `doc/rag_data_source_tree_plan_20260909.md`。三大需求：①导入入口统一为「数据源选择」（文件/文件夹只是选项）；②新增 Git 数据源（gix 纯 Rust 集成、支持认证）；③列表增加树形视图（存量归「文件」节点）。版本 `1.0.35002`（后并入 1.0.35003 发布，1.0.35003 的 changelog 又随 2026-09-24 基线同步并入 `doc/upgrade/1.0.39001.md`，原 `1.0.35003.md` 已删）。
 
 #### 3.17.1 数据模型 + 存量兼容（P1）
 
@@ -1846,7 +1846,7 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 #### 3.17.12 验证
 
 - `ORT_SKIP_DOWNLOAD=1 cargo check` 0 错 0 警；`cargo test --lib` 34 passed；`npm run build` ✓；`npx tsc --noEmit` 24 = 基线。
-- 版本：`1.0.35001 → 1.0.35003`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog **与 1.0.35003 合并为单文件 `doc/upgrade/1.0.35003.md`**（原 `1.0.35002.md` 已删——覆盖 1.0.35002 的数据源/树形功能与 1.0.35003 的 SSH/http 修复）。
+- 版本：`1.0.35001 → 1.0.35003`（tauri.conf.json / Cargo.toml / 根 package.json / frontend package.json + Cargo.lock）；changelog **与 1.0.35003 合并为单文件 `doc/upgrade/1.0.35003.md`**（原 `1.0.35002.md` 已删；该文件后续随 2026-09-24 基线同步再并入 `doc/upgrade/1.0.39001.md`，`1.0.35003.md` 已删）。
 
 #### 3.17.13 Git 数据源支持 SSH 连接（2026-09-13）
 
@@ -1884,7 +1884,7 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 
 **http 路径 TTY 提示修复（2026-09-15 补充，用户反馈：http 导入时控制台出现密码输入提示）**：gix 的 credential cascade 走空（http 401 + 无/错凭证）后调 `gix-prompt` **直接 open `/dev/tty`** 向用户要账密——提示打到 app 控制台并阻塞。修复：clone 的 `config_overrides` 加 `gitoxide.credentials.terminalPrompt=false`（gix 的 `Mode::Disable` 只禁 TTY 交互、askpass 程序不受影响；http 与 SSH 双路径生效）→ cascade 失败即快速返回 → `GIT_AUTH_REQUIRED` → 前端表单提示账密。端到端验证（GitHub 对不存在私有 repo 返回 401）：1.4s 快速失败、分类为 auth error、零 TTY 交互（临时测试已删）。
 
-**验证**：`cargo test --lib` **41 passed**；`cargo check` 0 错 0 警；`npm run build` ✓；`npx tsc --noEmit` 24 = 基线。版本 `1.0.35002 → 1.0.35003`（四源 + Cargo.lock）；changelog `doc/upgrade/1.0.35003.md`。
+**验证**：`cargo test --lib` **41 passed**；`cargo check` 0 错 0 警；`npm run build` ✓；`npx tsc --noEmit` 24 = 基线。版本 `1.0.35002 → 1.0.35003`（四源 + Cargo.lock）；changelog `doc/upgrade/1.0.35003.md`（后续并入 `doc/upgrade/1.0.39001.md`，原文件已删）。
 
 #### 3.17.15 文件夹级联勾选（主页树形 + 导入弹框，2026-09-17）
 
@@ -2193,6 +2193,63 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 
 ---
 
+### 3.19 OpenAPI 兼容端点（/api/*，镜像 origin openApiController，2026-09-24；同日复核轮补齐 query 参数 + 辅助端点 + E2E 实测）
+
+> 基线同步（§4.4，`8ed6478`）把 ServerCard/GroupCard 的 `/api/` 端点 chip 带进前端，但桌面 Rust `http_server.rs` 此前无对应路由（访问 404）。本节在 Rust 端补齐实现，使 chip 语义完整。前端 chip 复制的是 API base（`http://host:port/api/{name}`），客户端在其后拼接 `/openapi.json` 获取 spec。
+
+**文件**：`src-tauri/src/services/http_server.rs`（「OpenAPI-compatible endpoints」区段 + `openapi_tests` 测试模块）
+
+**路由（全部走与 /rest/*、/mcp/* 相同的 bearer-key 鉴权 + `get_allowed_servers` 服务器白名单）**：
+
+| 路由 | 说明 |
+| --- | --- |
+| `GET /api/openapi.json`（`.yaml` 同响应 JSON） | 全局 spec：所有可达服务器（connected / 睡眠 on-demand / RAG builtin）的工具 |
+| `GET /api/openapi/servers` | 已连接服务器名列表（origin getOpenAPIServers parity：`{success, data: [...]}`） |
+| `GET /api/openapi/stats` | 工具统计（origin getToolStats parity：`{totalServers, totalTools, serverBreakdown:[{name, toolCount, status}]}`；status ∈ connected/connecting/sleeping/disconnected） |
+| `GET /api/{name}/openapi.json` | 作用域 spec：`name` 先按分组解析（分组 servers + 工具 allow-list），否则按单服务器（含 RAG builtin）；无可达工具返回 404（origin 同文案） |
+| `GET\|POST /api/tools/{server}/{tool}` | 全局作用域执行工具 |
+| `GET\|POST /api/{name}/tools/{server}/{tool}` | 分组/单服务器作用域执行工具（校验 server 在 scope 内，否则 404） |
+
+**spec 端点 query 参数（origin 全量 parity）**：`?title=&description=&version=&serverUrl=&includeDisabled=true|false&group=<分组名>&servers=a,b`——`serverUrl` 覆盖 `servers[0].url`（自动追加 `/api` 后缀）；`includeDisabled=true` 在 spec 中包含已禁用工具（仍仅限已连接服务器，与 origin 一致）；`?group=` 传不存在的分组返回**空 spec**（此参数不做单服务器回退——回退语义仅存在于 `/api/{name}/openapi.json` 路径形态，与 origin 语义一致）。
+
+**spec 生成（镜像 origin openApiGeneratorService 语义）**：
+- 工具收集 `collect_openapi_tools(scope, include_disabled)`：复用 `mcp_scope_server_filters` + `tools_for_server` + `apply_tool_filters`（禁用工具跳过、描述覆盖生效、分组 allow-list 按 bare name 匹配）；运行时前缀名（`{server}{nameSeparator}{tool}`）剥为 bare name。
+- 操作形状 `tool_schema_shape`：纯基础类型参数（无 object/array/string）且 ≤10 个 → **GET query parameters**（schema 透传 type/enum/default/format，origin parity）；否则 → **POST JSON requestBody**（origin 同判定，string 也算复杂类型）。
+- path 名 `/tools/{enc(server)}/{enc(bareTool)}`（encodeURIComponent 等价的最小 percent-encoding）；`operationId` = bare name，**跨服务器同名工具冲突时改用 `{server}_{tool}` 消歧**（origin 用全前缀名天然唯一，桌面用 bare 名 + 冲突去重，两者均满足 OpenAPI 唯一性要求）；`tags` = 服务器名。
+- 文档结构：`openapi: 3.0.3` + `servers: [{url: base_url + "/api"}]` + `components.schemas`（ToolResponse/ErrorResponse）+ `security: bearerAuth`。`base_url` 优先取请求 `Host` 头（反代友好），回退 `localhost:{运行端口}`；恒为 `http://`（桌面 HTTP 监听无 TLS，TLS 反代场景应显式传 `serverUrl=`）。
+- `.yaml` 路径不做 YAML 序列化（无依赖），与 `.json` 同返回 JSON——所有主流 OpenAPI 客户端均接受。
+
+**工具执行 `execute_openapi_impl`**：
+- 工具名解析：先裸名、再 `{server}{nameSeparator}{tool}` 前缀名（origin 语义）。
+- 禁用工具 gate（与 /rest、/mcp 同源，#1178 安全语义；动态读 DB，改禁用状态即时生效无需重启）。
+- GET 的 query 参数按工具 inputSchema 做类型纠偏（`coerce_query_args`：number/integer/boolean 字符串 → 对应 JSON 类型，解析失败回退原字符串，origin convertParametersToTypes 同义）；POST body 直接作为 arguments。
+- 调用走共享 `pool::call_tool`（与 /rest 相同——无下游 session，不走 per-session 隔离）。
+- 写 activity_log（含 64KB 载荷截断，§3.17.15）+ `[OpenAPI]` 前缀日志。
+- 响应 `{content, isError}`（origin 同构）。
+
+**使用方式（OpenWebUI 等客户端）**：把 `http://localhost:{httpPort}/api/{server 或 group}/openapi.json` 作为 OpenAPI spec 地址导入，客户端即按 spec 中每个工具的 `POST/GET /tools/...` 路径直接调用；bearer auth 开启时需带 `Authorization: Bearer <token>` 请求头（token 为 Bearer Keys 页签创建的 key）。
+**仪表盘入口（2026-09-24）**：Dashboard 端点区两处改动——①「MCP 接入端点」卡片原「GROUP ×2 + SERVER 兜底」多行合并为单行 `SERVER/GROUP`，URL 占位 `<服务名或分组名>`（i18n 键 `pages.dashboard.namePlaceholder`；原 groupNamePlaceholder/serverNamePlaceholder 两键已删）；②「MCP 接入端点」卡片下方新增「OpenAPI 接入端点」卡片——两张 `EndpointCopy` 行（全局 spec `/api/openapi.json` + 命名 spec `/api/{服务名或分组名}/openapi.json`，均可一键复制），下方一行用法说明（占位符替换为服务器/分组名、简单参数走 GET、复杂参数走 POST JSON、Bearer Key 鉴权提示）。i18n 键 `pages.dashboard.openapi*` 4 键 × 4 语言（openapiTitle/openapiHint/openapiNamePlaceholder/openapiUsage，插在 endpointsHint 之后）。Dashboard 的 `useGroupData` 引用随之移除（无其他使用点）。
+
+**与 origin 的差异（有意为之，记录在案）**：
+- **鉴权更严格**：origin 的 /api/* 完全公开（仅限流）；桌面端在 `routing.enableBearerAuth` 开启时对全部 /api 路由强制 bearer 鉴权（含 spec 端点），关闭时与 origin 同为开放。安全增强，保持。
+- **.yaml 返回 JSON**（origin 用 js-yaml 输出真 YAML）：避免引入序列化依赖，主流客户端不受影响。
+- **UI-only 工具过滤缺失**：origin `filterModelVisibleTools` 过滤 `_meta.ui.visibility` 不含 `model` 的工具；桌面端无该概念（全局缺失，非 /api 特有），此类工具会出现在 spec 中。
+- **限流缺失**：origin 对 /api 有 rate limiter；桌面端 HTTP 服务器整体无限流（既有状态，非 /api 特有）。
+- **matchit 静态优先边界**：服务器恰好命名为 `openapi` 时其命名 spec（`/api/openapi/openapi.json`）会被 `/api/openapi/*` 静态路由挡住（matchit 无回溯；origin express 按注册序可匹配）。病态命名边界，不处理。
+- origin 执行路径传 `x-session-id`（固定 `openapi-session`）+ 全部请求头透传；桌面无此透传链路（与 /rest 一致）。
+
+**E2E 实测矩阵（2026-09-24 复核轮，针对运行中的 dev 实例真机验证）**：
+- spec：全局（102 路径 / operationId 唯一 / method-body 一致性断言全过）、单服务器（playwright 25 工具）、CJK 服务器名（本机公网ip查询，percent-encoding 链路）、分组（Test → 4 已连接服务器、禁用服务器正确排除）、builtin（mcphub-desktop → 6 RAG 工具）、不存在名 → 404（origin 同文案）、`.yaml` → JSON、CORS `*`。
+- query 参数：`servers=playwright` 过滤 ✓、`group=Test` ✓、`group=<不存在>` → 空 spec ✓、`serverUrl/title/version` 覆盖 ✓、`includeDisabled=true`（临时禁用 codegraph_files 后 7→8 工具，含隐藏/可见双向断言）✓。
+- 辅助端点：`/api/openapi/servers`（4 名单）、`/api/openapi/stats`（96 工具 + breakdown）✓。
+- 执行：GET 全局（getPublicIp）、GET 分组作用域、POST 空 body（codegraph_status）、POST 带 required 参数（codegraph_search query+limit）、POST 分组作用域——响应均 `{content, isError}` ✓；activity_log 行（server/tool/duration/status）全部落库 ✓。
+- 错误路径：未知服务器 404 / 未知工具 404 / scope 外服务器 404 / PUT 405 / 禁用工具 403「is disabled」/ 鉴权开启后无 key、错 key 401 + 对 key 200 + spec 端点同受控 / `allowed_servers` 受限 key：spec 过滤到白名单服务器 + 执行越权 403——全部 ✓，测试后 DB 均已还原并复核还原生效。
+- 对照实验：Idea-mcp-server 上游 404 经 `/mcp` JSON-RPC 复现同错——确认为上游失联（IDE 端点漂移），非 /api 路径缺陷。
+
+**验证**：`ORT_SKIP_DOWNLOAD=1 cargo check --lib` 0 错 0 警；`cargo test --lib` **57 passed**（`openapi_tests` 模块 6 个：路由构建防 matchit panic、GET/POST 形态分流、operationId 唯一性、urlencode、coerce_query_args 类型纠偏、spec options 解析）。
+
+---
+
 ## 4. 上游 mcphub-origin 同步记录
 
 ### 4.1 同步策略
@@ -2296,18 +2353,65 @@ cd src-tauri && cargo check
 桌面的版本号规则为：{{version}}xxx, xxx代表当前桌面端的版本号，从001开始递增
 | 项                             | 值                      |
 | ------------------------------ | ----------------------- |
-| **当前已同步到 origin commit** | `6b1fdb7` (origin/main，v1.0.35 tag 之后 3 个未发布提交) |
-| **对应 origin tag**            | `v1.0.35`（最新 tag） |
-| **桌面端版本号**               | `1.0.35001` |
-| **同步执行日期**               | 2026-09-08            |
+| **当前已同步到 origin commit** | `8ed6478` (origin/main，v1.0.39 tag 之后 9 个未发布提交) |
+| **对应 origin tag**            | `v1.0.39`（最新 tag） |
+| **桌面端版本号**               | `1.0.39001` |
+| **同步执行日期**               | 2026-09-24            |
 
-> 下次同步时，使用 `6b1fdb7` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 6b1fdb7..HEAD`）。
+> 下次同步时，使用 `8ed6478` 作为新的基线 SHA 起点（命令：`cd mcphub-origin && git --no-pager log --oneline 8ed6478..HEAD`）。
 >
-> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。本轮基线跨 origin 两个 release（`v1.0.34`/`v1.0.35`，`980ab4a → 6b1fdb7`），前端/locales 改动集中在 #1133（Smart Routing 配置字段 provider-neutral 更名）、#1141（btn-primary 边框）与 #1131（MRL 透传，上一轮已同步本次去重确认）。版本号 `1.0.34003 → 1.0.35001`：基线跟随 origin 最新 tag v1.0.35（34 → 35），序号从 001 重新开始；changelog `doc/upgrade/1.0.35001.md` 单文件（34002/34003 历史文件保留）。
->
-> ⚠️ **文档补齐说明（第二次）**：上一次基线（2026-09-01，`0f59780`/`1.0.33002`）之后，feature 提交 `38d5691` 已把子模块指针无记录推进到 `40e7c74`（v1.0.34 之后第 2 个提交），但 §4.3/§4.4 未更新。2026-09-06 同步顺带补登该段（`f03eb10` #1124、`40e7c74` #1125，均无代码落点，详见 §4.4）。
+> 注：本节「对应 origin tag」指 origin 仓库的最新 tag（与子模块指针所在 commit 未必相同——指针停在 tag 之后的未发布提交上）。本轮基线跨 origin 四个 release（`v1.0.36`~`v1.0.39`，`6b1fdb7 → 8ed6478`，43 个 commit），前端改动集中在 #1175（分组可见性）、#1129（per-user credentials）、#1186（包版本展示）、#1190/#1191/#1193（服务器复制 + 客户端配置预设复制）、#1199（Smart Routing 索引面板）。版本号 `1.0.35003 → 1.0.39001`：基线跟随 origin 最新 tag v1.0.39（35 → 39），序号从 001 重新开始；changelog `doc/upgrade/1.0.39001.md` 单文件。
 
 ### 4.4 最近同步记录
+
+#### 2026-09-24：同步 `6b1fdb7` -> `8ed6478`（43 个 commit，跨 v1.0.36 ~ v1.0.39 四个 release）
+
+origin 基线前进 43 个 commit（`6b1fdb7..8ed6478`；v1.0.36/37/38/39 四个 tag 均在本次范围内）。`git diff --stat 6b1fdb7..8ed6478 -- frontend/ locales/`：31 个文件 +3148/-197；`-- src/`：59 个文件 +4850/-272。
+
+**已同步到 desktop（前端 / locales）**
+
+| 来源 commit | 说明 | desktop 应用方式 |
+| ----------- | ---- | ---------------- |
+| `b3d0dcb` #1143 | remove deprecated baseUrl from tsconfig | 桌面 tsconfig 与 origin 同步（新文件直接采用 origin 版本，`serverName.ts` 补齐依赖）。 |
+| `451102d` #1142 | use group names in copied MCP configuration | GroupCard 直接采用 origin 版本区段（GroupCard 为桌面自定义文件，手动合并）。 |
+| `ae5962c` #1153 | log-stream reconnect backoff reset on open | `logService.ts` 手动合并：`onopen` 中重置 `openAttempts`（桌面端保留 Tauri 跳过 EventSource 的差异）。 |
+| `fb60844` #1160 | slogan 措辞更新（open-source / control plane） | 4 语言 `auth.slogan` 同步为 origin 值。 |
+| `319e191` #1129 | per-user credentials（CredentialsPage 等） | **部分采用**：新增文件 `credentials` locales、`credentialTemplate`/`CredentialSlot` 类型、`ServerConfig.resources` 字段、ServerForm 的 credentials slots 编辑器（Advanced 分区）；**跳过** CredentialsPage 路由/Header/Sidebar 入口（桌面端免登录单用户，无 per-user 语义）；`serverFormPayload` 不带 `credentialTemplate`（Rust 模型无此字段）。 |
+| `1772c7a` #1175 | group visibility controls | **仅类型与 locales**：`Group.visibility/owner/sharedWithUsers` 类型 + `groups.legacyVisibility` 等 4 键；跳过 AddGroupForm/EditGroupForm/GroupVisibilityFields UI 与 GroupCard 的 `canManage`/visibility 行（桌面端无用户体系）。 |
+| `629ff61` #1180 | OpenAPI endpoint URLs 展示 | ServerCard/GroupCard 手动合并：`/api/` 端点 chip + 复制（baseUrl 沿用桌面 httpPort 逻辑）。 |
+| `260de33` #1164 | keep on-demand servers alive during calls | **Rust 镜像**：`on_demand.rs::run_call` 调用开始前 bump `last_used` + 重 arm idle timer，长调用不再被 idle 计时器中途回收。 |
+| `afcc72f` #1178 | **CRITICAL**: disabled tools remain executable via tools/call | **Rust 镜像**：`http_server.rs` 的 REST `/rest/:server/call` 与 `/rest/group/:group/call` 补 disabled-tool gate（MCP JSON-RPC 路径与 Tauri 命令路径已有 gate）。 |
+| `895f448` #1182 | scope npx reinstall cache clear | **Rust 镜像**：`servers.rs` 新增 `clear_npx_cache_for_specs`（读 `_npx` 各 entry 的 package.json 元数据匹配包 spec，仅删本服务器的 entry），替代整目录 `remove_dir_all`。 |
+| `ee124ff` #1186 | show resolved package version + update availability | 前端展示层类型（`Server.packageVersion/latestVersion/updateAvailable`）+ `server.packageVersion/updateAvailable` locales；**运行时**桌面端已有自研 §3.6 实现（记录版本池 + `server://update-available`），不做 origin 的 registry 查询链路。 |
+| `a793e38`/`47cd1fc` #1190/#1193 | duplicate server into pre-filled add form | 完整镜像：新增 `serverDuplicate.ts`（含 `SERVER_NAME_MAX_LENGTH` 依赖 `serverName.ts`）；AddServerForm/EditServerForm 采用 origin 版本（AddServerForm 去掉 `shareCandidatesFrom`，桌面无 share-candidates API）；ServerForm 加 `mode` prop + OAuth 子字段回传；ServersPage 加 B1 竞态守卫（edit/duplicate request-id）+ duplicate 接线；ServerCard 加 `onDuplicate`/`isDuplicating`。 |
+| `93fdb6f` #1191 | per-client MCP configuration presets | 完整镜像：新增 `clipboard.ts`/`mcpClientSnippets.ts`/`CopyClientConfigDialog.tsx`；ServerCard/GroupCard 的复制动作改为打开预设对话框（桌面各自研 `copyText` 收敛为共享 helper）。 |
+| `5ac617f` #1184 | reap idle dynamically-registered OAuth clients | 前端完整镜像（SettingsContext `clientTtl` 类型/默认/读取 + SettingsPage temp state/保存/UI 输入）；Rust 后端无 OAuth server，无镜像面。 |
+| `aa46861` #1199 | Smart Routing performance & reindex panel | 新增 `SmartRoutingIndexPanel.tsx`/`smartRoutingService.ts` + SettingsPage 挂载（桌面 Tauri 下 Smart Routing 区块隐藏，按既有策略同步代码保留）+ 30 个 locales 键。 |
+| `8ed6478` #1208 | docs only | 跳过（origin 文档）。 |
+
+**已镜像到 desktop（Rust 后端）**：#1178（REST disabled-tool gate）、#1164（on-demand 长调用保活）、#1182（npx 重装 scoped 缓存清理）。其余后端 commit 逐项评估为无需镜像：
+
+| 来源 commit | 说明 | 处理决策 | 原因分析 |
+| ----------- | ---- | -------- | -------- |
+| `f0d8428` #1157 | overlapping inits strand 'connecting' | **无需镜像** | 桌面端 `connect_server` 有 `is_starting` 重入守卫 + disconnect 清理（§3.6.1），无 stranded 路径。 |
+| `2d4ad64` #1156 | isolate transport creation failures | **无需镜像** | 桌面端 `start_all` 每服务独立 `tokio::spawn`，`connect_server` 返回错误 status，单服务失败天然隔离。 |
+| `306e636` #1149 | preserve single-route tool calls after session rebuild | **无需镜像** | 桌面端 HTTP server 不校验 session id 有效性（`strategy_for_session` 未命中即 fallback，请求继续），单服务器 scope 的 raw/prefixed 工具名双查已实现，rebuild 语义天然成立。 |
+| `a55a650` #1162 | bound concurrent startup connects | **暂不镜像** | 桌面端已有 staggered startup（每服务间隔 2s），并发压力受限；服务量级小。后续需要时再引入 env-config 并发上限。 |
+| `67ca123` #1135 | rate limit: count only failed auth | **无需镜像** | 桌面端内置 HTTP server 无 rate limiter/登录端点，无镜像面。 |
+| `215a770`/`5ac617f`/`48981a3`/`9c5dc93` | OAuth server / BetterAuth / OAuth provider | **无需镜像** | 桌面端无 OAuth Server、无 Better Auth（§7 待办），无对应链路。 |
+| `319e191` 后端 / `abf15c5` #1203 / `8aaac68` #1204 | per-user credentials 路由 + 上游错误脱敏 | **无需镜像** | 桌面端未实现 per-user credentials（无凭证注入层），无此错误泄漏面。 |
+| `b6887ef` #1183 / `1db0aa7` #1194 / deps bumps | CI/deps | **不同步** | Node 依赖与 origin CI；桌面端有自己的 release.yml。 |
+| `b23f1db`/`5861e75`/`17e04ea`/`e9faf82`/`180b251` 等纯文档 | docs | **跳过** | docs/ 按策略不同步。 |
+
+**同步操作**：子模块指针 `6b1fdb7 -> 8ed6478`；版本号 `1.0.35003 -> 1.0.39001`（基线跟随 origin 最新 tag v1.0.39，35 → 39，四源 + Cargo.lock）；changelog `doc/upgrade/1.0.39001.md` 单文件。
+
+**同步后验证**：`cd frontend && npm run build` 通过；`npx tsc --noEmit` 24 错误 = 基线 24（经 `git stash` 对照 HEAD 逐条确认，零新增）；locales JSON 四文件解析校验通过（deep-merge 保留桌面自定义键，en 81/fr 82/tr 82/zh 81 个 origin 新键合入）；`ORT_SKIP_DOWNLOAD=1 cargo check --lib` 0 错 0 警；`cargo test --lib` 51 passed。
+
+**影响功能点与结果**：
+
+- **影响功能点**：①ServersPage/ServerCard/ServerForm/AddServerForm/EditServerForm（复制、竞态守卫、OAuth 子字段回传、`/api/` 端点 chip）；②GroupCard（OpenAPI 端点 + 客户端配置对话框；可见性/管理权 UI 未启用）；③SettingsPage/SettingsContext（OAuth clientTtl + Smart Routing 面板，Tauri 下均隐藏）；④logService（SSE 退避，桌面端 Tauri 不启用 EventSource）；⑤Rust `http_server.rs`（REST disabled-tool 安全 gate）、`on_demand.rs`（长调用保活）、`commands/servers.rs`（npx scoped 缓存清理）；⑥locales 四语言 +82 键（credentials/clientConfig/smartRoutingIndex/groups.legacyVisibility 等）。
+- **结果**：相比上一版本新增服务器复制、按客户端预设复制配置、OpenAPI 端点展示；修复禁用工具可经 REST 调用的安全漏洞、按需服务长调用被误关、npx 重装波及其他服务器缓存、日志流退避失效、编辑服务器竞态。**用户需重启应用**生效（Rust 侧三处修复随二进制更新）。
+- **发布**：版本 `1.0.39001`，changelog `doc/upgrade/1.0.39001.md`。
 
 #### 2026-09-08：同步 `980ab4a` -> `6b1fdb7`（8 个 commit，跨 v1.0.35 release + 3 个未发布提交）
 

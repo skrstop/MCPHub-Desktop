@@ -25,7 +25,8 @@ function removeSplash() {
  * contextmenu listener so it wins over any component's own handler.
  */
 function setupProductionContextMenuGuard() {
-  if (process.env.NODE_ENV !== 'production') return;
+  // Vite 浏览器环境没有 process，必须用 import.meta.env（PROD=true 即打包 release）
+  if (!import.meta.env.PROD) return;
   document.addEventListener(
     'contextmenu',
     (e) => {

@@ -654,6 +654,7 @@ export interface ServerConfig {
   idleTimeoutMs?: number; // Milliseconds of inactivity before shutting down (default: 300000 = 5 min)
   tools?: Record<string, { enabled: boolean; description?: string }>; // Tool-specific configurations with enable/disable state and custom descriptions
   prompts?: Record<string, { enabled: boolean; description?: string }>; // Prompt-specific configurations with enable/disable state and custom descriptions
+  resources?: Record<string, { enabled: boolean; description?: string }>; // Resource-specific configurations with enable/disable state and custom descriptions
   options?: {
     timeout?: number; // Request timeout in milliseconds
     resetTimeoutOnProgress?: boolean; // Reset timeout on progress notifications
@@ -691,6 +692,7 @@ export interface ServerConfig {
     resource?: string; // OAuth resource parameter (RFC8707)
     authorizationEndpoint?: string; // Authorization endpoint (authorization code flow)
     tokenEndpoint?: string; // Token endpoint for exchanging authorization codes for tokens
+    redirectUri?: string; // Preferred redirect URI for authorization requests and registration
     revocationEndpoint?: string; // Token revocation endpoint (RFC 7009)
     pendingAuthorization?: {
       authorizationUrl?: string;
@@ -751,6 +753,11 @@ export interface Server {
   error?: string;
   /** Running version reported by the MCP handshake (stdio servers). */
   version?: string;
+  // Resolved npx/uvx package version + registry update hint for stdio servers
+  // (#1166). Runtime state at the top level, like `version`.
+  packageVersion?: string;
+  latestVersion?: string;
+  updateAvailable?: boolean;
   tools?: Tool[];
   prompts?: Prompt[];
   resources?: Resource[];
@@ -828,6 +835,13 @@ export interface ServerFormData {
     authorizationEndpoint?: string;
     tokenEndpoint?: string;
     resource?: string;
+    // Round-trip-only OAuth sub-fields (#1193). The form has no editors for
+    // them, so the edit/duplicate flows carry the stored values through
+    // `ServerFormData` to the submit payload instead of dropping them.
+    // Note: `dynamicRegistration` is the RFC7591 sub-object (not a boolean).
+    dynamicRegistration?: NonNullable<ServerConfig['oauth']>['dynamicRegistration'];
+    redirectUri?: string;
+    revocationEndpoint?: string;
   };
   // OpenAPI specific fields
   openapi?: {

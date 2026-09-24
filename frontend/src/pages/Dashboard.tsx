@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { RefreshCw, Plus, ChevronRight, AlertCircle, AlertTriangle } from 'lucide-react';
 import { useServerData } from '@/hooks/useServerData';
-import { useGroupData } from '@/hooks/useGroupData';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useCostData } from '@/hooks/useCostData';
 import { formatTokens } from '@/utils/contextCost';
@@ -66,7 +65,6 @@ const DashboardPage: React.FC = () => {
   const { allServers, error, setError, isLoading, triggerRefresh } = useServerData({
     refreshOnMount: true,
   });
-  const { groups } = useGroupData();
   const { installConfig, routingConfig, bearerKeys } = useSettingsData();
   const { serverCosts } = useCostData();
   const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
@@ -319,6 +317,7 @@ const DashboardPage: React.FC = () => {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
           <EndpointCopy
+            className="hub-endpoint-wrap"
             label="ALL"
             url={`${baseUrl}/mcp`}
             configValue={() => buildMcpConfigJson(`${baseUrl}/mcp`)}
@@ -333,32 +332,47 @@ const DashboardPage: React.FC = () => {
               configCopiedMessage={configCopiedMessage}
             />
           )}
-          {groups.slice(0, 2).map((g) => {
-            const placeholderUrl = `${baseUrl}/mcp/${t('pages.dashboard.groupNamePlaceholder') || '<group-name>'}`;
-            return (
-              <EndpointCopy
-                key={g.id}
-                label="GROUP"
-                url={placeholderUrl}
-                copyValue={placeholderUrl}
-                configValue={() => buildMcpConfigJson(placeholderUrl)}
-                configCopiedMessage={configCopiedMessage}
-              />
-            );
-          })}
-          {/* Pad with first server endpoint if there's space */}
-          {groups.length < 2 && allServers[0] && (
-            <EndpointCopy
-              label="SERVER"
-              url={`${baseUrl}/mcp/${t('pages.dashboard.serverNamePlaceholder') || '<server-name>'}`}
-              copyValue={`${baseUrl}/mcp/${t('pages.dashboard.serverNamePlaceholder') || '<server-name>'}`}
-              configValue={() =>
-                buildMcpConfigJson(`${baseUrl}/mcp/${t('pages.dashboard.serverNamePlaceholder') || '<server-name>'}`)
-              }
-              configCopiedMessage={configCopiedMessage}
-            />
-          )}
+          <EndpointCopy
+            className="hub-endpoint-wrap"
+            label="SERVER/GROUP"
+            url={`${baseUrl}/mcp/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'}`}
+            copyValue={`${baseUrl}/mcp/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'}`}
+            configValue={() =>
+              buildMcpConfigJson(`${baseUrl}/mcp/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'}`)
+            }
+            configCopiedMessage={configCopiedMessage}
+          />        </div>
+      </div>
+
+      {/* OpenAPI endpoint quick-access — spec URLs for OpenWebUI-style clients */}
+      <div className="hub-card mb-5" style={{ padding: 16 }}>
+        <div className="flex justify-between items-start gap-3 mb-3">
+          <div>
+            <h3 className="hub-card-title">{t('pages.dashboard.openapiTitle') || 'OpenAPI Endpoints'}</h3>
+            <p className="hub-sub" style={{ marginTop: 2 }}>
+              {t('pages.dashboard.openapiHint') ||
+                'Import a spec into OpenWebUI, Swagger UI, or any OpenAPI-compatible client to call MCP tools'}
+            </p>
+          </div>
         </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+          <EndpointCopy
+            className="hub-endpoint-wrap"
+            label="ALL"
+            url={`${baseUrl}/api/openapi.json`}
+            copyValue={`${baseUrl}/api/openapi.json`}
+          />
+          <EndpointCopy
+            className="hub-endpoint-wrap"
+            label="SERVER/GROUP"
+            url={`${baseUrl}/api/${t('pages.dashboard.openapiNamePlaceholder') || '<server-name>'}/openapi.json`}
+            copyValue={`${baseUrl}/api/${t('pages.dashboard.openapiNamePlaceholder') || '<server-name>'}/openapi.json`}
+          />
+        </div>
+        <p className="hub-sub" style={{ marginTop: 10 }}>
+          {t('pages.dashboard.openapiUsage') ||
+            'Replace the placeholder with a server or group name. Simple-parameter tools become GET calls, the rest take a POST JSON body. Requests need a Bearer Key when authentication is enabled.'}
+        </p>
       </div>
     </div>
   );

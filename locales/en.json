@@ -104,7 +104,7 @@
   "auth": {
     "login": "Login",
     "loginTitle": "Login to MCPHub",
-    "slogan": "Self-hosted MCP gateway and management platform",
+    "slogan": "Open-source, self-hosted MCP gateway and control plane",
     "subtitle": "Connect, organize, control, and operate Model Context Protocol servers through unified endpoints.",
     "username": "Username",
     "password": "Password",
@@ -297,7 +297,22 @@
       "apiKeyInQuery": "Query",
       "apiKeyInCookie": "Cookie",
       "passthroughHeaders": "Passthrough Headers",
-      "passthroughHeadersHelp": "Comma-separated list of header names to pass through from incoming MCP requests to upstream server requests (e.g., Authorization, X-API-Key)"
+      "passthroughHeadersHelp": "Comma-separated list of header names to pass through from incoming MCP requests to upstream server requests (e.g., Authorization, X-API-Key)",
+      "securityDetect": "Detect from spec",
+      "securityDetecting": "Detecting…",
+      "securityNotDeclared": "This spec does not declare a security scheme.",
+      "securityPrefillNotice": "This spec declares {{summary}}. Security settings were pre-filled — add your credential value before the first call.",
+      "securityMismatchWarning": "The spec declares {{summary}}, but this server is configured as {{configured}}. This can cause silent 401 responses.",
+      "securityUnsupportedNotice": "This spec declares {{summary}}, which MCPHub cannot represent ({{reason}}). Configure authentication manually.",
+      "httpCredentialsBasicHint": "Enter user:password (encoded automatically) or pre-encoded Base64.",
+      "specSecurityToggle": "Specification URL requires separate authentication",
+      "specSecurityHelp": "Enable only when the spec document itself is protected differently from the API (e.g. Basic-protected /v3/api-docs behind a Bearer-protected API). When off, the security configuration above is used for both.",
+      "cookieSession": "Cookie Session Handling",
+      "cookieSessionHelp": "Capture Set-Cookie from upstream login responses and replay them on later calls within the same downstream session. Isolated per MCP session; not persisted.",
+      "statsMeasuring": "Measuring the generated tool list…",
+      "statsSummary": "{{toolCount}} tools · ~{{bytes}} of definitions · ~{{tokens}} tokens",
+      "statsWarning": "This tool list alone may approach or exceed common model context windows. Consider exposing fewer tools — create a group or disable individual tools on the server.",
+      "statsUnavailable": "The specification could not be measured. You can still continue; the server will validate the import when it is submitted."
     },
     "oauth": {
       "sectionTitle": "OAuth Configuration",
@@ -311,7 +326,16 @@
       "resource": "Resource / Audience",
       "accessToken": "Access Token",
       "refreshToken": "Refresh Token"
-    }
+    },
+    "duplicate": "Duplicate",
+    "nameInvalid": "Server name can only contain letters, numbers, dots, underscores, and hyphens (no spaces or special characters)",
+    "duplicateTitle": "Duplicate Server: {{serverName}}",
+    "shareUserSearchLabel": "Search users",
+    "shareUserSearchPlaceholder": "Search usernames...",
+    "selectAllShareUsers": "Select all",
+    "deselectAllShareUsers": "Deselect all",
+    "noMatchingShareUsers": "No users match your search.",
+    "packageVersion": "Installed package version (last installed by the runner cache)"
   },
   "status": {
     "sleeping": "Sleeping",
@@ -394,7 +418,8 @@
     "all": "All",
     "searchPlaceholder": "Search name or description",
     "started": "Started",
-    "notStarted": "Not started"
+    "notStarted": "Not started",
+    "copyOpenApiUrl": "Copy OpenAPI URL"
   },
   "pagination": {
     "rowsPerPage": "Rows per page",
@@ -429,7 +454,12 @@
       "connectingServers": "Connecting",
       "recentServers": "Recent Servers",
       "endpoints": "MCP Endpoints",
+      "namePlaceholder": "<server-or-group>",
       "endpointsHint": "Use these URLs in Claude Desktop, Cursor or any MCP client",
+      "openapiTitle": "OpenAPI Endpoints",
+      "openapiHint": "Import a spec into OpenWebUI, Swagger UI, or any OpenAPI-compatible client to call MCP tools",
+      "openapiNamePlaceholder": "<server-or-group>",
+      "openapiUsage": "Replace the placeholder with a server or group name. Simple-parameter tools become GET calls, the rest take a POST JSON body. Requests need a Bearer Key when authentication is enabled.",
       "copyMcpConfig": "Copy MCP Config",
       "mcpConfigCopied": "MCP client config copied to clipboard",
       "mcpConfigCopiedWithAuth": "MCP client config copied (includes Bearer auth header)",
@@ -449,9 +479,7 @@
       "httpFailCauseOther": "Failed to bind port {{port}}.",
       "httpFailActionOther": "Check the logs for details; on Windows also check the firewall.",
       "httpFailBadge": "MCP HTTP service is not running",
-      "httpFailBadgeHint": "Click to view the failure reason and retry",
-      "groupNamePlaceholder": "<group-name>",
-      "serverNamePlaceholder": "<server-name>"
+      "httpFailBadgeHint": "Click to view the failure reason and retry"
     },
     "servers": {
       "title": "Server Management"
@@ -902,7 +930,11 @@
     "previewResources": "[resources: {{items}}]",
     "previewAllTools": "(all tools)",
     "previewAllPrompts": "(all prompts)",
-    "previewAllResources": "(all resources)"
+    "previewAllResources": "(all resources)",
+    "legacyVisibility": "Legacy — choose visibility",
+    "legacyVisibilityHint": "This group keeps its previous endpoint access until you explicitly choose visibility.",
+    "visibilityDescription": "Group access also requires access to each server. Sharing a group does not share private servers. Only the owner and admins can manage the group.",
+    "shareAfterCreate": "Save the group before selecting users."
   },
   "market": {
     "title": "Local Installation",
@@ -956,7 +988,22 @@
       "deny": "Deny",
       "approveSubtitle": "Recommended if you trust this application.",
       "denySubtitle": "You can always grant access later."
-    }
+    },
+    "application": "Application",
+    "scopesTitle": "This application will be able to:",
+    "noScopes": "No permissions requested.",
+    "requestInvalidTitle": "Request invalid",
+    "requestInvalid": "This authorization request is invalid or has expired. Please go back and try again.",
+    "grantingAccessTo": "Granting access to:",
+    "resourceAll": "All MCP servers",
+    "resourceSmart": "Smart routing",
+    "resourceServer": "MCP server: {{name}}",
+    "resourceGroup": "MCP group: {{name}}",
+    "clientId": "Client ID",
+    "willRedirectTo": "Will redirect to:",
+    "policy": "Privacy policy",
+    "terms": "Terms",
+    "homepage": "Homepage"
   },
   "cloud": {
     "title": "Cloud Support",
@@ -1353,7 +1400,42 @@
     "skillsAgentPathPlaceholder": "Skills install path, e.g. ~/.claude/skills",
     "addSkillsAgent": "Add Agent",
     "skillsAgentsSaved": "Agent paths saved",
-    "skillsAgentsSaveError": "Failed to save agent paths"
+    "skillsAgentsSaveError": "Failed to save agent paths",
+    "dynamicRegistrationClientTtl": "Idle Client Cleanup TTL (seconds)",
+    "dynamicRegistrationClientTtlDescription": "Reap dynamically-registered clients with no live tokens and no in-progress authorization flow older than this age. Set to 0 to disable cleanup.",
+    "dynamicRegistrationClientTtlPlaceholder": "e.g. 2592000",
+    "smartRoutingIndexTitle": "Vector Index & Diagnostics",
+    "smartRoutingIndexRefresh": "Refresh",
+    "smartRoutingIndexReindex": "Reindex",
+    "smartRoutingIndexReindexing": "Reindexing…",
+    "smartRoutingIndexLoading": "Loading…",
+    "smartRoutingIndexNoData": "No index data yet. Enable Smart Routing and click Reindex to build the vector store.",
+    "smartRoutingIndexStatsUnavailable": "Statistics unavailable",
+    "smartRoutingIndexDatabase": "Database",
+    "smartRoutingIndexConnected": "Connected",
+    "smartRoutingIndexDisconnected": "Disconnected",
+    "smartRoutingIndexUnhealthy": "Unhealthy",
+    "smartRoutingIndexModel": "Model",
+    "smartRoutingIndexDimensions": "Dimensions",
+    "smartRoutingIndexTotalRows": "Total rows",
+    "smartRoutingIndexToolRows": "Tool rows",
+    "smartRoutingIndexServerRows": "Server rows",
+    "smartRoutingIndexClusterLabel": "Indexed servers",
+    "smartRoutingIndexCoverage": "Coverage",
+    "smartRoutingIndexLastSynced": "Last synced",
+    "smartRoutingIndexPerServer": "Tools per server",
+    "smartRoutingIndexMissingIndex": "{{count}} enabled server(s) missing an index",
+    "smartRoutingIndexSyncedRange": "Sync range: {{oldest}} → {{newest}}",
+    "smartRoutingIndexReindexDone": "Reindex completed: {{synced}} server(s) synced, {{failed}} failed, {{skipped}} skipped, {{total}} tools in total",
+    "smartRoutingIndexReindexFailed": "Reindex failed: {{message}}",
+    "smartRoutingIndexReindexStarting": "Starting reindex…",
+    "smartRoutingIndexReindexingServer": "Reindexing \"{{server}}\"",
+    "smartRoutingIndexReindexSummary": "Reindex done · {{synced}} synced, {{failed}} failed, {{skipped}} skipped, {{total}} tools",
+    "smartRoutingIndexReindexConfirmTitle": "Rebuild vector index?",
+    "smartRoutingIndexReindexConfirmMessage": "All existing embeddings will be cleared and regenerated from scratch. This can take a while and consumes embedding API quota.",
+    "smartRoutingIndexPersonalCredentials": "Personal-credential servers",
+    "smartRoutingIndexSkippedReason": "Skipped",
+    "smartRoutingIndexIndexedAs": "indexed as {{principals}}"
   },
   "mcpb": {
     "upload": "Upload",
@@ -1723,6 +1805,7 @@
     "exportDialogTitle": "Export to Agent",
     "exportTargetAgents": "Target Agents",
     "searchAgents": "Search agents…",
+    "noAgentsFound": "No matching agents",
     "exportSelectedAgents": "{{count}} target(s)",
     "exportMethod": "Export Method",
     "exportMethodHelp": "View method explanation",
@@ -1788,5 +1871,99 @@
     "manualSelection": "Manual",
     "noSkillFound": "No skill found (no SKILL.md)",
     "manualSelectSkills": "Manually select skill(s)"
+  },
+  "clientConfig": {
+    "title": "Copy MCP configuration",
+    "description": "Pick your client to copy a ready-to-paste configuration for {{name}}.",
+    "menuItem": "Copy MCP config",
+    "tokenPrompt": "MCPHub access token",
+    "configBlock": "Configuration",
+    "commandBlock": "CLI command",
+    "copied": "Copied",
+    "noTransport": "This server has no client-side MCP transport (it is OpenAPI-backed). Use the hub or a group endpoint instead.",
+    "clients": {
+      "generic-mcp-servers": {
+        "label": "Generic (mcpServers)",
+        "hint": "Widely accepted mcpServers block: Claude Desktop, Cline, Cherry Studio and most clients."
+      },
+      "generic-http": {
+        "label": "Generic HTTP",
+        "hint": "Escape hatch with the bare entry: remote endpoints give a raw HTTP entry (SSE upstreams carry a \"type\": \"sse\" marker), local servers a raw stdio entry (command/args/env). Paste it into your client's own server map; for most clients use Generic (mcpServers)."
+      },
+      "claude-code": {
+        "label": "Claude Code",
+        "hint": "Claude Code: `claude mcp add`, or the mcpServers block in ~/.claude.json."
+      },
+      "cursor": {
+        "label": "Cursor",
+        "hint": "Cursor: .cursor/mcp.json in a project, or ~/.cursor/mcp.json globally."
+      },
+      "vscode": {
+        "label": "VS Code / Copilot",
+        "hint": "VS Code / Copilot: .vscode/mcp.json in the workspace, or mcp.json in your user profile."
+      },
+      "codex": {
+        "label": "Codex",
+        "hint": "Codex: ~/.codex/config.toml, or a project-level .codex/config.toml."
+      },
+      "opencode": {
+        "label": "OpenCode",
+        "hint": "OpenCode: ~/.config/opencode/opencode.json globally, or opencode.json in the project."
+      },
+      "windsurf": {
+        "label": "Windsurf",
+        "hint": "Windsurf: ~/.codeium/windsurf/mcp_config.json."
+      },
+      "cherry-studio": {
+        "label": "Cherry Studio",
+        "hint": "Cherry Studio: Settings > MCP Servers > Add Server > Import JSON."
+      },
+      "codebuddy": {
+        "label": "CodeBuddy Code",
+        "hint": "CodeBuddy Code: ~/.codebuddy/.mcp.json globally, or .mcp.json in the project."
+      },
+      "qoder": {
+        "label": "Qoder",
+        "hint": "Qoder: Settings > MCP > Add Manually, then paste the JSON."
+      },
+      "trae": {
+        "label": "TRAE",
+        "hint": "TRAE: Settings > MCP > Add > Add Manually, then paste the JSON."
+      },
+      "zcode": {
+        "label": "ZCode",
+        "hint": "ZCode: Settings > MCP Servers > New MCP Server > Full configuration."
+      },
+      "workbuddy": {
+        "label": "WorkBuddy",
+        "hint": "WorkBuddy: Plugins > MCP Servers > Configure MCP, or ~/.workbuddy/mcp.json."
+      }
+    }
+  },
+  "credentials": {
+    "title": "Credentials",
+    "missing": "Personal credentials required for '{{serverName}}'. Bind all required slots in Dashboard → Credentials.",
+    "description": "Bind your own credentials to shared servers. Each server uses the credentials of the user making the request.",
+    "slots": "Per-user credential slots",
+    "slotsHint": "Declare field names only. Every slot requires a personal binding; organization credentials are never used as a fallback.",
+    "fieldName": "Field name",
+    "label": "Label (optional)",
+    "addSlot": "Add slot",
+    "removeSlot": "Remove slot",
+    "personalBadge": "Personal credentials",
+    "manage": "Manage",
+    "configured": "Configured",
+    "required": "Binding required",
+    "writeOnly": "Saved values cannot be displayed. To replace a binding, enter new values for every slot.",
+    "replaceValue": "Enter replacement value",
+    "enterValue": "Enter credential",
+    "save": "Save binding",
+    "delete": "Delete binding",
+    "saved": "Binding saved",
+    "deleted": "Binding deleted",
+    "failed": "Unable to manage credentials",
+    "showAll": "Show all servers",
+    "loading": "Loading…",
+    "empty": "No shared servers require personal credentials."
   }
 }

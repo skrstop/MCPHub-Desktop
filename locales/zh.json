@@ -104,7 +104,7 @@
   "auth": {
     "login": "登录",
     "loginTitle": "登录 MCPHub",
-    "slogan": "自托管 MCP 网关与管理平台",
+    "slogan": "开源、自托管的 MCP 网关与控制平面",
     "subtitle": "通过统一端点连接、组织、控制和运行 Model Context Protocol 服务器。",
     "username": "用户名",
     "password": "密码",
@@ -297,7 +297,22 @@
       "apiKeyInQuery": "查询",
       "apiKeyInCookie": "Cookie",
       "passthroughHeaders": "透传请求头",
-      "passthroughHeadersHelp": "要从传入的 MCP 请求透传到上游服务器请求的请求头名称列表，用逗号分隔（如：Authorization, X-API-Key）"
+      "passthroughHeadersHelp": "要从传入的 MCP 请求透传到上游服务器请求的请求头名称列表，用逗号分隔（如：Authorization, X-API-Key）",
+      "securityDetect": "从规范检测",
+      "securityDetecting": "检测中…",
+      "securityNotDeclared": "该规范未声明任何安全方案。",
+      "securityPrefillNotice": "该规范声明了 {{summary}}。安全设置已自动预填——请在首次调用前填入你的凭据值。",
+      "securityMismatchWarning": "该规范声明的是 {{summary}}，但当前服务器配置为 {{configured}}。这可能导致静默返回 401。",
+      "securityUnsupportedNotice": "该规范声明了 {{summary}}，但 MCPHub 无法表示该方案（{{reason}}）。请手动配置认证。",
+      "httpCredentialsBasicHint": "可输入 user:password（自动编码）或已编码的 Base64。",
+      "specSecurityToggle": "规范文档需要单独的认证",
+      "specSecurityHelp": "仅当规范文档本身与 API 使用不同的认证时启用（例如 /v3/api-docs 使用 Basic 保护，而 API 需要 Bearer）。关闭时，上方的安全配置同时用于两者。",
+      "cookieSession": "Cookie 会话处理",
+      "cookieSessionHelp": "捕获上游登录响应中的 Set-Cookie，并在同一下游会话的后续调用中自动携带。按 MCP 会话隔离，不持久化存储。",
+      "statsMeasuring": "正在测量生成的工具列表…",
+      "statsSummary": "{{toolCount}} 个工具 · 定义约 {{bytes}} · 约 {{tokens}} tokens",
+      "statsWarning": "仅此工具列表就可能接近或超过常见模型的上下文窗口。建议只暴露部分工具：创建分组，或在服务器上按工具禁用。",
+      "statsUnavailable": "暂时无法测量此规范。仍可继续，提交时服务器会再次校验导入。"
     },
     "oauth": {
       "sectionTitle": "OAuth 配置",
@@ -311,7 +326,16 @@
       "resource": "资源 / 受众",
       "accessToken": "访问令牌",
       "refreshToken": "刷新令牌"
-    }
+    },
+    "duplicate": "创建副本",
+    "nameInvalid": "服务器名称只能包含字母、数字、点、下划线和连字符（不能包含空格或特殊字符）",
+    "duplicateTitle": "创建服务器副本: {{serverName}}",
+    "shareUserSearchLabel": "搜索用户",
+    "shareUserSearchPlaceholder": "搜索用户名...",
+    "selectAllShareUsers": "全选",
+    "deselectAllShareUsers": "取消全选",
+    "noMatchingShareUsers": "没有匹配的用户。",
+    "packageVersion": "已安装的包版本（runner 缓存中最后安装的版本）"
   },
   "status": {
     "sleeping": "休眠",
@@ -396,7 +420,8 @@
     "all": "全部",
     "searchPlaceholder": "搜索名称或描述",
     "started": "已启动",
-    "notStarted": "未启动"
+    "notStarted": "未启动",
+    "copyOpenApiUrl": "复制OpenAPI URL"
   },
   "pagination": {
     "rowsPerPage": "每页行数",
@@ -431,7 +456,12 @@
       "connectingServers": "连接中",
       "recentServers": "最近的服务器",
       "endpoints": "MCP 接入端点",
+      "namePlaceholder": "<服务名或分组名>",
       "endpointsHint": "把这些 URL 配到 Claude Desktop / Cursor 等 MCP 客户端即可使用",
+      "openapiTitle": "OpenAPI 接入端点",
+      "openapiHint": "把规格文档导入 OpenWebUI、Swagger UI 或任意 OpenAPI 兼容客户端，即可直接调用 MCP 工具",
+      "openapiNamePlaceholder": "<服务名或分组名>",
+      "openapiUsage": "将占位符替换为服务器或分组名；简单参数工具走 GET 查询串、复杂参数走 POST JSON 请求体（路径 /api/tools/{server}/{tool}）；开启 Bearer Key 鉴权时请求需携带对应 Key",
       "copyMcpConfig": "复制 MCP 配置",
       "mcpConfigCopied": "MCP 客户端配置已复制到剪贴板",
       "mcpConfigCopiedWithAuth": "MCP 客户端配置已复制（含 Bearer 鉴权头）",
@@ -451,9 +481,7 @@
       "httpFailCauseOther": "端口 {{port}} 绑定失败。",
       "httpFailActionOther": "请查看日志了解详情；Windows 上也可检查防火墙设置。",
       "httpFailBadge": "MCP HTTP 服务未启动",
-      "httpFailBadgeHint": "点击查看失败原因并重试",
-      "groupNamePlaceholder": "<分组名>",
-      "serverNamePlaceholder": "<服务名>"
+      "httpFailBadgeHint": "点击查看失败原因并重试"
     },
     "servers": {
       "title": "服务器管理"
@@ -904,7 +932,11 @@
     "previewResources": "[资源: {{items}}]",
     "previewAllTools": "（全部工具）",
     "previewAllPrompts": "（全部提示词）",
-    "previewAllResources": "（全部资源）"
+    "previewAllResources": "（全部资源）",
+    "legacyVisibility": "历史组 — 请设置可见性",
+    "legacyVisibilityHint": "在您明确选择可见性之前，该组保留原有的端点访问规则。",
+    "visibilityDescription": "访问组内服务器还需具备对应服务器的权限。共享组不会共享私有服务器。仅所有者和管理员可管理此组。",
+    "shareAfterCreate": "请先保存组，再选择共享用户。"
   },
   "market": {
     "title": "本地安装",
@@ -958,7 +990,22 @@
       "deny": "拒绝",
       "approveSubtitle": "如果您信任此应用，建议选择允许。",
       "denySubtitle": "您可以在之后随时再次授权。"
-    }
+    },
+    "application": "应用程序",
+    "scopesTitle": "此应用程序将能够：",
+    "noScopes": "未请求任何权限。",
+    "requestInvalidTitle": "请求无效",
+    "requestInvalid": "此授权请求无效或已过期。请返回后重试。",
+    "grantingAccessTo": "将授予访问权限：",
+    "resourceAll": "所有 MCP 服务器",
+    "resourceSmart": "智能路由",
+    "resourceServer": "MCP 服务器：{{name}}",
+    "resourceGroup": "MCP 分组：{{name}}",
+    "clientId": "客户端 ID",
+    "willRedirectTo": "将重定向到：",
+    "policy": "隐私政策",
+    "terms": "服务条款",
+    "homepage": "主页"
   },
   "cloud": {
     "title": "云端支持",
@@ -1356,7 +1403,42 @@
     "skillsAgentPathPlaceholder": "技能安装路径，如 ~/.claude/skills",
     "addSkillsAgent": "添加 Agent",
     "skillsAgentsSaved": "Agent 路径已保存",
-    "skillsAgentsSaveError": "保存 Agent 路径失败"
+    "skillsAgentsSaveError": "保存 Agent 路径失败",
+    "dynamicRegistrationClientTtl": "空闲客户端清理 TTL（秒）",
+    "dynamicRegistrationClientTtlDescription": "回收超过此时长、且没有活跃令牌和进行中授权流程的动态注册客户端。设为 0 可禁用清理。",
+    "dynamicRegistrationClientTtlPlaceholder": "例如 2592000",
+    "smartRoutingIndexTitle": "向量索引与诊断",
+    "smartRoutingIndexRefresh": "刷新",
+    "smartRoutingIndexReindex": "重新索引",
+    "smartRoutingIndexReindexing": "重建中…",
+    "smartRoutingIndexLoading": "加载中…",
+    "smartRoutingIndexNoData": "暂无索引数据。请先启用智能路由，再点击“重新索引”构建向量库。",
+    "smartRoutingIndexStatsUnavailable": "统计数据不可用",
+    "smartRoutingIndexDatabase": "数据库",
+    "smartRoutingIndexConnected": "已连接",
+    "smartRoutingIndexDisconnected": "未连接",
+    "smartRoutingIndexUnhealthy": "不健康",
+    "smartRoutingIndexModel": "模型",
+    "smartRoutingIndexDimensions": "维度",
+    "smartRoutingIndexTotalRows": "总行数",
+    "smartRoutingIndexToolRows": "工具行数",
+    "smartRoutingIndexServerRows": "服务器行数",
+    "smartRoutingIndexClusterLabel": "已索引服务器",
+    "smartRoutingIndexCoverage": "覆盖率",
+    "smartRoutingIndexLastSynced": "最近同步",
+    "smartRoutingIndexPerServer": "每台服务器的工具数",
+    "smartRoutingIndexMissingIndex": "有 {{count}} 台已启用服务器缺少索引",
+    "smartRoutingIndexSyncedRange": "同步范围：{{oldest}} → {{newest}}",
+    "smartRoutingIndexReindexDone": "重新索引完成：同步 {{synced}} 台，失败 {{failed}} 台，跳过 {{skipped}} 台，共 {{total}} 个工具",
+    "smartRoutingIndexReindexFailed": "重新索引失败：{{message}}",
+    "smartRoutingIndexReindexStarting": "开始重建…",
+    "smartRoutingIndexReindexingServer": "正在重建“{{server}}”",
+    "smartRoutingIndexReindexSummary": "重建完成 · 同步 {{synced}} 台，失败 {{failed}} 台，跳过 {{skipped}} 台，共 {{total}} 个工具",
+    "smartRoutingIndexReindexConfirmTitle": "确认重建向量索引？",
+    "smartRoutingIndexReindexConfirmMessage": "将清空所有现有向量并从头重新生成。此操作可能需要较长时间，并会消耗 embedding API 额度。",
+    "smartRoutingIndexPersonalCredentials": "需个人凭据的服务器",
+    "smartRoutingIndexSkippedReason": "已跳过",
+    "smartRoutingIndexIndexedAs": "以 {{principals}} 的身份索引"
   },
   "mcpb": {
     "upload": "上传",
@@ -1725,6 +1807,7 @@
     "exportDialogTitle": "导出到 Agent",
     "exportTargetAgents": "目标 Agent",
     "searchAgents": "搜索 Agent…",
+    "noAgentsFound": "未找到匹配的 Agent",
     "exportSelectedAgents": "{{count}} 个目标",
     "exportMethod": "导出方式",
     "exportMethodHelp": "查看方式说明",
@@ -1790,5 +1873,99 @@
     "manualSelection": "手动选择",
     "noSkillFound": "未找到 Skill(无 SKILL.md)",
     "manualSelectSkills": "手动选择skill(s)"
+  },
+  "clientConfig": {
+    "title": "复制 MCP 配置",
+    "description": "选择你的客户端，复制可直接粘贴的 {{name}} 配置。",
+    "menuItem": "复制 MCP 配置",
+    "tokenPrompt": "MCPHub 访问令牌",
+    "configBlock": "配置内容",
+    "commandBlock": "命令行",
+    "copied": "已复制",
+    "noTransport": "该服务器没有客户端侧的 MCP 传输方式（它由 OpenAPI 支撑）。请改用 hub 或分组端点。",
+    "clients": {
+      "generic-mcp-servers": {
+        "label": "通用（mcpServers）",
+        "hint": "最通用的 mcpServers 结构：Claude Desktop、Cline、Cherry Studio 等大多数客户端都可用。"
+      },
+      "generic-http": {
+        "label": "通用 HTTP",
+        "hint": "输出裸条目的兜底出口：远程端点给出裸 HTTP 条目（SSE 上游会带上 \"type\": \"sse\" 标记），本地服务器给出裸 stdio 条目（command/args/env），粘进目标客户端自己的服务器表即可；大多数客户端请用「通用（mcpServers）」。"
+      },
+      "claude-code": {
+        "label": "Claude Code",
+        "hint": "Claude Code：`claude mcp add`，或写入 ~/.claude.json 的 mcpServers。"
+      },
+      "cursor": {
+        "label": "Cursor",
+        "hint": "Cursor：项目内 .cursor/mcp.json，或全局 ~/.cursor/mcp.json。"
+      },
+      "vscode": {
+        "label": "VS Code / Copilot",
+        "hint": "VS Code / Copilot：工作区 .vscode/mcp.json，或用户配置中的 mcp.json。"
+      },
+      "codex": {
+        "label": "Codex",
+        "hint": "Codex：~/.codex/config.toml，或项目级 .codex/config.toml。"
+      },
+      "opencode": {
+        "label": "OpenCode",
+        "hint": "OpenCode：全局 ~/.config/opencode/opencode.json，或项目内 opencode.json。"
+      },
+      "windsurf": {
+        "label": "Windsurf",
+        "hint": "Windsurf：~/.codeium/windsurf/mcp_config.json。"
+      },
+      "cherry-studio": {
+        "label": "Cherry Studio",
+        "hint": "Cherry Studio：设置 > MCP 服务器 > 添加服务器 > 从 JSON 导入。"
+      },
+      "codebuddy": {
+        "label": "CodeBuddy Code",
+        "hint": "CodeBuddy Code：全局 ~/.codebuddy/.mcp.json，或项目内 .mcp.json。"
+      },
+      "qoder": {
+        "label": "Qoder",
+        "hint": "Qoder：设置 > MCP > 手动添加，粘贴 JSON。"
+      },
+      "trae": {
+        "label": "TRAE",
+        "hint": "TRAE：设置 > MCP > 添加 > 手动添加，粘贴 JSON。"
+      },
+      "zcode": {
+        "label": "ZCode",
+        "hint": "ZCode：设置 > MCP 服务器 > 新建 MCP 服务器 > 完整配置。"
+      },
+      "workbuddy": {
+        "label": "WorkBuddy",
+        "hint": "WorkBuddy：侧边栏插件 > MCP 服务器 > 配置 MCP，或 ~/.workbuddy/mcp.json。"
+      }
+    }
+  },
+  "credentials": {
+    "title": "凭据",
+    "missing": "服务器“{{serverName}}”需要个人凭据。请在控制台 → 凭据中绑定所有必需字段。",
+    "description": "为共享服务器绑定自己的凭据。每次请求使用当前调用用户的凭据。",
+    "slots": "个人凭据字段",
+    "slotsHint": "仅声明字段名。所有字段均需用户绑定，缺失时不会回退到组织凭据。",
+    "fieldName": "字段名",
+    "label": "显示名称（可选）",
+    "addSlot": "添加字段",
+    "removeSlot": "移除字段",
+    "personalBadge": "个人凭据",
+    "manage": "管理",
+    "configured": "已绑定",
+    "required": "需要绑定",
+    "writeOnly": "已保存的值无法查看。替换绑定时，请为所有字段填写新值。",
+    "replaceValue": "输入替换值",
+    "enterValue": "输入凭据",
+    "save": "保存绑定",
+    "delete": "删除绑定",
+    "saved": "绑定已保存",
+    "deleted": "绑定已删除",
+    "failed": "无法管理凭据",
+    "showAll": "显示所有服务器",
+    "loading": "加载中…",
+    "empty": "暂无需要个人凭据的共享服务器。"
   }
 }

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Activity,
@@ -454,14 +455,14 @@ const ActivityPage: React.FC = () => {
     const inputData = safeParseJSON(selectedActivity.input);
     const outputData = safeParseJSON(selectedActivity.output);
 
-    return (
-      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    return createPortal(
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70]">
         <div
-          className="hub-card max-w-4xl w-full mx-4 max-h-[90vh] overflow-hidden"
-          style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)' }}
+          className="hub-card max-w-4xl w-full mx-4 flex flex-col"
+          style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: '90vh' }}
         >
           <div
-            className="flex items-center justify-between px-5 py-3"
+            className="flex items-center justify-between px-5 py-3 flex-shrink-0"
             style={{ borderBottom: '1px solid var(--hub-line-2)' }}
           >
             <h3 className="hub-card-title">{t('activity.details')}</h3>
@@ -480,7 +481,7 @@ const ActivityPage: React.FC = () => {
               </svg>
             </button>
           </div>
-          <div className="px-6 py-4 overflow-y-auto max-h-[calc(90vh-120px)]">
+          <div className="px-6 py-4 overflow-y-auto flex-1 min-h-0" style={{ minHeight: 0 }}>
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
                 <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
@@ -566,7 +567,7 @@ const ActivityPage: React.FC = () => {
                 <label className="block text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
                   {t('activity.input')}
                 </label>
-                <pre className="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm overflow-x-auto max-h-64">
+                <pre className="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm overflow-auto">
                   {typeof inputData === 'string' ? inputData : JSON.stringify(inputData, null, 2)}
                 </pre>
               </div>
@@ -577,7 +578,7 @@ const ActivityPage: React.FC = () => {
                 <label className="block text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
                   {t('activity.output')}
                 </label>
-                <pre className="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm overflow-x-auto max-h-64">
+                <pre className="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm overflow-auto">
                   {typeof outputData === 'string'
                     ? outputData
                     : JSON.stringify(outputData, null, 2)}
@@ -586,7 +587,8 @@ const ActivityPage: React.FC = () => {
             )}
           </div>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   };
 

@@ -79,6 +79,7 @@ interface OAuthServerConfig {
     enabled: boolean;
     allowedGrantTypes: string[];
     requiresAuthentication: boolean;
+    clientTtl: number;
   };
 }
 
@@ -212,6 +213,7 @@ const getDefaultOAuthServerConfig = (): OAuthServerConfig => ({
     enabled: true,
     allowedGrantTypes: ['authorization_code', 'refresh_token'],
     requiresAuthentication: false,
+    clientTtl: 2592000,
   },
 });
 
@@ -523,6 +525,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
               requiresAuthentication:
                 oauth.dynamicRegistration?.requiresAuthentication ??
                 defaultDynamic.requiresAuthentication,
+              clientTtl:
+                oauth.dynamicRegistration?.clientTtl ?? defaultDynamic.clientTtl,
             },
           });
         } else {

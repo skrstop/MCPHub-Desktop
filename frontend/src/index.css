@@ -428,21 +428,24 @@
 /* Endpoint copy box */
 .hub-endpoint {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 0;
   border: 1px solid var(--hub-line);
   border-radius: 8px;
   background: var(--hub-bg-2);
   /* overflow: visible so the copy dropdown (an absolutely-positioned child of
      the button) can extend below the row. URL truncation is handled by
-     .hub-endpoint-url's own overflow:hidden + ellipsis, not by the parent. */
+     .hub-endpoint-url's own overflow rules, not by the parent. */
   overflow: visible;
   min-width: 0;
-  height: 32px;
+  /* No fixed height anywhere in this component: the row is content-driven
+     with a min-height floor. Fixed heights + height:100% children deadlock
+     WKWebView's cyclic-percentage resolution and pin the row height even
+     when the URL wraps. */
+  min-height: 32px;
 }
 .hub-endpoint .hub-endpoint-label {
   padding: 0 10px;
-  height: 100%;
   display: flex;
   align-items: center;
   border-right: 1px solid var(--hub-line);
@@ -455,7 +458,10 @@
 }
 .hub-endpoint .hub-endpoint-url {
   flex: 1;
-  padding: 0 10px;
+  /* 6px vertical padding is the *constant* visual padding: single-line rows sit
+     on the 32px min-height (text vertically centered, ≈6px top/bottom), and
+     multi-line rows grow to 2*line-height + 12px so the padding never compresses. */
+  padding: 6px 10px;
   font-family: var(--hub-mono);
   font-size: 12.5px;
   color: var(--hub-ink-2);
@@ -464,10 +470,12 @@
   text-overflow: ellipsis;
   min-width: 0;
   letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
 }
 .hub-endpoint .hub-endpoint-copy {
   border-radius: 0;
-  height: 100%;
+  align-self: stretch;
   width: 32px;
   border-left: 1px solid var(--hub-line);
   color: var(--hub-ink-3);
@@ -482,6 +490,30 @@
 }
 .hub-endpoint .hub-endpoint-copy:hover { background: var(--hub-surface-hover); }
 .hub-endpoint .hub-endpoint-copy.copied { color: var(--hub-ok); }
+
+/* URL + copy buttons form one unbreakable flex unit inside the row.
+   Stretch fills the row height (single-line rows = 32px); no height:100%
+   anywhere so WKWebView's cyclic-percentage quirk can't pin the height. */
+.hub-endpoint-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+}
+.hub-endpoint-actions {
+  height: auto;
+  align-self: stretch;
+}
+/* Dashboard endpoint cards: keep the original label-left / URL-right row, but
+   let the URL section wrap onto multiple lines when the column is narrow so
+   long URLs stay fully readable (no ellipsis truncation). Opt-in className. */
+.hub-endpoint.hub-endpoint-wrap .hub-endpoint-url {
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
 
 /* Generic Settings page field rows — flatten heavy gray bg to hair-line */
 /* Only inside the settings page body, scoped via .page-card descendants */

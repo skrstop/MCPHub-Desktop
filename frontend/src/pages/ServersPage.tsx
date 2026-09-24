@@ -15,6 +15,7 @@ import { ApiResponse, ServerPage } from '@/types';
 import { useServerData } from '@/hooks/useServerData';
 import { useCostData } from '@/hooks/useCostData';
 import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/utils/serverFilters';
+import { resolveDuplicateResponse } from '@/utils/serverDuplicate';
 
 const ServersPage: React.FC = () => {
   const { t } = useTranslation();
@@ -49,6 +50,8 @@ const ServersPage: React.FC = () => {
   }, [servers, refetchCost]);
 
   const [editingServer, setEditingServer] = useState<Server | null>(null);
+  const [duplicateServer, setDuplicateServer] = useState<Server | null>(null);
+  const [duplicatingServer, setDuplicatingServer] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [showMcpbUpload, setShowMcpbUpload] = useState(false);
@@ -138,9 +141,52 @@ const ServersPage: React.FC = () => {
   }, [safePage, currentPage, setCurrentPage]);
   const pagination = { page: safePage, limit: serversPerPage, total: listTotal, totalPages };
 
+  // Edit opens the modal from a `GET /servers/<name>` response, so it has the
+  // same interleave race the Duplicate B1 guard fixes: click Edit on A, then
+  // click Edit on B while A's request is still in flight - A's late response
+  // would otherwise overwrite `editingServer` after B's already opened, and
+  // `EditServerForm.handleSubmit` would `PUT` B's form values onto A (silent
+  // cross-server write, same causal mechanism as the Duplicate race).
+  //
+  // Fix: same B1 pattern - a monotonically increasing request id that is never
+  // reset. Each accepted click bumps it; the response is only committed if its
+  // id is still the latest, so a superseded/stale response is dropped.
+  const editRequestId = useRef(0); // bumped on every accepted click
   const handleEditClick = async (server: Server) => {
+    const requestId = ++editRequestId.current;
     const fullServerData = await handleServerEdit(server);
+    // Drop a stale response: a newer click superseded this request, so
+    // committing it would open the modal for the wrong server.
+    if (requestId !== editRequestId.current) return;
     if (fullServerData) setEditingServer(fullServerData);
+  };
+
+  // Duplicate pre-fills the add form, so it needs the same full stored
+  // configuration the edit flow loads - the card only carries the list
+  // projection, which has no env/headers (#1187).
+  //
+  // B1: guard against interleaved clicks with a monotonically increasing
+  // request id (never reset); a superseded response is dropped and cannot
+  // clear a newer request's busy indicator.
+  const duplicateRequestId = useRef(0); // bumped on every accepted click
+  const handleDuplicateClick = async (server: Server) => {
+    // Ignore repeat clicks while this server's stored config is still loading,
+    // so a slow request cannot fire twice.
+    if (duplicatingServer === server.name) return;
+    const requestId = ++duplicateRequestId.current;
+    setDuplicatingServer(server.name);
+    try {
+      const fullServerData = await handleServerEdit(server);
+      // Drop a stale response: a newer click superseded this request, so
+      // committing it would overwrite the prefill with the wrong server.
+      if (resolveDuplicateResponse(requestId, duplicateRequestId.current) === 'stale') return;
+      if (fullServerData) setDuplicateServer(fullServerData);
+    } finally {
+      // Only clear the busy indicator when this request is still the latest.
+      if (resolveDuplicateResponse(requestId, duplicateRequestId.current) === 'commit') {
+        setDuplicatingServer(null);
+      }
+    }
   };
 
   const handleRefresh = async () => {
@@ -226,7 +272,11 @@ const ServersPage: React.FC = () => {
             <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
             {t('common.refresh')}
           </button>
-          <AddServerForm onAdd={handleServerAdd} />
+          <AddServerForm
+            onAdd={handleServerAdd}
+            duplicateSource={duplicateServer}
+            onDuplicateCancel={() => setDuplicateServer(null)}
+          />
         </div>
       </div>
 
@@ -360,6 +410,8 @@ const ServersPage: React.FC = () => {
                 cost={serverCosts.find((c) => c.name === server.name)}
                 onRemove={handleServerRemove}
                 onEdit={handleEditClick}
+                onDuplicate={handleDuplicateClick}
+                isDuplicating={duplicatingServer === server.name}
                 onToggle={handleServerToggle}
                 onVisibilityChange={handleServerVisibilityChange}
                 onRefresh={triggerRefresh}

@@ -1328,6 +1328,109 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
     [agents, installedMethods],
   );
 
+  // Flat inline list: query filter (name or path/id substring), applied per
+  // section; both sections empty renders a single no-results row.
+  const [search, setSearch] = useState('');
+  const qFiltered = useCallback(
+    (list: SkillAgent[]) => {
+      const q = search.trim().toLowerCase();
+      if (!q) return list;
+      return list.filter(
+        (a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q),
+      );
+    },
+    [search],
+  );
+
+  const toggleAgent = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const renderAgentRow = (a: SkillAgent) => {
+    const checked = selected.has(a.id);
+    return (
+      <div
+        key={a.id}
+        className="flex items-center gap-2 w-full text-left"
+        style={{
+          padding: '7px 10px',
+          background: checked ? 'var(--hub-surface-hover, var(--hub-surface))' : 'transparent',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => toggleAgent(a.id)}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0 }}
+        >
+          <span
+            style={{
+              width: 14,
+              height: 14,
+              borderRadius: 3,
+              flexShrink: 0,
+              border: '1px solid var(--hub-line)',
+              background: checked ? 'var(--hub-accent)' : 'transparent',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {checked && <Check size={10} style={{ color: '#fff' }} />}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span className="block truncate text-[12.5px]" style={{ color: 'var(--hub-ink)' }}>
+                {a.name}
+              </span>
+              {rowMeta(a)}
+            </span>
+            <span
+              className="block truncate hub-mono"
+              style={{ fontSize: 10.5, color: 'var(--hub-ink-3)' }}
+              title={a.skillsPath}
+            >
+              {a.skillsPath}
+            </span>
+          </span>
+        </button>
+        <div className="flex items-center gap-1.5 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          {rowExtra(a)}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSection = (label: string, list: SkillAgent[]) => {
+    const visible = qFiltered(list);
+    if (visible.length === 0) return null;
+    return (
+      <div key={label}>
+        <div
+          className="hub-sect"
+          style={{
+            padding: '7px 10px 4px',
+            fontSize: 11,
+            color: 'var(--hub-ink-3)',
+            borderBottom: '1px solid var(--hub-line-2)',
+            background: 'var(--hub-surface)',
+            position: 'sticky',
+            top: 0,
+            zIndex: 1,
+          }}
+        >
+          {label} ({visible.length})
+        </div>
+        {visible.map(renderAgentRow)}
+      </div>
+    );
+  };
+
   // Row meta for AgentMultiSelect: current-method badge (已安装方式) plus a
   // "switching" accent badge when the chosen method differs from the current.
   const rowMeta = (a: SkillAgent) => {
@@ -1520,22 +1623,59 @@ const InstallDialog: React.FC<InstallDialogProps> = ({ skill, onInstall, onUnins
               </label>
               <MethodHelpIcon />
             </div>
-            {/* RAG TagSearchSelect-style searchable multi-select with grouped
-                sections (已安装 / 未安装), per-agent method toggle + uninstall
-                as row extras — same visual language as the export dialog. */}
-            <AgentMultiSelect
-              agents={agents}
-              loading={loading}
-              selected={selected}
-              onChange={setSelected}
-              placeholder={t('skills.searchAgents')}
-              sections={[
-                { key: 'installed', label: t('skills.installedSection'), agents: installedList },
-                { key: 'available', label: t('skills.notInstalledSection'), agents: availableList },
-              ]}
-              renderRowMeta={rowMeta}
-              renderRowExtra={rowExtra}
-            />
+            {/* Flat searchable checkbox list rendered inline in the dialog body
+                (search box + scrollable grouped rows) — restored per user
+                feedback; ExportDialog keeps the AgentMultiSelect dropdown. */}
+            <div
+              className="rounded-lg"
+              style={{ border: '1px solid var(--hub-line)', background: 'var(--hub-surface)' }}
+            >
+              <div
+                className="flex items-center gap-2"
+                style={{ padding: '6px 10px', borderBottom: '1px solid var(--hub-line-2)' }}
+              >
+                <Search size={13} style={{ color: 'var(--hub-ink-3)', flexShrink: 0 }} />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={t('skills.searchAgents')}
+                  className="flex-1 text-[13px]"
+                  style={{
+                    border: 'none',
+                    outline: 'none',
+                    background: 'transparent',
+                    color: 'var(--hub-ink)',
+                    padding: 0,
+                  }}
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch('')}
+                    className="hub-icon-btn sm"
+                    aria-label="clear"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+              <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
+                {loading ? (
+                  <div className="text-center text-[12.5px]" style={{ padding: 20, color: 'var(--hub-ink-3)' }}>
+                    {t('app.loading')}
+                  </div>
+                ) : qFiltered(installedList).length === 0 && qFiltered(availableList).length === 0 ? (
+                  <div className="text-center text-[12.5px]" style={{ padding: 20, color: 'var(--hub-ink-3)' }}>
+                    {t('skills.noAgentsFound')}
+                  </div>
+                ) : (
+                  <>
+                    {renderSection(t('skills.installedSection'), installedList)}
+                    {renderSection(t('skills.notInstalledSection'), availableList)}
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 

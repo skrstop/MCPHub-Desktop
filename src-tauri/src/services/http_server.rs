@@ -489,6 +489,22 @@ async fn call_server_tool(
             return (StatusCode::FORBIDDEN, Json(json!({ "error": "Access denied for this server" }))).into_response();
         }
     }
+    // Disabled-tool gate (origin #1178): tools disabled via server_tool_config
+    // must not remain executable through the REST endpoint.
+    if let Ok(tools) = pool::list_tools_for(&server_name).await {
+        let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
+            .await
+            .unwrap_or_default();
+        if let Some(t) = filtered.iter().find(|t| &t.name == &req.tool) {
+            if !t.enabled {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": format!("Tool '{}' is disabled", req.tool) })),
+                )
+                    .into_response();
+            }
+        }
+    }
     let args = req.arguments.unwrap_or(json!({}));
     match pool::call_tool(&server_name, &req.tool, args).await {
         Ok(result) => Json(json!({ "result": result.content, "is_error": result.is_error })).into_response(),
@@ -569,6 +585,22 @@ async fn call_group_tool(
         Some(s) => s,
         None => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Tool '{}' not found in group '{}'", tool_name, group_name) }))).into_response(),
     };
+    // Disabled-tool gate (origin #1178): tools disabled via server_tool_config
+    // must not remain executable through the REST group endpoint.
+    if let Ok(tools) = pool::list_tools_for(&server_name).await {
+        let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
+            .await
+            .unwrap_or_default();
+        if let Some(t) = filtered.iter().find(|t| &t.name == tool_name) {
+            if !t.enabled {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": format!("Tool '{}' is disabled", tool_name) })),
+                )
+                    .into_response();
+            }
+        }
+    }
     let args = req.arguments.unwrap_or(json!({}));
     match pool::call_tool(&server_name, tool_name, args).await {
         Ok(result) => Json(json!({ "result": result.content, "is_error": result.is_error })).into_response(),
@@ -1585,6 +1617,702 @@ async fn oauth_protected_resource(headers: HeaderMap) -> Response {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// OpenAPI-compatible endpoints (origin /api/*: spec generation + tool execution)
+//
+// Mirrors origin's openApiController/openApiGeneratorService so OpenWebUI and
+// other OpenAPI clients can browse/call MCP tools:
+//   GET  /api/openapi.json|.yaml                  — spec for all connected servers
+//   GET  /api/{name}/openapi.json|.yaml           — spec scoped to a group or single server
+//   GET|POST /api/tools/{server}/{tool}           — execute a tool (global scope)
+//   GET|POST /api/{name}/tools/{server}/{tool}    — execute a tool (group/server scope)
+// All routes go through the same bearer-key gate as /rest/* and /mcp/*.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Read nameSeparator from system config (default "-"); same source as the
+/// /mcp dispatch path.
+async fn name_separator() -> String {
+    config_service::get()
+        .await
+        .ok()
+        .and_then(|c| c.get("nameSeparator").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// One tool collected for spec generation / execution: (server name, bare tool
+/// name with the server prefix stripped, full Tool with enabled/description
+/// overrides applied).
+struct OpenApiToolRef {
+    server: String,
+    bare_name: String,
+    tool: Tool,
+}
+
+/// Collect the tools visible under `scope` (None = global "/"), mirroring the
+/// /mcp scope rules: group tool allow-lists applied, disabled tools skipped
+/// (unless `include_disabled`), server-prefixed runtime names reduced to bare.
+async fn collect_openapi_tools(scope: Option<&str>, include_disabled: bool) -> Vec<OpenApiToolRef> {
+    let sfs = mcp_scope_server_filters(scope.unwrap_or("/")).await;
+    let name_sep = name_separator().await;
+    let mut out = Vec::new();
+    for sf in sfs {
+        let ts = match tools_for_server(&sf.name).await {
+            Some(t) => t,
+            None => continue,
+        };
+        // Group allow-list: sf.tools holds bare tool names (same as tools/call).
+        let ts: Vec<Tool> = match &sf.tools {
+            Some(allowed) => ts
+                .into_iter()
+                .filter(|t| {
+                    let bare = t
+                        .name
+                        .strip_prefix(&format!("{}{}", sf.name, name_sep))
+                        .unwrap_or(&t.name);
+                    allowed.contains(&bare.to_string())
+                })
+                .collect(),
+            None => ts,
+        };
+        let ts = server_tool_config_service::apply_tool_filters(&sf.name, ts)
+            .await
+            .unwrap_or_default();
+        for t in ts {
+            if !include_disabled && !t.enabled {
+                continue;
+            }
+            let prefix = format!("{}{}", sf.name, name_sep);
+            let bare_name = t.name.strip_prefix(&prefix).unwrap_or(&t.name).to_string();
+            out.push(OpenApiToolRef {
+                server: sf.name.clone(),
+                bare_name,
+                tool: t,
+            });
+        }
+    }
+    out
+}
+
+/// Decide the operation shape from a tool's inputSchema, mirroring origin:
+/// pure primitive params (no object/array/string) and ≤10 properties → GET
+/// query parameters; anything else → POST JSON request body.
+fn tool_schema_shape(tool: &Tool) -> (Option<Vec<serde_json::Value>>, Option<serde_json::Value>) {
+    let schema = &tool.input_schema;
+    if !schema.is_object() {
+        return (None, None);
+    }
+    let (Some(properties), Some(props_obj)) = (
+        schema.get("properties"),
+        schema.get("properties").and_then(|p| p.as_object()),
+    ) else {
+        return (None, None);
+    };
+    if props_obj.is_empty() {
+        return (None, None);
+    }
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let has_complex = props_obj.values().any(|prop: &serde_json::Value| {
+        matches!(
+            prop.get("type").and_then(|t| t.as_str()),
+            Some("object") | Some("array") | Some("string")
+        )
+    });
+    if !has_complex && props_obj.len() <= 10 {
+        let mut parameters: Vec<serde_json::Value> = Vec::new();
+        for (name, prop) in props_obj.iter() {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert(
+                "type".to_string(),
+                prop.get("type").cloned().unwrap_or(json!("string")),
+            );
+            if let Some(e) = prop.get("enum") {
+                schema_obj.insert("enum".to_string(), e.clone());
+            }
+            if let Some(d) = prop.get("default") {
+                schema_obj.insert("default".to_string(), d.clone());
+            }
+            if let Some(f) = prop.get("format") {
+                schema_obj.insert("format".to_string(), f.clone());
+            }
+            parameters.push(json!({
+                "name": name,
+                "in": "query",
+                "required": required.contains(&name.as_str()),
+                "description": prop.get("description").cloned().unwrap_or(json!(format!("Parameter {name}"))),
+                "schema": serde_json::Value::Object(schema_obj),
+            }));
+        }
+        (Some(parameters), None)
+    } else {
+        let mut body_schema = serde_json::Map::new();
+        body_schema.insert("type".to_string(), json!("object"));
+        body_schema.insert("properties".to_string(), properties.clone());
+        if !required.is_empty() {
+            body_schema.insert("required".to_string(), json!(required));
+        }
+        let request_body = json!({
+            "required": !required.is_empty(),
+            "content": {
+                "application/json": {
+                    "schema": serde_json::Value::Object(body_schema),
+                }
+            }
+        });
+        (None, Some(request_body))
+    }
+}
+
+/// Build an OpenAPI 3.0.3 document from the collected tools. `base_url` is the
+/// public origin (scheme://host[:port]) — the spec's server URL appends `/api`.
+fn build_openapi_spec(
+    title: &str,
+    description: &str,
+    version: &str,
+    base_url: &str,
+    tools: Vec<OpenApiToolRef>,
+) -> serde_json::Value {
+    let mut paths = serde_json::Map::new();
+    let mut tags: Vec<serde_json::Value> = Vec::new();
+    let mut seen_servers: Vec<String> = Vec::new();
+    // OpenAPI requires unique operationIds; two servers can expose the same
+    // bare tool name (e.g. two filesystem servers), so dedupe with the server
+    // name as the disambiguator.
+    let mut seen_operation_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for t in &tools {
+        if !seen_servers.contains(&t.server) {
+            seen_servers.push(t.server.clone());
+            tags.push(json!({
+                "name": t.server,
+                "description": format!("Tools from {} server", t.server),
+            }));
+        }
+        let (parameters, request_body) = tool_schema_shape(&t.tool);
+        let operation_id = if seen_operation_ids.contains(&t.bare_name) {
+            format!("{}_{}", t.server.replace(['-', '.', '/'], "_"), t.bare_name)
+        } else {
+            t.bare_name.clone()
+        };
+        seen_operation_ids.insert(operation_id.clone());
+        let path_name = format!(
+            "/tools/{}/{}",
+            urlencode_component(&t.server),
+            urlencode_component(&t.bare_name)
+        );
+        let mut operation = json!({
+            "summary": t.tool.description.clone().unwrap_or_else(|| format!("Execute {} tool", t.bare_name)),
+            "description": t.tool.description.clone().unwrap_or_else(|| format!("Execute the {} tool from {} server", t.bare_name, t.server)),
+            "operationId": operation_id,
+            "tags": [t.server],
+            "responses": {
+                "200": {"description": "Successful tool execution", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ToolResponse"}}}},
+                "400": {"description": "Bad request - invalid parameters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+                "500": {"description": "Internal server error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
+            }
+        });
+        if let Some(params) = parameters {
+            operation["parameters"] = json!(params);
+        }
+        if let Some(body) = request_body {
+            operation["requestBody"] = body;
+        }
+        let entry = paths
+            .entry(path_name)
+            .or_insert_with(|| json!({}));
+        let method = if operation.get("requestBody").is_some() {
+            "post"
+        } else {
+            "get"
+        };
+        entry[method] = operation;
+    }
+    json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": title,
+            "description": description,
+            "version": version,
+            "contact": {"name": "MCPHub Desktop", "url": "https://github.com/skrstop/MCPHub-Desktop"},
+        },
+        "servers": [{"url": format!("{base_url}/api"), "description": "MCPHub Desktop API Server"}],
+        "paths": paths,
+        "components": {
+            "schemas": {
+                "ToolResponse": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string"}, "text": {"type": "string"}}}},
+                        "isError": {"type": "boolean"},
+                    }
+                },
+                "ErrorResponse": {
+                    "type": "object",
+                    "properties": {"error": {"type": "string"}, "message": {"type": "string"}}
+                },
+            },
+            "securitySchemes": {
+                "bearerAuth": {"type": "http", "scheme": "bearer"}
+            }
+        },
+        "security": [{"bearerAuth": []}],
+        "tags": tags,
+    })
+}
+
+/// Minimal percent-encoding for path segments in the generated spec (keeps
+/// unreserved characters; everything else %XX — matches encodeURIComponent for
+/// the characters that matter in server/tool names).
+fn urlencode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Public base URL for the spec's `servers` entry: prefer the request Host
+/// header (reverse-proxy friendly), fall back to localhost:{running port}.
+/// Always http:// — the desktop HTTP listener has no TLS; a TLS-terminating
+/// proxy should set serverUrl=... explicitly (origin parity query param).
+fn openapi_base_url(headers: &HeaderMap) -> String {
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        if !host.is_empty() {
+            return format!("http://{host}");
+        }
+    }
+    let port = current_status().port;
+    format!("http://localhost:{}", if port > 0 { port } else { 23333 })
+}
+
+/// Origin-parity spec options parsed from the query string
+/// (`?title=&description=&version=&serverUrl=&includeDisabled=`).
+struct OpenApiSpecOptions {
+    title: Option<String>,
+    description: Option<String>,
+    version: Option<String>,
+    server_url: Option<String>,
+    include_disabled: bool,
+}
+
+impl OpenApiSpecOptions {
+    fn from_query(q: &std::collections::HashMap<String, String>) -> Self {
+        let get = |k: &str| q.get(k).filter(|v| !v.is_empty()).cloned();
+        Self {
+            title: get("title"),
+            description: get("description"),
+            version: get("version"),
+            server_url: get("serverUrl"),
+            include_disabled: q.get("includeDisabled").map(|v| v == "true").unwrap_or(false),
+        }
+    }
+}
+
+fn openapi_spec_response(
+    headers: &HeaderMap,
+    opts: &OpenApiSpecOptions,
+    default_title: &str,
+    default_description: &str,
+    tools: Vec<OpenApiToolRef>,
+) -> Response {
+    let base = opts
+        .server_url
+        .clone()
+        .unwrap_or_else(|| openapi_base_url(headers));
+    let spec = build_openapi_spec(
+        opts.title.as_deref().unwrap_or(default_title),
+        opts.description.as_deref().unwrap_or(default_description),
+        opts.version.as_deref().unwrap_or("1.0.0"),
+        &base,
+        tools,
+    );
+    // YAML output is not generated (no serializer dependency); .yaml paths
+    // serve the same JSON document, which every OpenAPI client accepts.
+    (
+        [(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(spec),
+    )
+        .into_response()
+}
+
+async fn openapi_full_spec(
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let opts = OpenApiSpecOptions::from_query(&q);
+    // `?group=` filter (origin parity): scope to a group; an unknown group
+    // yields an EMPTY spec (no single-server fallback on this param — the
+    // fallback only applies to the /api/{name}/openapi.json path form).
+    let scope = match q.get("group") {
+        Some(g) if !g.is_empty() => {
+            let is_group = group_service::list_all()
+                .await
+                .ok()
+                .map(|gs| gs.iter().any(|x| x.name == *g || x.id == *g))
+                .unwrap_or(false);
+            if !is_group {
+                return openapi_spec_response(&headers, &opts, "MCPHub Desktop API", "", Vec::new());
+            }
+            Some(g.clone())
+        }
+        _ => None,
+    };
+    let mut tools = collect_openapi_tools(scope.as_deref(), opts.include_disabled).await;
+    // `?servers=a,b` filter (origin parity): restrict to the listed servers.
+    if let Some(servers) = q.get("servers").filter(|s| !s.is_empty()) {
+        let wanted: Vec<&str> = servers.split(',').map(|s| s.trim()).collect();
+        tools.retain(|t| wanted.contains(&t.server.as_str()));
+    }
+    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
+        tools.retain(|t| allowed.contains(&t.server));
+    }
+    openapi_spec_response(
+        &headers,
+        &opts,
+        "MCPHub Desktop API",
+        "OpenAPI specification for MCP tools managed by MCPHub Desktop. Enables integration with OpenWebUI and other OpenAPI-compatible systems.",
+        tools,
+    )
+}
+
+async fn openapi_named_spec(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let opts = OpenApiSpecOptions::from_query(&q);
+    // Group name first; mcp_scope_server_filters falls back to a single-server
+    // scope (and the RAG builtin) when `name` is not a group.
+    let group = group_service::list_all()
+        .await
+        .ok()
+        .and_then(|gs| gs.into_iter().find(|g| g.name == name || g.id == name));
+    let (scope, display, is_group) = match &group {
+        Some(g) => (g.name.clone(), g.name.clone(), true),
+        None => (name.clone(), name.clone(), false),
+    };
+    let (default_title, default_description) = if is_group {
+        (
+            format!("{display} Group MCP API"),
+            format!("OpenAPI specification for {display} group tools"),
+        )
+    } else {
+        (
+            format!("{display} MCP API"),
+            format!("OpenAPI specification for {display} MCP server tools"),
+        )
+    };
+    let mut tools = collect_openapi_tools(Some(&scope), opts.include_disabled).await;
+    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
+        tools.retain(|t| allowed.contains(&t.server));
+    }
+    if tools.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "Server not found",
+                "message": format!("Server '{name}' is not connected or does not exist"),
+            })),
+        )
+            .into_response();
+    }
+    openapi_spec_response(&headers, &opts, &default_title, &default_description, tools)
+}
+
+/// Origin /api/openapi/servers parity: connected server names.
+async fn openapi_servers_list(headers: HeaderMap) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let mut names: Vec<String> = pool::get_all_statuses()
+        .await
+        .into_iter()
+        .filter(|s| s.connected)
+        .map(|s| s.name)
+        .collect();
+    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
+        names.retain(|n| allowed.contains(n));
+    }
+    names.sort();
+    Json(json!({ "success": true, "data": names })).into_response()
+}
+
+/// Origin /api/openapi/stats parity: connected/tool totals + per-server breakdown.
+async fn openapi_stats(headers: HeaderMap) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let mut statuses = pool::get_all_statuses().await;
+    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
+        statuses.retain(|s| allowed.contains(&s.name));
+    }
+    let breakdown: Vec<serde_json::Value> = statuses
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "toolCount": s.tool_count,
+                "status": if s.connected { "connected" }
+                    else if s.starting { "connecting" }
+                    else if s.start_on_demand { "sleeping" }
+                    else { "disconnected" },
+            })
+        })
+        .collect();
+    let total_tools: usize = statuses.iter().filter(|s| s.connected).map(|s| s.tool_count).sum();
+    Json(json!({
+        "success": true,
+        "data": {
+            "totalServers": statuses.iter().filter(|s| s.connected).count(),
+            "totalTools": total_tools,
+            "serverBreakdown": breakdown,
+        }
+    }))
+    .into_response()
+}
+
+/// Coerce string query-parameter values to the types declared in the tool's
+/// inputSchema (origin convertParametersToTypes equivalent).
+fn coerce_query_args(query: std::collections::HashMap<String, String>, tool: &Tool) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    let props = tool
+        .input_schema
+        .get("properties")
+        .and_then(|p| p.as_object());
+    for (k, v) in query {
+        let ty = props
+            .and_then(|p| p.get(&k))
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.as_str());
+        let value = match ty {
+            Some("number") => v.parse::<f64>().map(|n| json!(n)).unwrap_or(json!(v)),
+            Some("integer") => v.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(v)),
+            Some("boolean") => match v.to_lowercase().as_str() {
+                "true" => json!(true),
+                "false" => json!(false),
+                _ => json!(v),
+            },
+            _ => json!(v),
+        };
+        obj.insert(k, value);
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Shared execution path for the four /api tools routes. `scope` None = global.
+/// Resolves the tool by bare or server-prefixed name (origin semantics), gates
+/// disabled tools, calls the shared pool, and writes an activity log entry.
+async fn execute_openapi_impl(
+    scope: Option<String>,
+    server_name: String,
+    tool_name: String,
+    args: serde_json::Value,
+    headers: &HeaderMap,
+    source_ip: Option<&str>,
+) -> Response {
+    let bearer_key = match check_bearer_auth(headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
+        if !allowed.contains(&server_name) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "Access denied for this server" })),
+            )
+                .into_response();
+        }
+    }
+    // Scoped variant: verify the server is actually reachable under the scope
+    // (a group's server list, or the named server itself).
+    if let Some(ref sc) = scope {
+        let sfs = mcp_scope_server_filters(sc).await;
+        if !sfs.iter().any(|f| f.name == server_name) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("Server '{server_name}' not found in scope '{sc}'") })),
+            )
+                .into_response();
+        }
+    }
+    let tools = match pool::list_tools_for(&server_name).await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let name_sep = name_separator().await;
+    let prefixed = format!("{}{}", server_name, name_sep);
+    let actual_name = match tools.iter().find(|t| t.name == tool_name) {
+        Some(_) => tool_name.clone(),
+        None => {
+            if tools.iter().any(|t| t.name == format!("{prefixed}{tool_name}")) {
+                format!("{prefixed}{tool_name}")
+            } else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": format!("Tool '{tool_name}' not found on server '{server_name}'") })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    // Disabled-tool gate (origin #1178 parity with /rest and /mcp).
+    let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
+        .await
+        .unwrap_or_default();
+    if let Some(t) = filtered.iter().find(|t| t.name == actual_name) {
+        if !t.enabled {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": format!("Tool '{}' is disabled", tool_name) })),
+            )
+                .into_response();
+        }
+    }
+    let start = std::time::Instant::now();
+    let result = pool::call_tool(&server_name, &actual_name, args.clone()).await;
+    let duration_ms = start.elapsed().as_millis() as i64;
+    match result {
+        Ok(r) => {
+            let status = if r.is_error { "error" } else { "success" };
+            log::info!("[OpenAPI] Tool '{}' call {} on server '{}' ({}ms)", actual_name, status, server_name, duration_ms);
+            let output = serde_json::to_value(&r).ok();
+            let _ = log_service::write_activity(
+                &server_name,
+                &actual_name,
+                Some(duration_ms),
+                status,
+                Some(args),
+                output,
+                None,
+                source_ip,
+            )
+            .await;
+            Json(json!({ "content": r.content, "isError": r.is_error })).into_response()
+        }
+        Err(e) => {
+            let _ = log_service::write_activity(
+                &server_name,
+                &actual_name,
+                Some(duration_ms),
+                "error",
+                Some(args),
+                None,
+                Some(&e.to_string()),
+                source_ip,
+            )
+            .await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to execute tool", "message": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn client_ip_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+async fn openapi_exec_global_get(
+    headers: HeaderMap,
+    Path((server, tool)): Path<(String, String)>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let ip = client_ip_of(&headers);
+    let args = match pool::list_tools_for(&server).await {
+        Ok(ts) => {
+            let name_sep = name_separator().await;
+            let prefixed = format!("{}{}", server, name_sep);
+            let actual = ts.iter().find(|t| t.name == tool)
+                .or_else(|| ts.iter().find(|t| t.name == format!("{prefixed}{tool}")));
+            match actual {
+                Some(t) => coerce_query_args(query, t),
+                None => json!({}),
+            }
+        }
+        Err(_) => json!({}),
+    };
+    execute_openapi_impl(None, server, tool, args, &headers, ip.as_deref()).await
+}
+
+async fn openapi_exec_global_post(
+    headers: HeaderMap,
+    Path((server, tool)): Path<(String, String)>,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    let ip = client_ip_of(&headers);
+    let args = body.and_then(|Json(v)| v.as_object().cloned()).unwrap_or_default();
+    execute_openapi_impl(None, server, tool, serde_json::Value::Object(args), &headers, ip.as_deref()).await
+}
+
+async fn openapi_exec_scoped_get(
+    headers: HeaderMap,
+    Path((scope, server, tool)): Path<(String, String, String)>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let ip = client_ip_of(&headers);
+    let args = match pool::list_tools_for(&server).await {
+        Ok(ts) => {
+            let name_sep = name_separator().await;
+            let prefixed = format!("{}{}", server, name_sep);
+            let actual = ts.iter().find(|t| t.name == tool)
+                .or_else(|| ts.iter().find(|t| t.name == format!("{prefixed}{tool}")));
+            match actual {
+                Some(t) => coerce_query_args(query, t),
+                None => json!({}),
+            }
+        }
+        Err(_) => json!({}),
+    };
+    execute_openapi_impl(Some(scope), server, tool, args, &headers, ip.as_deref()).await
+}
+
+async fn openapi_exec_scoped_post(
+    headers: HeaderMap,
+    Path((scope, server, tool)): Path<(String, String, String)>,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    let ip = client_ip_of(&headers);
+    let args = body.and_then(|Json(v)| v.as_object().cloned()).unwrap_or_default();
+    execute_openapi_impl(Some(scope), server, tool, serde_json::Value::Object(args), &headers, ip.as_deref()).await
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Router
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -1598,6 +2326,23 @@ fn build_router(body_limit_bytes: usize) -> Router {
         .route("/rest/{server}/call", post(call_server_tool))
         .route("/rest/group/{group}/tools", get(list_group_tools))
         .route("/rest/group/{group}/call", post(call_group_tool))
+        // OpenAPI-compatible endpoints (spec generation + tool execution).
+        // Literal routes win over the {name} params; .yaml paths serve the same
+        // JSON document (no YAML serializer dependency).
+        .route("/api/openapi.json", get(openapi_full_spec))
+        .route("/api/openapi.yaml", get(openapi_full_spec))
+        .route("/api/openapi/servers", get(openapi_servers_list))
+        .route("/api/openapi/stats", get(openapi_stats))
+        .route("/api/{name}/openapi.json", get(openapi_named_spec))
+        .route("/api/{name}/openapi.yaml", get(openapi_named_spec))
+        .route(
+            "/api/tools/{server}/{tool}",
+            get(openapi_exec_global_get).post(openapi_exec_global_post),
+        )
+        .route(
+            "/api/{name}/tools/{server}/{tool}",
+            get(openapi_exec_scoped_get).post(openapi_exec_scoped_post),
+        )
         // MCP Streamable HTTP protocol (JSON-RPC 2.0)
         .route("/mcp", get(mcp_root_get).post(mcp_root_post).delete(mcp_root_delete))
         // Legacy 2024-11-05 SSE transport: POST target named in the `endpoint`
@@ -1824,5 +2569,154 @@ pub async fn sync_with_config() {
             }
         }
         Err(e) => log::warn!("Could not read config for HTTP server sync: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+
+    /// matchit panics at Router build time on conflicting routes; the /api
+    /// literal-vs-param mix ("/api/openapi.json" vs "/api/{name}/openapi.json",
+    /// "/api/tools/{server}/{tool}" vs "/api/{name}/tools/{server}/{tool}") must
+    /// coexist with static segments winning. Build the router here so a conflict
+    /// surfaces as a test failure instead of an app-startup panic.
+    #[test]
+    fn router_builds_with_openapi_routes() {
+        let _ = build_router(1024 * 1024);
+    }
+
+    #[test]
+    fn coerce_query_args_converts_schema_types() {
+        let tool = Tool {
+            name: "t".to_string(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "n": {"type": "number"},
+                    "i": {"type": "integer"},
+                    "b": {"type": "boolean"},
+                    "s": {"type": "string"}
+                }
+            }),
+            server_name: "srv".to_string(),
+            enabled: true,
+            annotations: None,
+            output_schema: None,
+        };
+        let mut q = std::collections::HashMap::new();
+        q.insert("n".to_string(), "1.5".to_string());
+        q.insert("i".to_string(), "42".to_string());
+        q.insert("b".to_string(), "TRUE".to_string());
+        q.insert("s".to_string(), "hello".to_string());
+        q.insert("junk_n".to_string(), "NaN!".to_string());
+        let out = coerce_query_args(q, &tool);
+        assert_eq!(out["n"], json!(1.5));
+        assert_eq!(out["i"], json!(42));
+        assert_eq!(out["b"], json!(true));
+        assert_eq!(out["s"], json!("hello"));
+        // Unparseable numbers fall back to the raw string (origin parity).
+        assert_eq!(out["junk_n"], json!("NaN!"));
+        // Unknown keys pass through as strings.
+        let mut q2 = std::collections::HashMap::new();
+        q2.insert("unknown".to_string(), "x".to_string());
+        let out2 = coerce_query_args(q2, &tool);
+        assert_eq!(out2["unknown"], json!("x"));
+    }
+
+    #[test]
+    fn spec_options_parse_origin_query_params() {
+        let mut q = std::collections::HashMap::new();
+        q.insert("title".to_string(), "Custom".to_string());
+        q.insert("serverUrl".to_string(), "https://proxy.example".to_string());
+        q.insert("includeDisabled".to_string(), "true".to_string());
+        let o = OpenApiSpecOptions::from_query(&q);
+        assert_eq!(o.title.as_deref(), Some("Custom"));
+        assert_eq!(o.server_url.as_deref(), Some("https://proxy.example"));
+        assert!(o.include_disabled);
+        assert!(o.description.is_none());
+        assert!(o.version.is_none());
+        // includeDisabled=anything-else is false (origin compares === 'true').
+        q.insert("includeDisabled".to_string(), "1".to_string());
+        assert!(!OpenApiSpecOptions::from_query(&q).include_disabled);
+    }
+
+    #[test]
+    fn spec_shape_routes_simple_tools_to_get_and_complex_to_post() {
+        let mk = |schema: serde_json::Value| Tool {
+            name: "echo".to_string(),
+            description: None,
+            input_schema: schema,
+            server_name: "test".to_string(),
+            enabled: true,
+            annotations: None,
+            output_schema: None,
+        };
+        // Pure number/boolean params → GET query parameters.
+        let simple = mk(json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "number"},
+                "b": {"type": "boolean"}
+            },
+            "required": ["n"]
+        }));
+        let (params, body) = tool_schema_shape(&simple);
+        assert!(params.is_some() && body.is_none(), "simple tool should use query params");
+        assert_eq!(params.as_ref().unwrap().len(), 2);
+
+        // A string prop counts as complex (origin parity) → POST body.
+        let complex = mk(json!({
+            "type": "object",
+            "properties": {"s": {"type": "string"}}
+        }));
+        let (params, body) = tool_schema_shape(&complex);
+        assert!(params.is_none() && body.is_some(), "string prop must route to requestBody");
+
+        // No schema → neither.
+        let bare = mk(json!({}));
+        let (params, body) = tool_schema_shape(&bare);
+        assert!(params.is_none() && body.is_none());
+    }
+
+    #[test]
+    fn spec_operation_ids_are_unique_across_servers() {
+        let mk_tool = |name: &str| Tool {
+            name: name.to_string(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"q": {"type": "number"}}}),
+            server_name: "test".to_string(),
+            enabled: true,
+            annotations: None,
+            output_schema: None,
+        };
+        let tools = vec![
+            OpenApiToolRef { server: "fs-a".into(), bare_name: "read".into(), tool: mk_tool("fs-a-read") },
+            OpenApiToolRef { server: "fs-b".into(), bare_name: "read".into(), tool: mk_tool("fs-b-read") },
+            OpenApiToolRef { server: "fs-a".into(), bare_name: "list".into(), tool: mk_tool("fs-a-list") },
+        ];
+        let spec = build_openapi_spec("t", "d", "1.0.0", "http://localhost:1", tools);
+        let paths = spec.get("paths").and_then(|p| p.as_object()).unwrap();
+        assert_eq!(paths.len(), 3, "three tools across two servers -> three paths");
+        let mut ids = Vec::new();
+        for (path, ops) in paths {
+            for (method, op) in ops.as_object().unwrap() {
+                ids.push((path.clone(), method.to_string(),
+                    op.get("operationId").and_then(|v| v.as_str()).unwrap().to_string()));
+            }
+        }
+        let mut unique = std::collections::HashSet::new();
+        for (_, _, id) in &ids {
+            assert!(unique.insert(id.clone()), "duplicate operationId: {id}");
+        }
+        assert!(ids.iter().any(|(_, m, _)| m == "get"), "simple tools are GET");
+    }
+
+    #[test]
+    fn urlencode_keeps_unreserved_and_escapes_slash() {
+        assert_eq!(urlencode_component("fs-a_tool.1~"), "fs-a_tool.1~");
+        assert_eq!(urlencode_component("a/b c"), "a%2Fb%20c");
+        assert_eq!(urlencode_component("中文"), "%E4%B8%AD%E6%96%87");
     }
 }

@@ -4,6 +4,7 @@ import {
   ChevronRight,
   AlertCircle,
   Copy,
+  CopyPlus,
   Check,
   RefreshCw,
   Wrench,
@@ -26,6 +27,9 @@ import PromptCard from '@/components/ui/PromptCard';
 import ResourceCard from '@/components/ui/ResourceCard';
 import DeleteDialog from '@/components/ui/DeleteDialog';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import CopyClientConfigDialog from '@/components/ui/CopyClientConfigDialog';
+import { toClientSnippetTarget, type ClientSnippetTarget } from '@/utils/mcpClientSnippets';
+import { copyText } from '@/utils/clipboard';
 import { Switch } from '@/components/ui/ToggleGroup';
 import { useToast } from '@/contexts/ToastContext';
 import { useServerInstallProgress } from '@/contexts/ServerInstallProgressContext';
@@ -44,6 +48,8 @@ interface ServerCardProps {
   cost?: ServerCost;
   onRemove: (serverName: string) => void;
   onEdit: (server: Server) => void;
+  onDuplicate?: (server: Server) => void;
+  isDuplicating?: boolean;
   onToggle?: (server: Server, enabled: boolean) => Promise<boolean>;
   onVisibilityChange?: (server: Server, visibility: 'private' | 'group' | 'public') => Promise<boolean>;
   onRefresh?: () => void;
@@ -142,6 +148,8 @@ const ServerCard = ({
   cost,
   onRemove,
   onEdit,
+  onDuplicate,
+  isDuplicating = false,
   onToggle,
   onVisibilityChange,
   onRefresh,
@@ -169,6 +177,7 @@ const ServerCard = ({
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReinstallDialog, setShowReinstallDialog] = useState(false);
   const [showOAuthDisconnectDialog, setShowOAuthDisconnectDialog] = useState(false);
+  const [clientConfigTarget, setClientConfigTarget] = useState<ClientSnippetTarget | null>(null);
   const [isToggling, setIsToggling] = useState(false);
   const [isUpdatingVisibility, setIsUpdatingVisibility] = useState(false);
   const [isReloading, setIsReloading] = useState(false);
@@ -334,31 +343,6 @@ const ServerCard = ({
     }
   };
 
-  const copyText = async (value: string) => {
-    try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(value);
-        return true;
-      }
-    } catch {
-      /* noop */
-    }
-    try {
-      const el = document.createElement('textarea');
-      el.value = value;
-      el.style.position = 'fixed';
-      el.style.left = '-9999px';
-      document.body.appendChild(el);
-      el.focus();
-      el.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(el);
-      return ok;
-    } catch {
-      return false;
-    }
-  };
-
   const handleCopyError = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!server.error) return;
@@ -377,39 +361,13 @@ const ServerCard = ({
     setShowMenu(false);
     if (!canManage) return;
     try {
-      // For OpenAPI servers, copy the OpenAPI spec JSON instead of MCP settings
-      if (server.type === 'openapi') {
-        let spec = server.openapi?.schema;
-        // URL mode: fetch the spec from the URL
-        if (!spec && server.openapi?.url) {
-          const resp = await fetch(server.openapi.url);
-          if (!resp.ok) {
-            showToast(t('common.copyFailed') || 'Copy failed', 'error');
-            return;
-          }
-          spec = await resp.json();
-        }
-        if (spec) {
-          const json = JSON.stringify(spec, null, 2);
-          const ok = await copyText(json);
-          showToast(
-            ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Copy failed',
-            ok ? 'success' : 'error',
-          );
-          return;
-        }
-      }
       const result = await exportMCPSettings(server.name);
-      if (!result || !result.success || !result.data) {
+      const exported = result?.data?.mcpServers?.[server.name];
+      if (!result || !result.success || !exported) {
         showToast(result?.message || t('common.copyFailed') || 'Copy failed', 'error');
         return;
       }
-      const json = JSON.stringify(result.data, null, 2);
-      const ok = await copyText(json);
-      showToast(
-        ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Copy failed',
-        ok ? 'success' : 'error',
-      );
+      setClientConfigTarget(toClientSnippetTarget(server.name, exported));
     } catch (error) {
       console.error('Error copying server configuration:', error);
       showToast(t('common.copyFailed') || 'Copy failed', 'error');
@@ -551,6 +509,15 @@ const ServerCard = ({
   })();
 
   const serverEndpoint = `${baseUrl}/mcp/${server.name}`;
+  const serverOpenApiEndpoint = `${baseUrl}/api/${server.name}`;
+
+  const copyEndpoint = async (value: string) => {
+    const ok = await copyText(value);
+    showToast(
+      ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Failed',
+      ok ? 'success' : 'error',
+    );
+  };
   const translateVisibility = (key: string, options?: { defaultValue?: string }) => t(key, options);
   const visibility = getServerVisibilityDisplay(
     translateVisibility,
@@ -841,8 +808,13 @@ const ServerCard = ({
                   setShowMenu((v) => !v);
                 }}
                 aria-label="More"
+                aria-busy={isDuplicating}
               >
-                <MoreHorizontal size={14} />
+                {isDuplicating ? (
+                  <RefreshCw size={14} className="animate-spin" />
+                ) : (
+                  <MoreHorizontal size={14} />
+                )}
                 {hasUpdate && (
                   <span
                     className="absolute top-0 right-0 block h-[7px] w-[7px] rounded-full pointer-events-none"
@@ -871,6 +843,27 @@ const ServerCard = ({
                 >
                   <Edit3 size={13} /> {t('server.edit')}
                 </button>
+                {onDuplicate && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowMenu(false);
+                      if (isDuplicating) return;
+                      onDuplicate(server);
+                    }}
+                    disabled={isDuplicating}
+                    aria-busy={isDuplicating}
+                    className="flex items-center gap-2 w-full px-2.5 py-1.5 text-[13px] rounded-md hover:bg-[var(--hub-surface-hover)] text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                    style={{ color: 'var(--hub-ink)' }}
+                  >
+                    {isDuplicating ? (
+                      <RefreshCw size={13} className="animate-spin" />
+                    ) : (
+                      <CopyPlus size={13} />
+                    )}{' '}
+                    {t('server.duplicate')}
+                  </button>
+                )}
                 <button
                   onClick={handleCopyConfig}
                   className="flex items-center gap-2 w-full px-2.5 py-1.5 text-[13px] rounded-md hover:bg-[var(--hub-surface-hover)] text-left"
@@ -1029,7 +1022,7 @@ const ServerCard = ({
               )}
 
               {/* Endpoint inline, pushed to the right */}
-              <div className="ml-auto max-w-full flex-shrink-0">
+              <div className="ml-auto max-w-full flex-shrink-0 flex items-center justify-end gap-1.5 flex-wrap">
                 <div className="hub-endpoint" style={{ height: 26 }}>
                   <div className="hub-endpoint-label">/mcp/</div>
                   <div className="hub-endpoint-url" title={serverEndpoint} style={{ maxWidth: 200 }}>
@@ -1038,15 +1031,32 @@ const ServerCard = ({
                   <button
                     type="button"
                     className="hub-endpoint-copy"
-                    onClick={async (e) => {
+                    onClick={(e) => {
                       e.stopPropagation();
-                      const ok = await copyText(serverEndpoint);
-                      showToast(
-                        ok ? t('common.copySuccess') || 'Copied' : t('common.copyFailed') || 'Failed',
-                        ok ? 'success' : 'error',
-                      );
+                      void copyEndpoint(serverEndpoint);
                     }}
-                    title={t('common.copy')}
+                    title={t('common.copyUrl')}
+                  >
+                    <Copy size={12} />
+                  </button>
+                </div>
+                <div className="hub-endpoint" style={{ height: 26 }}>
+                  <div className="hub-endpoint-label">/api/</div>
+                  <div
+                    className="hub-endpoint-url"
+                    title={serverOpenApiEndpoint}
+                    style={{ maxWidth: 200 }}
+                  >
+                    {server.name}
+                  </div>
+                  <button
+                    type="button"
+                    className="hub-endpoint-copy"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void copyEndpoint(serverOpenApiEndpoint);
+                    }}
+                    title={t('common.copyOpenApiUrl')}
                   >
                     <Copy size={12} />
                   </button>
@@ -1125,6 +1135,12 @@ const ServerCard = ({
           </div>
         )}
       </div>
+
+      <CopyClientConfigDialog
+        isOpen={clientConfigTarget !== null}
+        target={clientConfigTarget}
+        onClose={() => setClientConfigTarget(null)}
+      />
 
       <DeleteDialog
         isOpen={showDeleteDialog}

@@ -104,7 +104,7 @@
   "auth": {
     "login": "Giriş Yap",
     "loginTitle": "MCPHub'a Giriş Yap",
-    "slogan": "Kendi kendine barındırılan MCP ağ geçidi ve yönetim platformu",
+    "slogan": "Açık kaynaklı, kendi kendine barındırılan MCP ağ geçidi ve kontrol düzlemi",
     "subtitle": "Model Context Protocol sunucularını birleşik uç noktalar üzerinden bağlayın, düzenleyin, kontrol edin ve işletin.",
     "username": "Kullanıcı Adı",
     "password": "Şifre",
@@ -145,7 +145,8 @@
     "passwordRequireLetter": "Şifre en az bir harf içermelidir",
     "passwordRequireNumber": "Şifre en az bir rakam içermelidir",
     "passwordRequireSpecial": "Şifre en az bir özel karakter içermelidir",
-    "passwordStrengthHint": "Şifre en az 8 karakter olmalı ve harf, rakam ve özel karakter içermelidir"
+    "passwordStrengthHint": "Şifre en az 8 karakter olmalı ve harf, rakam ve özel karakter içermelidir",
+    "defaultPasswordHint": "Default password: admin"
   },
   "server": {
     "searchPlaceholder": "Ada veya açıklamaya göre ara",
@@ -292,7 +293,22 @@
       "apiKeyInQuery": "Sorgu",
       "apiKeyInCookie": "Çerez",
       "passthroughHeaders": "Geçiş Başlıkları",
-      "passthroughHeadersHelp": "Gelen MCP isteklerinden yukarı akış sunucu isteklerine geçirilecek başlık adlarının virgülle ayrılmış listesi (örn. Authorization, X-API-Key)"
+      "passthroughHeadersHelp": "Gelen MCP isteklerinden yukarı akış sunucu isteklerine geçirilecek başlık adlarının virgülle ayrılmış listesi (örn. Authorization, X-API-Key)",
+      "securityDetect": "Spec'ten algıla",
+      "securityDetecting": "Algılanıyor…",
+      "securityNotDeclared": "Bu spec bir güvenlik şeması bildirmiyor.",
+      "securityPrefillNotice": "Bu spec {{summary}} bildiriyor. Güvenlik ayarları önceden dolduruldu — ilk çağrıdan önce kimlik bilginizi ekleyin.",
+      "securityMismatchWarning": "Spec {{summary}} bildiriyor, ancak bu sunucu {{configured}} olarak yapılandırılmış. Bu, sessiz 401 yanıtlarına neden olabilir.",
+      "securityUnsupportedNotice": "Bu spec {{summary}} bildiriyor; MCPHub bunu temsil edemiyor ({{reason}}). Kimlik doğrulamayı elle yapılandırın.",
+      "httpCredentialsBasicHint": "kullanıcı:şifre (otomatik kodlanır) veya önceden kodlanmış Base64 girin.",
+      "specSecurityToggle": "Şartname URL'si ayrı kimlik doğrulama gerektirir",
+      "specSecurityHelp": "Yalnızca şartname belgesi API'den farklı şekilde korunuyorsa etkinleştirin (örn. Bearer korumalı API arkasında Basic ile korunan /v3/api-docs). Kapalıyken yukarıdaki güvenlik yapılandırması her ikisi için de kullanılır.",
+      "cookieSession": "Cookie Oturum Yönetimi",
+      "cookieSessionHelp": "Yukarı akış oturum açma yanıtlarındaki Set-Cookie değerini yakalar ve aynı aşağı akış oturumundaki sonraki çağrılarda yeniden gönderir. MCP oturumu başına izole edilir; kalıcı değildir.",
+      "statsMeasuring": "Oluşturulan araç listesi ölçülüyor…",
+      "statsSummary": "{{toolCount}} araç · tanımlar ~{{bytes}} · ~{{tokens}} token",
+      "statsWarning": "Bu araç listesi tek başına yaygın model bağlam pencerelerine yaklaşabilir veya bunları aşabilir. Daha az araç göstermeyi düşünün: bir grup oluşturun veya sunucuda tek tek araçları devre dışı bırakın.",
+      "statsUnavailable": "Belirtim ölçülemedi. Devam edebilirsiniz; sunucu gönderim sırasında içe aktarmayı doğrular."
     },
     "oauth": {
       "sectionTitle": "OAuth Yapılandırması",
@@ -306,7 +322,20 @@
       "resource": "Kaynak / Hedef Kitle",
       "accessToken": "Erişim Tokeni",
       "refreshToken": "Yenileme Tokeni"
-    }
+    },
+    "duplicate": "Çoğalt",
+    "nameInvalid": "Sunucu adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir (boşluk veya özel karakter içeremez)",
+    "duplicateTitle": "Sunucuyu Çoğalt: {{serverName}}",
+    "shareUserSearchLabel": "Kullanıcıları ara",
+    "shareUserSearchPlaceholder": "Kullanıcı adlarını ara...",
+    "selectAllShareUsers": "Tümünü seç",
+    "deselectAllShareUsers": "Tümünün seçimini kaldır",
+    "noMatchingShareUsers": "Aramanızla eşleşen kullanıcı yok.",
+    "packageVersion": "Kurulu paket sürümü (runner önbelleğindeki son kurulum)",
+    "updateAvailable": "Kayıt defterinde daha yeni bir sürüm mevcut",
+    "downloading": "Downloading",
+    "reinstallStarted": "Package update started...",
+    "updateTo": "Update to {{version}}"
   },
   "status": {
     "sleeping": "Uykuda",
@@ -390,7 +419,8 @@
     "all": "Tümü",
     "searchPlaceholder": "İsim veya açıklamaya göre ara",
     "started": "Başlatıldı",
-    "notStarted": "Başlatılmadı"
+    "notStarted": "Başlatılmadı",
+    "copyOpenApiUrl": "OpenAPI URL'sini Kopyala"
   },
   "pagination": {
     "rowsPerPage": "Sayfa başına satır",
@@ -412,7 +442,8 @@
     "workspace": "Çalışma Alanı",
     "system": "Sistem",
     "rag": "RAG",
-    "beta": "Beta"
+    "beta": "Beta",
+    "skills": "Skills"
   },
   "pages": {
     "dashboard": {
@@ -422,7 +453,34 @@
       "disabledServers": "Devre Dışı",
       "offlineServers": "Çevrimdışı",
       "connectingServers": "Bağlanıyor",
-      "recentServers": "Son Sunucular"
+      "recentServers": "Son Sunucular",
+      "copyMcpConfig": "Copy MCP Config",
+      "endpoints": "MCP Endpoints",
+      "namePlaceholder": "<sunucu-veya-grup>",
+      "endpointsHint": "Use these URLs in Claude Desktop, Cursor or any MCP client",
+      "openapiTitle": "OpenAPI Uç Noktaları",
+      "openapiHint": "MCP araçlarını çağırmak için belirtimi OpenWebUI, Swagger UI veya OpenAPI uyumlu herhangi bir istemciye aktarın",
+      "openapiNamePlaceholder": "<sunucu-veya-grup>",
+      "openapiUsage": "Yer tutucuyu bir sunucu veya grup adıyla değiştirin. Basit parametreli araçlar GET, diğerleri POST JSON ile çağrılır. Kimlik doğrulama açıkken isteklerde Bearer Key gerekir.",
+      "httpFailActionAddrInUse": "Close the app occupying the port, or change the HTTP port in Settings.",
+      "httpFailActionAddrNotAvailable": "Change the HTTP port in Settings.",
+      "httpFailActionOther": "Check the logs for details; on Windows also check the firewall.",
+      "httpFailActionPermissionDenied": "Allow MCPHub through Windows Defender Firewall and open inbound TCP {{port}}, or change the HTTP port in Settings.",
+      "httpFailAddress": "Service address",
+      "httpFailBadge": "MCP HTTP service is not running",
+      "httpFailBadgeHint": "Click to view the failure reason and retry",
+      "httpFailCauseAddrInUse": "Port {{port}} is already in use by another application.",
+      "httpFailCauseAddrNotAvailable": "Port {{port}} is not available on this host.",
+      "httpFailCauseOther": "Failed to bind port {{port}}.",
+      "httpFailCausePermissionDenied": "Permission denied — the firewall is likely blocking this app.",
+      "httpFailReason": "Reason",
+      "httpFailRetry": "Retry start",
+      "httpFailRetryFailed": "Retry failed. Check the firewall / port, then try again. See logs for details.",
+      "httpFailSuggestion": "Suggestion",
+      "httpFailTitle": "MCP HTTP service failed to start",
+      "mcpConfigCopied": "MCP client config copied to clipboard",
+      "mcpConfigCopiedPlaceholder": "MCP client config copied. Bearer auth is on — replace <your-bearer-token> with the key you want to use (copy it from Bearer key management).",
+      "mcpConfigCopiedWithAuth": "MCP client config copied (includes Bearer auth header)"
     },
     "servers": {
       "title": "Sunucu Yönetimi"
@@ -797,6 +855,9 @@
       "excludeFileGroupRemove": "Bu dosyaları yeniden dahil et (güncelleme kontrolleri sürer)",
       "refreshSourceDone": "Kaynak güncellemesi tamamlandı: {{added}} içe aktarıldı, {{removed}} kaldırıldı, {{updated}} güncellendi",
       "refreshSourceTitle": "Kaynak Güncellemesi"
+    },
+    "skills": {
+      "title": "Skills"
     }
   },
   "logs": {
@@ -870,7 +931,11 @@
     "previewResources": "[kaynaklar: {{items}}]",
     "previewAllTools": "(tüm araçlar)",
     "previewAllPrompts": "(tüm istemler)",
-    "previewAllResources": "(tüm kaynaklar)"
+    "previewAllResources": "(tüm kaynaklar)",
+    "legacyVisibility": "Eski grup — görünürlük seçin",
+    "legacyVisibilityHint": "Görünürlüğü açıkça seçene kadar bu grup önceki erişim kurallarını korur.",
+    "visibilityDescription": "Grup erişimi, her sunucuya erişim de gerektirir. Grubu paylaşmak özel sunucuları paylaşmaz. Grubu yalnızca sahibi ve yöneticiler yönetebilir.",
+    "shareAfterCreate": "Kullanıcıları seçmeden önce grubu kaydedin."
   },
   "market": {
     "title": "Yerel Kurulum",
@@ -924,7 +989,22 @@
       "deny": "Reddet",
       "approveSubtitle": "Bu uygulamaya güveniyorsanız izin vermeniz önerilir.",
       "denySubtitle": "İstediğiniz zaman daha sonra erişim verebilirsiniz."
-    }
+    },
+    "application": "Uygulama",
+    "scopesTitle": "Bu uygulama şunları yapabilecek:",
+    "noScopes": "İzin istenmedi.",
+    "requestInvalidTitle": "Geçersiz istek",
+    "requestInvalid": "Bu yetkilendirme isteği geçersiz veya süresi dolmuş. Lütfen geri dönüp tekrar deneyin.",
+    "grantingAccessTo": "Erişim verilecek hedef:",
+    "resourceAll": "Tüm MCP sunucuları",
+    "resourceSmart": "Akıllı yönlendirme",
+    "resourceServer": "MCP sunucusu: {{name}}",
+    "resourceGroup": "MCP grubu: {{name}}",
+    "clientId": "İstemci kimliği",
+    "willRedirectTo": "Şuraya yönlendirilecek:",
+    "policy": "Gizlilik politikası",
+    "terms": "Hizmet şartları",
+    "homepage": "Ana sayfa"
   },
   "cloud": {
     "title": "Bulut Desteği",
@@ -1304,7 +1384,59 @@
     "runtimePhase.verifying": "Doğrulanıyor",
     "runtimePhase.running": "Çalışıyor",
     "runtimePhase.done": "Tamamlandı",
-    "runtimePhase.error": "Hata"
+    "runtimePhase.error": "Hata",
+    "dynamicRegistrationClientTtl": "Boşta İstemci Temizleme TTL'si (saniye)",
+    "dynamicRegistrationClientTtlDescription": "Aktif tokenı ve devam eden yetkilendirme akışı olmayan, bu süreden daha eski dinamik kayıtlı istemcileri temizler. Temizlemeyi devre dışı bırakmak için 0 yapın.",
+    "dynamicRegistrationClientTtlPlaceholder": "örn. 2592000",
+    "smartRoutingIndexTitle": "Vektör İndeksi ve Tanılama",
+    "smartRoutingIndexRefresh": "Yenile",
+    "smartRoutingIndexReindex": "Yeniden İndeksle",
+    "smartRoutingIndexReindexing": "Yeniden İndeksleniyor…",
+    "smartRoutingIndexLoading": "Yükleniyor…",
+    "smartRoutingIndexNoData": "Henüz indeks verisi yok. Akıllı yönlendirmeyi etkinleştirin ve vektör deposunu oluşturmak için Yeniden İndeksle’ye tıklayın.",
+    "smartRoutingIndexStatsUnavailable": "İstatistikler kullanılamıyor",
+    "smartRoutingIndexDatabase": "Veritabanı",
+    "smartRoutingIndexConnected": "Bağlı",
+    "smartRoutingIndexDisconnected": "Bağlı değil",
+    "smartRoutingIndexUnhealthy": "Sağlıksız",
+    "smartRoutingIndexModel": "Model",
+    "smartRoutingIndexDimensions": "Boyutlar",
+    "smartRoutingIndexTotalRows": "Toplam satır",
+    "smartRoutingIndexToolRows": "Araç satırı",
+    "smartRoutingIndexServerRows": "Sunucu satırı",
+    "smartRoutingIndexClusterLabel": "İndekslenen sunucular",
+    "smartRoutingIndexCoverage": "Kapsam",
+    "smartRoutingIndexLastSynced": "Son senkronizasyon",
+    "smartRoutingIndexPerServer": "Sunucu başına araçlar",
+    "smartRoutingIndexMissingIndex": "İndeksi olmayan {{count}} etkin sunucu",
+    "smartRoutingIndexSyncedRange": "Senkronizasyon aralığı: {{oldest}} → {{newest}}",
+    "smartRoutingIndexReindexDone": "Yeniden indeksleme tamamlandı: {{synced}} senkronize, {{failed}} hata, {{skipped}} atlandı, toplam {{total}} araç",
+    "smartRoutingIndexReindexFailed": "Yeniden indeksleme başarısız: {{message}}",
+    "smartRoutingIndexReindexStarting": "Yeniden indeksleme başlıyor…",
+    "smartRoutingIndexReindexingServer": "{{server}} yeniden indeksleniyor",
+    "smartRoutingIndexReindexSummary": "Yeniden indeksleme tamam · {{synced}} senkronize, {{failed}} hata, {{skipped}} atlandı, {{total}} araç",
+    "smartRoutingIndexReindexConfirmTitle": "Vektör indeksi yeniden oluşturulsun mu?",
+    "smartRoutingIndexReindexConfirmMessage": "Mevcut tüm embedding’ler temizlenecek ve sıfırdan yeniden üretilecek. Bu biraz zaman alabilir ve embedding API kotası harcar.",
+    "smartRoutingIndexPersonalCredentials": "Kişisel kimlik bilgisi gerektiren sunucular",
+    "smartRoutingIndexSkippedReason": "Atlandı",
+    "smartRoutingIndexIndexedAs": "{{principals}} olarak indekslendi",
+    "addSkillsAgent": "Add Agent",
+    "bearerKeyScopeFilter": "Filter by scope",
+    "exposeHttp": "Enable HTTP Service",
+    "exposeHttpDescription": "When enabled, MCP services will be exposed to external clients via HTTP",
+    "httpPort": "HTTP Service Port",
+    "httpPortDescription": "MCP HTTP service listening port, restart required after changes",
+    "httpPortWarning": "After changing the port, you need to restart the application for changes to take effect",
+    "nodeVersion": "Node.js Version",
+    "nodeVersionDescription": "Select or install a specific Node.js version for running MCP servers",
+    "pythonVersion": "Python Version",
+    "pythonVersionDescription": "Select or install a specific Python version for running MCP servers",
+    "skillsAgentNamePlaceholder": "Agent name",
+    "skillsAgentPathPlaceholder": "Skills install path, e.g. ~/.claude/skills",
+    "skillsAgentsDescription": "Configure known AI agents' skills install paths, used for scanning and exporting skills. Paths may start with ~.",
+    "skillsAgentsSaveError": "Failed to save agent paths",
+    "skillsAgentsSaved": "Agent paths saved",
+    "skillsAgentsTitle": "Agent Install Paths"
   },
   "mcpb": {
     "upload": "Yükle",
@@ -1446,7 +1578,8 @@
       "failedToGetMarketTags": "Market etiketleri alınamadı",
       "failedToSearchMarketServers": "Market sunucuları aranamadı",
       "failedToFilterMarketServers": "Market sunucuları filtrelenemedi",
-      "failedToProcessMcpbFile": "MCPB dosyası işlenemedi"
+      "failedToProcessMcpbFile": "MCPB dosyası işlenemedi",
+      "failedToReloadServer": "Failed to reload server"
     },
     "success": {
       "serverCreated": "Sunucu başarıyla oluşturuldu",
@@ -1646,6 +1779,192 @@
   },
   "skills": {
     "selectAllPage": "Sayfadaki Tümünü Seç",
-    "deselectAllPage": "Seçimi Kaldır"
+    "deselectAllPage": "Seçimi Kaldır",
+    "addCustomAgent": "Add Custom Agent",
+    "agentManagement": "Agent Management",
+    "agentSearchPlaceholder": "Search agents by name or path",
+    "alreadyImported": "Already imported",
+    "builtinAgentTag": "Built-in",
+    "close": "Close",
+    "confirmDelete": "Delete Skill",
+    "confirmDeleteBtn": "Delete",
+    "currentMethod": "Current",
+    "customAgentAddError": "Failed to add custom agent",
+    "customAgentAdded": "Custom agent added",
+    "customAgentName": "Agent name",
+    "customAgentNamePlaceholder": "e.g. MyAgent",
+    "customAgentNameRequired": "Agent name is required",
+    "customAgentPath": "Skills folder path",
+    "customAgentPathPlaceholder": "Pick or enter the skills directory path",
+    "customAgentPathRequired": "Folder path is required",
+    "customAgentTag": "Custom",
+    "delete": "Delete",
+    "deleteAgent": "Delete Agent",
+    "deleteAgentConfirm": "Delete this custom agent? Installed skills at its path are not removed.",
+    "deleteCopyOptional": "File copies in these agents are optional to delete:",
+    "deleteDialogTitle": "Delete Skill",
+    "deleteError": "Failed to delete skill",
+    "deleteLibraryCopy": "Will remove library copy: {{name}}",
+    "deleteNoExports": "This skill has not been exported to any agent.",
+    "deleteSuccess": "Deleted",
+    "deleteSymlinkMandatory": "Symlinks to these agents will be removed (mandatory):",
+    "deleteWarning": "Delete skill \"{{name}}\"? This removes the library copy but leaves files already exported to agents untouched.",
+    "empty": "No skills yet",
+    "emptyExports": "Not exported to any agent yet",
+    "export": "Export",
+    "exportDialogTitle": "Export to Agent",
+    "exportError": "Failed to export skills",
+    "exportMethod": "Export Method",
+    "exportMethodHelp": "View method explanation",
+    "exportSelectedAgents": "{{count}} target(s)",
+    "exportSuccess": "Exported {{count}} item(s)",
+    "exportSummary": "Export {{skills}} skill(s) → {{agents}} agent(s)",
+    "exportTargetAgents": "Target Agents",
+    "exportToAgent": "Export to Agent",
+    "fetchError": "Failed to load skills",
+    "fileCopy": "File Copy",
+    "fileCopyHelp": "Copy entity files to the target location; later edits do not affect the original.",
+    "hideEmptyAgents": "Hide agents without skills",
+    "import": "Import",
+    "importDialogTitle": "Import Skills",
+    "importError": "Failed to import skills",
+    "importExisting": "Import Existing",
+    "importFirst": "Import your first skill",
+    "importSelected": "{{count}} selected",
+    "importSuccess": "Imported {{count}} skills",
+    "install": "Install",
+    "installDialogTitle": "Install Skill",
+    "installError": "Install failed",
+    "installMethod": "Install Method",
+    "installSuccess": "Installed",
+    "installTargetAgents": "Target Agents",
+    "installedAgents": "Installed Agents",
+    "installedCount": "{{count}} installed",
+    "installedSection": "Installed",
+    "manualSelectSkills": "Manually select skill(s)",
+    "manualSelection": "Manual",
+    "noAgents": "No agents found",
+    "noSearchResults": "No matching results",
+    "noSkillFound": "No skill found (no SKILL.md)",
+    "noSkillsInAgent": "No skills found in this agent's path",
+    "notInstalledSection": "Not installed",
+    "openFolder": "Open Folder",
+    "openPathError": "Failed to open folder",
+    "openSkillFolder": "Open skill folder",
+    "openingPath": "Opening: {{path}}",
+    "pickFolder": "Pick Folder",
+    "pickFolderError": "Failed to pick folder",
+    "scanError": "Failed to scan skills",
+    "scanLoading": "Scanning installed skills…",
+    "searchAgents": "Search agents…",
+    "noAgentsFound": "Eşleşen ajan yok",
+    "selectFolder": "Select Folder",
+    "skillSearchPlaceholder": "Search skills by name or description",
+    "switchTo": "Will switch to",
+    "symlink": "Symlink",
+    "symlinkHelp": "Create a soft reference or shortcut; all entity files are managed centrally — edit once, take effect everywhere.",
+    "symlinkSkill": "Symlink",
+    "symlinkSkillHint": "Soft-referenced skill, not importable (import from the agent holding the real directory)",
+    "uninstall": "Uninstall",
+    "uninstallConfirm": "Uninstall this skill from {{agent}}? Removes the install (symlink or file copy) at its path.",
+    "uninstallError": "Failed to uninstall",
+    "uninstallSuccess": "Uninstalled",
+    "view": "View",
+    "viewSkill": "View Skill",
+    "willInstall": "Will install"
+  },
+  "clientConfig": {
+    "title": "MCP yapılandırmasını kopyala",
+    "description": "{{name}} için doğrudan yapıştırılabilir yapılandırmayı kopyalamak üzere istemcinizi seçin.",
+    "menuItem": "MCP yapılandırmasını kopyala",
+    "tokenPrompt": "MCPHub erişim jetonu",
+    "configBlock": "Yapılandırma",
+    "commandBlock": "CLI komutu",
+    "copied": "Kopyalandı",
+    "noTransport": "Bu sunucunun istemci tarafı bir MCP taşıması yok (OpenAPI desteklidir). Bunun yerine hub'ı veya bir grup uç noktasını kullanın.",
+    "clients": {
+      "generic-mcp-servers": {
+        "label": "Genel (mcpServers)",
+        "hint": "Yaygın kabul gören mcpServers bloğu: Claude Desktop, Cline, Cherry Studio ve çoğu istemci."
+      },
+      "generic-http": {
+        "label": "Genel HTTP",
+        "hint": "Ham girdiyle çıkış yolu: uzak uç nokta ham bir HTTP girdisi (SSE üzerinde \"type\": \"sse\" işaretini taşır), yerel sunucu ham bir stdio girdisi (command/args/env) verir. İstemcinin kendi sunucu tablosuna yapıştırın; çoğu istemci için Genel (mcpServers) sekmesini kullanın."
+      },
+      "claude-code": {
+        "label": "Claude Code",
+        "hint": "Claude Code: `claude mcp add` veya ~/.claude.json içindeki mcpServers bloğu."
+      },
+      "cursor": {
+        "label": "Cursor",
+        "hint": "Cursor: proje içinde .cursor/mcp.json veya genel olarak ~/.cursor/mcp.json."
+      },
+      "vscode": {
+        "label": "VS Code / Copilot",
+        "hint": "VS Code / Copilot: çalışma alanında .vscode/mcp.json veya kullanıcı profilinizdeki mcp.json."
+      },
+      "codex": {
+        "label": "Codex",
+        "hint": "Codex: ~/.codex/config.toml veya proje düzeyinde .codex/config.toml."
+      },
+      "opencode": {
+        "label": "OpenCode",
+        "hint": "OpenCode: genel olarak ~/.config/opencode/opencode.json veya proje içinde opencode.json."
+      },
+      "windsurf": {
+        "label": "Windsurf",
+        "hint": "Windsurf: ~/.codeium/windsurf/mcp_config.json."
+      },
+      "cherry-studio": {
+        "label": "Cherry Studio",
+        "hint": "Cherry Studio: Ayarlar > MCP Sunucuları > Sunucu Ekle > JSON İçe Aktar."
+      },
+      "codebuddy": {
+        "label": "CodeBuddy Code",
+        "hint": "CodeBuddy Code: genel olarak ~/.codebuddy/.mcp.json veya proje içinde .mcp.json."
+      },
+      "qoder": {
+        "label": "Qoder",
+        "hint": "Qoder: Ayarlar > MCP > Elle Ekle, ardından JSON'u yapıştırın."
+      },
+      "trae": {
+        "label": "TRAE",
+        "hint": "TRAE: Ayarlar > MCP > Ekle > Elle Ekle, ardından JSON'u yapıştırın."
+      },
+      "zcode": {
+        "label": "ZCode",
+        "hint": "ZCode: Ayarlar > MCP Sunucuları > Yeni MCP Sunucusu > Tam yapılandırma."
+      },
+      "workbuddy": {
+        "label": "WorkBuddy",
+        "hint": "WorkBuddy: Eklentiler > MCP Sunucuları > MCP Yapılandır veya ~/.workbuddy/mcp.json."
+      }
+    }
+  },
+  "credentials": {
+    "title": "Kimlik Bilgileri",
+    "missing": "{{serverName}} için kişisel kimlik bilgileri gerekli. Pano → Kimlik Bilgileri bölümünde gerekli tüm alanları bağlayın.",
+    "description": "Paylaşılan sunuculara kendi kimlik bilgilerinizi bağlayın. Her istek, çağrıyı yapan kullanıcının bilgilerini kullanır.",
+    "slots": "Kişisel kimlik bilgisi alanları",
+    "slotsHint": "Yalnızca alan adlarını tanımlayın. Tüm alanlar zorunludur; kuruluş bilgilerine otomatik dönüş yapılmaz.",
+    "fieldName": "Alan adı",
+    "label": "Etiket (isteğe bağlı)",
+    "addSlot": "Alan ekle",
+    "removeSlot": "Alanı kaldır",
+    "personalBadge": "Kişisel kimlik bilgileri",
+    "manage": "Yönet",
+    "configured": "Yapılandırıldı",
+    "required": "Bağlama gerekli",
+    "writeOnly": "Kaydedilen değerler görüntülenemez. Bağlamayı değiştirmek için tüm alanlara yeni değerler girin.",
+    "replaceValue": "Yeni değer girin",
+    "enterValue": "Kimlik bilgisi girin",
+    "save": "Bağlamayı kaydet",
+    "delete": "Bağlamayı sil",
+    "saved": "Bağlama kaydedildi",
+    "deleted": "Bağlama silindi",
+    "failed": "Kimlik bilgileri yönetilemiyor",
+    "showAll": "Tüm sunucuları göster",
+    "loading": "Yükleniyor…",
+    "empty": "Kişisel kimlik bilgisi gerektiren paylaşılan sunucu yok."
   }
 }

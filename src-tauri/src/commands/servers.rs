@@ -485,6 +485,111 @@ pub async fn reload_server(name: String) -> Result<ServerStatus, String> {
 }
 
 #[tauri::command]
+/// Resolve the npx package spec(s) from a server's args (origin #1182):
+/// `-p/--package[=]` values are explicit specs; the first bare token is the
+/// package; everything after `-c/--call` is a shell command, not a spec.
+fn resolve_npx_package_specs(args: &[String]) -> Vec<String> {
+    let mut specs: Vec<String> = Vec::new();
+    let mut explicit = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-p" || arg == "--package" {
+            if let Some(v) = args.get(i + 1) {
+                specs.push(v.clone());
+                explicit = true;
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(v) = arg.strip_prefix("--package=") {
+            specs.push(v.to_string());
+            explicit = true;
+            i += 1;
+            continue;
+        }
+        if arg == "-c" || arg == "--call" {
+            break;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        if !explicit {
+            specs.push(arg.clone());
+        }
+        break;
+    }
+    specs
+}
+
+/// Strip the version from a package spec, keeping a scoped name intact:
+/// `cowsay@1.5.0` -> `cowsay`, `@scope/pkg@1.2.3` -> `@scope/pkg`.
+fn npx_package_name_from_spec(spec: &str) -> &str {
+    match spec.rfind('@') {
+        // `separator > 0` so a leading `@scope` marker is kept.
+        Some(idx) if idx > 0 => &spec[..idx],
+        _ => spec,
+    }
+}
+
+/// Whether an `_npx` cache entry (identified by the metadata npm leaves in its
+/// package.json) installed one of the given specs.
+fn npx_entry_matches_spec(manifest: &serde_json::Value, specs: &[String]) -> bool {
+    if let Some(packages) = manifest.get("_npx").and_then(|n| n.get("packages")).and_then(|p| p.as_array()) {
+        return packages
+            .iter()
+            .filter_map(|p| p.as_str())
+            .any(|p| specs.iter().any(|s| s == p));
+    }
+    if let Some(deps) = manifest.get("dependencies").and_then(|d| d.as_object()) {
+        let names: std::collections::HashSet<&str> =
+            specs.iter().map(|s| npx_package_name_from_spec(s)).collect();
+        return deps.keys().any(|k| names.contains(k.as_str()));
+    }
+    false
+}
+
+/// Remove only the `_npx` cache entries belonging to the given package specs.
+/// Returns Ok(true) when entries were cleared, Ok(false) when no spec could be
+/// resolved (cache deliberately left untouched). Unreadable entries are skipped:
+/// this runs to refresh one server, an unreadable neighbour is not ours to delete.
+fn clear_npx_cache_for_specs(args: &[String]) -> Result<bool, std::io::Error> {
+    let specs = resolve_npx_package_specs(args);
+    if specs.is_empty() {
+        return Ok(false);
+    }
+    let Some(cache_dir) = runtime_env::npm_cache_dir() else {
+        return Ok(false);
+    };
+    let entries = match std::fs::read_dir(&cache_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut removed = false;
+    for entry in entries.flatten() {
+        let entry_dir = entry.path();
+        let manifest: serde_json::Value = match std::fs::read_to_string(entry_dir.join("package.json"))
+        {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+        if !npx_entry_matches_spec(&manifest, &specs) {
+            continue;
+        }
+        if std::fs::remove_dir_all(&entry_dir).is_ok() {
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
 pub async fn reinstall_server(name: String) -> Result<serde_json::Value, String> {
     // Disconnect first
     pool::disconnect_server(&name).await.ok();
@@ -500,11 +605,19 @@ pub async fn reinstall_server(name: String) -> Result<serde_json::Value, String>
 
     // Clear npx cache if the server uses npx
     if command == "npx" {
-        if let Some(cache_dir) = runtime_env::npm_cache_dir() {
-            if cache_dir.exists() {
-                let _ = std::fs::remove_dir_all(&cache_dir);
-                cleared.push("npx".to_string());
+        // Scope the clear to this server's package (origin #1182): deleting the
+        // whole `_npx` directory would discard every other npx server's install
+        // as well. Entries are identified from the metadata npm leaves in each
+        // entry's package.json; unreadable/unmatched entries are left alone.
+        match clear_npx_cache_for_specs(cfg.args.as_deref().unwrap_or(&[])) {
+            Ok(true) => cleared.push("npx".to_string()),
+            Ok(false) => {
+                log::warn!(
+                    "[reinstall] Could not identify the npx package from args of '{}'; cache left untouched",
+                    name
+                );
             }
+            Err(e) => log::warn!("[reinstall] Failed to clear scoped npx cache for '{}': {}", name, e),
         }
     }
 

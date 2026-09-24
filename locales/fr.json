@@ -104,7 +104,7 @@
   "auth": {
     "login": "Connexion",
     "loginTitle": "Se connecter à MCPHub",
-    "slogan": "Passerelle MCP et plateforme de gestion auto-hébergées",
+    "slogan": "Passerelle et plan de contrôle MCP open source et auto-hébergés",
     "subtitle": "Connectez, organisez, contrôlez et exploitez vos serveurs Model Context Protocol via des points de terminaison unifiés.",
     "username": "Nom d'utilisateur",
     "password": "Mot de passe",
@@ -145,7 +145,8 @@
     "passwordRequireLetter": "Le mot de passe doit contenir au moins une lettre",
     "passwordRequireNumber": "Le mot de passe doit contenir au moins un chiffre",
     "passwordRequireSpecial": "Le mot de passe doit contenir au moins un caractère spécial",
-    "passwordStrengthHint": "Le mot de passe doit contenir au moins 8 caractères et inclure des lettres, des chiffres et des caractères spéciaux"
+    "passwordStrengthHint": "Le mot de passe doit contenir au moins 8 caractères et inclure des lettres, des chiffres et des caractères spéciaux",
+    "defaultPasswordHint": "Default password: admin"
   },
   "server": {
     "searchPlaceholder": "Rechercher par nom ou description",
@@ -292,7 +293,22 @@
       "apiKeyInQuery": "Requête",
       "apiKeyInCookie": "Cookie",
       "passthroughHeaders": "En-têtes de transmission",
-      "passthroughHeadersHelp": "Liste séparée par des virgules des noms d’en-têtes à transmettre des requêtes MCP entrantes vers les requêtes du serveur en amont (par ex. : Authorization, X-API-Key)"
+      "passthroughHeadersHelp": "Liste séparée par des virgules des noms d’en-têtes à transmettre des requêtes MCP entrantes vers les requêtes du serveur en amont (par ex. : Authorization, X-API-Key)",
+      "securityDetect": "Détecter depuis le spec",
+      "securityDetecting": "Détection…",
+      "securityNotDeclared": "Ce spec ne déclare aucun schéma de sécurité.",
+      "securityPrefillNotice": "Ce spec déclare {{summary}}. Les paramètres de sécurité ont été pré-remplis — ajoutez votre valeur d’identification avant le premier appel.",
+      "securityMismatchWarning": "Le spec déclare {{summary}}, mais ce serveur est configuré en {{configured}}. Cela peut provoquer des réponses 401 silencieuses.",
+      "securityUnsupportedNotice": "Ce spec déclare {{summary}}, que MCPHub ne peut pas représenter ({{reason}}). Configurez l’authentification manuellement.",
+      "httpCredentialsBasicHint": "Saisissez utilisateur:motdepasse (encodé automatiquement) ou un Base64 pré-encodé.",
+      "specSecurityToggle": "L'URL de la spécification nécessite une authentification distincte",
+      "specSecurityHelp": "Activez uniquement si le document de spécification est protégé différemment de l'API (ex. /v3/api-docs protégé par Basic derrière une API en Bearer). Sinon, la configuration de sécurité ci-dessus est utilisée pour les deux.",
+      "cookieSession": "Gestion de session Cookie",
+      "cookieSessionHelp": "Capture les Set-Cookie des réponses de connexion en amont et les renvoie lors des appels ultérieurs dans la même session aval. Isolé par session MCP ; non persistant.",
+      "statsMeasuring": "Mesure de la liste d'outils générée…",
+      "statsSummary": "{{toolCount}} outils · ~{{bytes}} de définitions · ~{{tokens}} jetons",
+      "statsWarning": "Cette liste d'outils peut à elle seule approcher ou dépasser les fenêtres de contexte courantes des modèles. Envisagez d'exposer moins d'outils : créez un groupe ou désactivez des outils individuels sur le serveur.",
+      "statsUnavailable": "La spécification n'a pas pu être mesurée. Vous pouvez continuer ; le serveur la validera lors de l'envoi."
     },
     "oauth": {
       "sectionTitle": "Configuration OAuth",
@@ -306,7 +322,20 @@
       "resource": "Ressource / Audience",
       "accessToken": "Jeton d'accès",
       "refreshToken": "Jeton d'actualisation"
-    }
+    },
+    "duplicate": "Dupliquer",
+    "nameInvalid": "Le nom du serveur ne peut contenir que des lettres, chiffres, points, underscores et traits d'union (ni espaces ni caractères spéciaux)",
+    "duplicateTitle": "Dupliquer le serveur : {{serverName}}",
+    "shareUserSearchLabel": "Rechercher des utilisateurs",
+    "shareUserSearchPlaceholder": "Rechercher des noms d'utilisateur...",
+    "selectAllShareUsers": "Tout sélectionner",
+    "deselectAllShareUsers": "Tout désélectionner",
+    "noMatchingShareUsers": "Aucun utilisateur ne correspond à votre recherche.",
+    "packageVersion": "Version du paquet installé (dernière installée dans le cache du runner)",
+    "updateAvailable": "Une version plus récente est disponible sur le registre",
+    "downloading": "Downloading",
+    "reinstallStarted": "Package update started...",
+    "updateTo": "Update to {{version}}"
   },
   "status": {
     "sleeping": "En veille",
@@ -390,7 +419,8 @@
     "all": "Tout",
     "searchPlaceholder": "Rechercher par nom ou description",
     "started": "Démarré",
-    "notStarted": "Non démarré"
+    "notStarted": "Non démarré",
+    "copyOpenApiUrl": "Copier l'URL OpenAPI"
   },
   "pagination": {
     "rowsPerPage": "Lignes par page",
@@ -412,7 +442,8 @@
     "workspace": "Espace de travail",
     "system": "Système",
     "rag": "RAG",
-    "beta": "Beta"
+    "beta": "Beta",
+    "skills": "Skills"
   },
   "pages": {
     "dashboard": {
@@ -422,7 +453,34 @@
       "disabledServers": "Désactivés",
       "offlineServers": "Hors ligne",
       "connectingServers": "En connexion",
-      "recentServers": "Serveurs récents"
+      "recentServers": "Serveurs récents",
+      "copyMcpConfig": "Copy MCP Config",
+      "endpoints": "MCP Endpoints",
+      "namePlaceholder": "<serveur-ou-groupe>",
+      "endpointsHint": "Use these URLs in Claude Desktop, Cursor or any MCP client",
+      "openapiTitle": "Points d'accès OpenAPI",
+      "openapiHint": "Importez la spécification dans OpenWebUI, Swagger UI ou tout client compatible OpenAPI pour appeler les outils MCP",
+      "openapiNamePlaceholder": "<serveur-ou-groupe>",
+      "openapiUsage": "Remplacez l'espace réservé par un nom de serveur ou de groupe. Les outils à paramètres simples s'appellent en GET, les autres en POST JSON. Les requêtes exigent une clé Bearer lorsque l'authentification est activée.",
+      "httpFailActionAddrInUse": "Close the app occupying the port, or change the HTTP port in Settings.",
+      "httpFailActionAddrNotAvailable": "Change the HTTP port in Settings.",
+      "httpFailActionOther": "Check the logs for details; on Windows also check the firewall.",
+      "httpFailActionPermissionDenied": "Allow MCPHub through Windows Defender Firewall and open inbound TCP {{port}}, or change the HTTP port in Settings.",
+      "httpFailAddress": "Service address",
+      "httpFailBadge": "MCP HTTP service is not running",
+      "httpFailBadgeHint": "Click to view the failure reason and retry",
+      "httpFailCauseAddrInUse": "Port {{port}} is already in use by another application.",
+      "httpFailCauseAddrNotAvailable": "Port {{port}} is not available on this host.",
+      "httpFailCauseOther": "Failed to bind port {{port}}.",
+      "httpFailCausePermissionDenied": "Permission denied — the firewall is likely blocking this app.",
+      "httpFailReason": "Reason",
+      "httpFailRetry": "Retry start",
+      "httpFailRetryFailed": "Retry failed. Check the firewall / port, then try again. See logs for details.",
+      "httpFailSuggestion": "Suggestion",
+      "httpFailTitle": "MCP HTTP service failed to start",
+      "mcpConfigCopied": "MCP client config copied to clipboard",
+      "mcpConfigCopiedPlaceholder": "MCP client config copied. Bearer auth is on — replace <your-bearer-token> with the key you want to use (copy it from Bearer key management).",
+      "mcpConfigCopiedWithAuth": "MCP client config copied (includes Bearer auth header)"
     },
     "servers": {
       "title": "Gestion des serveurs"
@@ -797,6 +855,9 @@
       "excludeFileGroupRemove": "Réinclure ces fichiers (reprendre les vérifications de mise à jour)",
       "refreshSourceDone": "Mise à jour de la source terminée : {{added}} importés, {{removed}} supprimés, {{updated}} mis à jour",
       "refreshSourceTitle": "Mise à jour de la source"
+    },
+    "skills": {
+      "title": "Skills"
     }
   },
   "logs": {
@@ -870,7 +931,11 @@
     "previewResources": "[ressources : {{items}}]",
     "previewAllTools": "(tous les outils)",
     "previewAllPrompts": "(tous les prompts)",
-    "previewAllResources": "(toutes les ressources)"
+    "previewAllResources": "(toutes les ressources)",
+    "legacyVisibility": "Groupe existant — choisir la visibilité",
+    "legacyVisibilityHint": "Ce groupe conserve ses règles d’accès précédentes jusqu’au choix explicite de sa visibilité.",
+    "visibilityDescription": "L’accès au groupe nécessite aussi l’accès à chaque serveur. Partager un groupe ne partage pas ses serveurs privés. Seuls le propriétaire et les administrateurs peuvent le gérer.",
+    "shareAfterCreate": "Enregistrez le groupe avant de sélectionner des utilisateurs."
   },
   "market": {
     "title": "Installation locale",
@@ -924,7 +989,22 @@
       "deny": "Refuser",
       "approveSubtitle": "Recommandé si vous faites confiance à cette application.",
       "denySubtitle": "Vous pourrez toujours accorder l'accès plus tard."
-    }
+    },
+    "application": "Application",
+    "scopesTitle": "Cette application pourra :",
+    "noScopes": "Aucune autorisation demandée.",
+    "requestInvalidTitle": "Demande invalide",
+    "requestInvalid": "Cette demande d'autorisation est invalide ou a expiré. Veuillez revenir en arrière et réessayer.",
+    "grantingAccessTo": "Accord de l'accès à :",
+    "resourceAll": "Tous les serveurs MCP",
+    "resourceSmart": "Routage intelligent",
+    "resourceServer": "Serveur MCP : {{name}}",
+    "resourceGroup": "Groupe MCP : {{name}}",
+    "clientId": "ID client",
+    "willRedirectTo": "Redirigera vers :",
+    "policy": "Politique de confidentialité",
+    "terms": "Conditions d'utilisation",
+    "homepage": "Page d'accueil"
   },
   "cloud": {
     "title": "Support Cloud",
@@ -1305,7 +1385,58 @@
     "runtimePhase.verifying": "Vérification",
     "runtimePhase.running": "Exécution",
     "runtimePhase.done": "Terminé",
-    "runtimePhase.error": "Erreur"
+    "runtimePhase.error": "Erreur",
+    "dynamicRegistrationClientTtl": "TTL de nettoyage des clients inactifs (secondes)",
+    "dynamicRegistrationClientTtlDescription": "Réclame les clients enregistrés dynamiquement, sans jeton actif ni flux d'autorisation en cours, plus anciens que cette durée. Mettre à 0 pour désactiver.",
+    "dynamicRegistrationClientTtlPlaceholder": "ex. 2592000",
+    "smartRoutingIndexTitle": "Index vectoriel et diagnostic",
+    "smartRoutingIndexRefresh": "Actualiser",
+    "smartRoutingIndexReindex": "Réindexer",
+    "smartRoutingIndexReindexing": "Réindexation…",
+    "smartRoutingIndexLoading": "Chargement…",
+    "smartRoutingIndexNoData": "Aucune donnée d’index. Activez le routage intelligent puis cliquez sur Réindexer pour construire le magasin vectoriel.",
+    "smartRoutingIndexStatsUnavailable": "Statistiques indisponibles",
+    "smartRoutingIndexDatabase": "Base de données",
+    "smartRoutingIndexConnected": "Connectée",
+    "smartRoutingIndexDisconnected": "Déconnectée",
+    "smartRoutingIndexUnhealthy": "Malsaine",
+    "smartRoutingIndexModel": "Modèle",
+    "smartRoutingIndexDimensions": "Dimensions",
+    "smartRoutingIndexTotalRows": "Lignes totales",
+    "smartRoutingIndexToolRows": "Lignes d’outils",
+    "smartRoutingIndexServerRows": "Lignes de serveurs",
+    "smartRoutingIndexClusterLabel": "Serveurs indexés",
+    "smartRoutingIndexCoverage": "Couverture",
+    "smartRoutingIndexLastSynced": "Dernière synchro",
+    "smartRoutingIndexPerServer": "Outils par serveur",
+    "smartRoutingIndexMissingIndex": "{{count}} serveur(s) activé(s) sans index",
+    "smartRoutingIndexSyncedRange": "Plage de synchro : {{oldest}} → {{newest}}",
+    "smartRoutingIndexReindexDone": "Réindexation terminée : {{synced}} synchronisé(s), {{failed}} échec(s), {{skipped}} ignoré(s), {{total}} outils au total",
+    "smartRoutingIndexReindexFailed": "Échec de la réindexation : {{message}}",
+    "smartRoutingIndexReindexStarting": "Démarrage de la réindexation…",
+    "smartRoutingIndexReindexingServer": "Réindexation de « {{server}} »",
+    "smartRoutingIndexReindexSummary": "Réindexation effectuée · {{synced}} synchronisé(s), {{failed}} échec(s), {{skipped}} ignoré(s), {{total}} outils",
+    "smartRoutingIndexReindexConfirmTitle": "Reconstruire l’index vectoriel ?",
+    "smartRoutingIndexReindexConfirmMessage": "Tous les embeddings existants seront effacés puis régénérés depuis zéro. Cela peut prendre du temps et consommer du quota API d’embedding.",
+    "smartRoutingIndexPersonalCredentials": "Serveurs à identifiants personnels",
+    "smartRoutingIndexSkippedReason": "Ignoré",
+    "smartRoutingIndexIndexedAs": "indexé en tant que {{principals}}",
+    "addSkillsAgent": "Add Agent",
+    "exposeHttp": "Enable HTTP Service",
+    "exposeHttpDescription": "When enabled, MCP services will be exposed to external clients via HTTP",
+    "httpPort": "HTTP Service Port",
+    "httpPortDescription": "MCP HTTP service listening port, restart required after changes",
+    "httpPortWarning": "After changing the port, you need to restart the application for changes to take effect",
+    "nodeVersion": "Node.js Version",
+    "nodeVersionDescription": "Select or install a specific Node.js version for running MCP servers",
+    "pythonVersion": "Python Version",
+    "pythonVersionDescription": "Select or install a specific Python version for running MCP servers",
+    "skillsAgentNamePlaceholder": "Agent name",
+    "skillsAgentPathPlaceholder": "Skills install path, e.g. ~/.claude/skills",
+    "skillsAgentsDescription": "Configure known AI agents' skills install paths, used for scanning and exporting skills. Paths may start with ~.",
+    "skillsAgentsSaveError": "Failed to save agent paths",
+    "skillsAgentsSaved": "Agent paths saved",
+    "skillsAgentsTitle": "Agent Install Paths"
   },
   "mcpb": {
     "upload": "Télécharger",
@@ -1447,7 +1578,8 @@
       "failedToGetMarketTags": "Échec de la récupération des tags du marché",
       "failedToSearchMarketServers": "Échec de la recherche des serveurs du marché",
       "failedToFilterMarketServers": "Échec du filtrage des serveurs du marché",
-      "failedToProcessMcpbFile": "Échec du traitement du fichier MCPB"
+      "failedToProcessMcpbFile": "Échec du traitement du fichier MCPB",
+      "failedToReloadServer": "Failed to reload server"
     },
     "success": {
       "serverCreated": "Serveur créé avec succès",
@@ -1647,6 +1779,192 @@
   },
   "skills": {
     "selectAllPage": "Tout sélectionner (page)",
-    "deselectAllPage": "Désélectionner"
+    "deselectAllPage": "Désélectionner",
+    "addCustomAgent": "Add Custom Agent",
+    "agentManagement": "Agent Management",
+    "agentSearchPlaceholder": "Search agents by name or path",
+    "alreadyImported": "Already imported",
+    "builtinAgentTag": "Built-in",
+    "close": "Close",
+    "confirmDelete": "Delete Skill",
+    "confirmDeleteBtn": "Delete",
+    "currentMethod": "Current",
+    "customAgentAddError": "Failed to add custom agent",
+    "customAgentAdded": "Custom agent added",
+    "customAgentName": "Agent name",
+    "customAgentNamePlaceholder": "e.g. MyAgent",
+    "customAgentNameRequired": "Agent name is required",
+    "customAgentPath": "Skills folder path",
+    "customAgentPathPlaceholder": "Pick or enter the skills directory path",
+    "customAgentPathRequired": "Folder path is required",
+    "customAgentTag": "Custom",
+    "delete": "Delete",
+    "deleteAgent": "Delete Agent",
+    "deleteAgentConfirm": "Delete this custom agent? Installed skills at its path are not removed.",
+    "deleteCopyOptional": "File copies in these agents are optional to delete:",
+    "deleteDialogTitle": "Delete Skill",
+    "deleteError": "Failed to delete skill",
+    "deleteLibraryCopy": "Will remove library copy: {{name}}",
+    "deleteNoExports": "This skill has not been exported to any agent.",
+    "deleteSuccess": "Deleted",
+    "deleteSymlinkMandatory": "Symlinks to these agents will be removed (mandatory):",
+    "deleteWarning": "Delete skill \"{{name}}\"? This removes the library copy but leaves files already exported to agents untouched.",
+    "empty": "No skills yet",
+    "emptyExports": "Not exported to any agent yet",
+    "export": "Export",
+    "exportDialogTitle": "Export to Agent",
+    "exportError": "Failed to export skills",
+    "exportMethod": "Export Method",
+    "exportMethodHelp": "View method explanation",
+    "exportSelectedAgents": "{{count}} target(s)",
+    "exportSuccess": "Exported {{count}} item(s)",
+    "exportSummary": "Export {{skills}} skill(s) → {{agents}} agent(s)",
+    "exportTargetAgents": "Target Agents",
+    "exportToAgent": "Export to Agent",
+    "fetchError": "Failed to load skills",
+    "fileCopy": "File Copy",
+    "fileCopyHelp": "Copy entity files to the target location; later edits do not affect the original.",
+    "hideEmptyAgents": "Hide agents without skills",
+    "import": "Import",
+    "importDialogTitle": "Import Skills",
+    "importError": "Failed to import skills",
+    "importExisting": "Import Existing",
+    "importFirst": "Import your first skill",
+    "importSelected": "{{count}} selected",
+    "importSuccess": "Imported {{count}} skills",
+    "install": "Install",
+    "installDialogTitle": "Install Skill",
+    "installError": "Install failed",
+    "installMethod": "Install Method",
+    "installSuccess": "Installed",
+    "installTargetAgents": "Target Agents",
+    "installedAgents": "Installed Agents",
+    "installedCount": "{{count}} installed",
+    "installedSection": "Installed",
+    "manualSelectSkills": "Manually select skill(s)",
+    "manualSelection": "Manual",
+    "noAgents": "No agents found",
+    "noSearchResults": "No matching results",
+    "noSkillFound": "No skill found (no SKILL.md)",
+    "noSkillsInAgent": "No skills found in this agent's path",
+    "notInstalledSection": "Not installed",
+    "openFolder": "Open Folder",
+    "openPathError": "Failed to open folder",
+    "openSkillFolder": "Open skill folder",
+    "openingPath": "Opening: {{path}}",
+    "pickFolder": "Pick Folder",
+    "pickFolderError": "Failed to pick folder",
+    "scanError": "Failed to scan skills",
+    "scanLoading": "Scanning installed skills…",
+    "searchAgents": "Search agents…",
+    "noAgentsFound": "Aucun agent correspondant",
+    "selectFolder": "Select Folder",
+    "skillSearchPlaceholder": "Search skills by name or description",
+    "switchTo": "Will switch to",
+    "symlink": "Symlink",
+    "symlinkHelp": "Create a soft reference or shortcut; all entity files are managed centrally — edit once, take effect everywhere.",
+    "symlinkSkill": "Symlink",
+    "symlinkSkillHint": "Soft-referenced skill, not importable (import from the agent holding the real directory)",
+    "uninstall": "Uninstall",
+    "uninstallConfirm": "Uninstall this skill from {{agent}}? Removes the install (symlink or file copy) at its path.",
+    "uninstallError": "Failed to uninstall",
+    "uninstallSuccess": "Uninstalled",
+    "view": "View",
+    "viewSkill": "View Skill",
+    "willInstall": "Will install"
+  },
+  "clientConfig": {
+    "title": "Copier la configuration MCP",
+    "description": "Choisissez votre client pour copier une configuration prête à coller pour {{name}}.",
+    "menuItem": "Copier la config MCP",
+    "tokenPrompt": "Jeton d'accès MCPHub",
+    "configBlock": "Configuration",
+    "commandBlock": "Commande CLI",
+    "copied": "Copié",
+    "noTransport": "Ce serveur n'a aucun transport MCP côté client (il est adossé à OpenAPI). Utilisez plutôt le hub ou un endpoint de groupe.",
+    "clients": {
+      "generic-mcp-servers": {
+        "label": "Générique (mcpServers)",
+        "hint": "Bloc mcpServers largement accepté : Claude Desktop, Cline, Cherry Studio et la plupart des clients."
+      },
+      "generic-http": {
+        "label": "HTTP générique",
+        "hint": "Solution de repli avec l'entrée brute : un endpoint distant donne une entrée HTTP brute (un upstream SSE porte le marqueur \"type\": \"sse\"), un serveur local une entrée stdio brute (command/args/env). Collez-la dans la table de serveurs du client ; pour la plupart des clients, utilisez Générique (mcpServers)."
+      },
+      "claude-code": {
+        "label": "Claude Code",
+        "hint": "Claude Code : `claude mcp add`, ou le bloc mcpServers dans ~/.claude.json."
+      },
+      "cursor": {
+        "label": "Cursor",
+        "hint": "Cursor : .cursor/mcp.json dans un projet, ou ~/.cursor/mcp.json en global."
+      },
+      "vscode": {
+        "label": "VS Code / Copilot",
+        "hint": "VS Code / Copilot : .vscode/mcp.json dans l'espace de travail, ou mcp.json dans votre profil utilisateur."
+      },
+      "codex": {
+        "label": "Codex",
+        "hint": "Codex : ~/.codex/config.toml, ou .codex/config.toml au niveau du projet."
+      },
+      "opencode": {
+        "label": "OpenCode",
+        "hint": "OpenCode : ~/.config/opencode/opencode.json en global, ou opencode.json dans le projet."
+      },
+      "windsurf": {
+        "label": "Windsurf",
+        "hint": "Windsurf : ~/.codeium/windsurf/mcp_config.json."
+      },
+      "cherry-studio": {
+        "label": "Cherry Studio",
+        "hint": "Cherry Studio : Paramètres > Serveurs MCP > Ajouter un serveur > Importer JSON."
+      },
+      "codebuddy": {
+        "label": "CodeBuddy Code",
+        "hint": "CodeBuddy Code : ~/.codebuddy/.mcp.json en global, ou .mcp.json dans le projet."
+      },
+      "qoder": {
+        "label": "Qoder",
+        "hint": "Qoder : Paramètres > MCP > Ajout manuel, puis collez le JSON."
+      },
+      "trae": {
+        "label": "TRAE",
+        "hint": "TRAE : Paramètres > MCP > Ajouter > Ajout manuel, puis collez le JSON."
+      },
+      "zcode": {
+        "label": "ZCode",
+        "hint": "ZCode : Paramètres > Serveurs MCP > Nouveau serveur MCP > Configuration complète."
+      },
+      "workbuddy": {
+        "label": "WorkBuddy",
+        "hint": "WorkBuddy : Plugins > Serveurs MCP > Configurer MCP, ou ~/.workbuddy/mcp.json."
+      }
+    }
+  },
+  "credentials": {
+    "title": "Identifiants",
+    "missing": "Des identifiants personnels sont requis pour « {{serverName}} ». Associez tous les champs requis dans Tableau de bord → Identifiants.",
+    "description": "Associez vos identifiants aux serveurs partagés. Chaque requête utilise les identifiants de son utilisateur.",
+    "slots": "Champs d’identifiants personnels",
+    "slotsHint": "Déclarez uniquement les noms des champs. Chaque champ est obligatoire, sans repli sur les identifiants de l’organisation.",
+    "fieldName": "Nom du champ",
+    "label": "Libellé (facultatif)",
+    "addSlot": "Ajouter un champ",
+    "removeSlot": "Retirer le champ",
+    "personalBadge": "Identifiants personnels",
+    "manage": "Gérer",
+    "configured": "Configuré",
+    "required": "Association requise",
+    "writeOnly": "Les valeurs enregistrées ne sont jamais affichées. Pour remplacer une association, renseignez tous les champs.",
+    "replaceValue": "Nouvelle valeur",
+    "enterValue": "Saisir l’identifiant",
+    "save": "Enregistrer",
+    "delete": "Supprimer l’association",
+    "saved": "Association enregistrée",
+    "deleted": "Association supprimée",
+    "failed": "Impossible de gérer les identifiants",
+    "showAll": "Afficher tous les serveurs",
+    "loading": "Chargement…",
+    "empty": "Aucun serveur partagé ne nécessite d’identifiants personnels."
   }
 }

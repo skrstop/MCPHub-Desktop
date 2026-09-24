@@ -100,11 +100,12 @@ export const EndpointCopy: React.FC<EndpointCopyProps> = ({
   return (
     <div className={cn('hub-endpoint', className)} role="group" aria-label={ariaLabel || url}>
       {label && <div className="hub-endpoint-label">{label}</div>}
-      <div className="hub-endpoint-url" title={url}>
-        {prefix && <span style={{ color: 'var(--hub-ink-3)' }}>{prefix}</span>}
-        {url}
-      </div>
-      <div className="flex items-stretch relative h-full" ref={dropdownRef}>
+      <div className="hub-endpoint-main">
+        <div className="hub-endpoint-url" title={url}>
+          {prefix && <span style={{ color: 'var(--hub-ink-3)' }}>{prefix}</span>}
+          {url}
+        </div>
+        <div className="hub-endpoint-actions flex items-stretch relative" ref={dropdownRef}>
         <button
           type="button"
           onClick={onButtonClick}
@@ -140,6 +141,7 @@ export const EndpointCopy: React.FC<EndpointCopyProps> = ({
             </button>
           </div>
         )}
+        </div>
       </div>
     </div>
   );

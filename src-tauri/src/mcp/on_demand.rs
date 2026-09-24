@@ -210,6 +210,18 @@ async fn run_call(
     idle_ms: u64,
 ) -> Result<ToolCallResult> {
     let call_start = Instant::now();
+    // Bump `last_used` before the call starts (origin #1164): a long-running
+    // tool must not be shut down mid-call by the idle timer, which checks
+    // `last_used` when it fires. Without this bump the timer's generation
+    // snapshot still matches during the call and the entry gets removed while
+    // the client lock is held.
+    {
+        let mut map = store().write().await;
+        if let Some(entry) = map.get_mut(server_name) {
+            entry.last_used = Instant::now();
+        }
+    }
+    schedule_idle(server_name, idle_ms).await;
     let result = {
         let client = client_arc.lock().await;
         client.call_tool(tool, arguments).await

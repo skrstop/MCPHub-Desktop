@@ -10,6 +10,14 @@ interface ServerFormProps {
   initialData?: Server | null;
   modalTitle: string;
   formError?: string | null;
+  /**
+   * Which flow this form drives. `initialData` pre-fills the form for the edit
+   * flow *and* for create flows that start from an existing configuration
+   * (duplicate), so it cannot decide this on its own: it defaults to 'edit'
+   * when `initialData` is set, and callers that create a server pass 'create'
+   * explicitly.
+   */
+  mode?: 'create' | 'edit';
 }
 
 const ServerForm = ({
@@ -18,6 +26,7 @@ const ServerForm = ({
   initialData = null,
   modalTitle,
   formError = null,
+  mode,
 }: ServerFormProps) => {
   const { t } = useTranslation();
 
@@ -55,6 +64,14 @@ const ServerForm = ({
       authorizationEndpoint: oauth?.authorizationEndpoint || '',
       tokenEndpoint: oauth?.tokenEndpoint || '',
       resource: oauth?.resource || '',
+      // Faithful pass-through (#1193): carry the non-editable OAuth sub-fields —
+      // the `dynamicRegistration` sub-object (RFC7591), `revocationEndpoint`
+      // (RFC 7009) and `redirectUri` — through the edit/duplicate round-trip so
+      // a save does not silently drop them. They have no in-form editors and
+      // are re-emitted verbatim by buildServerPayload.
+      ...(oauth?.dynamicRegistration && { dynamicRegistration: oauth.dynamicRegistration }),
+      ...(oauth?.revocationEndpoint && { revocationEndpoint: oauth.revocationEndpoint }),
+      ...(oauth?.redirectUri && { redirectUri: oauth.redirectUri }),
     };
   };
 
@@ -175,7 +192,7 @@ const ServerForm = ({
   const [isKeepAliveSectionExpanded, setIsKeepAliveSectionExpanded] = useState<boolean>(false);
   const [isAdvancedExpanded, setIsAdvancedExpanded] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const isEdit = !!initialData;
+  const isEdit = mode ? mode === 'edit' : !!initialData;
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
