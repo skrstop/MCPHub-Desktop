@@ -539,6 +539,10 @@ pub fn run() {
             commands::rag::rag_model_limits,
             commands::rag::rag_tools,
             commands::rag::set_rag_tags,
+            commands::rag::list_rag_excluded_paths,
+            commands::rag::set_rag_excluded_paths,
+            commands::rag::get_rag_git_clone_dir,
+            commands::rag::set_rag_source_alias,
             commands::rag::open_rag_file_location,
             commands::rag::open_rag_doc_source_file,
             commands::rag::rag_reindex_all,
@@ -550,6 +554,8 @@ pub fn run() {
             commands::rag::preview_batch_update,
             commands::rag::get_git_source_errors,
             commands::rag::batch_update_rag_docs,
+            commands::rag::refresh_rag_source,
+            commands::rag::preview_rag_source_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MCPHub application");

@@ -1403,6 +1403,14 @@ button.text-white.is-loading::after {
   to { transform: rotate(360deg); }
 }
 
+/* Indeterminate progress bar: a half-width bar sweeps left→right→left.
+   Used by the update-check confirm dialog's scan phase (no known total). */
+@keyframes hub-indeterminate {
+  0% { margin-left: -40%; }
+  50% { margin-left: 60%; }
+  100% { margin-left: -40%; }
+}
+
 /* Custom checkbox — reliable across WKWebView (accent-color is unreliable there).
    appearance:none removes the native control; :checked paints a blue box + white tick. */
 .hub-checkbox {
@@ -1446,3 +1454,17 @@ button.text-white.is-loading::after {
   to { transform: translateX(0); opacity: 1; }
 }
 .animate-toast-in { animation: toast-in 0.25s ease-out; }
+
+/* ── RAG 页窄窗口响应式（rag-col-* 列逐级隐藏） ─────────────────────────
+   文档行的 大小/分块/时间 列固定宽度 + 操作按钮列共 ~484px，窄窗口时把
+   名称列压到重叠（用户截图反馈）。按 时间→大小→分块 的信息优先级逐级
+   隐藏次要列，名称 + 操作列始终完整可见。表头同一组类名同步隐藏。 */
+@media (max-width: 1180px) {
+  .rag-col-time { display: none !important; }
+}
+@media (max-width: 1010px) {
+  .rag-col-size { display: none !important; }
+}
+@media (max-width: 900px) {
+  .rag-col-chunks { display: none !important; }
+}

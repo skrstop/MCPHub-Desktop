@@ -152,6 +152,22 @@ async fn git_pick_inner(
     // Stamp the scan with the head commit so uploads can record it in the
     // doc source (display only).
     scan.commit = Some(result.commit);
+    // Exclusion-registry match paths: the dialog checks/sets paths in the
+    // global registry, and the update pipeline compares against the doc's
+    // recorded original_path — which for git docs is the PERSISTENT clone
+    // path (temp->persistent mapping at upload), not the temp path the scan
+    // just returned. Re-stamp each file's match_path accordingly; files that
+    // don't map (unexpected) keep the temp path (harmless: they'd just never
+    // match the registry).
+    for g in &mut scan.groups {
+        for f in &mut g.files {
+            if let Ok(Some((_, persisted))) =
+                crate::rag::git::map_temp_to_persistent(app, &f.match_path)
+            {
+                f.match_path = persisted;
+            }
+        }
+    }
     Ok(scan)
 }
 
@@ -292,6 +308,55 @@ pub async fn batch_update_rag_docs(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Source-level manual update (the tree view's per-source refresh button):
+/// git — force-refresh the repo's persistent clone; then (both kinds) run the
+/// source-level sync scoped to this source (import added files / remove docs
+/// whose file vanished, same gates as the batch flow) and re-index the docs
+/// of this source whose md5 changed. Guarded by the same BATCH_UPDATE_RUNNING
+/// CAS as the batch flow — the frontend's shared progress dialog works for
+/// both. Returns (added, removed, updated) counts.
+#[tauri::command]
+pub async fn refresh_rag_source(
+    app: AppHandle,
+    kind: String,
+    url: Option<String>,
+    root: Option<String>,
+) -> Result<(u32, u32, u32), String> {
+    service::refresh_source_update(
+        &app,
+        service::SourceUpdateTarget {
+            kind,
+            url: url.unwrap_or_default(),
+            root: root.unwrap_or_default(),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Source-scoped batch preview: the confirm dialog counts for the tree view's
+/// per-source refresh button (same shape as preview_batch_update, but scoped
+/// to one source; git targets are force-refreshed first so the counts reflect
+/// the remote state).
+#[tauri::command]
+pub async fn preview_rag_source_update(
+    app: AppHandle,
+    kind: String,
+    url: Option<String>,
+    root: Option<String>,
+) -> Result<BatchPreview, String> {
+    service::preview_source_update(
+        &app,
+        service::SourceUpdateTarget {
+            kind,
+            url: url.unwrap_or_default(),
+            root: root.unwrap_or_default(),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn delete_rag_doc(app: AppHandle, id: String) -> Result<(), String> {
     service::delete_doc(&app, &id).await.map_err(|e| e.to_string())
@@ -344,6 +409,49 @@ pub async fn rag_doc_search_paged(
 #[tauri::command]
 pub async fn set_rag_tags(app: AppHandle, id: String, tags: Vec<String>) -> Result<(), String> {
     service::set_doc_tags(&app, &id, tags).await.map_err(|e| e.to_string())
+}
+
+/// Read the exclusion registry (`config_json.rag.excludedPaths`) — absolute
+/// paths (or directories) the update pipeline must ignore. Backs the import
+/// dialog's per-file ban toggles (initial state) and the doc-list badge.
+#[tauri::command]
+pub async fn list_rag_excluded_paths() -> Result<Vec<String>, String> {
+    Ok(service::list_excluded_paths().await)
+}
+
+/// Replace the exclusion registry wholesale. The import dialog persists its
+/// dialog-local toggles as a full diff (removed + added paths) in one call;
+/// the doc-list toggle sends the current list plus/minus one path. Returns
+/// the stored list (deduped/trimmed).
+#[tauri::command]
+pub async fn set_rag_excluded_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    service::set_excluded_paths(paths).await.map_err(|e| e.to_string())
+}
+
+/// The persistent clone directory for a git source URL. The tree view's
+/// per-source exclude button uses it as the registry entry (a dir entry
+/// prefix-covers every doc of that repo), keeping git-source exclusion on the
+/// same path-based mechanism as folder exclusion.
+#[tauri::command]
+pub async fn get_rag_git_clone_dir(app: AppHandle, url: String) -> Result<String, String> {
+    let dir = crate::rag::git::persistent_repo_dir_for_url(&app, &url)
+        .await
+        .ok_or_else(|| "git source has no persistent clone yet".to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Set (alias non-empty) or clear (alias empty) a folder/git source's display
+/// alias. `identity` = folder absolute root path / git canonical URL — the
+/// same values the doc list already carries as sourceRoot / gitUrl.
+#[tauri::command]
+pub async fn set_rag_source_alias(
+    kind: String,
+    identity: String,
+    alias: String,
+) -> Result<(), String> {
+    service::set_source_alias(kind, identity, alias)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

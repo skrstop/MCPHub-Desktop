@@ -67,6 +67,12 @@ fn default_source_sync_remove_enabled() -> bool {
     true
 }
 
+/// `skip_serializing_if` helper for `BatchPreview.excluded` (u32): omit the
+/// field from the wire when 0 so older frontends / API consumers see no change.
+fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 fn default_vector_weight() -> f32 {
     // Vector (semantic) search dominates by default — it carries the meaning;
     // keyword is a recall backstop. 0.9 / 0.1 is the recommended split for
@@ -195,6 +201,15 @@ pub struct RagDocInfo {
     /// the user view its imported copy.
     #[serde(default)]
     pub content_available: bool,
+    /// True iff the doc's recorded original_path is in the user's exclusion
+    /// registry (`config_json.rag.excludedPaths`). Excluded docs are ignored
+    /// by ALL update paths — batch preview/run, the auto-update tick, and the
+    /// single-doc "check original" — and their source files are never
+    /// re-imported by the source-level sync (add or remove). The UI shows a
+    /// badge + a toggle to re-include. `#[serde(default)]` keeps the field out
+    /// of the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub excluded: bool,
     /// Data-source display fields (kind + label + root + rel dir chain +
     /// git url/branch), filled by `classify_source` at read time. Legacy
     /// docs (no `source` in meta) classify as kind "file" — the tree view
@@ -273,6 +288,11 @@ pub struct RagDoc {
     pub git_url: String,
     #[serde(default)]
     pub git_branch: String,
+    /// True iff the doc's original_path is in the exclusion registry (see
+    /// `RagDocInfo.excluded`). `#[serde(default)]` keeps it off the wire when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub excluded: bool,
 }
 
 /// A search result fragment.
@@ -366,6 +386,15 @@ pub struct RagScanFile {
     /// under the right directory chain. Empty for multi-file picks.
     #[serde(default)]
     pub rel_path: String,
+    /// The canonical registry path this scan file resolves to, used by the
+    /// import dialog's exclusion feature: the UI checks/sets this path in the
+    /// global exclusion registry, and the update pipeline compares it against
+    /// the doc's `original_path`. Empty for multi-file picks (no root). For
+    /// git scans this is stamped by `git_pick_inner` AFTER the temp->persistent
+    /// mapping (the path the doc's original_path will record), so excluding a
+    /// git file in the dialog also blocks its future sync re-import.
+    #[serde(default)]
+    pub match_path: String,
 }
 
 /// Git source remote info attached to a doc's `DocSource` (kind = "git").
@@ -489,6 +518,12 @@ pub struct RagUpdateCheck {
     /// True iff symlink method + original_path missing (UI: only manual-upload
     /// is offered).
     pub lost_original: bool,
+    /// True iff the doc's original_path is in the user's exclusion registry —
+    /// update checks report it as "excluded" so the UpdateDialog can explain
+    /// why auto-update is off and offer to re-include. `#[serde(default)]`
+    /// keeps it off the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub excluded: bool,
     /// Git source refresh failure for this doc's repo (address changed /
     /// credentials revoked). None = repo refreshed fine or doc isn't git.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,6 +553,12 @@ pub struct BatchPreview {
     /// (folder/git) but no longer present in a fresh scan of that source ->
     /// will be deleted by the batch (source-level sync).
     pub removed: u32,
+    /// Docs in the user's exclusion registry — deliberately ignored by this
+    /// batch (no re-index, no source-sync add/remove). Shown as its own stat
+    /// card so the counts add up visually. `#[serde(default)]` keeps it off
+    /// the wire when 0.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub excluded: u32,
     /// Per-repo refresh failures (address changed / credentials revoked /
     /// network down). `label` = repo url @ branch, `auth` = true means the
     /// fix is credentials (re-pick in the import dialog), false = network /

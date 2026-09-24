@@ -43,6 +43,48 @@ export const listRagDocs = async (): Promise<RagDocInfo[]> => {
   return response.data || [];
 };
 
+/** Read the exclusion registry: absolute paths (or directories) the update
+ *  pipeline ignores (no re-index, no source-sync add/remove). */
+export const listRagExcludedPaths = async (): Promise<string[]> => {
+  const response: ApiResponse<string[]> = await apiGet('/rag/excluded-paths');
+  if (!response.success) throw new Error(response.message || 'Failed to list excluded paths');
+  return response.data || [];
+};
+
+/** Replace the exclusion registry wholesale. Returns the stored list. */
+export const setRagExcludedPaths = async (paths: string[]): Promise<string[]> => {
+  const response: ApiResponse<string[]> = await apiPost('/rag/excluded-paths/set', { paths });
+  if (!response.success) throw new Error(response.message || 'Failed to set excluded paths');
+  return response.data || [];
+};
+
+/** The persistent clone directory for a git source URL — the tree view's
+ *  per-source exclude button adds it to the exclusion registry (a dir entry
+ *  prefix-covers every doc of that repo). */
+export const getRagGitCloneDir = async (url: string): Promise<string> => {
+  const response: ApiResponse<string> = await apiGet(
+    `/rag/git-clone-dir?url=${encodeURIComponent(url)}`,
+  );
+  if (!response.success) throw new Error(response.message || 'Failed to get git clone dir');
+  return response.data || '';
+};
+
+/** Set (alias non-empty) or clear (alias empty) a folder/git source's display
+ *  alias. `identity` = folder root path / git URL (sourceRoot / gitUrl from
+ *  the doc list). */
+export const setRagSourceAlias = async (
+  kind: 'folder' | 'git',
+  identity: string,
+  alias: string,
+): Promise<void> => {
+  const response: ApiResponse<null> = await apiPost('/rag/source-alias', {
+    kind,
+    identity,
+    alias,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to set source alias');
+};
+
 /** Get the full content of a document (for the View dialog). Unpaged — kept
  *  for the rag_get MCP path; the View dialog uses `getRagDocPaged`. */
 export const getRagDoc = async (id: string): Promise<RagDoc | null> => {
@@ -262,6 +304,51 @@ export const getOcrStatus = async (): Promise<RagOcrStatus> => {
 export const batchUpdateRagDocs = async (): Promise<void> => {
   const response: ApiResponse = await apiPost('/rag/docs/batch-update', {});
   if (!response.success) throw new Error(response.message || 'Failed to start batch update');
+};
+
+/** Source-level manual update (the tree view's per-source refresh button):
+ *  git — force-refresh the repo's persistent clone; then (both kinds) run the
+ *  source-level sync scoped to this source + re-index its changed docs.
+ *  Runs INLINE (awaited) — progress arrives via the shared
+ *  `rag://batch-update-progress` events. Returns (added, removed, updated). */
+export const refreshRagSource = async (
+  kind: 'git' | 'folder' | 'file',
+  opts: { url?: string; root?: string } = {},
+): Promise<{ added: number; removed: number; updated: number }> => {
+  const response: ApiResponse<[number, number, number]> = await apiPost('/rag/source-update', {
+    kind,
+    url: opts.url ?? '',
+    root: opts.root ?? '',
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to refresh source');
+  const [added = 0, removed = 0, updated = 0] = response.data || [];
+  return { added, removed, updated };
+};
+
+/** Source-scoped batch preview: the confirm-dialog counts for the per-source
+ *  refresh button (same shape as the batch preview, scoped to one source;
+ *  git targets are force-refreshed first so counts reflect the remote). */
+export const previewRagSourceUpdate = async (
+  kind: 'git' | 'folder' | 'file',
+  opts: { url?: string; root?: string } = {},
+): Promise<BatchPreview> => {
+  const response: ApiResponse<BatchPreview> = await apiPost('/rag/source-update/preview', {
+    kind,
+    url: opts.url ?? '',
+    root: opts.root ?? '',
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to preview source update');
+  return (
+    response.data || {
+      total: 0,
+      toUpdate: 0,
+      skipped: 0,
+      lost: 0,
+      added: 0,
+      removed: 0,
+      gitErrors: [],
+    }
+  );
 };
 
 /** Set the absolute tag list for a document (re-indexes its chunks). */

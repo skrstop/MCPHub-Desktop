@@ -267,6 +267,9 @@ export interface RagDoc {
   /** True iff the recorded originalPath is missing on disk (both symlink +
    *  copy count — the ⚠️ badge + auto-update skip apply to both). */
   lostOriginal?: boolean;
+  /** True iff the doc's originalPath is in the exclusion registry (see
+   *  RagDocInfo.excluded). */
+  excluded?: boolean;
   /** True iff the doc's content is readable right now (symlink = original
    *  exists; copy = the rag/files copy exists). View/open-location are gated
    *  on this — a copy doc whose original vanished still has its copy. */
@@ -317,6 +320,10 @@ export interface RagDocInfo {
   /** True iff the recorded originalPath is missing on disk (both symlink +
    *  copy count — the ⚠️ badge + auto-update skip apply to both). */
   lostOriginal?: boolean;
+  /** True iff the doc's originalPath is in the exclusion registry — all
+   *  update paths (batch/auto/single check + source sync add/remove) ignore
+   *  it. The UI shows a badge + a toggle to re-include. */
+  excluded?: boolean;
   /** True iff the doc's content is readable right now (symlink = original
    *  exists; copy = the rag/files copy exists). View/open-location are gated
    *  on this — a copy doc whose original vanished still has its copy. */
@@ -376,6 +383,9 @@ export interface RagUpdateCheck {
   originalChanged: boolean;
   /** True iff symlink method + originalPath missing (UI: manual-upload only). */
   lostOriginal: boolean;
+  /** True iff the doc's originalPath is in the exclusion registry — the
+   *  UpdateDialog explains why auto-update is off + offers to re-include. */
+  excluded?: boolean;
   /** Git source refresh failure (credentials revoked / address moved). The
    *  md5 check above may be against a stale clone. */
   gitError?: GitSourceError | null;
@@ -413,6 +423,8 @@ export interface BatchPreview {
   added: number;
   /** Docs whose source file vanished from a known folder/git source -> will be removed. */
   removed: number;
+  /** Docs in the exclusion registry — deliberately ignored by this batch. */
+  excluded?: number;
   /** Per-repo git refresh failures (credentials revoked / address moved). */
   gitErrors?: GitSourceError[];
 }
@@ -571,6 +583,12 @@ export interface RagScanFile {
   /** Dir chain relative to the scan root ("/"-separated, "" = root level).
    *  Carried into the imported doc's DocSource.relPath for the tree view. */
   relPath?: string;
+  /** Absolute path to check/set in the exclusion registry for this file. For
+   *  folder scans this equals `path`; for git scans the backend re-stamps it
+   *  to the persistent-clone path (the path the doc's originalPath will
+   *  record), so excluding a git file also blocks its future sync re-import.
+   *  Empty for multi-file picks (no root → not part of a sync-able source). */
+  matchPath?: string;
 }
 
 /** One folder group in a recursive folder-scan result: the folder's path

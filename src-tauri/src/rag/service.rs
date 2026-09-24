@@ -188,6 +188,13 @@ struct RagBatchUpdateProgress {
 
 const BATCH_UPDATE_PROGRESS_EVENT: &str = "rag://batch-update-progress";
 
+/// Preview-scan progress event (the confirm dialog's live scan progress —
+/// the dialog used to show only a bare spinner line while the preview ran).
+/// Phases: "metas" (reading .meta files) | "git" (refreshing repo i/n) |
+/// "scan" (source sync plan: scanning folders) | "checking" (md5 check per
+/// doc, i/n with the doc name).
+const PREVIEW_PROGRESS_EVENT: &str = "rag://preview-progress";
+
 fn emit_batch_update_progress(
     app: &AppHandle,
     current: u32,
@@ -203,6 +210,20 @@ fn emit_batch_update_progress(
     };
     if let Err(e) = app.emit(BATCH_UPDATE_PROGRESS_EVENT, &payload) {
         log::warn!("[RAG] emit batch-update-progress failed: {e}");
+    }
+}
+
+/// Emit one preview-scan progress frame (same shape as the batch progress —
+/// consumed by the confirm dialog's live scan-progress row).
+fn emit_preview_progress(app: &AppHandle, current: u32, total: u32, name: &str, phase: &str) {
+    let payload = RagBatchUpdateProgress {
+        current,
+        total,
+        name: name.to_string(),
+        phase: phase.to_string(),
+    };
+    if let Err(e) = app.emit(PREVIEW_PROGRESS_EVENT, &payload) {
+        log::warn!("[RAG] emit preview-progress failed: {e}");
     }
 }
 
@@ -489,6 +510,139 @@ fn path_under_root(path: &str, root: &str) -> bool {
     path == root || path.starts_with(&format!("{root}/"))
 }
 
+// ── exclusion registry: paths the update pipeline must ignore ───────────────
+//
+// Users can exclude individual files (or whole directories) from update
+// processing. Excluded paths live in `config_json.rag.excludedPaths` (a JSON
+// array of absolute paths) — same store as the other RAG settings, no schema
+// change. Semantics:
+// - `preview_batch_update` / `run_batch_update` / the auto-update tick: an
+//   excluded doc is never re-indexed, never source-sync-removed, and its file
+//   is never source-sync-re-imported.
+// - `check_rag_update` (single-doc dialog): reports `excluded: true` so the UI
+//   can explain why nothing will auto-update + offer to re-include.
+// - `plan_source_sync`: a scanned file whose match path is excluded is not
+//   "new"; a doc whose original_path is excluded is not "removable".
+// A directory entry excludes everything under it (`path_under_root`).
+
+/// Read the exclusion registry. Best-effort: a config read failure returns an
+/// empty set (fail-open — updates keep working; the UI just won't see flags).
+pub async fn list_excluded_paths() -> Vec<String> {
+    let cfg = match crate::services::config_service::get().await {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    cfg.get("rag")
+        .and_then(|r| r.get("excludedPaths"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// Replace the whole exclusion registry with `paths` (deduped, trimmed,
+/// non-empty). Called by the import dialog (persist its dialog-local toggles)
+/// and the doc-list toggle (add/remove one path). Returns the stored list.
+pub async fn set_excluded_paths(paths: Vec<String>) -> Result<Vec<String>> {
+    let cleaned = normalize_excluded_paths(paths);
+    let patch = json!({ "rag": { "excludedPaths": cleaned } });
+    crate::services::config_service::update(&patch).await?;
+    Ok(cleaned)
+}
+
+/// Normalize a caller-supplied path list: trim, drop empties, dedup
+/// (order-preserving). Shared by `set_excluded_paths` and its unit test.
+fn normalize_excluded_paths(paths: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty() && seen.insert(p.clone()))
+        .collect()
+}
+
+// ── source aliases（folder/git 数据源的自定义别名） ─────────────────────────
+// Registry: config_json.rag.sourceAliases — identity -> alias, where identity
+// is the folder's absolute root path or the git canonical URL. Applied at
+// read time in doc_info_from_meta (an alias set on a source shows on every
+// doc of that source in the tree); an empty alias removes the entry (falls
+// back to the derived default label).
+
+/// Read the alias registry. Best-effort: a config read failure returns an
+/// empty map (labels just fall back to defaults). Entries with an empty
+/// string value are tombstones (set by `set_source_alias` on clear) and are
+/// filtered out — config_service::update deep-merges objects key-by-key, so
+/// a removed key would otherwise survive; the tombstone overwrites it.
+pub async fn list_source_aliases() -> std::collections::HashMap<String, String> {
+    let cfg = match crate::services::config_service::get().await {
+        Ok(c) => c,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    cfg.get("rag")
+        .and_then(|r| r.get("sourceAliases"))
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    v.as_str()
+                        .map(|s| (k.clone(), s.trim().to_string()))
+                        .filter(|(_, s)| !s.is_empty())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set (alias non-empty) or clear (alias empty) the alias for a folder/git
+/// source identity. `kind` is only validated for sanity ("folder" | "git").
+/// Clear writes an EMPTY-STRING tombstone rather than removing the key:
+/// `config_service::update` deep-merges object values key-by-key, so an
+/// absent key would leave the old alias in place (observed: clearing in the
+/// rename dialog kept the alias until another set overwrote it). The reader
+/// filters empty values out.
+pub async fn set_source_alias(kind: String, identity: String, alias: String) -> Result<()> {
+    if kind != "folder" && kind != "git" {
+        return Err(anyhow!("unsupported source kind: {}", kind));
+    }
+    let identity = identity.trim().to_string();
+    if identity.is_empty() {
+        return Err(anyhow!("source identity is empty"));
+    }
+    let mut aliases = list_source_aliases().await;
+    let alias = alias.trim();
+    if alias.is_empty() {
+        // Tombstone (deep-merge can't express key removal).
+        aliases.insert(identity, String::new());
+    } else {
+        aliases.insert(identity, alias.to_string());
+    }
+    let patch = json!({ "rag": { "sourceAliases": aliases } });
+    crate::services::config_service::update(&patch).await?;
+    Ok(())
+}
+
+/// Is `path` (or any of its ancestors) in the exclusion registry?
+pub(crate) async fn is_path_excluded(path: &str, excluded: &[String]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    excluded.iter().any(|e| path_under_root(path, e))
+}
+
+/// Convenience wrapper for single-path checks (no registry in hand).
+pub(crate) async fn path_excluded(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let excluded = list_excluded_paths().await;
+    is_path_excluded(path, &excluded).await
+}
+
 /// Scan the known folder/git sources for level changes: files that appeared
 /// (no doc references them) and docs whose file vanished from the source.
 /// Pure detection (no writes) — the batch preview reports the counts and the
@@ -513,6 +667,10 @@ async fn plan_source_sync(
     }
     let mut added: Vec<SourceSyncAdd> = Vec::new();
     let mut removed: Vec<(String, String)> = Vec::new();
+    // Exclusion registry: paths (or dirs) the user told us to ignore. A
+    // scanned file whose path is excluded is never "new"; a doc whose
+    // original_path is excluded is never "removable".
+    let excluded = list_excluded_paths().await;
 
     // Distinct folder roots (kind == "folder" with a recorded root).
     let mut folder_roots: Vec<String> = Vec::new();
@@ -544,7 +702,7 @@ async fn plan_source_sync(
         for group in &scan.groups {
             for f in &group.files {
                 current.insert(f.path.clone());
-                if !referenced.contains(&f.path) {
+                if !referenced.contains(&f.path) && !is_path_excluded(&f.path, &excluded).await {
                     added.push(SourceSyncAdd {
                         path: f.path.clone(),
                         source: crate::models::rag::DocSource {
@@ -564,8 +722,13 @@ async fn plan_source_sync(
                 // Removal requires BOTH: not in the fresh scan AND actually
                 // gone from disk. The scan applies extension/ignore filters —
                 // a file that merely fell out of the scan's candidate set
-                // (filter drift) must not delete its doc.
-                if path_under_root(op, root) && !current.contains(op) && !std::path::Path::new(op).exists() {
+                // (filter drift) must not delete its doc. Excluded docs are
+                // never removed (the user pinned them).
+                if path_under_root(op, root)
+                    && !current.contains(op)
+                    && !std::path::Path::new(op).exists()
+                    && !is_path_excluded(op, &excluded).await
+                {
                     removed.push((meta.id.clone(), meta.name.clone()));
                 }
             }
@@ -602,7 +765,7 @@ async fn plan_source_sync(
         for group in &scan.groups {
             for f in &group.files {
                 current.insert(f.path.clone());
-                if !referenced.contains(&f.path) {
+                if !referenced.contains(&f.path) && !is_path_excluded(&f.path, &excluded).await {
                     added.push(SourceSyncAdd {
                         path: f.path.clone(),
                         source: crate::models::rag::DocSource {
@@ -628,7 +791,12 @@ async fn plan_source_sync(
         for meta in docs {
             if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
                 // Same dual check as folders: scan-miss + file really gone.
-                if path_under_root(op, &persistent.to_string_lossy()) && !current.contains(op) && !std::path::Path::new(op).exists() {
+                // Excluded docs are never removed.
+                if path_under_root(op, &persistent.to_string_lossy())
+                    && !current.contains(op)
+                    && !std::path::Path::new(op).exists()
+                    && !is_path_excluded(op, &excluded).await
+                {
                     removed.push((meta.id.clone(), meta.name.clone()));
                 }
             }
@@ -638,7 +806,7 @@ async fn plan_source_sync(
     // Single-file data sources (kind == "file", incl. legacy docs with no
     // recorded source): the original IS the source — vanished file = doc
     // removable. Dual check unnecessary (no scan/filter involved): the file
-    // simply must not exist on disk.
+    // simply must not exist on disk. Excluded docs are never removed.
     for meta in docs {
         let is_file_source = match meta.source.as_ref() {
             Some(src) => src.kind == "file",
@@ -648,7 +816,10 @@ async fn plan_source_sync(
             continue;
         }
         if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
-            if !removed.iter().any(|(id, _)| id == &meta.id) && !std::path::Path::new(op).exists() {
+            if !removed.iter().any(|(id, _)| id == &meta.id)
+                && !std::path::Path::new(op).exists()
+                && !is_path_excluded(op, &excluded).await
+            {
                 removed.push((meta.id.clone(), meta.name.clone()));
             }
         }
@@ -2419,6 +2590,9 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
     // (used to resolve the on-disk file name per doc).
     let dir_clone = dir.clone();
     let mut entries = tokio::task::spawn_blocking(move || std::fs::read_dir(&dir_clone)).await??;
+    // One registry read for the whole list (see doc_info_from_meta).
+    let excluded_paths = list_excluded_paths().await;
+    let aliases = list_source_aliases().await;
     while let Some(entry) = entries.next() {
         let entry = entry?;
         let path = entry.path();
@@ -2432,7 +2606,7 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
         // manual edit) must not blank the entire doc list.
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
-        out.push(doc_info_from_meta(&dir, meta));
+        out.push(doc_info_from_meta(&dir, meta, &excluded_paths, &aliases));
     }
     out.sort_by(|a, b| b.uploaded_at.cmp(&a.uploaded_at));
     Ok(out)
@@ -2442,7 +2616,16 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
 /// on-disk file name (uuid for uploads, meta.name for rag_file_create) and the
 /// filesystem-derived flags (lost_original / content_available). Shared by
 /// `list_docs` (full scan) and `search_docs_paged` (page enrichment only).
-fn doc_info_from_meta(dir: &Path, meta: DocMeta) -> RagDocInfo {
+/// `excluded_paths` is the caller's pre-read exclusion registry (one config
+/// read per list/page, not per doc). `aliases` is the caller's pre-read
+/// source-alias registry (same one-read-per-page pattern): a folder/git
+/// source with an alias shows the alias as its display label.
+fn doc_info_from_meta(
+    dir: &Path,
+    meta: DocMeta,
+    excluded_paths: &[String],
+    aliases: &std::collections::HashMap<String, String>,
+) -> RagDocInfo {
     // The actual on-disk file name - content_path_for resolves which exists.
     // Surfaced so the user can match the file when its folder is opened.
     // Empty for "symlink" docs (no copied file - content lives at original_path).
@@ -2484,6 +2667,19 @@ fn doc_info_from_meta(dir: &Path, meta: DocMeta) -> RagDocInfo {
     let file_type = meta.file_type.clone().unwrap_or_else(|| file_type_label(&meta.name));
     let (source_kind, source_label, source_root, rel_path, git_url, git_branch) =
         classify_source(&meta);
+    // Alias override: folder identity = root path, git identity = URL. A user
+    // alias replaces the derived label (tree source node + tooltips).
+    let source_label = if source_kind == "folder" {
+        aliases.get(source_root.as_str()).cloned().unwrap_or(source_label)
+    } else if source_kind == "git" {
+        aliases.get(git_url.as_str()).cloned().unwrap_or(source_label)
+    } else {
+        source_label
+    };
+    // Exclusion flag: the registry is read by the CALLER (one read per page /
+    // list, not per doc) and passed in — a per-doc config read would multiply
+    // DB hits by the doc count.
+    let excluded = is_excluded_sync(meta.original_path.as_deref().unwrap_or(""), excluded_paths);
     RagDocInfo {
         id: meta.id,
         name: meta.name,
@@ -2499,6 +2695,7 @@ fn doc_info_from_meta(dir: &Path, meta: DocMeta) -> RagDocInfo {
         md5: meta.md5.clone().unwrap_or_default(),
         lost_original,
         content_available,
+        excluded,
         source_kind,
         source_label,
         source_root,
@@ -2612,11 +2809,14 @@ pub async fn search_docs_paged(
                     .map(|(id, _)| id.clone())
                     .collect();
                 let mut items = Vec::with_capacity(window.len());
+                // One registry read for the whole page (see doc_info_from_meta).
+                let excluded_paths = list_excluded_paths().await;
+                let aliases = list_source_aliases().await;
                 for id in window {
                     let meta_path = dir.join(format!("{}.meta", id));
                     let Ok(bytes) = std::fs::read(&meta_path) else { continue };
                     let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
-                    items.push(doc_info_from_meta(&dir, meta));
+                    items.push(doc_info_from_meta(&dir, meta, &excluded_paths, &aliases));
                 }
                 return Ok(RagDocPage { items, total, page, page_size });
             }
@@ -2672,12 +2872,15 @@ pub async fn search_docs_paged(
     // Enrich just this page from the .meta files (source of truth). Skip
     // unreadable/corrupt metas - same policy as list_docs.
     let mut items = Vec::with_capacity(rows.len());
+    // One registry read for the whole page (see doc_info_from_meta).
+    let excluded_paths = list_excluded_paths().await;
+    let aliases = list_source_aliases().await;
     for row in rows {
         let id: String = sqlx::Row::try_get(&row, "id")?;
         let meta_path = dir.join(format!("{}.meta", id));
         let Ok(bytes) = std::fs::read(&meta_path) else { continue };
         let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
-        items.push(doc_info_from_meta(&dir, meta));
+        items.push(doc_info_from_meta(&dir, meta, &excluded_paths, &aliases));
     }
     Ok(RagDocPage {
         items,
@@ -2812,6 +3015,7 @@ async fn get_doc_inner(
             truncated,
             next_offset,
             content_total_bytes: total_bytes,
+            excluded: path_excluded(meta.original_path.as_deref().unwrap_or("")).await,
             source_kind,
             source_label,
             source_root,
@@ -3111,6 +3315,11 @@ fn scan_folder(folder: &std::path::Path, recursive: bool) -> RagFolderScan {
                     name,
                     size: md.len(),
                     rel_path: rel.to_string_lossy().replace('\\', "/"),
+                    // Registry match path = the absolute file path. For folder
+                    // scans this IS `path` (docs record original_path = the
+                    // same absolute path). Git scans get re-stamped by
+                    // `git_pick_inner` after the temp->persistent mapping.
+                    match_path: path.to_string_lossy().to_string(),
                 });
                 *total += 1;
             }
@@ -3759,7 +3968,17 @@ fn classify_source(meta: &DocMeta) -> (String, String, String, String, String, S
     )
 }
 
-fn classify_original(meta: &DocMeta) -> RagUpdateCheck {
+/// Is `path` (or any of its ancestors) in the exclusion registry? Sync
+/// counterpart of `is_path_excluded` for contexts that already hold the
+/// registry (classification loops over many docs).
+fn is_excluded_sync(path: &str, excluded: &[String]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    excluded.iter().any(|e| path_under_root(path, e))
+}
+
+fn classify_original(meta: &DocMeta, excluded: &[String]) -> RagUpdateCheck {
     let method = meta.method.clone().unwrap_or_else(|| "copy".to_string());
     let is_symlink = method == "symlink";
     let original_path = meta.original_path.as_deref();
@@ -3786,6 +4005,7 @@ fn classify_original(meta: &DocMeta) -> RagUpdateCheck {
     // in the batch preview — inconsistent with the list's lostOriginal badge.)
     let lost_original = has_original_path && !original_exists;
     let _ = is_symlink; // kept for clarity; not gating lost_original anymore.
+    let excluded = is_excluded_sync(original_path.unwrap_or(""), excluded);
     RagUpdateCheck {
         method,
         has_original_path,
@@ -3793,6 +4013,7 @@ fn classify_original(meta: &DocMeta) -> RagUpdateCheck {
         has_md5,
         original_changed,
         lost_original,
+        excluded,
         git_error: None,
     }
 }
@@ -4841,7 +5062,7 @@ pub async fn check_rag_update(app: &AppHandle, id: &str) -> Result<RagUpdateChec
             }
         }
     }
-    let mut result = classify_original(&meta);
+    let mut result = classify_original(&meta, &list_excluded_paths().await);
     result.git_error = git_error;
     Ok(result)
 }
@@ -4865,6 +5086,7 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
             lost: 0,
             added: 0,
             removed: 0,
+            excluded: 0,
             git_errors: Vec::new(),
         });
     }
@@ -4872,6 +5094,11 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
     let mut to_update = 0u32;
     let mut skipped = 0u32;
     let mut lost = 0u32;
+    let mut excluded_count = 0u32;
+    // Exclusion registry: docs whose original_path matches are counted as
+    // `excluded` and skipped by every branch below (never re-indexed, never
+    // source-sync-removed, their file never re-imported).
+    let excluded_paths = list_excluded_paths().await;
     // First pass: collect metas (needed both for the git-repo refresh pass
     // and the classification loop).
     let mut docs: Vec<DocMeta> = Vec::new();
@@ -4884,6 +5111,7 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         docs.push(meta);
     }
+    emit_preview_progress(app, 0, docs.len() as u32, "", "metas");
     // Git repos: refresh each distinct repo once before classification so the
     // md5 check sees the remote content. Refreshes run CONCURRENTLY (N offline
     // repos cost one timeout, not N); failures are collected and reported to
@@ -4892,6 +5120,7 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
     if refresh_git {
         let urls = collect_git_repo_urls(&docs);
         if !urls.is_empty() {
+            emit_preview_progress(app, 0, urls.len() as u32, "", "git");
             let app2 = app.clone();
             let futs: Vec<_> = urls
                 .iter()
@@ -4906,11 +5135,13 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
                     git_errors.push(err);
                 }
             }
+            emit_preview_progress(app, urls.len() as u32, urls.len() as u32, "", "git");
         }
     }
     // Source-level sync plan (dry run): files added/removed in folder/git
     // sources. Docs that the sync will REMOVE are counted as `removed`, not
     // `lost` (they'd otherwise double-report as lost originals).
+    emit_preview_progress(app, 0, 0, "", "scan");
     let (mut sync_added, mut sync_removed) = plan_source_sync(app, &docs).await.unwrap_or_default();
     // Apply the SAME "自动同步新增文件" gate as run_batch_update — otherwise the
     // confirm dialog would advertise adds that never happen, and the auto-tick
@@ -4949,14 +5180,20 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
         sync_removed.iter().map(|(id, _)| id.as_str()).collect();
     let added_count = sync_added.len() as u32;
     let removed_count = sync_removed.len() as u32;
-    for meta in &docs {
+    let classify_total = docs.len() as u32;
+    for (ci, meta) in docs.iter().enumerate() {
+        emit_preview_progress(app, ci as u32 + 1, classify_total, &meta.name, "checking");
         total += 1;
         if removed_ids.contains(meta.id.as_str()) {
             // The sync will delete this doc — counted via `removed` below
             // (= sync plan size), not as a lost original.
             continue;
         }
-        let c = classify_original(meta);
+        if is_excluded_sync(meta.original_path.as_deref().unwrap_or(""), &excluded_paths) {
+            excluded_count += 1;
+            continue;
+        }
+        let c = classify_original(meta, &excluded_paths);
         if c.lost_original {
             lost += 1;
         } else if !c.has_original_path {
@@ -4976,6 +5213,7 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
         lost,
         added: added_count,
         removed: removed_count,
+        excluded: excluded_count,
         git_errors,
     })
 }
@@ -5130,11 +5368,14 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
         rag_log("info", format!("batch_update: source sync applied (added {a}, removed {r})"));
     }
     let total = docs.len() as u32;
+    // Exclusion registry: excluded docs are skipped entirely (no re-index).
+    // plan_source_sync already gates add/remove on the same registry.
+    let excluded_paths = list_excluded_paths().await;
     for (i, meta) in docs.iter().enumerate() {
-        let c = classify_original(meta);
+        let c = classify_original(meta, &excluded_paths);
         emit_batch_update_progress(app, i as u32, total, &meta.name, "checking");
-        // Lost original or legacy-no-path -> skip (manual-upload-only).
-        if c.lost_original || !c.has_original_path {
+        // Excluded (user-pinned) or lost original or legacy-no-path -> skip.
+        if c.excluded || c.lost_original || !c.has_original_path {
             continue;
         }
         if !c.original_changed {
@@ -5151,6 +5392,508 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
     }
     rag_log("info", format!("batch_update: done ({} docs)", total));
     Ok(())
+}
+
+/// One data source's identity for the source-level manual update (the tree
+/// view's per-source refresh button): kind "git" (url selects the repo),
+/// "folder" (root selects the directory), or "file" (the logical 文件 group —
+/// single-file imports + legacy no-source docs; re-index only, no sync).
+/// File/tool sources have nothing to fetch remotely.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUpdateTarget {
+    /// "git" | "folder"
+    pub kind: String,
+    /// Git repo URL (kind == "git").
+    #[serde(default)]
+    pub url: String,
+    /// Folder root absolute path (kind == "folder").
+    #[serde(default)]
+    pub root: String,
+}
+
+/// Source-level manual update (the tree view's per-source refresh button):
+/// 1. git — force-refresh the repo's persistent clone (TTL bypassed: the user
+///    clicked the button explicitly), reporting refresh failures through the
+///    same GitSourceError channel as the batch flow.
+/// 2. plan + run the source-level sync SCOPED to this source only (import
+///    files added under it, remove docs whose file vanished from it) — the
+///    same add/remove gates as the batch flow apply (exclusion registry,
+///    "自动同步新增/删除文件" switches, import-session deferral).
+/// 3. re-index the docs OF THIS SOURCE whose md5 changed (git refresh may
+///    have brought new content).
+///
+/// Guarded by the same `BATCH_UPDATE_RUNNING` CAS as the batch flow so a
+/// source update can't overlap a batch/auto run (and vice versa) — the
+/// frontend's batchUpdateRunning state + progress dialog therefore work for
+/// both (the same `rag://batch-update-progress` events drive the dialog).
+/// Runs INLINE (awaited) — the frontend shows the shared progress dialog
+/// while this command is in flight.
+pub async fn refresh_source_update(
+    app: &AppHandle,
+    target: SourceUpdateTarget,
+) -> Result<(u32, u32, u32)> {
+    // CAS guard: overlap with batch/auto would double-import / race the
+    // persistent clone swap. A second trigger while one runs is a no-op
+    // error (the frontend disables the button while running anyway).
+    if BATCH_UPDATE_RUNNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err(anyhow!("another update is already running"));
+    }
+    struct RunningGuard;
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            BATCH_UPDATE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _guard = RunningGuard;
+
+    if import_session_active() {
+        return Err(anyhow!("import in progress, try again later"));
+    }
+
+    let dir = files_dir(app)?;
+    // Collect metas (best-effort, same policy as the batch flow).
+    let mut docs: Vec<DocMeta> = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+            docs.push(meta);
+        }
+    }
+
+    // 1. Git: force refresh (TTL bypassed — explicit user action). The
+    //    refresh re-clones into the persistent dir; failures surface to the
+    //    caller as Err (the frontend shows the reason inline) but the sync
+    //    below still runs against the existing clone content.
+    if target.kind == "git" {
+        if target.url.is_empty() {
+            return Err(anyhow!("git source url is empty"));
+        }
+        // Force: drop the TTL entry so refresh_git_repo actually re-clones.
+        let hash = super::git::repo_hash(&target.url);
+        if let Ok(mut cache) = git_refresh_cache().lock() {
+            cache.remove(&hash);
+        }
+        // GitSourceError doesn't impl std::error::Error -> map manually (the
+        // structured detail is what the frontend shows inline).
+        if let Err(err) = refresh_git_repo(app, &target.url).await {
+            return Err(anyhow!(
+                "{}{}",
+                if err.auth { "认证失败：" } else { "拉取失败：" },
+                err.message
+            ));
+        }
+    } else if target.kind == "folder" {
+        if target.root.is_empty() || !Path::new(&target.root).exists() {
+            return Err(anyhow!("folder source root missing: {}", target.root));
+        }
+    } else if target.kind != "file" {
+        // "file" = the logical 文件 group (single-file imports + legacy
+        // no-source docs): no remote to fetch, no dir to scan — just re-index
+        // the in-scope docs whose md5 changed (step 3 below).
+        return Err(anyhow!("unsupported source kind: {}", target.kind));
+    }
+
+    // 2. Source sync scoped to THIS source (shared helper — also used by the
+    //    source-scoped preview so the confirm dialog's counts match the run).
+    let (mut sync_added, mut sync_removed) =
+        plan_source_sync_scoped(app, &docs, &target).await?;
+    // Same gates as the batch flow (preview + run agree on these).
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_add_enabled)
+        .unwrap_or(false)
+    {
+        sync_added.clear();
+    }
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_remove_enabled)
+        .unwrap_or(true)
+    {
+        sync_removed.clear();
+    }
+    let (added, removed) = if sync_added.is_empty() && sync_removed.is_empty() {
+        (0, 0)
+    } else {
+        let total = docs.len() as u32;
+        emit_batch_update_progress(app, 0, total, "", "sync");
+        run_source_sync(app, sync_added, sync_removed).await
+    };
+
+    // 3. Re-index docs of THIS source whose md5 changed. For git the refresh
+    //    may have brought new content; for folder the user may have edited
+    //    files since the last check. Re-collect metas (adds above changed the
+    //    set) and filter by the source identity recorded in each meta.
+    let mut docs2: Vec<DocMeta> = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+            docs2.push(meta);
+        }
+    }
+    let excluded_paths = list_excluded_paths().await;
+    // Legacy docs (no source): classify by original_path prefix under the
+    // target root (folder scope only). Git targets can't scope legacy docs.
+    // Git with a non-empty root: root is a RELATIVE SUBDIR inside the repo's
+    // persistent clone (the git dir rows' refresh button) — scope = git docs
+    // of that repo whose original file lives under clone/subdir.
+    let git_subdir_prefix = if target.kind == "git" && !target.root.is_empty() {
+        super::git::persistent_repo_dir_for_url(app, &target.url)
+            .await
+            .map(|d| {
+                d.join(&target.root)
+                    .to_string_lossy()
+                    .trim_end_matches('/')
+                    .to_string()
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let root_prefix = if target.kind == "git" {
+        String::new()
+    } else {
+        target.root.clone()
+    };
+    let in_scope = |meta: &DocMeta| -> bool {
+        if target.kind == "git" {
+            let url_hit = meta.source.as_ref().map(|src| {
+                src.kind == "git"
+                    && src.git.as_ref().map(|g| g.url == target.url).unwrap_or(false)
+            }).unwrap_or(false);
+            if !url_hit {
+                return false;
+            }
+            return git_subdir_prefix.is_empty()
+                || path_under_root(meta.original_path.as_deref().unwrap_or(""), &git_subdir_prefix);
+        }
+        if target.kind == "file" {
+            // The logical 文件 group: explicit single-file sources + legacy
+            // no-source docs. Folder/git-sourced docs are NEVER in scope.
+            return meta.source.as_ref().map(|src| src.kind == "file").unwrap_or(true);
+        }
+        // Folder scope is path-prefix based (not exact root match) so a
+        // SUBDIRECTORY target (the dir rows' refresh button) only hits docs
+        // whose original file lives under it, while a source-root target
+        // still covers the whole source.
+        target.kind == "folder"
+            && path_under_root(
+                meta.original_path.as_deref().unwrap_or(""),
+                &root_prefix,
+            )
+    };
+    let scoped: Vec<&DocMeta> = docs2.iter().filter(|m| in_scope(m)).collect();
+    let total = scoped.len() as u32;
+    let mut updated = 0u32;
+    for (i, meta) in scoped.iter().enumerate() {
+        let c = classify_original(meta, &excluded_paths);
+        emit_batch_update_progress(app, i as u32, total, &meta.name, "checking");
+        if c.excluded || c.lost_original || !c.has_original_path || !c.original_changed {
+            continue;
+        }
+        emit_batch_update_progress(app, i as u32, total, &meta.name, "reindexing");
+        if update_doc_from_original(app, &meta.id).await.is_ok() {
+            updated += 1;
+        } else {
+            rag_log("warn", format!("source_update: '{}' failed", meta.name));
+        }
+    }
+    emit_batch_update_progress(app, total, total, "", "done");
+    if updated > 0 || added > 0 || removed > 0 {
+        if let Err(e) = rebuild_rag_sql_index(app).await {
+            rag_log("warn", format!("source_update: rebuild_rag_sql_index failed: {}", e));
+        }
+    }
+    rag_log(
+        "info",
+        format!(
+            "source_update: {} done (added {added}, removed {removed}, updated {updated})",
+            if target.kind == "git" {
+                &target.url
+            } else if target.kind == "file" {
+                "file group"
+            } else {
+                &target.root
+            }
+        ),
+    );
+    Ok((added, removed, updated))
+}
+
+/// Source-scoped sync plan (shared by the source-scoped preview + run so the
+/// confirm dialog's counts always match what the run will do): filters the
+/// full `plan_source_sync` output by the target's root/url prefix, and for a
+/// folder target whose root has NO explicit folder-source doc (legacy docs
+/// classified by parent dir only) scans that root directly — plan_source_sync
+/// never scans such roots, so without this the legacy folder refresh could
+/// never import newly added files. Applies the same add/remove gates as the
+/// batch flow.
+async fn plan_source_sync_scoped(
+    app: &AppHandle,
+    docs: &[DocMeta],
+    target: &SourceUpdateTarget,
+) -> Result<(Vec<SourceSyncAdd>, Vec<(String, String)>)> {
+    let root_prefix = if target.kind == "git" {
+        super::git::persistent_repo_dir_for_url(app, &target.url)
+            .await
+            .map(|d| {
+                // Git with a non-empty root = relative subdir inside the
+                // clone (the git dir rows' refresh button) — adds/removes
+                // narrow to that subdir.
+                if target.root.is_empty() {
+                    d.to_string_lossy().into_owned()
+                } else {
+                    d.join(&target.root)
+                        .to_string_lossy()
+                        .trim_end_matches('/')
+                        .to_string()
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        target.root.clone()
+    };
+    let scope_hit = |p: &str| !root_prefix.is_empty() && path_under_root(p, &root_prefix);
+    let (mut plan_added, plan_removed) = plan_source_sync(app, docs).await.unwrap_or_default();
+    if target.kind == "folder" {
+        // The direct scan below is a fallback for roots with no known folder
+        // source. A subdirectory target INSIDE a known folder source must not
+        // rescan (plan_source_sync already scanned the source root and
+        // scope_hit filters its adds to this dir) — so "known" also includes
+        // any doc folder-source root that is an ancestor of target.root.
+        let root_has_explicit_source = docs.iter().any(|m| {
+            m.source
+                .as_ref()
+                .map(|s| {
+                    s.kind == "folder"
+                        && s.root.as_deref().map(|r| {
+                            r == target.root.as_str() || path_under_root(&target.root, r)
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        });
+        if !root_has_explicit_source && Path::new(&target.root).exists() {
+            let scan = scan_folder_public(Path::new(&target.root), true);
+            if !scan.truncated {
+                let referenced: std::collections::HashSet<&str> = docs
+                    .iter()
+                    .filter_map(|m| m.original_path.as_deref().filter(|p| !p.is_empty()))
+                    .collect();
+                for g in &scan.groups {
+                    for f in &g.files {
+                        if !referenced.contains(f.path.as_str())
+                            && !plan_added.iter().any(|a| a.path == f.path)
+                        {
+                            plan_added.push(SourceSyncAdd {
+                                path: f.path.clone(),
+                                source: crate::models::rag::DocSource {
+                                    kind: "folder".to_string(),
+                                    label: target.root.clone(),
+                                    root: Some(target.root.clone()),
+                                    rel_path: Some(g.rel_path.clone()),
+                                    git: None,
+                                },
+                                method: "symlink",
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut sync_added: Vec<_> = plan_added
+        .into_iter()
+        .filter(|a| scope_hit(&a.path))
+        .collect();
+    let mut sync_removed: Vec<_> = plan_removed
+        .into_iter()
+        .filter(|(_, id)| {
+            docs.iter()
+                .find(|m| m.id == *id)
+                .and_then(|m| m.original_path.as_deref())
+                .map(|op| scope_hit(op))
+                .unwrap_or(false)
+        })
+        .collect();
+    // Same gates as the batch flow (preview + run agree on these).
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_add_enabled)
+        .unwrap_or(false)
+    {
+        sync_added.clear();
+    }
+    if !get_settings()
+        .await
+        .map(|s| s.source_sync_remove_enabled)
+        .unwrap_or(true)
+    {
+        sync_removed.clear();
+    }
+    Ok((sync_added, sync_removed))
+}
+
+/// Source-scoped batch preview: the confirm dialog for the tree view's
+/// per-source refresh button. Same counts as `preview_batch_update_inner`
+/// but computed over THIS source's docs only (git: also force-refreshes the
+/// repo first so the md5 classification sees the remote state; the refresh
+/// failure surfaces as gitErrors). No CAS guard — preview is read-only and
+/// cheap; the RUN (refresh_source_update) takes the guard.
+pub async fn preview_source_update(
+    app: &AppHandle,
+    target: SourceUpdateTarget,
+) -> Result<BatchPreview> {
+    let dir = files_dir(app)?;
+    let mut docs: Vec<DocMeta> = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+            docs.push(meta);
+        }
+    }
+    emit_preview_progress(app, 0, docs.len() as u32, "", "metas");
+    // Git: force refresh (TTL bypassed — explicit user action) so the md5
+    // classification reflects the remote. Failure -> gitErrors (the confirm
+    // dialog already renders those) and classification falls back to the
+    // existing clone, same as the batch flow.
+    let mut git_errors: Vec<GitSourceError> = Vec::new();
+    if target.kind == "git" {
+        if target.url.is_empty() {
+            return Err(anyhow!("git source url is empty"));
+        }
+        emit_preview_progress(app, 0, 1, &target.url, "git");
+        let hash = super::git::repo_hash(&target.url);
+        if let Ok(mut cache) = git_refresh_cache().lock() {
+            cache.remove(&hash);
+        }
+        if let Err(err) = refresh_git_repo(app, &target.url).await {
+            git_errors.push(err);
+        }
+        emit_preview_progress(app, 1, 1, &target.url, "git");
+    } else if target.kind == "folder" {
+        if target.root.is_empty() {
+            return Err(anyhow!("folder source root is empty"));
+        }
+    } else if target.kind != "file" {
+        return Err(anyhow!("unsupported source kind: {}", target.kind));
+    }
+    // Scoped sync plan (adds/removes for THIS source, gates applied).
+    emit_preview_progress(app, 0, 0, "", "scan");
+    let (sync_added, sync_removed) = plan_source_sync_scoped(app, &docs, &target).await?;
+    let added_count = sync_added.len() as u32;
+    let removed_count = sync_removed.len() as u32;
+    let removed_ids: std::collections::HashSet<&str> =
+        sync_removed.iter().map(|(id, _)| id.as_str()).collect();
+    // Scope filter for the classification loop: explicit source identity
+    // (git url / folder root) or, for legacy docs, the original_path prefix.
+    // Git with a non-empty root = relative subdir inside the clone (the git
+    // dir rows' refresh button) — the whole scope (adds/removes + md5 loop)
+    // narrows to clone/subdir.
+    let root_prefix = if target.kind == "git" {
+        super::git::persistent_repo_dir_for_url(app, &target.url)
+            .await
+            .map(|d| {
+                if target.root.is_empty() {
+                    d.to_string_lossy().into_owned()
+                } else {
+                    d.join(&target.root)
+                        .to_string_lossy()
+                        .trim_end_matches('/')
+                        .to_string()
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        target.root.clone()
+    };
+    let scope_hit = |p: &str| !root_prefix.is_empty() && path_under_root(p, &root_prefix);
+    let excluded_paths = list_excluded_paths().await;
+    let mut total = 0u32;
+    let mut to_update = 0u32;
+    let mut skipped = 0u32;
+    let mut lost = 0u32;
+    let mut excluded_count = 0u32;
+    let classify_total = docs.len() as u32;
+    for (ci, meta) in docs.iter().enumerate() {
+        emit_preview_progress(app, ci as u32 + 1, classify_total, &meta.name, "checking");
+        let in_scope = if target.kind == "git" {
+            let url_hit = match meta.source.as_ref() {
+                Some(src) => {
+                    src.kind == "git"
+                        && src.git.as_ref().map(|g| g.url == target.url).unwrap_or(false)
+                }
+                None => false,
+            };
+            url_hit
+                && (target.root.is_empty()
+                    || scope_hit(meta.original_path.as_deref().unwrap_or("")))
+        } else if target.kind == "file" {
+            // Logical 文件 group: single-file sources + legacy no-source docs.
+            match meta.source.as_ref() {
+                Some(src) => src.kind == "file",
+                None => true,
+            }
+        } else {
+            // Folder: path-prefix scope (matches the run side).
+            scope_hit(meta.original_path.as_deref().unwrap_or(""))
+        };
+        if !in_scope {
+            continue;
+        }
+        total += 1;
+        if removed_ids.contains(meta.id.as_str()) {
+            continue;
+        }
+        if is_excluded_sync(meta.original_path.as_deref().unwrap_or(""), &excluded_paths) {
+            excluded_count += 1;
+            continue;
+        }
+        let c = classify_original(meta, &excluded_paths);
+        if c.lost_original {
+            lost += 1;
+        } else if !c.has_original_path {
+            skipped += 1;
+        } else if c.original_changed {
+            to_update += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(BatchPreview {
+        total,
+        to_update,
+        skipped,
+        lost,
+        added: added_count,
+        removed: removed_count,
+        excluded: excluded_count,
+        git_errors,
+    })
 }
 
 // ── auto (timed) doc update ─────────────────────────────────────────────────
@@ -5652,4 +6395,47 @@ fn reveal_in_file_manager(file: &Path) -> std::io::Result<()> {
     let dir = file.parent().unwrap_or(file);
     std::process::Command::new("xdg-open").arg(dir).spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod exclusion_tests {
+    use super::*;
+
+    #[test]
+    fn path_under_root_directory_semantics() {
+        // The exclusion registry reuses path_under_root: a directory entry
+        // excludes everything under it; sibling prefixes must not match.
+        assert!(path_under_root("/a/b/c.txt", "/a/b"));
+        assert!(path_under_root("/a/b", "/a/b"));
+        assert!(!path_under_root("/a/bc/x.txt", "/a/b"));
+        assert!(!path_under_root("", "/a/b"));
+        assert!(!path_under_root("/a/b/c.txt", ""));
+    }
+
+    #[test]
+    fn is_excluded_sync_matches_files_and_dirs() {
+        let reg = vec!["/data/skip.txt".to_string(), "/data/dir".to_string()];
+        assert!(is_excluded_sync("/data/skip.txt", &reg));
+        assert!(is_excluded_sync("/data/dir/inner.txt", &reg));
+        assert!(is_excluded_sync("/data/dir", &reg));
+        assert!(!is_excluded_sync("/data/other.txt", &reg));
+        assert!(!is_excluded_sync("", &reg));
+        assert!(!is_excluded_sync("/data/skip.txt", &[]));
+    }
+
+    #[test]
+    fn registry_normalizes_trim_dedup_drop_empty() {
+        // set_excluded_paths' normalization: trim, drop empties, dedup
+        // (order-preserving). (The DB round-trip itself runs against the
+        // global pool which tests can't initialize — covered by the pure
+        // helper + the path-matching tests above.)
+        let out = normalize_excluded_paths(vec![
+            " /x/a.txt ".to_string(),
+            "/x/b.txt".to_string(),
+            "/x/a.txt".to_string(), // duplicate -> deduped
+            "   ".to_string(),      // blank -> dropped
+        ]);
+        assert_eq!(out, vec!["/x/a.txt".to_string(), "/x/b.txt".to_string()]);
+        assert!(normalize_excluded_paths(Vec::new()).is_empty());
+    }
 }

@@ -12,6 +12,7 @@ import {
   Loader2,
   FileText,
   FolderOpen,
+  Pencil,
   Search,
   Sparkles,
   Tag,
@@ -35,6 +36,7 @@ import {
   Wrench,
   ChevronsDownUp,
   ChevronsUpDown,
+  Ban,
 } from 'lucide-react';
 import GitIcon from '@/components/icons/GitIcon';
 import { Switch } from '@/components/ui/ToggleGroup';
@@ -46,7 +48,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauri } from '@/utils/tauriClient';
 import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
-import { getRagTools, ragDocSearchPaged, ragTagSearchPaged, getOcrStatus, pickRagGitRepo, cancelRagGitPick, getGitSourceErrors } from '@/services/ragService';
+import { getRagTools, ragDocSearchPaged, ragTagSearchPaged, getOcrStatus, pickRagGitRepo, cancelRagGitPick, getGitSourceErrors, listRagExcludedPaths, setRagExcludedPaths, refreshRagSource, previewRagSourceUpdate, getRagGitCloneDir, setRagSourceAlias } from '@/services/ragService';
 import RagDocTree, { type RagDocTreeHandle } from '@/components/ui/RagDocTree';
 import { RagDoc, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, RagOcrStatus, BatchPreview, DocSource, GitSourceError } from '@/types';
 
@@ -113,6 +115,15 @@ type MockDocInfo = RagDocInfo;
 
 // 真实 RagUpdateCheck 已含 lostOriginal；保留别名供 UpdateDialog 复用。
 type MockUpdateCheck = RagUpdateCheck;
+
+/** 路径前缀判定：child == root 或 child 在 root 之下（与后端
+    is_excluded_sync 的 path_under_root 语义一致，忽略尾随斜杠）。 */
+export const pathUnderRoot = (child: string, root: string): boolean => {
+  if (!root || !child) return false;
+  const c = child.replace(/\/+$/, '');
+  const r = root.replace(/\/+$/, '');
+  return c === r || c.startsWith(r + '/');
+};
 
 type BatchProgress = {
   current: number;
@@ -336,6 +347,9 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   const [folderRecursive, setFolderRecursive] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [uploadTags, setUploadTags] = useState<string[]>([]);
+  // 数据源别名（folder/git 导入时的可选输入）：确认导入时持久化到别名
+  // 注册表（identity = folder 根路径 / git URL），树形数据源节点显示别名。
+  const [uploadSourceAlias, setUploadSourceAlias] = useState('');
   const [fileNameSearch, setFileNameSearch] = useState('');
   const [selectedTagFilter, setSelectedTagFilter] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -376,12 +390,88 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   // 进行中的 pick 的 canonical URL（ref 而非 state：取消回调不需要重渲染）。
   const gitPickingUrlRef = useRef('');
 
+  // ── 排除文件（导入弹框内勾选「排除」，更新检查忽略该文件） ──
+  // excludedBase = 打开弹框时的注册表快照（持久化部分）；excludedLocal =
+  // 弹框内新增的排除（未持久化）。确认导入时一次性 diff 持久化，取消即丢弃。
+  // 仅文件夹/Git 数据源提供排除（file 数据源不参与数据源级同步）。
+  const [excludedBase, setExcludedBase] = useState<Set<string>>(new Set());
+  const [excludedLocal, setExcludedLocal] = useState<Set<string>>(new Set());
+  const excludedUnion = useMemo(
+    () => new Set([...excludedBase, ...excludedLocal]),
+    [excludedBase, excludedLocal],
+  );
+  const toggleExcluded = (matchPath: string) => {
+    if (!matchPath) return;
+    if (excludedBase.has(matchPath)) {
+      // 已持久化的排除：弹框内点击 = 取消排除（从基线移除，确认时持久化）。
+      const next = new Set(excludedBase);
+      next.delete(matchPath);
+      setExcludedBase(next);
+    } else if (excludedLocal.has(matchPath)) {
+      const next = new Set(excludedLocal);
+      next.delete(matchPath);
+      setExcludedLocal(next);
+    } else {
+      setExcludedLocal((prev) => new Set(prev).add(matchPath));
+    }
+  };
+  const toggleGroupExcluded = (files: RagScanFile[]) => {
+    const paths = files.map((f) => f.matchPath || f.path).filter(Boolean);
+    if (paths.length === 0) return;
+    const allExcluded = paths.every((p) => excludedUnion.has(p));
+    for (const p of paths) toggleExcluded(p);
+    if (allExcluded) {
+      // 全部已排除 → 全部取消：上面逐个 toggle 已处理（基线/本地各自移除）。
+    }
+  };
+  // 打开弹框时拉取注册表快照；关闭时清空本地未持久化状态。
+  useEffect(() => {
+    if (!showUpload) return;
+    let cancelled = false;
+    listRagExcludedPaths()
+      .then((paths) => { if (!cancelled) setExcludedBase(new Set(paths)); })
+      .catch(() => { if (!cancelled) setExcludedBase(new Set()); });
+    return () => {
+      cancelled = true;
+    };
+  }, [showUpload]);
+  // 确认导入后持久化排除 diff：基线中被移除的 + 本地新增的。
+  const persistExclusionDiff = async () => {
+    // 最终语义 = base ∪ local（base 已是「打开时注册表 − 弹框内取消的」）。
+    const removed = [...excludedBase].filter((p) => !excludedUnion.has(p));
+    const added = [...excludedLocal];
+    if (removed.length === 0 && added.length === 0) return;
+    try {
+      const current = new Set(await listRagExcludedPaths());
+      for (const p of removed) current.delete(p);
+      for (const p of added) current.add(p);
+      const stored = await setRagExcludedPaths([...current]);
+      setExcludedBase(new Set(stored));
+      setExcludedLocal(new Set());
+    } catch (err) {
+      console.warn('[RAG] persist exclusion diff failed:', err);
+    }
+  };
+
   // 拉取进度监听：事件在 git pick 进行期间由后端每 250ms 采样发射。
   useEffect(() => {
     if (!isTauri()) return;
     let un: UnlistenFn | undefined;
     listen<{ received: number; total: number; speed: number }>('rag://git-clone-progress', (e) => {
       setGitProgress(e.payload);
+    }).then((f) => { un = f; }).catch(() => {});
+    return () => { un?.(); };
+  }, []);
+
+  // 更新检查（预扫描）进度监听：批量/数据源级 preview 在扫描期间发射
+  // rag://preview-progress（metas → git → scan → checking 逐文档），
+  // 确认弹框据此显示实时扫描进度（此前只有一行 spinner 文案）。
+  const [previewProgress, setPreviewProgress] = useState<{ current: number; total: number; name: string; phase: string } | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let un: UnlistenFn | undefined;
+    listen<{ current: number; total: number; name: string; phase: string }>('rag://preview-progress', (e) => {
+      setPreviewProgress(e.payload);
     }).then((f) => { un = f; }).catch(() => {});
     return () => { un?.(); };
   }, []);
@@ -438,10 +528,21 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
 
   // ── 选中操作(分组树,无 checkbox:点行选中/取消) ──
   // null 哨兵(= 全选)物化为具体集合;所有增删都在物化后的集合上进行。
+  // ⚠️ 已排除文件不可被选中：null 哨兵物化、组切换、全选、合并扫描都跳过
+  // 排除路径（排除 = 不导入，勾选状态与排除状态互斥）。
+  const isFileExcluded = (f: RagScanFile) => {
+    const mp = f.matchPath || f.path;
+    return !!mp && excludedUnion.has(mp);
+  };
   const resolveSelected = (prev: Set<string> | null): Set<string> => {
     if (prev) return prev;
     if (!scan) return new Set();
-    return new Set(scan.groups.flatMap((g) => g.files.map((f) => f.path)));
+    return new Set(
+      scan.groups
+        .flatMap((g) => g.files)
+        .filter((f) => !isFileExcluded(f))
+        .map((f) => f.path),
+    );
   };
   // 当前选中集(selectedPaths 为 null 时 = 全选,即扫描结果中所有文件)。
   const currentSelected = (): Set<string> => resolveSelected(selectedPaths);
@@ -458,17 +559,21 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   // 原地突变会让 setState 的 action 与 React 内部 lastRenderedState 为同一对象，
   // Object.is 相等 → 更新被 React 判定为「无变化」直接吞掉（点第二次起全部失效）。
   const toggleFileSelected = (path: string) => {
+    // 已排除文件不可选中（点击无效果）。
+    const file = scan?.groups.flatMap((g) => g.files).find((f) => f.path === path);
+    if (file && isFileExcluded(file)) return;
     const next = new Set(resolveSelected(selectedRef.current));
     if (next.has(path)) next.delete(path);
     else next.add(path);
     applySelected(next);
   };
-  // 整组切换:组内全选中 -> 清空;否则全选。(复制后变更，理由同上)
+  // 整组切换:组内(未排除)全选中 -> 清空;否则全选。(复制后变更，理由同上)
   const toggleGroupSelected = (files: RagScanFile[]) => {
+    const selectable = files.filter((f) => !isFileExcluded(f));
     const next = new Set(resolveSelected(selectedRef.current));
-    const all = files.every((f) => next.has(f.path));
-    if (all) files.forEach((f) => next.delete(f.path));
-    else files.forEach((f) => next.add(f.path));
+    const all = selectable.length > 0 && selectable.every((f) => next.has(f.path));
+    if (all) selectable.forEach((f) => next.delete(f.path));
+    else selectable.forEach((f) => next.add(f.path));
     applySelected(next);
   };
   // 清除整组已选(部分选中状态下的组级「清除 M」)。(复制后变更，理由同上)
@@ -478,10 +583,17 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     applySelected(next);
   };
   // 全部选中 / 全部清除(底栏全局按钮)。「清除」必须物化为空集,
-  // 不能保留 null 哨兵,否则 UI 仍显示全选。
+  // 不能保留 null 哨兵,否则 UI 仍显示全选。已排除文件不参与全选。
   const setAllSelected = (on: boolean) => {
     applySelected(
-      on && scan ? new Set(scan.groups.flatMap((g) => g.files.map((f) => f.path))) : new Set<string>()
+      on && scan
+        ? new Set(
+            scan.groups
+              .flatMap((g) => g.files)
+              .filter((f) => !isFileExcluded(f))
+              .map((f) => f.path),
+          )
+        : new Set<string>()
     );
   };
 
@@ -633,10 +745,12 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
         groups: merged,
       };
     });
-    // 新合并进来的文件默认勾选(不改变已有勾选)。
+    // 新合并进来的文件默认勾选(不改变已有勾选)。已排除文件不可选中。
     const base = resolveSelected(selectedRef.current);
     const nextSet = new Set(base);
-    for (const g of next.groups) for (const f of g.files) nextSet.add(f.path);
+    for (const g of next.groups)
+      for (const f of g.files)
+        if (!isFileExcluded(f)) nextSet.add(f.path);
     applySelected(nextSet);
   };
 
@@ -677,6 +791,10 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     setGitFormError('');
     resetPickState();
     setUploadTags([]);
+    setUploadSourceAlias('');
+    // 排除状态：基线保留（下次打开作为快照起点会被重新拉取覆盖），本地未
+    // 持久化的排除丢弃（取消 = 不生效）。
+    setExcludedLocal(new Set());
     setShowUpload(false);
   };
 
@@ -686,6 +804,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     // 设计稿 v9 移除了「导入方式」切换器：Git 数据源后端强制 copy；
     // file/folder 恢复默认软链接（用户在旧弹框里切到 copy 后切数据源需复位）。
     setUploadMethod(ds === 'git' ? 'copy' : 'symlink');
+    setUploadSourceAlias('');
     resetPickState();
   };
 
@@ -700,6 +819,24 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     if (failed === 0 && success > 0) {
       showToast(t('pages.rag.uploadConfirm'), 'success');
     }
+    // 持久化数据源别名（folder/git，best-effort——导入已成功，别名失败不回滚）。
+    // 空别名不写（不影响已有别名）。
+    const aliasIdentity = uploadDataSource === 'git'
+      ? gitSourceMeta?.url
+      : scan?.root;
+    if ((uploadDataSource === 'folder' || uploadDataSource === 'git') && uploadSourceAlias.trim() && aliasIdentity) {
+      try {
+        await setRagSourceAlias(uploadDataSource, aliasIdentity, uploadSourceAlias.trim());
+        // 别名在 doc_info_from_meta 的读路径生效——写入后必须重拉列表，
+        // 否则导入后的树形数据源节点仍显示默认名（用户需手动刷新才可见）。
+        await refreshDocs();
+      } catch (err) {
+        console.warn('[RAG] persist source alias failed:', err);
+      }
+    }
+    // Persist the dialog's exclusion toggles (best-effort — import already
+    // succeeded; a registry failure must not roll it back).
+    await persistExclusionDiff();
     closeUploadDialog();
   };
 
@@ -816,6 +953,20 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     }
   };
 
+  // UpdateDialog 内「取消排除」：从注册表移除该文档的 original_path 后重查。
+  const reincludeDoc = async (doc: MockDocInfo) => {
+    try {
+      const current = new Set(await listRagExcludedPaths());
+      if (doc.originalPath) current.delete(doc.originalPath);
+      await setRagExcludedPaths([...current]);
+      showToast(t('pages.rag.excludeRemovedToast', '已取消排除，该文件恢复参与更新检查'), 'success');
+      await refreshDocs();
+      if (updateTarget?.id === doc.id) void runUpdateCheck(doc.id);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.excludeToggleFailed', '排除状态更新失败'), 'error');
+    }
+  };
+
   // 执行更新（从原始 / 手动上传）：调后端 update_rag_doc，复用上传进度浮层。
   const runUpdateAction = async (doc: MockDocInfo, mode: 'original' | 'file') => {
     setUpdateActionPhase('reindexing');
@@ -878,6 +1029,82 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     } catch (err) {
       setShowBatchUpdateDialog(false);
       showToast(err instanceof Error ? err.message : t('pages.rag.batchUpdate', '批量更新'), 'error');
+    }
+  };
+
+  // ── 数据源级手动更新（树形视图数据源节点上的刷新按钮） ──
+  // 与批量更新同流程：先弹**数据源范围**的确认框（preview_rag_source_update
+  // 预扫描——git 先强制拉取远端，统计只算该数据源的文档/新增/移除），用户
+  // 确认后执行 refresh_rag_source（git 强制拉取 + 范围同步 + 范围重索引）。
+  // 与批量更新共用 BATCH_UPDATE_RUNNING 守卫与进度事件（batchUpdateRunning
+  // 状态 + 进度弹框对两种更新通用）。命令内联执行（await），进度由
+  // rag://batch-update-progress 事件驱动。
+  const [refreshingSourceKey, setRefreshingSourceKey] = useState<string | null>(null);
+  // 数据源级确认框状态：target = 待更新的数据源；preview = 预扫描结果；
+  // checking = 预扫描中。null target = 关闭。
+  const [sourceConfirmTarget, setSourceConfirmTarget] = useState<{ kind: 'git' | 'folder' | 'file'; url?: string; root?: string } | null>(null);
+  const [sourceConfirmPreview, setSourceConfirmPreview] = useState<BatchPreview | null>(null);
+  const [sourceConfirmChecking, setSourceConfirmChecking] = useState(false);
+  const handleRefreshSource = async (target: { kind: 'git' | 'folder' | 'file'; url?: string; root?: string }) => {
+    const srcKey = target.kind === 'git'
+      ? target.root
+        ? `git\n${target.url}\n${target.root}`
+        : `git\n${target.url}`
+      : target.kind === 'file'
+        ? 'file\n'
+        : `folder\n${target.root}`;
+    if (refreshingSourceKey || batchUpdateRunning) {
+      // 已有更新在跑：只打开进度弹框（与批量按钮同语义）。
+      setShowBatchUpdateDialog(true);
+      return;
+    }
+    // 打开确认框并预扫描（数据源范围）。
+    setSourceConfirmTarget(target);
+    setSourceConfirmPreview(null);
+    setSourceConfirmChecking(true);
+    try {
+      const preview = await previewRagSourceUpdate(target.kind, { url: target.url, root: target.root });
+      setSourceConfirmPreview(preview);
+    } catch (err) {
+      setSourceConfirmTarget(null);
+      showToast(err instanceof Error ? err.message : t('pages.rag.refreshSource', '更新该数据源'), 'error');
+    } finally {
+      setSourceConfirmChecking(false);
+    }
+  };
+
+  // 确认框「开始更新」：执行数据源级更新（进度弹框复用批量更新的）。
+  const startSourceUpdate = async () => {
+    const target = sourceConfirmTarget;
+    if (!target) return;
+    const srcKey = target.kind === 'git'
+      ? target.root
+        ? `git\n${target.url}\n${target.root}`
+        : `git\n${target.url}`
+      : target.kind === 'file'
+        ? 'file\n'
+        : `folder\n${target.root}`;
+    setSourceConfirmTarget(null);
+    setSourceConfirmPreview(null);
+    setRefreshingSourceKey(srcKey);
+    setShowBatchUpdateDialog(true);
+    try {
+      const { added, removed, updated } = await refreshRagSource(target.kind, {
+        url: target.url,
+        root: target.root,
+      });
+      showToast(
+        t('pages.rag.refreshSourceDone', '数据源更新完成：导入 {{added}}，移除 {{removed}}，更新 {{updated}}', { added, removed, updated }),
+        'success',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('another update is already running')) {
+        showToast(msg, 'error');
+      }
+    } finally {
+      setRefreshingSourceKey(null);
+      await refreshDocs();
     }
   };
 
@@ -1000,6 +1227,182 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     [ragDocs],
   );
 
+  // ── 文档列表的排除切换（单条 + 批量） ──
+  // 直接读写注册表（无弹框本地态）：切换后 refreshDocs 让列表徽章即时更新。
+  const [excludeToggling, setExcludeToggling] = useState(false);
+  const toggleDocExcluded = async (doc: RagDocInfo) => {
+    if (excludeToggling) return;
+    const p = doc.originalPath;
+    if (!p) {
+      showToast(t('pages.rag.excludeNoPath', '该文档没有记录原始地址，无法排除'), 'error');
+      return;
+    }
+    setExcludeToggling(true);
+    try {
+      const current = new Set(await listRagExcludedPaths());
+      if (current.has(p)) {
+        current.delete(p);
+      }
+      // 祖先覆盖处理：文件当前已排除（doc.excluded，由后端按注册表前缀匹
+      // 配计算——祖先目录/数据源条目覆盖时 exact-path 检查恒 false）。
+      // ⚠️ 只删祖先条目会把整个目录都解除排除（siblings 也恢复）——正确的
+      // 「单文件取消」语义 = 祖先条目替换为「其余文件的排除条目」：从全量
+      // 文档列表（ragDocs）枚举同被覆盖、非本文件的文档路径，逐个加入排
+      // 除；祖先条目删除；本文件不进注册表（恢复参与更新检查）。
+      if (doc.excluded) {
+        const covering = [...current].filter((e) => pathUnderRoot(p, e));
+        if (covering.length > 0) {
+          // 祖先条目（目录/数据源排除）→「单文件取消」语义 = 祖先条目替换
+          // 为其余被覆盖文档的逐文件条目：从全量文档列表枚举同被覆盖、非
+          // 本文件的文档路径，逐个加入排除；祖先条目删除；本文件不进注册
+          // 表（恢复）。无法枚举文档列表时退回删祖先条目。
+          const coveredOthers = (ragDocs || [])
+            .filter((d) => {
+              const op = d.originalPath;
+              return !!op && op !== p && covering.some((e) => pathUnderRoot(op, e));
+            })
+            .map((d) => d.originalPath as string);
+          for (const e of covering) current.delete(e);
+          for (const s of coveredOthers) current.add(s);
+          current.delete(p);
+        }
+      }
+      const stored = await setRagExcludedPaths([...current]);
+      setExcludedRegistry(new Set(stored));
+      await refreshDocs();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.excludeToggleFailed', '排除状态更新失败'), 'error');
+    } finally {
+      setExcludeToggling(false);
+    }
+  };
+  const toggleDocsExcluded = async (docs: RagDocInfo[]) => {
+    const paths = docs.map((d) => d.originalPath).filter((p): p is string => !!p);
+    if (paths.length === 0) {
+      showToast(t('pages.rag.excludeNoPath', '该文档没有记录原始地址，无法排除'), 'error');
+      return;
+    }
+    if (excludeToggling) return;
+    setExcludeToggling(true);
+    try {
+      const current = new Set(await listRagExcludedPaths());
+      // 方向以文档当前状态为准（doc.excluded 由后端按注册表前缀匹配计算
+      // ——祖先目录条目覆盖时 exact-path 检查会误判）。取消时同样清理覆盖
+      // 的祖先条目（同 toggleDocExcluded）。
+      const allExcluded = docs.every((d) => !d.originalPath || d.excluded);
+      for (const p of paths) {
+        if (allExcluded) current.delete(p);
+        else current.add(p);
+      }
+      if (allExcluded) {
+        for (const p of paths) {
+          for (const e of [...current]) {
+            if (pathUnderRoot(p, e)) current.delete(e);
+          }
+        }
+      }
+      const stored = await setRagExcludedPaths([...current]);
+      setExcludedRegistry(new Set(stored));
+      await refreshDocs();
+      setSelectedIds(new Set());
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.excludeToggleFailed', '排除状态更新失败'), 'error');
+    } finally {
+      setExcludeToggling(false);
+    }
+  };
+
+  // ── 目录行的排除切换（树形视图文件夹行） ──
+  // 注册表是路径集合，目录条目按前缀覆盖其下全部文件（后端
+  // is_excluded_sync 的 path_under_root 语义）。已排除 = 注册表里有该
+  // 目录自身或覆盖它的祖先条目；取消时一并移除覆盖它的祖先（否则
+  // 取消不生效）。切换后 refreshDocs 让子文件行的「已排除」徽章即时更新。
+  const [excludedRegistry, setExcludedRegistry] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    listRagExcludedPaths()
+      .then((s) => setExcludedRegistry(new Set(s)))
+      .catch(() => {});
+  }, []);
+  const toggleDirExcluded = async (dirPath: string, scopeDocs?: RagDocInfo[]) => {
+    if (excludeToggling) return;
+    setExcludeToggling(true);
+    try {
+      const current = new Set(await listRagExcludedPaths());
+      const covering = [...current].filter((e) => pathUnderRoot(dirPath, e));
+      // 切换方向与按钮状态同源：scopeDocs（该数据源/目录子树的文档）全部
+      // 已排除 = 当前是排除态，这次是取消——否则是排除。scopeDocs 缺省时
+      // 回退到「有覆盖条目即取消」的旧语义（防御）。
+      const currentlyExcluded = scopeDocs
+        ? scopeDocs.some((d) => d.originalPath) && scopeDocs.filter((d) => d.originalPath).every((d) => d.excluded)
+        : covering.length > 0;
+      if (currentlyExcluded) {
+        // 取消：移除覆盖该路径的条目（目录/祖先条目）+ 该路径之下的所有
+        // 条目（批量「排除更新」留下的逐文件条目）。
+        for (const e of covering) current.delete(e);
+        for (const e of [...current]) {
+          if (pathUnderRoot(e, dirPath)) current.delete(e);
+        }
+      } else if (covering.length === 0) {
+        current.add(dirPath);
+      }
+      const stored = await setRagExcludedPaths([...current]);
+      setExcludedRegistry(new Set(stored));
+      await refreshDocs();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.excludeToggleFailed', '排除状态更新失败'), 'error');
+    } finally {
+      setExcludeToggling(false);
+    }
+  };
+
+  // ── 数据源节点的排除切换（树形视图，git/folder） ──
+  // folder：注册表加数据源根目录条目（前缀覆盖其下全部文件/子目录）。
+  // git：逻辑分组无单一用户路径，单独处理——注册表加该仓库的持久 clone
+  // 目录（get_rag_git_clone_dir），其下所有文档的 original_path 都在 clone
+  // 内，一条目录条目即覆盖整个仓库。子文件/子文件夹行的排除状态由后端
+  // is_excluded_sync（前缀匹配）+ 前端 dirExcluded 的祖先检查同步生效。
+  // ⚠️ 切换方向不能只看「注册表里有无覆盖该路径的条目」：文件若是经批量
+  // 「排除更新」（逐文件条目）排除的，注册表里没有目录条目，取消时会走
+  // 错分支把目录再加进排除（用户实测：取消后子文件未恢复）。方向与按钮
+  // 状态同源：看该路径下的文档是否全部已排除；取消时把覆盖该路径的条目
+  // **和该路径之下的所有条目**（批量排除留下的逐文件条目）一并移除。
+  const toggleSourceExcluded = async (target: { kind: 'git' | 'folder' | 'file'; url?: string; root?: string }, scopeDocs?: RagDocInfo[]) => {
+    if (excludeToggling) return;
+    if (target.kind === 'git') {
+      const cloneDir = await getRagGitCloneDir(target.url || '');
+      if (!cloneDir) {
+        showToast(t('pages.rag.excludeNoPath', '该文档没有记录原始地址，无法排除'), 'error');
+        return;
+      }
+      await toggleDirExcluded(cloneDir, scopeDocs);
+      return;
+    }
+    if (target.kind === 'folder') {
+      await toggleDirExcluded(target.root || '', scopeDocs);
+    }
+  };
+
+  // ── 数据源别名（folder/git 的修改别名按钮） ──
+  // 别名持久化在后端注册表（config_json.rag.sourceAliases，identity =
+  // folder 根路径 / git URL），读路径在 doc_info_from_meta 里覆盖默认标签
+  // —— refreshDocs 后树形数据源节点即显示别名。空别名 = 清除（回退默认名）。
+  const [aliasTarget, setAliasTarget] = useState<{ kind: 'git' | 'folder'; url?: string; root?: string; currentLabel: string } | null>(null);
+  const handleRenameSource = (target: { kind: 'git' | 'folder'; url?: string; root?: string; currentLabel: string }) => {
+    setAliasTarget(target);
+  };
+  const saveSourceAlias = async (alias: string) => {
+    const target = aliasTarget;
+    if (!target) return;
+    try {
+      await setRagSourceAlias(target.kind, (target.url || target.root || ''), alias);
+      setAliasTarget(null);
+      await refreshDocs();
+      showToast(t('pages.rag.renameSourceDone', '别名已更新'), 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.renameSourceFailed', '别名保存失败'), 'error');
+    }
+  };
+
   // ── 单行渲染：平铺列表与树形视图共用同一行 JSX（数据源徽章 + 操作按钮
   // 完全一致；需求3 树形仅是 GUI 展示层）。borderTop 平铺时按 idx==0，
   // 树形行恒为 true（树节点自带分隔线）。 ──
@@ -1023,8 +1426,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
             >
               <div className="flex flex-col gap-1.5 flex-1 min-w-0">
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <input
-                    type="checkbox"
+                  <input                    type="checkbox"
                     checked={checked}
                     onChange={() => toggleSelect(doc.id)}
                     className="hub-checkbox"
@@ -1083,6 +1485,17 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                       {t('pages.rag.originalLostTag', '原始丢失')}
                     </span>
                   )}
+                  {/* 排除标记：更新检查（批量/自动/单条 + 数据源同步）忽略该文档 */}
+                  {mDoc.excluded && (
+                    <span
+                      className="flex-shrink-0 inline-flex items-center gap-0.5"
+                      title={t('pages.rag.excludedBadgeTip', '已排除：更新检查将忽略该文件')}
+                      style={{ color: 'var(--hub-ink-3)', fontSize: 10 }}
+                    >
+                      <Ban size={11} />
+                      {t('pages.rag.excludedBadge', '已排除')}
+                    </span>
+                  )}
                 </div>
                 {(doc.tags || []).length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap" style={{ paddingLeft: 26 }}>
@@ -1103,16 +1516,19 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                   </div>
                 )}
               </div>
-              <span className="hub-mono text-[12px]" style={{ width: 90, color: 'var(--hub-ink-3)' }}>
+              {/* 列结构（大小/分块/时间/操作）：固定宽度 + flex-shrink-0；
+                  窄窗口按 时间→大小→分块 顺序经 rag-col-* 类逐级隐藏（见
+                  index.css 的 media query），保证名称 + 操作列始终可见不重叠。 */}
+              <span className="hub-mono text-[12px] rag-col-size flex-shrink-0" style={{ width: 90, color: 'var(--hub-ink-3)' }}>
                 {formatSize(doc.size)}
               </span>
-              <span className="hub-mono text-[12px]" style={{ width: 64, color: 'var(--hub-ink-3)' }}>
+              <span className="hub-mono text-[12px] rag-col-chunks flex-shrink-0" style={{ width: 64, color: 'var(--hub-ink-3)' }}>
                 {doc.chunkCount ?? 0}
               </span>
-              <span className="hub-mono text-[12px]" style={{ width: 160, color: 'var(--hub-ink-3)' }}>
+              <span className="hub-mono text-[12px] rag-col-time flex-shrink-0" style={{ width: 160, color: 'var(--hub-ink-3)' }}>
                 {doc.uploadedAt || '-'}
               </span>
-              <div className="flex items-center gap-1" style={{ width: 170 }}>
+              <div className="flex items-center gap-1 flex-shrink-0" style={{ width: 170 }}>
                 <button
                   className="hub-icon-btn sm"
                   onClick={() => handleView(doc)}
@@ -1178,6 +1594,17 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                 </div>
                 <button
                   className="hub-icon-btn sm"
+                  onClick={() => void toggleDocExcluded(doc)}
+                  title={mDoc.excluded
+                    ? t('pages.rag.excludeRemove', '取消排除（恢复参与更新检查）')
+                    : t('pages.rag.excludeAdd', '排除该文件（更新检查忽略）')}
+                  disabled={disabled || excludeToggling}
+                  style={mDoc.excluded ? { color: 'var(--hub-accent)' } : undefined}
+                >
+                  {mDoc.excluded ? <Eye size={13} /> : <Ban size={13} />}
+                </button>
+                <button
+                  className="hub-icon-btn sm"
                   onClick={() => setDeleteTarget(doc)}
                   title={t('pages.rag.delete')}
                   disabled={disabled}
@@ -1195,8 +1622,8 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     <div className={disabled ? 'opacity-60 pointer-events-none' : ''}>
       {/* Header: title + switch + memory warning on the right of the title（单行）。
           文档数副标题独立成行放在 header 下方——不参与右侧控件的对齐，避免右组被两行块挤动。 */}
-      <div className="flex items-center justify-between gap-4 mb-1">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <div className="flex items-center justify-between gap-4 mb-1 flex-wrap">
+        <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
           <h1 className="hub-h1">{t('pages.rag.title')}</h1>
           {/* Switch group — always interactive even when page is disabled */}
           <div className="flex items-center gap-1.5" style={{ pointerEvents: 'auto' }}>
@@ -1241,8 +1668,8 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           </div>
         </div>
 
-        {/* Top-right action buttons */}
-        <div className="flex items-center gap-2" style={{ pointerEvents: 'auto' }}>
+        {/* Top-right action buttons（flex-wrap：窄窗口换行不压缩文字） */}
+        <div className="flex items-center gap-2 flex-wrap" style={{ pointerEvents: 'auto' }}>
           <button onClick={() => setShowVectorSearch(true)} className="hub-btn primary" disabled={disabled}>
             <Sparkles size={13} /> {t('pages.rag.vectorSearch')}
           </button>
@@ -1393,6 +1820,17 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
             >
               <Trash2 size={13} /> {t('pages.rag.batchDelete')}
             </button>
+            <button
+              className="hub-btn"
+              disabled={disabled || excludeToggling}
+              onClick={() => {
+                const sel = ragDocs.filter((d) => selectedIds.has(d.id));
+                void toggleDocsExcluded(sel);
+              }}
+              title={t('pages.rag.batchExcludeHint', '选中文件全部排除 / 全部取消排除（更新检查忽略）')}
+            >
+              <Ban size={13} /> {t('pages.rag.batchExclude', '排除更新')}
+            </button>
             <button className="hub-icon-btn sm" onClick={() => setSelectedIds(new Set())} title={t('pages.rag.cancel')}>
               <X size={13} />
             </button>
@@ -1410,6 +1848,14 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           onToggleDocs={toggleSelectDocs}
           forceExpanded={!!fileNameSearch.trim() || selectedTagFilter.size > 0}
           onAllCollapsedChange={setTreeAllCollapsed}
+          onRefreshSource={handleRefreshSource}
+          refreshingSourceKey={refreshingSourceKey}
+          excludedPaths={excludedRegistry}
+          excludeToggling={excludeToggling}
+          onToggleDirExcluded={toggleDirExcluded}
+          onToggleDocsExcluded={toggleDocsExcluded}
+          onToggleSourceExcluded={toggleSourceExcluded}
+          onRenameSource={handleRenameSource}
         />
       ) : visibleDocs.length === 0 ? (
         <div className="hub-card p-10 text-center" style={{ color: 'var(--hub-ink-3)' }}>
@@ -1421,9 +1867,10 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
         </div>
       ) : (
         <div className="hub-card overflow-hidden">
-          {/* Column header */}
+          {/* Column header（gap-4 与数据行一致，否则列错位——数据行 flex 间隙
+              会把列往左推，表头必须同 gap 才能对齐） */}
           <div
-            className="flex items-center"
+            className="flex items-center gap-4"
             style={{
               padding: '8px 16px',
               borderBottom: '1px solid var(--hub-line-2)',
@@ -1432,15 +1879,17 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
             }}
           >
             <span className="flex-1">{t('pages.rag.columnName')}</span>
-            <span style={{ width: 90 }}>{t('pages.rag.columnSize')}</span>
-            <span style={{ width: 64 }}>{t('pages.rag.columnChunks')}</span>
-            <span style={{ width: 160 }}>{t('pages.rag.columnTime')}</span>
-            <span style={{ width: 170 }} />
+            <span className="rag-col-size flex-shrink-0" style={{ width: 90 }}>{t('pages.rag.columnSize')}</span>
+            <span className="rag-col-chunks flex-shrink-0" style={{ width: 64 }}>{t('pages.rag.columnChunks')}</span>
+            <span className="rag-col-time flex-shrink-0" style={{ width: 160 }}>{t('pages.rag.columnTime')}</span>
+            <span className="flex-shrink-0" style={{ width: 170 }} />
           </div>
           {visibleDocs.map((doc, idx) => renderDocRow(doc, idx === 0))}
-          {/* 分页页脚：显示区间 + 翻页 + 每页数（与其他列表页一致） */}
-          <div className="flex items-center mt-2 text-[12px]" style={{ color: 'var(--hub-ink-3)', borderTop: '1px solid var(--hub-line-2)', padding: '8px 16px' }}>
-            <div className="flex-[2] flex items-center gap-2">
+          {/* 分页页脚：显示区间 + 翻页 + 每页数。flex-wrap：窄窗口时各区
+              换行；分页按钮组 whitespace-nowrap 恒为单行，「显示 x-x 条」
+              文案允许折行（不截断——数字信息完整可读）。 */}
+          <div className="flex items-center flex-wrap gap-y-1 mt-2 text-[12px]" style={{ color: 'var(--hub-ink-3)', borderTop: '1px solid var(--hub-line-2)', padding: '8px 16px' }}>
+            <div className="flex-[2] flex items-center gap-2 min-w-[200px]">
               {visibleDocs.length > 0 && (
                 <button
                   className="hub-btn sm whitespace-nowrap"
@@ -1453,7 +1902,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                   {allVisibleDocsSelected ? t('pages.rag.deselectAllPage') : t('pages.rag.selectAllPage')}
                 </button>
               )}
-              <span>
+              <span className="min-w-0">
                 {t('common.showing', {
                   start: docPagination.total === 0 ? 0 : (docPagination.page - 1) * docPagination.limit + 1,
                   end: Math.min(docPagination.page * docPagination.limit, docPagination.total),
@@ -1461,7 +1910,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                 })}
               </span>
             </div>
-            <div className="flex-[4] flex justify-center">
+            <div className="flex-[4] flex justify-center min-w-0">
               {docPagination.totalPages > 1 && (
                 <Pagination
                   currentPage={docPagination.page}
@@ -1471,7 +1920,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                 />
               )}
             </div>
-            <div className="flex-[2] flex items-center justify-end gap-2">
+            <div className="flex-[2] flex items-center justify-end gap-2 flex-shrink-0">
               <label htmlFor="ragPerPage">{t('common.itemsPerPage')}:</label>
               <select
                 id="ragPerPage"
@@ -1522,6 +1971,8 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           onCancelGitPick={handleCancelGitPick}
           gitFormError={gitFormError}
           gitSourceMeta={gitSourceMeta}
+          sourceAlias={uploadSourceAlias}
+          onSourceAliasChange={setUploadSourceAlias}
           onToggleFile={toggleFileSelected}
           onToggleGroup={toggleGroupSelected}
           onClearGroup={clearGroupSelected}
@@ -1536,6 +1987,9 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           method={uploadMethod}
           onMethodChange={setUploadMethod}
           existingPaths={existingPaths}
+          excludedPaths={uploadDataSource === 'file' ? undefined : excludedUnion}
+          onToggleExcluded={toggleExcluded}
+          onToggleGroupExcluded={toggleGroupExcluded}
         />
       )}
 
@@ -1550,6 +2004,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           onManualUpload={async () => {
             await runUpdateAction(updateTarget, 'file');
           }}
+          onReinclude={() => void reincludeDoc(updateTarget)}
           onClose={() => {
             setUpdateTarget(null);
             setUpdateCheck(null);
@@ -1564,8 +2019,33 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
         <BatchUpdateConfirmDialog
           preview={batchConfirm}
           checking={batchConfirmChecking}
+          scanProgress={previewProgress}
           onCancel={() => { setBatchConfirm(null); setBatchConfirmChecking(false); }}
           onConfirm={startBatchUpdate}
+        />
+      )}
+
+      {/* 数据源级更新确认弹框（树形视图数据源刷新按钮）：范围限定单个数据源，
+          统计/确认/进度能力与批量更新完全复用。 */}
+      {(sourceConfirmChecking || sourceConfirmTarget) && (
+        <BatchUpdateConfirmDialog
+          preview={sourceConfirmPreview}
+          checking={sourceConfirmChecking}
+          scanProgress={previewProgress}
+          title={t('pages.rag.refreshSourceTitle', '数据源更新')}
+          subtitle={
+            sourceConfirmTarget
+              ? sourceConfirmTarget.kind === 'git'
+                ? sourceConfirmTarget.root
+                  ? `${sourceConfirmTarget.url} · ${sourceConfirmTarget.root}`
+                  : sourceConfirmTarget.url
+                : sourceConfirmTarget.kind === 'file'
+                  ? t('pages.rag.refreshFileGroupScope', '「文件」分组（单文件导入 + 未记录来源的文档）')
+                  : sourceConfirmTarget.root
+              : undefined
+          }
+          onCancel={() => { setSourceConfirmTarget(null); setSourceConfirmPreview(null); setSourceConfirmChecking(false); }}
+          onConfirm={startSourceUpdate}
         />
       )}
 
@@ -1582,6 +2062,15 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
 
       {/* OCR 引擎缺失弹框（导入图片/PDF/Office 时 Linux 无 tesseract） */}
       {ocrMissing && <OcrMissingDialog status={ocrMissing} onClose={dismissOcrMissing} />}
+
+      {/* 数据源修改别名弹框（树形视图 folder/git 数据源行的铅笔按钮） */}
+      {aliasTarget && (
+        <SourceAliasDialog
+          target={aliasTarget}
+          onClose={() => setAliasTarget(null)}
+          onSave={saveSourceAlias}
+        />
+      )}
 
       {/* Search settings dialog */}
       {showSettings && (
@@ -2306,6 +2795,11 @@ const UploadDialog: React.FC<{
   gitFormError: string;
   /** 拉取成功的仓库元信息（写入 doc 的 DocSource.git）。 */
   gitSourceMeta?: { url: string; branch?: string; commit?: string } | null;
+  /** 数据源别名（folder/git）：确认导入时持久化到别名注册表，树形数据源
+   *  节点显示别名。folder 需要 scan.root、git 需要 gitSourceMeta.url 才能
+   *  确定身份——未扫描/未拉取前置灰。 */
+  sourceAlias?: string;
+  onSourceAliasChange?: (v: string) => void;
   onToggleFile: (path: string) => void;
   onToggleGroup: (files: RagScanFile[]) => void;
   onClearGroup: (files: RagScanFile[]) => void;
@@ -2322,6 +2816,11 @@ const UploadDialog: React.FC<{
   method?: MockMethod;
   onMethodChange?: (m: MockMethod) => void;
   existingPaths: Set<string>;
+  /** 排除注册表（当前生效集 = 基线 ∪ 弹框本地）。undefined = 该数据源不提供
+   *  排除（file 数据源不参与数据源级同步）。 */
+  excludedPaths?: Set<string>;
+  onToggleExcluded: (matchPath: string) => void;
+  onToggleGroupExcluded: (files: RagScanFile[]) => void;
 }> = ({
   onClose, scan, selectedPaths, scanning, recursive, onRecursiveChange,
   onPick, onPickFolder, dataSource, onDataSourceChange,
@@ -2329,9 +2828,11 @@ const UploadDialog: React.FC<{
   gitUsername, onGitUsernameChange, gitPassword, onGitPasswordChange,
   gitDepth, onGitDepthChange, gitAdvancedOpen, onGitAdvancedOpenChange,
   gitScanning, onPickGit, onCancelGitPick, gitProgress, gitFormError, gitSourceMeta,
+  sourceAlias, onSourceAliasChange,
   onToggleFile, onToggleGroup, onClearGroup, onSetAll,
   onConfirm, sourceSyncAddEnabled, onSourceSyncAddChange, sourceSyncRemoveEnabled, onSourceSyncRemoveChange,
   tags, onTagsChange, method, onMethodChange, existingPaths,
+  excludedPaths, onToggleExcluded, onToggleGroupExcluded,
 }) => {
   const { t } = useTranslation();
   const showMethod = method !== undefined && onMethodChange !== undefined;
@@ -2353,8 +2854,15 @@ const UploadDialog: React.FC<{
     ? scan.groups.reduce((n, g) => n + g.files.reduce((s, f) => s + (f.size || 0), 0), 0)
     : 0;
   // 递归扫描分组多时对话框加宽,扁平/单组保持原宽度。
-  const groupCount = scan?.groups.filter((g) => g.files.some((f) => selectedPaths.has(f.path))).length ?? 0;
+  // 已排除文件不可选中，不参与「已选分组」统计。
+  const groupCount = scan?.groups.filter((g) => g.files.some((f) => selectedPaths.has(f.path) && !isExcludedFile(f))).length ?? 0;
   const wide = (scan?.groups.length ?? 0) > 1;
+
+  // 排除判定（弹框内共用）：matchPath（无则 path）在注册表中即已排除。
+  function isExcludedFile(f: RagScanFile) {
+    const mp = f.matchPath || f.path;
+    return !!mp && !!excludedPaths && excludedPaths.has(mp);
+  }
 
   // 列表形态：树形（默认）/ 平铺（按分组一行一组）。
   const [scanViewMode, setScanViewMode] = useState<'tree' | 'flat'>('tree');
@@ -2748,6 +3256,43 @@ const UploadDialog: React.FC<{
               )}
             </div>
           )}
+          {/* 数据源别名（folder/git）：放在「文件夹/Git 信息提示条」上方。
+              identity = 文件夹根路径 / git URL，需先选择文件夹 / 成功拉取
+              仓库；未确定前置灰。确认导入时持久化，树形数据源节点显示别名。
+              标题样式与「标签」一致（图标 + 13px medium）。 */}
+          {dataSource !== 'file' && onSourceAliasChange !== undefined && scan && (
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <Pencil size={13} style={{ color: 'var(--hub-ink-3)' }} />
+                <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+                  {t('pages.rag.sourceAliasTitle', '数据源别名')}
+                </label>
+                <span
+                  title={t('pages.rag.renameSourceHint', '别名仅用于展示；清空后恢复默认名称。')}
+                  className="cursor-help"
+                  style={{ fontSize: 11, color: 'var(--hub-ink-3)' }}
+                >
+                  ⓘ
+                </span>
+              </div>
+              <input
+                className="hub-input w-full"
+                style={{ height: 30, fontSize: 12 }}
+                value={sourceAlias ?? ''}
+                disabled={dataSource === 'folder' ? !scan.root : !gitSourceMeta?.url}
+                placeholder={
+                  dataSource === 'folder'
+                    ? (scan.root
+                        ? t('pages.rag.importAliasPlaceholder', '数据源别名（可选，留空使用默认名称）')
+                        : t('pages.rag.importAliasPickFirst', '选择文件夹后可填写'))
+                    : (gitSourceMeta?.url
+                        ? t('pages.rag.importAliasPlaceholder', '数据源别名（可选，留空使用默认名称）')
+                        : t('pages.rag.importAliasPickFirstGit', '拉取仓库成功后可填写'))
+                }
+                onChange={(e) => onSourceAliasChange(e.target.value)}
+              />
+            </div>
+          )}
           {/* 分组树:统计条 + 每个子文件夹一组 */}
           {!scanning && scan && totalFiles > 0 && (
             <div className="space-y-2">
@@ -2873,7 +3418,14 @@ const UploadDialog: React.FC<{
                     // （与 collapsed 集合/树形节点 key 对齐，否则「全部收起」
                     // 对根分组不生效——实测踩坑）。
                     const gKey = g.relPath || '__root__';
-                    const sel = g.files.filter((f) => selectedPaths.has(f.path));
+                    // 已排除文件不参与勾选统计（排除 = 不可选中）。
+                    const gSelectable = excludedPaths
+                      ? g.files.filter((f) => {
+                          const mp = f.matchPath || f.path;
+                          return !mp || !excludedPaths.has(mp);
+                        })
+                      : g.files;
+                    const sel = gSelectable.filter((f) => selectedPaths.has(f.path));
                     // 分组始终展示（未勾选文件弱化态），隐藏会让用户无法重新勾选
                     const gCollapsed = collapsed.has(gKey);
                     return (
@@ -2884,10 +3436,10 @@ const UploadDialog: React.FC<{
                           onClick={() => toggleCollapse(gKey)}
                           title={gCollapsed ? t('pages.rag.expandGroup', '展开') : t('pages.rag.collapseGroup', '收起')}
                         >
-                          {/* 分组勾选框：勾选 = 选中本组全部文件；部分选中显示半选态。 */}
+                          {/* 分组勾选框：勾选 = 选中本组全部未排除文件；部分选中显示半选态。 */}
                           <ScanDirCheckbox
-                            checked={sel.length === g.files.length && g.files.length > 0}
-                            indeterminate={sel.length > 0 && sel.length < g.files.length}
+                            checked={sel.length === gSelectable.length && gSelectable.length > 0}
+                            indeterminate={sel.length > 0 && sel.length < gSelectable.length}
                             onChange={() => onToggleGroup(g.files)}
                           />
                           <ChevronDown
@@ -2904,8 +3456,23 @@ const UploadDialog: React.FC<{
                             {g.relPath || t('pages.rag.scanRootGroup', '(根目录)')}
                           </span>
                           <span className="hub-mono text-[10.5px] flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
-                            {sel.length}/{g.files.length}
+                            {sel.length}/{gSelectable.length}
                           </span>
+                          {/* 分组级排除切换（文件夹/Git 数据源）：全部已排除 →
+                              点击全部取消；否则排除本组全部文件。 */}
+                          {excludedPaths !== undefined && (
+                            <button
+                              type="button"
+                              className="hub-icon-btn sm flex-shrink-0"
+                              style={{ height: 20, width: 20, color: g.files.every((f) => excludedPaths.has(f.matchPath || f.path)) ? 'var(--hub-accent)' : undefined }}
+                              title={g.files.every((f) => excludedPaths.has(f.matchPath || f.path))
+                                ? t('pages.rag.excludeRemoveDir', '取消排除本目录全部文件')
+                                : t('pages.rag.excludeAddDir', '排除本目录全部文件（更新检查忽略）')}
+                              onClick={(e) => { e.stopPropagation(); onToggleGroupExcluded(g.files); }}
+                            >
+                              {g.files.every((f) => excludedPaths.has(f.matchPath || f.path)) ? <Eye size={11} /> : <Ban size={11} />}
+                            </button>
+                          )}
                         </div>
                         {!gCollapsed && g.files.map((file) => (
                           <FlatScanFileRow
@@ -2914,13 +3481,15 @@ const UploadDialog: React.FC<{
                             selectedPaths={selectedPaths}
                             onToggleFile={onToggleFile}
                             existingPaths={existingPaths}
+                            excludedPaths={excludedPaths}
+                            onToggleExcluded={onToggleExcluded}
                             formatSize={formatSize}
                             t={t}
                           />
                         ))}
                         {gCollapsed && (
                           <div className="text-[10.5px]" style={{ padding: '4px 10px 6px 34px', color: 'var(--hub-ink-3)' }}>
-                            {t('pages.rag.scanCollapsedHint', '{{count}} 个文件（已选 {{sel}}）', { count: g.files.length, sel: sel.length })}
+                            {t('pages.rag.scanCollapsedHint', '{{count}} 个文件（已选 {{sel}}）', { count: gSelectable.length, sel: sel.length })}
                           </div>
                         )}
                       </div>
@@ -2943,6 +3512,9 @@ const UploadDialog: React.FC<{
                     onToggleGroup={onToggleGroup}
                     onClearGroup={onClearGroup}
                     existingPaths={existingPaths}
+                    excludedPaths={excludedPaths}
+                    onToggleExcluded={onToggleExcluded}
+                    onToggleGroupExcluded={onToggleGroupExcluded}
                     formatSize={formatSize}
                     t={t}
                   />
@@ -3156,12 +3728,18 @@ const FlatScanFileRow: React.FC<{
   selectedPaths: Set<string>;
   onToggleFile: (path: string) => void;
   existingPaths: Set<string>;
+  /** 排除注册表（当前生效集）；undefined = 数据源不提供排除。 */
+  excludedPaths?: Set<string>;
+  onToggleExcluded: (matchPath: string) => void;
   formatSize: (n: number) => string;
   t: ReturnType<typeof useTranslation>['t'];
-}> = ({ file, selectedPaths, onToggleFile, existingPaths, formatSize, t }) => {
+}> = ({ file, selectedPaths, onToggleFile, existingPaths, excludedPaths, onToggleExcluded, formatSize, t }) => {
 
   const exists = existingPaths.has(file.path);
-  const checked = selectedPaths.has(file.path);
+  const matchPath = file.matchPath || file.path;
+  const excluded = !!excludedPaths && !!matchPath && excludedPaths.has(matchPath);
+  // 已排除文件强制未选中且不可选中（勾选与排除互斥：排除 = 不导入）。
+  const checked = selectedPaths.has(file.path) && !excluded;
   return (
     <div
       className="group/file relative flex items-center gap-2 select-none cursor-pointer transition-colors"
@@ -3172,8 +3750,10 @@ const FlatScanFileRow: React.FC<{
         // 还靠左，视觉上「文件顶到头」、与分组头平级——用户实测截图）。
         padding: '5px 10px 5px 56px',
         background: checked ? 'var(--hub-surface-hover)' : undefined,
+        opacity: excluded ? 0.55 : undefined,
+        cursor: excluded ? 'not-allowed' : undefined,
       }}
-      onClick={() => onToggleFile(file.path)}
+      onClick={() => { if (!excluded) onToggleFile(file.path); }}
       role="option"
       aria-selected={checked}
     >
@@ -3196,9 +3776,33 @@ const FlatScanFileRow: React.FC<{
           {t('pages.rag.pathExists')}
         </span>
       )}
+      {excluded && (
+        <span
+          className="text-[11px] flex-shrink-0 inline-flex items-center gap-0.5"
+          style={{ color: 'var(--hub-ink-3)' }}
+          title={t('pages.rag.excludedBadgeTip', '已排除：更新检查将忽略该文件')}
+        >
+          <Ban size={10} />
+          {t('pages.rag.excludedBadge', '已排除')}
+        </span>
+      )}
       <span className="hub-mono text-[11px] ml-auto flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
         {file.size > 0 ? formatSize(file.size) : ''}
       </span>
+      {/* 排除开关（文件夹/Git 数据源）：点行内按钮不触发行的勾选切换。 */}
+      {excludedPaths !== undefined && matchPath && (
+        <button
+          type="button"
+          className="hub-icon-btn sm flex-shrink-0"
+          style={{ height: 20, width: 20 }}
+          title={excluded
+            ? t('pages.rag.excludeRemove', '取消排除（恢复参与更新检查）')
+            : t('pages.rag.excludeAdd', '排除该文件（更新检查忽略）')}
+          onClick={(e) => { e.stopPropagation(); onToggleExcluded(matchPath); }}
+        >
+          {excluded ? <Eye size={11} /> : <Ban size={11} />}
+        </button>
+      )}
     </div>
   );
 };
@@ -3235,13 +3839,31 @@ const ScanDirNode: React.FC<{
   onToggleGroup: (files: RagScanFile[]) => void;
   onClearGroup: (files: RagScanFile[]) => void;
   existingPaths: Set<string>;
+  /** 排除注册表（当前生效集）；undefined = 数据源不提供排除。 */
+  excludedPaths?: Set<string>;
+  onToggleExcluded: (matchPath: string) => void;
+  onToggleGroupExcluded: (files: RagScanFile[]) => void;
   formatSize: (n: number) => string;
   t: ReturnType<typeof useTranslation>['t'];
-}> = ({ node, depth, collapsed, onToggle, selectedPaths, onToggleFile, onToggleGroup, onClearGroup, existingPaths, formatSize, t }) => {
+}> = ({ node, depth, collapsed, onToggle, selectedPaths, onToggleFile, onToggleGroup, onClearGroup, existingPaths, excludedPaths, onToggleExcluded, onToggleGroupExcluded, formatSize, t }) => {
 
   const isCollapsed = collapsed.has(node.key);
-  const selCount = node.files.filter((f) => selectedPaths.has(f.path)).length;
-  const allChecked = selCount === node.files.length && node.files.length > 0;
+  // 已排除文件不参与勾选统计（排除 = 不可选中）：selCount / allChecked /
+  // indeterminate 都只统计未排除文件；计数显示「已选 X / 可选 Y」。
+  const selectableFiles = excludedPaths
+    ? node.files.filter((f) => {
+        const mp = f.matchPath || f.path;
+        return !mp || !excludedPaths.has(mp);
+      })
+    : node.files;
+  const selCount = selectableFiles.filter((f) => selectedPaths.has(f.path)).length;
+  const allChecked = selCount === selectableFiles.length && selectableFiles.length > 0;
+  // 目录级排除：子树全部文件已排除 → 全排他态（供标题按钮高亮/取消）。
+  const exPaths = node.files.map((f) => f.matchPath || f.path).filter(Boolean);
+  const allExcluded =
+    excludedPaths !== undefined &&
+    exPaths.length > 0 &&
+    exPaths.every((p) => excludedPaths.has(p));
   return (
     <div className={depth === 0 ? 'border-b last:border-b-0' : ''} style={{ borderColor: 'var(--hub-line-2)' }}>
       <div
@@ -3254,11 +3876,11 @@ const ScanDirNode: React.FC<{
         onClick={() => onToggle(node.key)}
         title={isCollapsed ? t('pages.rag.expandGroup', '展开') : t('pages.rag.collapseGroup', '收起')}
       >
-        {/* 文件夹勾选框：勾选 = 选中子树全部文件（含子文件夹）；部分选中显示半选态。
-            点击需 stopPropagation，避免触发整行的折叠/展开。 */}
+        {/* 文件夹勾选框：勾选 = 选中子树全部未排除文件（含子文件夹）；部分选中
+            显示半选态。点击需 stopPropagation，避免触发整行的折叠/展开。 */}
         <ScanDirCheckbox
-          checked={selCount === node.files.length && node.files.length > 0}
-          indeterminate={selCount > 0 && selCount < node.files.length}
+          checked={allChecked}
+          indeterminate={selCount > 0 && selCount < selectableFiles.length}
           onChange={() => onToggleGroup(node.files)}
         />
         <span
@@ -3289,8 +3911,23 @@ const ScanDirNode: React.FC<{
           {node.name}
         </span>
         <span className="hub-mono text-[10.5px] flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
-          {selCount}/{node.files.length}
+          {selCount}/{selectableFiles.length}
         </span>
+        {/* 目录级排除切换（文件夹/Git 数据源）：全部已排除 → 点击全部取消；
+            否则点击排除子树全部文件。stopPropagation 防触发折叠。 */}
+        {excludedPaths !== undefined && exPaths.length > 0 && (
+          <button
+            type="button"
+            className="hub-icon-btn sm flex-shrink-0"
+            style={{ height: 20, width: 20, color: allExcluded ? 'var(--hub-accent)' : undefined }}
+            title={allExcluded
+              ? t('pages.rag.excludeRemoveDir', '取消排除本目录全部文件')
+              : t('pages.rag.excludeAddDir', '排除本目录全部文件（更新检查忽略）')}
+            onClick={(e) => { e.stopPropagation(); onToggleGroupExcluded(node.files); }}
+          >
+            {allExcluded ? <Eye size={11} /> : <Ban size={11} />}
+          </button>
+        )}
         <span className="ml-auto flex-shrink-0" />
       </div>
       {!isCollapsed && (
@@ -3300,7 +3937,10 @@ const ScanDirNode: React.FC<{
               「文件比目录还靠前」且脱离父级缩进层级（用户实测截图）。 */}
           {node.rootFiles.map((file) => {
             const exists = existingPaths.has(file.path);
-            const checked = selectedPaths.has(file.path);
+            const fMatchPath = file.matchPath || file.path;
+            const fExcluded = !!excludedPaths && !!fMatchPath && excludedPaths.has(fMatchPath);
+            // 已排除文件强制未选中且不可选中（勾选与排除互斥：排除 = 不导入）。
+            const checked = selectedPaths.has(file.path) && !fExcluded;
             return (
               <div
                 key={file.path}
@@ -3313,8 +3953,10 @@ const ScanDirNode: React.FC<{
                   paddingTop: 5,
                   paddingBottom: 5,
                   background: checked ? 'var(--hub-surface-hover)' : undefined,
+                  opacity: fExcluded ? 0.55 : undefined,
+                  cursor: fExcluded ? 'not-allowed' : undefined,
                 }}
-                onClick={() => onToggleFile(file.path)}
+                onClick={() => { if (!fExcluded) onToggleFile(file.path); }}
                 role="option"
                 aria-selected={checked}
               >
@@ -3341,9 +3983,33 @@ const ScanDirNode: React.FC<{
                     {t('pages.rag.pathExists')}
                   </span>
                 )}
+                {fExcluded && (
+                  <span
+                    className="text-[11px] flex-shrink-0 inline-flex items-center gap-0.5"
+                    style={{ color: 'var(--hub-ink-3)' }}
+                    title={t('pages.rag.excludedBadgeTip', '已排除：更新检查将忽略该文件')}
+                  >
+                    <Ban size={10} />
+                    {t('pages.rag.excludedBadge', '已排除')}
+                  </span>
+                )}
                 <span className="hub-mono text-[11px] ml-auto flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
                   {file.size > 0 ? formatSize(file.size) : ''}
                 </span>
+                {/* 排除开关（文件夹/Git 数据源）：点行内按钮不触发行勾选。 */}
+                {excludedPaths !== undefined && fMatchPath && (
+                  <button
+                    type="button"
+                    className="hub-icon-btn sm flex-shrink-0"
+                    style={{ height: 20, width: 20 }}
+                    title={fExcluded
+                      ? t('pages.rag.excludeRemove', '取消排除（恢复参与更新检查）')
+                      : t('pages.rag.excludeAdd', '排除该文件（更新检查忽略）')}
+                    onClick={(e) => { e.stopPropagation(); onToggleExcluded(fMatchPath); }}
+                  >
+                    {fExcluded ? <Eye size={11} /> : <Ban size={11} />}
+                  </button>
+                )}
               </div>
             );
           })}
@@ -3360,6 +4026,9 @@ const ScanDirNode: React.FC<{
               onToggleGroup={onToggleGroup}
               onClearGroup={onClearGroup}
               existingPaths={existingPaths}
+              excludedPaths={excludedPaths}
+              onToggleExcluded={onToggleExcluded}
+              onToggleGroupExcluded={onToggleGroupExcluded}
               formatSize={formatSize}
               t={t}
             />
@@ -3369,7 +4038,7 @@ const ScanDirNode: React.FC<{
       )}
       {isCollapsed && (
         <div className="text-[10.5px]" style={{ paddingLeft: 34 + depth * 14, paddingBottom: 4, color: 'var(--hub-ink-3)' }}>
-          {t('pages.rag.scanCollapsedHint', '{{count}} 个文件（已选 {{sel}}）', { count: node.files.length, sel: selCount })}
+          {t('pages.rag.scanCollapsedHint', '{{count}} 个文件（已选 {{sel}}）', { count: selectableFiles.length, sel: selCount })}
         </div>
       )}
     </div>
@@ -4521,8 +5190,10 @@ const UpdateDialog: React.FC<{
   onRetryCheck: () => void;
   onFromOriginal: () => void;
   onManualUpload: () => Promise<void>;
+  /** 「取消排除」：从注册表移除该文档 original_path 后重查（可选——无则不渲染按钮）。 */
+  onReinclude?: () => void;
   onClose: () => void;
-}> = ({ doc, check, checking, actionPhase, onRetryCheck, onFromOriginal, onManualUpload, onClose }) => {
+}> = ({ doc, check, checking, actionPhase, onRetryCheck, onFromOriginal, onManualUpload, onReinclude, onClose }) => {
   const { t } = useTranslation();
   const method = check?.method ?? (doc.method || 'copy');
   const reindexing = actionPhase === 'reindexing';
@@ -4583,6 +5254,21 @@ const UpdateDialog: React.FC<{
                 {check.gitError.auth
                   ? t('pages.rag.updateGitAuthError', 'Git 仓库认证失败（账密可能已修改），本次检查基于旧克隆。请到「导入文档」的 Git 数据源中重新选择该仓库并输入新账密。')
                   : t('pages.rag.updateGitOtherError', 'Git 仓库拉取失败（地址可能已变更或网络不可达），本次检查基于旧克隆：{{message}}', { message: check.gitError.message })}
+              </div>
+            </div>
+          )}
+
+          {/* 已排除：批量/自动更新与数据源同步都会忽略该文档；提供取消排除入口 */}
+          {!checking && check?.excluded && (
+            <div className="flex items-start gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+              <Ban size={15} className="mt-0.5 flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }} />
+              <div className="space-y-1.5">
+                <div>{t('pages.rag.updateExcludedHint', '该文件已被排除：批量更新、自动更新与数据源同步都会忽略它（手动上传仍可用）。')}</div>
+                {onReinclude && (
+                  <button onClick={onReinclude} className="hub-btn sm">
+                    <Eye size={12} /> {t('pages.rag.updateReinclude', '取消排除')}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -4913,12 +5599,83 @@ const TagSearchSelect: React.FC<{
 };
 
 // ── 批量更新前置确认弹框（预扫描后展示文件更新数量等信息，用户确认后再执行） ──
+// ── 数据源修改别名弹框（树形视图 folder/git 数据源行的铅笔按钮）：
+//    预填当前展示名（别名或默认名），空值提交 = 清除别名回退默认名。 ──
+const SourceAliasDialog: React.FC<{
+  target: { kind: 'git' | 'folder'; url?: string; root?: string; currentLabel: string };
+  onClose: () => void;
+  onSave: (alias: string) => Promise<void>;
+}> = ({ target, onClose, onSave }) => {
+  const { t } = useTranslation();
+  const [alias, setAlias] = useState(target.currentLabel);
+  const [saving, setSaving] = useState(false);
+  const identity = target.kind === 'git' ? target.url || '' : target.root || '';
+  const submit = async () => {
+    setSaving(true);
+    try {
+      await onSave(alias.trim());
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4" style={{ pointerEvents: 'auto' }}>
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border border-gray-100 dark:border-gray-700">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+            {t('pages.rag.renameSource', '修改别名')}
+          </h2>
+          <button onClick={onClose} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="p-5 space-y-3">
+          <p className="text-[12px] hub-mono truncate" style={{ color: 'var(--hub-ink-3)' }} title={identity}>
+            {identity}
+          </p>
+          <input
+            className="hub-input w-full"
+            style={{ height: 32 }}
+            value={alias}
+            autoFocus
+            placeholder={t('pages.rag.renameSourcePlaceholder', '输入别名（留空恢复默认名称）')}
+            onChange={(e) => setAlias(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void submit();
+              if (e.key === 'Escape') onClose();
+            }}
+          />
+          <p className="text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+            {t('pages.rag.renameSourceHint', '别名仅用于展示；清空后恢复默认名称。')}
+          </p>
+        </div>
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          <button onClick={onClose} className="hub-btn">
+            {t('pages.rag.cancel')}
+          </button>
+          <button onClick={() => void submit()} className="hub-btn primary" disabled={saving}>
+            {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+            {t('common.save')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const BatchUpdateConfirmDialog: React.FC<{
   preview: BatchPreview | null;
   checking: boolean;
+  /** 预扫描实时进度（rag://preview-progress 事件）：metas → git → scan →
+   *  checking 逐文档。null = 无事件（web 端/尚未开始）。 */
+  scanProgress?: { current: number; total: number; name: string; phase: string } | null;
+  /** 弹框标题（默认「批量更新」；数据源级更新传数据源名）。 */
+  title?: string;
+  /** 副标题说明（数据源级更新传范围说明）。 */
+  subtitle?: string;
   onCancel: () => void;
   onConfirm: () => void;
-}> = ({ preview, checking, onCancel, onConfirm }) => {
+}> = ({ preview, checking, scanProgress, title, subtitle, onCancel, onConfirm }) => {
   const { t } = useTranslation();
   const none =
     preview !== null && preview.toUpdate === 0 && preview.added === 0 && preview.removed === 0;
@@ -4927,7 +5684,7 @@ const BatchUpdateConfirmDialog: React.FC<{
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border border-gray-100 dark:border-gray-700">
         <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
           <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-            {t('pages.rag.batchUpdate', '批量更新')}
+            {title ?? t('pages.rag.batchUpdate', '批量更新')}
           </h2>
           <button onClick={onCancel} className="hub-icon-btn sm">
             <X size={16} />
@@ -4935,12 +5692,56 @@ const BatchUpdateConfirmDialog: React.FC<{
         </div>
         <div className="p-5 space-y-3">
           {checking ? (
-            <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
-              <Loader2 size={14} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
-              {t('pages.rag.batchScanChecking', '正在扫描文档更新状态…')}
-            </div>
+            <>
+              <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
+                <Loader2 size={14} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+                {t('pages.rag.batchScanChecking', '正在扫描文档更新状态…')}
+              </div>
+              {/* 实时扫描进度（rag://preview-progress）：阶段文案 + 进度条 +
+                  计数。阶段：metas 读元数据 → git 拉取远端仓库 → scan 扫描
+                  数据源目录 → checking 逐文档 md5 比对。 */}
+              {scanProgress && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
+                    <span>
+                      {scanProgress.phase === 'metas'
+                        ? t('pages.rag.scanPhaseMetas', '读取文档元数据…')
+                        : scanProgress.phase === 'git'
+                        ? t('pages.rag.scanPhaseGit', '拉取 Git 数据源远端… ({{current}}/{{total}})', { current: scanProgress.current, total: scanProgress.total })
+                        : scanProgress.phase === 'scan'
+                        ? t('pages.rag.scanPhaseScan', '扫描数据源目录（检测新增/删除）…')
+                        : scanProgress.name
+                        ? t('pages.rag.scanPhaseChecking', '比对文件变更 ({{current}}/{{total}})：{{name}}', { current: scanProgress.current, total: scanProgress.total, name: scanProgress.name })
+                        : t('pages.rag.scanPhaseCheckingCount', '比对文件变更 ({{current}}/{{total}})', { current: scanProgress.current, total: scanProgress.total })}
+                    </span>
+                    {scanProgress.phase === 'checking' && scanProgress.total > 0 && (
+                      <span className="hub-mono">{scanProgress.current}/{scanProgress.total}</span>
+                    )}
+                  </div>
+                  <div style={{ height: 4, borderRadius: 2, background: 'var(--hub-line)', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        width: scanProgress.phase === 'checking' && scanProgress.total > 0
+                          ? `${Math.round((scanProgress.current / scanProgress.total) * 100)}%`
+                          : '100%',
+                        height: '100%',
+                        background: 'var(--hub-ink-3)',
+                        opacity: 0.5,
+                        transition: 'width 0.15s ease',
+                        animation: scanProgress.phase === 'checking' && scanProgress.total > 0 ? undefined : 'hub-indeterminate 1.2s ease-in-out infinite',
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </>
           ) : preview && (
             <>
+              {subtitle && (
+                <p className="text-[12px] hub-mono truncate" style={{ color: 'var(--hub-ink-3)' }} title={subtitle}>
+                  {subtitle}
+                </p>
+              )}
               <p className="text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
                 {t('pages.rag.batchConfirmSummary', '将扫描全部文档并自动重新索引有更新的文件。以下是预扫描结果：')}
               </p>
@@ -4968,6 +5769,10 @@ const BatchUpdateConfirmDialog: React.FC<{
                 <div className="hub-card flex items-center justify-between" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
                   <span style={{ color: 'var(--hub-ink-3)' }}>{t('pages.rag.batchScanRemoved', '数据源已删除文件')}</span>
                   <span className="hub-mono" style={{ color: preview.removed > 0 ? 'var(--hub-err)' : 'var(--hub-ink-3)' }}>{preview.removed}</span>
+                </div>
+                <div className="hub-card flex items-center justify-between" style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}>
+                  <span style={{ color: 'var(--hub-ink-3)' }}>{t('pages.rag.batchScanExcluded', '已排除（忽略）')}</span>
+                  <span className="hub-mono" style={{ color: 'var(--hub-ink-3)' }}>{preview.excluded ?? 0}</span>
                 </div>
               </div>
               {none && (

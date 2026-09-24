@@ -746,6 +746,31 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       const b = body as { id?: string; tags?: string[] } | null;
       return { command: 'set_rag_tags', args: { id: b?.id ?? '', tags: b?.tags ?? [] } };
     }
+    // GET /rag/excluded-paths — the exclusion registry (paths the update
+    // pipeline ignores). Backs the import dialog's ban toggles + doc badges.
+    if (segs[1] === 'excluded-paths' && m === 'GET')
+      return { command: 'list_rag_excluded_paths', args: {} };
+    // POST /rag/excluded-paths/set — replace the registry wholesale (the
+    // import dialog persists its dialog-local diff in one call).
+    if (segs[1] === 'excluded-paths' && segs[2] === 'set' && m === 'POST') {
+      const b = body as { paths?: string[] } | null;
+      return { command: 'set_rag_excluded_paths', args: { paths: b?.paths ?? [] } };
+    }
+    // GET /rag/git-clone-dir?url=… — the persistent clone dir for a git
+    // source (the tree view's per-source exclude button registry entry).
+    if (segs[1] === 'git-clone-dir' && m === 'GET') {
+      const q = new URLSearchParams(endpoint.split('?')[1] || '');
+      return { command: 'get_rag_git_clone_dir', args: { url: q.get('url') ?? '' } };
+    }
+    // POST /rag/source-alias — set/clear a folder/git source's display alias
+    // (the tree view's per-source rename button).
+    if (segs[1] === 'source-alias' && m === 'POST') {
+      const b = body as { kind?: string; identity?: string; alias?: string } | null;
+      return {
+        command: 'set_rag_source_alias',
+        args: { kind: b?.kind ?? '', identity: b?.identity ?? '', alias: b?.alias ?? '' },
+      };
+    }
     // POST /rag/open-location — reveal a doc's file in the OS file manager
     // (target: "source" = original file, default/omitted = content file)
     if (segs[1] === 'open-location' && m === 'POST') {
@@ -881,6 +906,29 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // POST /rag/docs/batch-update - kick off the background re-index pass.
     if (segs[1] === 'docs' && segs[2] === 'batch-update' && m === 'POST') {
       return { command: 'batch_update_rag_docs', args: {} };
+    }
+    // POST /rag/source-update — source-level manual update (the tree view's
+    // per-source refresh button): git force-refresh + scoped sync + scoped
+    // md5 re-index. Shares the batch flow's progress events + running guard.
+    // ⚠️ Must require segs.length === 2 — otherwise this branch also swallows
+    // /rag/source-update/preview (segs[1] is still 'source-update') and the
+    // preview call would EXECUTE the update and return [added,removed,updated],
+    // leaving the confirm dialog counts undefined/blank.
+    if (segs[1] === 'source-update' && segs.length === 2 && m === 'POST') {
+      const b = body as { kind?: string; url?: string; root?: string } | null;
+      return {
+        command: 'refresh_rag_source',
+        args: { kind: b?.kind ?? '', url: b?.url ?? null, root: b?.root ?? null },
+      };
+    }
+    // POST /rag/source-update/preview — source-scoped batch preview (the
+    // confirm dialog counts for the per-source refresh button).
+    if (segs[1] === 'source-update' && segs[2] === 'preview' && m === 'POST') {
+      const b = body as { kind?: string; url?: string; root?: string } | null;
+      return {
+        command: 'preview_rag_source_update',
+        args: { kind: b?.kind ?? '', url: b?.url ?? null, root: b?.root ?? null },
+      };
     }
     // GET /rag/docs/:id — full document (with content)
     if (segs[1] === 'docs' && m === 'GET' && segs.length === 3)

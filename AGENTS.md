@@ -1902,6 +1902,15 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 - **搜索栏计数移除（同日）**：Servers / Prompts / Resources / Skills / RAG 五个页面搜索栏右侧的「N/M」总数统计移除（信息价值低且挤占工具栏宽度）；RAG 移除的是工具栏计数 span（批量条计数此前已删）。
 - **样式修复（同日）**：批量勾选条/树形「展开收起」按钮出现时工具栏宽度不足——容器无 `flex-wrap` 且子项默认收缩，按钮被压缩致「批量添加标签/平铺/树形」等文字换行错乱。修复：工具栏容器加 `flex-wrap`；批量条、计数+视图切换组、展开收起按钮加 `flex-shrink-0`；全局 `.hub-btn` 加 `white-space: nowrap` + `flex-shrink: 0`（按钮文字永不换行）。**后续补充**：`flex-wrap` 导致平铺勾选时批量条整体换行——去掉换行需求不现实（窗口小必换），改为优先收缩可收缩项：文件名搜索卡片加 `min-w-[160px]`、TagSearchSelect 根加 `min-w-[150px] shrink`——宽度不足时先缩搜索区，仅在极窄窗口才换行；批量条不再单独换行。
 
+#### 3.17.16 RAG 树形视图增强：数据源/目录级更新与排除、源别名（2026-09-24）
+
+> 树形视图（RagDocTree）的操作能力扩展。涉及 `rag/service.rs`、`commands/rag.rs`、`RagDocTree.tsx`、`RagPage.tsx`、`tauriClient.ts`、`ragService.ts`、locales ×4。
+
+- **数据源级手动更新**：`SourceUpdateTarget { kind: "git"|"folder"|"file", url, root }`——git=强制拉取远端+范围同步/重索引（TTL 绕过）；folder=扫描源根目录（支持子目录 root：路径前缀圈定范围）；file=逻辑「文件」分组（单文件导入+无 source 存量文档），仅重索引有变更文件（无同步）。命令 `refresh_rag_source` / `preview_rag_source_update`（复用 BATCH_UPDATE_RUNNING CAS + `rag://batch-update-progress` 事件）。前端树形：数据源行（git/folder/file）+ **目录行**（folder=绝对路径 root；git=root=clone 内相对子目录）都有刷新按钮，统一弹源范围确认框（复用 BatchUpdateConfirmDialog）。⚠️ tauriClient 路由 `/rag/source-update` 分支必须加 `segs.length === 2`，否则会吞掉 `/preview` 导致确认框拿不到数字。
+- **数据源/目录级排除**：排除注册表（`config_json.rag.excludedPaths`）加**目录条目**（前缀覆盖其下全部文件）——folder=源根/子目录绝对路径；git=持久 clone 目录（新命令 `get_rag_git_clone_dir`）；file 逻辑分组=逐文档按 original_path 切换。目录行/数据源行排除按钮状态按「有 original_path 的文档全部 excluded」判定（doc.excluded 后端前缀匹配计算，含祖先覆盖），子级状态随 refreshDocs 自动同步；取消排除时移除覆盖它的祖先条目。按钮顺序统一【刷新、排除】（数据源行另加【别名】按钮）。
+- **数据源别名**：注册表 `config_json.rag.sourceAliases`（identity=folder 根路径 / git canonical URL → 别名），`set_rag_source_alias` 命令（空别名=清除）；读路径在 `doc_info_from_meta` 覆盖 classify_source 的默认标签（3 个列表/分页调用点共享一次注册表读取）。前端 `SourceAliasDialog`（铅笔按钮，预填当前展示名，空值提交=恢复默认名），refreshDocs 后树形数据源节点即时显示别名。
+- **验证**：`cargo check` 通过；`cargo test --lib rag::` 22 passed；`tsc` 24=基线；`npm run build` 通过。i18n 新键：refreshFolder/refreshFile/refreshFileGroupScope/excludeFileGroupAdd/Remove/renameSource* ×4 语言。
+
 #### 3.17.15 分片策略修正 + Git 图标 + skill 多选样式 + 刷新按钮（2026-09-22）
 
 > 用户五项需求的落地与一次**方案纠偏**（3.17.15 内分片部分曾按「固定长度窗口 + 超长降级 text」实现，用户明确否定，已按本节最终方案重写）。
@@ -2110,6 +2119,63 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 **验证**：`npx tsc --noEmit` 24 = 基线（零新增）；`npm run build` ✓；Rust 无改动。
 
 ---
+
+### 3.18 RAG 文件排除（导入时勾选排除，更新检查忽略，桌面端独有，2026-09-23）
+
+> 需求：文件导入时支持「排除」——后续自动更新 / 手动批量更新 / 数据源同步时忽略该文件。排除注册表存 `config_json.rag.excludedPaths`（JSON 字符串数组，绝对路径），**目录条目排除其下全部文件**（复用 `path_under_root` 前缀语义）。无 DB 迁移。
+
+#### 3.18.1 后端（`src-tauri/`）
+
+- **模型**（`models/rag.rs`）：`RagScanFile.match_path`（扫描文件对应的注册表匹配路径；文件夹扫描 = 文件绝对路径，Git 扫描由 `git_pick_inner` 在 temp→persistent 映射后**重打**——与文档将要记录的 `original_path` 一致，排除 Git 文件才能挡住后续 sync 再导入）；`RagDocInfo.excluded` / `RagDoc.excluded` / `RagUpdateCheck.excluded`（`#[serde(default, skip_serializing_if = "Not::not")]`，false 不上线）；`BatchPreview.excluded: u32`（`skip_serializing_if = "u32_is_zero"`，0 不上线）。
+- **注册表服务**（`rag/service.rs`）：`list_excluded_paths()`（config 读失败 fail-open 返回空集）/ `set_excluded_paths(paths)`（trim + 去空 + 保序去重后整体替换）/ `is_path_excluded(path, &reg)`（async，目录前缀匹配）/ `path_excluded(path)`（单路径便捷）/ `is_excluded_sync(path, &reg)`（同步版，分类循环用）。
+- **管线跳过点**（全部生效）：
+  - `plan_source_sync`：排除路径的扫描文件不算「新增」（folder/git 两分支）；排除文档的 original_path 不参与「删除」判定（folder/git/file 三分支）。
+  - `preview_batch_update_inner`：排除文档计入 `excluded` 计数并跳过 lost/skipped/to_update 分类。
+  - `run_batch_update`：排除文档跳过重索引。
+  - `check_rag_update`：结果带 `excluded: true`（UpdateDialog 提示 + 取消排除入口）。
+  - `doc_info_from_meta`：列表/分页行带 `excluded` 徽章（**注册表由调用方一次读入传入**——list_docs / search_docs_paged 两条路径各读一次，非每文档一次 DB 读）。
+  - `get_doc_inner`：RagDoc 带 `excluded`（单文档一次 `path_excluded`）。
+- **命令**（`commands/rag.rs` + `lib.rs` 注册）：`list_rag_excluded_paths` / `set_rag_excluded_paths`；`git_pick_inner` 扫描后对每个文件 `map_temp_to_persistent` 重打 `match_path`。
+- **单测**（`service.rs::exclusion_tests`）：`path_under_root` 目录语义（兄弟前缀不误配）、`is_excluded_sync` 文件+目录匹配、`normalize_excluded_paths` trim/去空/去重。`cargo test --lib` **51 passed**。
+
+#### 3.18.2 前端（`frontend/`）
+
+- **API**：`ragService.listRagExcludedPaths()` / `setRagExcludedPaths(paths)`；`tauriClient.ts` 路由 `GET /rag/excluded-paths` + `POST /rag/excluded-paths/set`；`types/index.ts` 对应字段（RagScanFile.matchPath / RagDoc.excluded / RagDocInfo.excluded / RagUpdateCheck.excluded / BatchPreview.excluded）。
+- **导入弹框**（RagPage UploadDialog）：文件夹/Git 数据源（file 数据源不参与数据源级同步，不提供排除）每文件行尾 **Ban/Eye 切换按钮**（平铺 FlatScanFileRow + 树形 ScanDirNode 文件行），目录/分组头**整组切换按钮**；排除行 55% 透明 + 「已排除」徽章。状态 = `excludedBase`（打开弹框时注册表快照，弹框内可移除）∪ `excludedLocal`（弹框内新增）；**确认导入时 diff 持久化**（读当前注册表 → 删 removed 加 added → 整体写回），取消/关闭丢弃本地态。
+- **排除 ⇄ 勾选互斥（2026-09-23 补充）**：已排除文件**强制未选中且不可选中**——①null「全选」哨兵物化（`resolveSelected`）、组切换（`toggleGroupSelected`）、全选（`setAllSelected`）、合并扫描（`mergeIntoScan`）全部跳过排除路径；②文件行点击对排除文件无效果（cursor: not-allowed）；③目录/分组头勾选框与计数（`selCount`/`allChecked`/indeterminate/折叠提示/`groupCount`）只统计未排除文件。排除 = 不导入，与勾选状态天然互斥，无「勾选了但不导入」的歧义态。
+- **文档列表**：行内「已排除」徽章 + 操作列 Ban/Eye 切换按钮（直接读写注册表 + refreshDocs）；批量勾选条新增「排除更新」按钮（选中集全部排除 / 全部取消，toggle 语义）。
+- **UpdateDialog**：`check.excluded` 时显示提示块（批量/自动更新与数据源同步都会忽略，手动上传仍可用）+「取消排除」按钮（移除注册表条目后重查）。
+- **BatchUpdateConfirmDialog**：新增「已排除（忽略）」统计卡（第 7 格）。
+- **i18n**：`pages.rag` 新增 14 键 ×4 语言（excludedBadge/Tip、excludeAdd/Remove、excludeAddDir/RemoveDir、excludeNoPath、excludeToggleFailed、excludeRemovedToast、batchExclude/Hint、batchScanExcluded、updateExcludedHint、updateReinclude）。
+
+#### 3.18.3 边界
+
+- 排除**不阻断手动上传更新**（update_doc_from_file / from-original 不查注册表）——用户显式操作优先。
+- 排除路径匹配的是 `original_path`（导入时记录的绝对路径）；file 数据源文档同样可从列表排除（其源文件消失时不再被同步删除）。
+- Git 重打 match_path 失败（意外路径）时保留 temp 路径——永不匹配注册表，仅退化为「无法在弹框内排除该文件」，无副作用。
+- 注册表写失败（config_service Err）时导入弹框确认流程不回滚已成功的导入（best-effort，console.warn）。
+- 验证：`cargo check` 0 错 0 警；`cargo test --lib` 51 passed；`npx tsc --noEmit` 24 = 基线；`npm run build` ✓。
+
+#### 3.18.4 数据源级手动更新（树形视图数据源节点刷新按钮，2026-09-23）
+
+> 需求：RAG 列表树形结构时，在数据源节点上也放一个「更新」按钮，做数据源级别的手动更新。
+
+- **后端**（`rag/service.rs::refresh_source_update` + `commands/rag.rs::refresh_rag_source`，`lib.rs` 注册）：
+  - 入参 `SourceUpdateTarget { kind: "git"|"folder", url, root }`（camelCase）。
+  - **数据源范围预扫描**（`preview_source_update` + `preview_rag_source_update` 命令，2026-09-23 补充）：与批量预览同构的 `BatchPreview` 计数（total/toUpdate/skipped/lost/added/removed/excluded/gitErrors），但只统计该数据源的文档（显式 source 身份 git url / folder root；legacy 文档按 original_path 前缀）；git 目标先强制拉取远端（TTL 绕过），失败进 `gitErrors`（确认框已有渲染）；范围同步计划走共享的 `plan_source_sync_scoped`（与执行阶段同一函数，确认框数字与实际执行严格一致）。预扫描只读、无 CAS 守卫。
+  - **git**：先删 `GIT_REFRESH_CACHE` 的 TTL 条目（**强制重拉**，用户显式点击），再 `refresh_git_repo`（失败返回结构化错误——auth 前缀「认证失败：」/其他「拉取失败：」+ detail，前端 toast）。
+  - **folder**：校验 root 存在。
+  - **数据源范围同步**：`plan_source_sync_scoped`（全量计划后按目标 root/url 前缀过滤 + legacy folder root 补扫），add/remove 两闸门（「自动同步新增/删除文件」开关）与批量流程一致；有变化时发 `phase="sync"` 进度事件并 `run_source_sync`。
+  - **数据源范围重索引**：重收集 metas 后按 `source.git.url`（git）/ `source.root`（folder；legacy 无 source 文档按 original_path 前缀）过滤本数据源文档，`classify_original` + `update_doc_from_original` 逐条 md5 变更重索引（排除/丢失/无路径跳过）。
+  - **守卫**：与批量/自动更新共用 `BATCH_UPDATE_RUNNING` CAS（互斥不重叠）+ import-session 检查；**内联执行**（命令 await 返回 `(added, removed, updated)` 计数），进度走同一 `rag://batch-update-progress` 事件——前端 batchUpdateRunning 状态与进度弹框对两种更新通用。
+  - 变更后按需 `rebuild_rag_sql_index`。
+- **前端**：
+  - `RagDocTree.tsx`：新 props `onRefreshSource` / `refreshingSourceKey`；sources 分组携带 `gitUrl`/`sourceRoot`（取组内首个文档）；git/folder 数据源节点**行尾**渲染 RefreshCw/Loader2 按钮——按钮放在与文件行**等宽的 170px 容器内右对齐**（`justify-content: flex-end`），落点与文件行按钮列完全重合（首版按钮放容器左侧曾错位，用户截图反馈后修正）；stopPropagation 不触发折叠，进行中转圈禁用，tooltip 说明三步动作；file/tool 数据源无按钮（无远端可拉）。
+  - `RagPage.tsx`：**与批量更新同流程（2026-09-23 补充）**——点击刷新按钮先弹**数据源范围**的确认框（`preview_rag_source_update` 预扫描：git 先强制拉取远端，统计只算该数据源的文档/新增/移除/排除），用户确认后 `startSourceUpdate` 才执行 `refresh_rag_source`（进度弹框复用批量的）。`BatchUpdateConfirmDialog` 扩展可选 `title`/`subtitle` props（数据源级传「数据源更新」标题 + url/root 副标题）；已有更新在跑时只重开进度弹框（与批量按钮同语义）；完成 toast（导入/移除/更新计数）+ refreshDocs。
+  - `ragService.refreshRagSource(kind, {url, root})` / `previewRagSourceUpdate(kind, {url, root})`；`tauriClient.ts` 路由 `POST /rag/source-update` + `POST /rag/source-update/preview`。
+  - i18n：`pages.rag.refreshSource` / `refreshSourceDone` / `refreshSourceTitle` ×4 语言。
+- **legacy 文件夹数据源（无 source 元数据、按 original_path 父目录 classify）**：`plan_source_sync` 只扫显式 folder root，这类 root 永不出现在计划里——`refresh_source_update` 对「root 下无任何显式 folder source 文档」的 folder 目标**直接补扫该 root**（`scan_folder_public` 递归，truncated 跳过，排除注册表 + 引用集判定照常），使 legacy 文件夹数据源的刷新按钮同样能导入新增文件；移除/重索引路径经 `scope_hit(original_path)` 天然覆盖。
+- **验证**：`cargo check` 0 错 0 警；`cargo test --lib` 51 passed；`npx tsc --noEmit` 24 = 基线；`npm run build` ✓。
 
 ---
 
