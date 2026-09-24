@@ -1707,6 +1707,20 @@ macOS OCR 代码参考了 `macocr` 0.4.7 的 Vision 用法（VNRecognizeTextRequ
 
 **验证**：`cargo check` 0 错 0 警；`cargo test --lib` 34 passed；真实 DB 模拟 "idea sse stream" 最终排序 = `Idea-mcp-server-sse`(2) → `Idea-mcp-server-stream`(2) → `Idea-mcp-server`(1)。
 
+#### 3.15.10 清空日志死锁修复 + 活动页状态筛选统一样式（2026-09-24）
+
+**① 清空日志失败（`DELETE FROM fts_app_log` 等锁 5.2s 后 database is locked）**
+
+- **根因**：`log_service.rs::clear_logs` 在事务 `tx` 内先执行 `DELETE FROM app_log`（tx 连接持有 SQLite 写锁），随后调用的却是 `fts_service::clear_table`（**pool 版**，即另一连接）执行 `DELETE FROM fts_app_log`——第二个连接等 tx 释放写锁，而 tx 又在等 clear_table 返回后才 commit，**死锁**；sqlx SQLite 默认 busy_timeout 5s，超时后报 `database is locked`，整个清空失败（tx 回滚，app_log 也没删掉）。日志表现为 slow statement 警告（elapsed≈5.2s、rows_affected=0）。`cleanup_old_logs` 一直用的是 `&mut *tx` 同事务两步删，无此问题。
+- **修复**：`clear_logs` 改用 `clear_table_tx(&mut tx, FtsTable::AppLog)` 同事务执行；**删除 pool 版 `clear_table`**（fts_service.rs，已无调用方）——它是本次死锁的隐患源头，保留会诱使未来调用方重蹈覆辙，`clear_table_tx` 文档注释已加警示。
+- **验证**：`cargo check` 0 错 0 警；`cargo test --lib` 51 passed / 0 failed。
+
+**② 活动页「状态」筛选框样式统一（去掉原生 datalist）**
+
+- 原实现：`ActivityPage.tsx` 状态筛选用 `<input type="text">` + 原生 `<datalist>`（各平台渲染不一致、与其余四个 SearchableSelect 筛选框视觉割裂）。
+- 修复：`SearchableSelect.tsx` 新增 `searchable?: boolean` prop（默认 `true`）——`false` 时下拉面板不渲染搜索输入框，打开即加载全部候选（状态只有固定两项无需搜索）。`ActivityPage.tsx` 状态筛选改用 `<SearchableSelect loadOptions={loadStatusOptions} searchable={false}>`，候选为固定翻译标签（`activity.statusSuccess`/`statusError`）；`handleSearch` 既有的「翻译标签 → raw status」映射逻辑不变，天然兼容。顺带清理死代码：`STATUS_OPTIONS`/`isValidStatus`（后者本就无调用方）与 `ActivityStatus` import。
+- **验证**：`npx tsc --noEmit` 24 = 基线（改动文件 0 错误）；`npm run build` 通过。
+
 ### 3.16 已知 agent 目录补齐（对齐上游 vercel-labs/skills，2026-09-07）
 
 > skills 页的「已知 agent」catalog（`runtimes/skill/install.json`，编译期 `include_str!` 进二进制）对齐上游 `vercel-labs/skills` `src/agents.ts` 的 77 个 agent：补齐 19 个缺失条目（Amp/Antigravity/Antigravity CLI/Cline/Codex/Cursor/Deep Agents/Dexto/Firebender/Gemini CLI/GitHub Copilot/Kimi Code CLI/Loaf/MiniMax Code/OpenCode/Posit Assistant/Replit/Warp/Zed）+ 桌面端自定义两个通用目录条目：`"Common Agent": ".agents/skills"` 与 `"Common Agent Config": ".config/agents/skills"`（`.agents` 与 `.config/agents` 均为通用型目录，被 Cline/Dexto/Kimi Code CLI/Loaf/Warp/Zed、Amp/Replit 等共用；为免复合名过长且不指向具体 agent，统一以通用名展示）。**同路径合并**：catalog 内路径不允许重复，共享同一目录的 agent 合并为一条 `/` 分割的复合名（`Qoder/Qoder CN`、`Trae/Trae CN`、`Zencoder/Zenflow`），最终 65 条。**有意跳过** Eve / PromptScript（项目级 cwd 路径，桌面 home 扫描不适用）与 Universal（meta 条目，`~/.agents/skills` 语义已被 `.agents/skills` 复合条目覆盖）。新增条目路径采用上游 `globalSkillsDir`（用户级目录，符合桌面扫描语义）；存量条目路径（如 Devin/Crush/Goose 用项目级 `skillsDir`）保持不动，避免影响已持久化配置。

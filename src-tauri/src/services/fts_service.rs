@@ -494,14 +494,8 @@ pub async fn table_is_empty(table: FtsTable) -> Result<bool> {
     Ok(table_row_count(table).await? == 0)
 }
 
-/// 清空某张 FTS 表（rebuild 前置；app_log 清理等）
-pub async fn clear_table(table: FtsTable) -> Result<()> {
-    let sql = sqls(table).clear;
-    sqlx::query(sql).execute(crate::db::pool()).await?;
-    Ok(())
-}
-
-/// 清空某张 FTS 表（外部事务版：与源表写同事务提交）
+/// 清空某张 FTS 表（外部事务版：与源表写同事务提交）。
+/// ⚠️ 不要在持有写锁的事务外另开连接调用——会与事务互相等锁死锁（曾致 clear_logs 失败）。
 pub async fn clear_table_tx(tx: &mut sqlx::SqliteConnection, table: FtsTable) -> Result<()> {
     let sql = sqls(table).clear;
     sqlx::query(sql).execute(&mut *tx).await?;

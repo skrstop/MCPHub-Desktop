@@ -4,7 +4,6 @@ import {
   Activity,
   ActivityStats,
   ActivityFilter,
-  ActivityStatus,
 } from '@/types';
 import {
   getActivities,
@@ -26,11 +25,6 @@ interface PaginationInfo {
   hasNextPage: boolean;
   hasPrevPage: boolean;
 }
-
-const STATUS_OPTIONS: ActivityStatus[] = ['success', 'error'];
-
-const isValidStatus = (value: string): value is ActivityStatus =>
-  STATUS_OPTIONS.includes(value as ActivityStatus);
 
 const ActivityPage: React.FC = () => {
   const { t } = useTranslation();
@@ -74,6 +68,14 @@ const ActivityPage: React.FC = () => {
     (search: string, page: number, pageSize: number) =>
       getActivityFilterOptionsPaged('keyName', search, page, pageSize),
     [],
+  );
+  // 状态候选为固定两项（翻译标签），无搜索
+  const loadStatusOptions = useCallback(
+    async () => ({
+      options: [t('activity.statusSuccess'), t('activity.statusError')],
+      total: 2,
+    }),
+    [t],
   );
 
   // Fetch data
@@ -279,49 +281,14 @@ const ActivityPage: React.FC = () => {
             />
           </div>
           <div className="flex-1 min-w-[140px]">
-            <label className="sr-only" htmlFor="activity-status">
-              {t('activity.status')}
-            </label>
-            <div className="relative">
-              <input
-                id="activity-status"
-                type="text"
-                value={searchStatus}
-                onChange={(e) => setSearchStatus(e.target.value.toLowerCase())}
-                placeholder={t('activity.searchStatus')}
-                className="hub-input pr-9"
-                list="activity-status-options"
-              />
-              {searchStatus && (
-                <button
-                  onClick={() => setSearchStatus('')}
-                  className="absolute inset-y-0 right-2 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                  aria-label={t('common.clear')}
-                  type="button"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-            <datalist id="activity-status-options">
-              {STATUS_OPTIONS.map((status) => (
-                <option
-                  key={status}
-                  value={status === 'success' ? t('activity.statusSuccess') : t('activity.statusError')}
-                />
-              ))}
-            </datalist>
+            <SearchableSelect
+              loadOptions={loadStatusOptions}
+              value={searchStatus}
+              onChange={setSearchStatus}
+              placeholder={t('activity.searchStatus')}
+              ariaLabel={t('activity.status')}
+              searchable={false}
+            />
           </div>
           <div className="flex-1 min-w-[140px]">
             <SearchableSelect

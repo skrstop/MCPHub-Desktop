@@ -529,8 +529,10 @@ pub async fn clear_logs() -> Result<()> {
     sqlx::query("DELETE FROM app_log")
         .execute(&mut *tx)
         .await?;
-    // FTS 联动（§4.3 铁律）：FTS5 无 WHERE 删除，全清即 DELETE 全表
-    crate::services::fts_service::clear_table(crate::services::fts_service::FtsTable::AppLog)
+    // FTS 联动（§4.3 铁律）：必须与源表删除同事务（同一连接）执行。
+    // 若用 pool 版 clear_table（另一连接），tx 已持有 SQLite 写锁，
+    // 第二个连接的 DELETE 会等锁直至 busy_timeout（5s）后报 database is locked —— 死锁。
+    crate::services::fts_service::clear_table_tx(&mut tx, crate::services::fts_service::FtsTable::AppLog)
         .await?;
     tx.commit().await?;
     // Reclaim disk space after bulk delete (VACUUM 不能在事务内，单独执行)

@@ -15,6 +15,8 @@ export interface SearchableSelectProps {
   /** 无匹配文案 */
   emptyText?: string;
   className?: string;
+  /** 是否显示搜索输入框（默认 true；false 时为纯下拉，打开即加载全部候选） */
+  searchable?: boolean;
 }
 
 /**
@@ -33,6 +35,7 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
   pageSize = 50,
   emptyText,
   className = '',
+  searchable = true,
 }) => {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -197,17 +200,19 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
 
       {open && (
         <div className="absolute z-30 mt-1 w-full rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg">
-          <div className="p-2 border-b border-gray-100 dark:border-gray-700">
-            <input
-              autoFocus
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              className="w-full text-sm rounded border border-gray-200 dark:border-gray-600 bg-transparent px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </div>
+          {searchable && (
+            <div className="p-2 border-b border-gray-100 dark:border-gray-700">
+              <input
+                autoFocus
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={placeholder}
+                className="w-full text-sm rounded border border-gray-200 dark:border-gray-600 bg-transparent px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+          )}
           <div
             ref={listRef}
             onScroll={onScroll}
