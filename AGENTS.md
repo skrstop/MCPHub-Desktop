@@ -276,20 +276,32 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `f8615ab`（origin/main，v1.0.40 tag 之后 1 个未发布提交） |
+| **当前已同步到 origin commit** | `85a530f`（origin/main，= v1.0.40 tag 后 4 个未发布提交） |
 | **对应 origin tag** | `v1.0.40` |
-| **桌面端版本号** | `1.0.40001` |
-| **同步执行日期** | 2026-09-24 |
+| **桌面端版本号** | `1.0.40002` |
+| **同步执行日期** | 2026-09-25 |
 
-> 下次同步以 `f8615ab` 为基线起点（`git log --oneline f8615ab..HEAD`）。
+> 下次同步以 `85a530f` 为基线起点（`git log --oneline 85a530f..HEAD`）。
 
 ### 4.5 同步记录
+
+#### 2026-09-25：`f8615ab` -> `85a530f`（6 commit，v1.0.40 后未发布提交）
+
+**前端/locales 已同步**：
+- `f6e4cc8` #1210 env 变量遮蔽警示：`SettingsContext.SmartRoutingConfig` 加 `envOverriddenFields`（只读元数据，保存不回传）；`SettingsPage` 新增 `renderEnvOverrideWarning()` 并挂到 openai/azure 两分支 5 个输入框（llmProviderApiKey/BaseUrl、embeddingModel、azureOpenaiEndpoint/ApiKey）；locales +1 键 ×4。
+- `7b2822d` #1212 嵌入任务前缀：`SmartRoutingConfig` 加 `embeddingQueryPrefix`/`embeddingDocumentPrefix`；temp state/初始化/`handleSmartRoutingConfigChange` 键类型/两条保存路径（`handleSmartRoutingConfigChange` 批量 + `handleSaveSmartRoutingConfig`）同步；embeddingMaxTokens 与 progressiveDisclosure 之间新增「嵌入任务前缀」输入块（query/document 两输入框 + env 遮蔽警示）；locales +5 键 ×4（含补齐 `noChanges`——桌面代码此前已调用、缺键走 fallback）。
+- `815c91a` #1211 按钮指针光标：`index.css` 顶部 `@layer base` 全局 `button:not(:disabled)/[role='button']` cursor:pointer。
+
+**评估无需同步/镜像**：`f49ba5b`/`10736a2` #1213/`85a530f` #1214 纯 docs/CI（docs/ 不同步）；#1210/#1212 后端（smartRouting env 解析、vectorSearch 前缀应用、serverController 校验）——Smart Routing 未实现，无 Rust 落点；新配置键经 `config_service::update` JSON 深合并透明 round-trip。
+
+- 版本 `1.0.40001 → 1.0.40002`（四源 + Cargo.lock）；changelog `doc/upgrade/1.0.40002.md`。
+- **影响功能点**：设置页 Smart Routing 区块（桌面 Tauri 运行时隐藏，仅 web dev 可见）新增嵌入任务前缀输入块与 env 遮蔽警示（桌面后端不计算 `envOverriddenFields`，警示恒不显示，行为与 origin 部署一致需 origin 后端）；web 模式按钮 hover 指针光标；locales settings 段 +6 键 ×4。**结果**：桌面端运行行为不变（Smart Routing 未实现、隐藏区块代码保持与 origin 对齐）；新配置键 `embeddingQueryPrefix`/`embeddingDocumentPrefix`/`envOverriddenFields` 可透传存储。tsc 19 = 基线 19（0 新增）；`npm run build` 通过。用户无需操作。
 
 #### 2026-09-24（第二轮）：`8ed6478` -> `f8615ab`（2 commit，v1.0.40 + 1 未发布）
 
 - `984028e` #1205/#1206：pg 连接池加固 —— **无需镜像**（桌面 sqlx SQLite 本地，无 pg-pool）。
 - `f8615ab` #1209：Smart Routing 配置键白名单 —— **无需镜像**（Smart Routing 未实现；`config_service::update` JSON 深合并透明 round-trip）。
-- 无 frontend/locales/Rust 改动；版本 `1.0.39001 → 1.0.40001`；changelog `doc/upgrade/1.0.40001.md`。影响功能点：无。
+- 无 frontend/locales/Rust 改动；版本 `1.0.39001 → 1.0.40001`；changelog `doc/upgrade/1.0.40002.md`。影响功能点：无。
 
 #### 2026-09-24（第一轮）：`6b1fdb7` -> `8ed6478`（43 commit，跨 v1.0.36~v1.0.39）
 
@@ -306,7 +318,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 **评估无需镜像**（节选）：#1157（桌面有 is_starting 守卫）、#1156（独立 spawn 天然隔离）、#1149（session 策略 fallback 天然成立）、#1162（暂不镜像，已有 staggered startup）、#1135/#1155 等限流（无登录端点）、OAuth/BetterAuth/per-user credentials 后端（无链路）、依赖/CI/文档类。
 
-- 版本 `1.0.35003 → 1.0.39001`；changelog `doc/upgrade/1.0.40001.md`（合并单文件）。
+- 版本 `1.0.35003 → 1.0.39001`；changelog `doc/upgrade/1.0.40002.md`（合并单文件）。
 - **影响功能点**：Servers/Group 卡片复制与端点 chip、客户端预设对话框、SettingsPage OAuth TTL + Smart Routing 面板（隐藏）、logService 退避、Rust 三处安全/稳定性修复、locales +82 键。
 - **结果**：新增服务器复制/预设复制/OpenAPI 端点展示；修复禁用工具 REST 调用漏洞、on-demand 长调用误关、npx 重装波及、日志流退避、编辑竞态。**用户需重启生效**。
 
@@ -347,7 +359,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ## 6. 当前状态与待办
 
-### 已完成（节选，全量见 .bak §7）
+### 已完成（节选，全量见 [agent_20260924.md](doc/agent_20260924.md) §7）
 
 基础架构 / 全部 Tauri 命令 / 前端适配器 / 托盘 / 免登录 / 运行时版本管理 / 内置 HTTP 服务器 / Bearer Keys / Prompts & Resources / Activity Log / Market / Registry & Cloud Proxy / SSE 改进 / DB 版本化迁移 / OpenAPI 传输 / starting 状态 / 日志清理 / 工具禁用同步 / Context Footprint / 系统日志面板 / Splash / stdio 下载进度与更新检测（3.5.1）/ 启动更新检查 + Markdown release notes + 安装进度可视化（3.2）/ 版本号四源同步 / on-demand 按需启动（3.5.3）/ stderr 诊断（3.4.5）/ 无谓重连避免 + proxy 持久化（3.5.4）/ FTS5 全文索引 + 活动日志筛选 + 日志检索（3.4.4）/ RAG 全功能族（3.6）/ OpenAPI 兼容端点（3.3）/ agent catalog 补齐（3.7）
 
