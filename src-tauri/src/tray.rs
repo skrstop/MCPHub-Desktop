@@ -58,16 +58,21 @@ struct TrayStrings {
     m_paste: String,
     m_select_all: String,
     m_close_window: String,
-    // ── macOS-only native menu entries ──
-    m_view: String,
     m_window: String,
     m_minimize: String,
     m_maximize: String,
-    m_full_screen: String,
-    m_services: String,
-    m_hide: String,
-    m_hide_others: String,
     m_quit_app: String,
+    // ── macOS-only native menu entries ──
+    #[cfg(target_os = "macos")]
+    m_view: String,
+    #[cfg(target_os = "macos")]
+    m_full_screen: String,
+    #[cfg(target_os = "macos")]
+    m_services: String,
+    #[cfg(target_os = "macos")]
+    m_hide: String,
+    #[cfg(target_os = "macos")]
+    m_hide_others: String,
 }
 
 /// Fill a string field from a JSON object, falling back to the English value.
@@ -120,15 +125,20 @@ fn tray_strings(lang: &str) -> Option<TrayStrings> {
         m_paste: s!(menu, en_menu, "paste"),
         m_select_all: s!(menu, en_menu, "selectAll"),
         m_close_window: s!(menu, en_menu, "closeWindow"),
-        m_view: s!(menu, en_menu, "view"),
         m_window: s!(menu, en_menu, "window"),
         m_minimize: s!(menu, en_menu, "minimize"),
         m_maximize: s!(menu, en_menu, "maximize"),
-        m_full_screen: s!(menu, en_menu, "fullScreen"),
-        m_services: s!(menu, en_menu, "services"),
-        m_hide: s!(menu, en_menu, "hide"),
-        m_hide_others: s!(menu, en_menu, "hideOthers"),
         m_quit_app: s!(menu, en_menu, "quitApp").replace("{{app}}", "MCPHub Desktop"),
+        #[cfg(target_os = "macos")]
+        m_view: s!(menu, en_menu, "view"),
+        #[cfg(target_os = "macos")]
+        m_full_screen: s!(menu, en_menu, "fullScreen"),
+        #[cfg(target_os = "macos")]
+        m_services: s!(menu, en_menu, "services"),
+        #[cfg(target_os = "macos")]
+        m_hide: s!(menu, en_menu, "hide"),
+        #[cfg(target_os = "macos")]
+        m_hide_others: s!(menu, en_menu, "hideOthers"),
     })
 }
 
