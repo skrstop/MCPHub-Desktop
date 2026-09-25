@@ -298,8 +298,13 @@ debug = 1
 
 [profile.release]
 panic = "abort"
-codegen-units = 1
-lto = true
+# ⚠️ hosted runner 内存约束：ubuntu-22.04-arm 仅 4 核 / 16GB 无 swap，
+# `lto = true` + `codegen-units = 1` 的 full-LTO 链接阶段峰值内存会超出
+# 16GB（candle/lancedb/tokenizers 等重依赖），OOM 杀掉 rustc/linker 导致
+# runner "lost communication"。改用 thin-LTO（内存约为 full 的 1/4）+ 并行
+# codegen units，产物体积差距 1-3% 以内。
+codegen-units = 16
+lto = "thin"
 opt-level = "s"
 # ⚠️ 使用 "debuginfo" 而非 true（即 "symbols"）
 # strip = true 会移除 __TAURI_BUNDLE_TYPE 符号，导致 Tauri CLI 无法注入 bundle 类型信息
