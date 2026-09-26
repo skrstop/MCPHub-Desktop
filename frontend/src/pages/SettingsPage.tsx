@@ -14,7 +14,7 @@ import { PERMISSIONS } from '@/constants/permissions';
 import { isTauri } from '@/utils/tauriClient';
 import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { invoke } from '@tauri-apps/api/core';
-import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText } from 'lucide-react';
+import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText, Loader2 } from 'lucide-react';
 import { EndpointCopy, copyText } from '@/components/ui/EndpointCopy';
 import type { BearerKey, User } from '@/types';
 import { useServerContext } from '@/contexts/ServerContext';
@@ -22,6 +22,8 @@ import { useGroupData } from '@/hooks/useGroupData';
 import { useAuth } from '@/contexts/AuthContext';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import SmartRoutingIndexPanel from '@/components/SmartRoutingIndexPanel';
+import ModelVectorSettings from '@/components/ModelVectorSettings';
+import { reindexSmartRouting } from '@/services/smartRoutingService';
 import { apiGet, apiPost, apiPut } from '@/utils/fetchInterceptor';
 import {
   filterBearerKeysByScopeFilter,
@@ -485,6 +487,56 @@ function parseBasePacingDelayForUpdate(
 
 const DEFAULT_OIDC_SCOPES = ['openid', 'profile', 'email'];
 
+/** Slider + editable number input (mirrors RAG SearchSettingsDialog sliders).
+ *  Used by the Smart Routing retrieval settings on desktop. */
+const SrSlider: React.FC<{
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  disabled?: boolean;
+  onChange: (v: number) => void;
+}> = ({ label, value, min, max, step, disabled = false, onChange }) => {
+  const disabledStyle = disabled ? { opacity: 0.5, cursor: 'not-allowed' } : {};
+  const decimals = step < 1 ? 2 : 0;
+  return (
+    <div style={disabledStyle}>
+      <div className="flex items-center justify-between mb-1 gap-2">
+        <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+          {label}
+        </label>
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={value.toFixed(decimals)}
+          onChange={(e) => {
+            const v = parseFloat(e.target.value);
+            if (Number.isNaN(v)) return;
+            onChange(Math.max(min, Math.min(max, v)));
+          }}
+          disabled={disabled}
+          className="hub-mono text-[12px] text-right"
+          style={{ width: 72, background: 'var(--hub-bg-2)', color: 'var(--hub-ink)' }}
+        />
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        disabled={disabled}
+        className="w-full"
+        style={{ accentColor: 'var(--hub-accent)' }}
+      />
+    </div>
+  );
+};
+
 const SettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -524,6 +576,11 @@ const SettingsPage: React.FC = () => {
     embeddingMaxTokens: string;
     embeddingQueryPrefix: string;
     embeddingDocumentPrefix: string;
+    // Desktop local mode: hybrid retrieval settings (temp strings parsed on save)
+    vectorWeight: string;
+    keywordWeight: string;
+    maxResults: string;
+    scoreThreshold: string;
   }>({
     dbUrl: '',
     basePacingDelayMs: '',
@@ -543,6 +600,10 @@ const SettingsPage: React.FC = () => {
     embeddingMaxTokens: '',
     embeddingQueryPrefix: '',
     embeddingDocumentPrefix: '',
+    vectorWeight: '0.5',
+    keywordWeight: '0.5',
+    maxResults: '20',
+    scoreThreshold: '0.5',
   });
 
   const [tempToolResultCompressionConfig, setTempToolResultCompressionConfig] = useState<{
@@ -725,6 +786,18 @@ const SettingsPage: React.FC = () => {
             : '',
         embeddingQueryPrefix: smartRoutingConfig.embeddingQueryPrefix || '',
         embeddingDocumentPrefix: smartRoutingConfig.embeddingDocumentPrefix || '',
+        vectorWeight:
+          smartRoutingConfig.vectorWeight != null ? String(smartRoutingConfig.vectorWeight) : '0.5',
+        keywordWeight:
+          smartRoutingConfig.keywordWeight != null
+            ? String(smartRoutingConfig.keywordWeight)
+            : '0.5',
+        maxResults:
+          smartRoutingConfig.maxResults != null ? String(smartRoutingConfig.maxResults) : '20',
+        scoreThreshold:
+          smartRoutingConfig.scoreThreshold != null
+            ? String(smartRoutingConfig.scoreThreshold)
+            : '0.5',
       });
     }
   }, [smartRoutingConfig]);
@@ -973,6 +1046,17 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  // 桌面检索设置：相似度/关键词权重联动（与 RAG 一致——调一边，另一边补 1-v）。
+  const handleSrWeightChange = (key: 'vectorWeight' | 'keywordWeight', v: number) => {
+    const other = key === 'vectorWeight' ? 'keywordWeight' : 'vectorWeight';
+    const otherValue = Math.max(0, Math.min(1, 1 - v));
+    setTempSmartRoutingConfig({
+      ...tempSmartRoutingConfig,
+      [key]: String(v),
+      [other]: String(otherValue),
+    });
+  };
+
   const handleSmartRoutingConfigChange = (
     key:
       | 'dbUrl'
@@ -990,7 +1074,11 @@ const SettingsPage: React.FC = () => {
       | 'azureOpenaiEmbeddingModel'
       | 'embeddingMaxTokens'
       | 'embeddingQueryPrefix'
-      | 'embeddingDocumentPrefix',
+      | 'embeddingDocumentPrefix'
+      | 'vectorWeight'
+      | 'keywordWeight'
+      | 'maxResults'
+      | 'scoreThreshold',
     value: string,
   ) => {
     setTempSmartRoutingConfig({
@@ -1208,7 +1296,28 @@ const SettingsPage: React.FC = () => {
     await updateNameSeparator(tempNameSeparator);
   };
 
+  const [srReindexing, setSrReindexing] = useState(false);
+  const handleSmartRoutingReindex = async () => {
+    if (srReindexing) return;
+    setSrReindexing(true);
+    try {
+      await reindexSmartRouting();
+      showToast(t('settings.smartReindexDone') || 'Smart routing index rebuilt', 'success');
+    } catch (e) {
+      showToast(
+        `${t('settings.smartReindexFailed') || 'Failed to rebuild smart routing index'}: ${e instanceof Error ? e.message : String(e)}`,
+        'error',
+      );
+    } finally {
+      setSrReindexing(false);
+    }
+  };
   const handleSmartRoutingEnabledChange = async (value: boolean) => {
+    // Desktop local mode: no external provider fields required — enable directly
+    if (value && isTauri()) {
+      await updateSmartRoutingConfig('enabled', value);
+      return;
+    }
     // If enabling Smart Routing, validate required fields and save any unsaved changes
     if (value) {
       const currentDbUrl = tempSmartRoutingConfig.dbUrl || smartRoutingConfig.dbUrl;
@@ -1359,6 +1468,30 @@ const SettingsPage: React.FC = () => {
         updates.embeddingDimensions = parsedDimensions;
       }
 
+      // Desktop-only hybrid retrieval settings (temp string → number)
+      const parsedVectorWeight = parseFloat(tempSmartRoutingConfig.vectorWeight);
+      if (!Number.isNaN(parsedVectorWeight) && parsedVectorWeight !== smartRoutingConfig.vectorWeight) {
+        updates.vectorWeight = parsedVectorWeight;
+      }
+      const parsedKeywordWeight = parseFloat(tempSmartRoutingConfig.keywordWeight);
+      if (
+        !Number.isNaN(parsedKeywordWeight) &&
+        parsedKeywordWeight !== smartRoutingConfig.keywordWeight
+      ) {
+        updates.keywordWeight = parsedKeywordWeight;
+      }
+      const parsedMaxResults = parseInt(tempSmartRoutingConfig.maxResults, 10);
+      if (!Number.isNaN(parsedMaxResults) && parsedMaxResults !== smartRoutingConfig.maxResults) {
+        updates.maxResults = parsedMaxResults;
+      }
+      const parsedScoreThreshold = parseFloat(tempSmartRoutingConfig.scoreThreshold);
+      if (
+        !Number.isNaN(parsedScoreThreshold) &&
+        parsedScoreThreshold !== smartRoutingConfig.scoreThreshold
+      ) {
+        updates.scoreThreshold = parsedScoreThreshold;
+      }
+
       // Save all changes in a single batch update
       await updateSmartRoutingConfigBatch(updates);
     } else {
@@ -1450,6 +1583,30 @@ const SettingsPage: React.FC = () => {
     );
     if (parsedEmbeddingDimensions !== undefined) {
       updates.embeddingDimensions = parsedEmbeddingDimensions;
+    }
+
+    // Desktop-only hybrid retrieval settings (temp string → number)
+    const parsedVectorWeight = parseFloat(tempSmartRoutingConfig.vectorWeight);
+    if (!Number.isNaN(parsedVectorWeight) && parsedVectorWeight !== smartRoutingConfig.vectorWeight) {
+      updates.vectorWeight = parsedVectorWeight;
+    }
+    const parsedKeywordWeight = parseFloat(tempSmartRoutingConfig.keywordWeight);
+    if (
+      !Number.isNaN(parsedKeywordWeight) &&
+      parsedKeywordWeight !== smartRoutingConfig.keywordWeight
+    ) {
+      updates.keywordWeight = parsedKeywordWeight;
+    }
+    const parsedMaxResults = parseInt(tempSmartRoutingConfig.maxResults, 10);
+    if (!Number.isNaN(parsedMaxResults) && parsedMaxResults !== smartRoutingConfig.maxResults) {
+      updates.maxResults = parsedMaxResults;
+    }
+    const parsedScoreThreshold = parseFloat(tempSmartRoutingConfig.scoreThreshold);
+    if (
+      !Number.isNaN(parsedScoreThreshold) &&
+      parsedScoreThreshold !== smartRoutingConfig.scoreThreshold
+    ) {
+      updates.scoreThreshold = parsedScoreThreshold;
     }
 
     if (Object.keys(updates).length > 0) {
@@ -2150,11 +2307,11 @@ const SettingsPage: React.FC = () => {
           )}
         </div>
 
-      {/* Smart Routing Configuration Settings - Hidden in desktop client */}
-      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
-        <div className="hub-card mb-6 overflow-hidden">
+      {/* Smart Routing Configuration Settings (desktop: local mode via Model & Vector runtime) */}
+      <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
+        <div className="hub-card mb-6 overflow-visible">
           <div
-            className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] px-6 py-3"
+            className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
             onClick={() => toggleSection('smartRoutingConfig')}
           >
             <div className="flex items-center gap-2.5">
@@ -2186,7 +2343,7 @@ const SettingsPage: React.FC = () => {
           </div>
 
           {sectionsVisible.smartRoutingConfig && (
-            <div className="px-6 py-5 border-t border-[var(--hub-line-2)]">
+            <div className="px-5 py-5 border-t border-[var(--hub-line-2)]">
               {/* Status banner */}
               <div
                 className="hub-card mb-4"
@@ -2247,9 +2404,13 @@ const SettingsPage: React.FC = () => {
                     <div className="hub-sect" style={{ marginBottom: 5 }}>
                       smart endpoint
                     </div>
+                    {/* Same SMART row shape as Dashboard: optional
+                        `(/<server-or-group>)` suffix in the displayed URL,
+                        copied URL stays clean (unscoped /mcp/$smart). */}
                     <EndpointCopy
-                      label="SMART"
-                      url={`${accessBaseUrl}/mcp/$smart`}
+                      label="MCP"
+                      url={`${accessBaseUrl}/mcp/$smart(/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'})`}
+                      copyValue={`${accessBaseUrl}/mcp/$smart`}
                       configValue={() =>
                         buildMcpClientConfig(
                           `${accessBaseUrl}/mcp/$smart`,
@@ -2268,17 +2429,45 @@ const SettingsPage: React.FC = () => {
                               'MCP client config copied (includes Bearer auth header)'
                       }
                     />
+                    {/* SMART OpenAPI spec row (Dashboard parity): the
+                        meta-tool search/describe/call spec for
+                        OpenAPI-compatible clients. Optional scope suffix in
+                        the display; copied URL is the unscoped spec. */}
+                    <div style={{ marginTop: 6 }}>
+                      <EndpointCopy
+                        label="API"
+                        url={`${accessBaseUrl}/api/$smart(/${t('pages.dashboard.openapiNamePlaceholder') || '<server-name>'})/openapi.json`}
+                        copyValue={`${accessBaseUrl}/api/$smart/openapi.json`}
+                      />
+                    </div>
                   </div>
                   <div style={{ background: 'var(--hub-line)', height: 36 }} />
-                  <div className="flex items-center gap-2">
-                    <span style={{ fontSize: 12.5, color: 'var(--hub-ink-2)' }}>
-                      {t('settings.enableSmartRouting')}
-                    </span>
-                    <Switch
-                      disabled={loading}
-                      checked={smartRoutingConfig.enabled}
-                      onCheckedChange={(checked) => handleSmartRoutingEnabledChange(checked)}
-                    />
+                  <div className="flex flex-col items-center gap-2">
+                    <div className="flex items-center gap-2">
+                      <span style={{ fontSize: 12.5, color: 'var(--hub-ink-2)' }}>
+                        {t('settings.enableSmartRouting')}
+                      </span>
+                      <Switch
+                        disabled={loading}
+                        checked={smartRoutingConfig.enabled}
+                        onCheckedChange={(checked) => handleSmartRoutingEnabledChange(checked)}
+                      />
+                    </div>
+                    {/* Rebuild index — directly below the enable switch. Disabled
+                        while Smart Routing is off (nothing to rebuild). */}
+                    <button
+                      type="button"
+                      className="hub-btn"
+                      disabled={!smartRoutingConfig.enabled || srReindexing}
+                      onClick={handleSmartRoutingReindex}
+                    >
+                      {srReindexing && (
+                        <Loader2 size={14} className="animate-spin" />
+                      )}
+                      {srReindexing
+                        ? t('settings.smartReindexing') || 'Rebuilding index...'
+                        : t('settings.smartReindex') || 'Rebuild Index'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -2289,23 +2478,32 @@ const SettingsPage: React.FC = () => {
                   {t('settings.smartRoutingWorkflow') || 'Workflow'}
                 </h3>
                 <p className="hub-sub" style={{ marginTop: 0, marginBottom: 16 }}>
-                  {t('settings.smartRoutingWorkflowDescription') ||
-                    'Prompt is embedded, top-k similar tools are retrieved from pgvector, only relevant tools are exposed.'}
+                  {isTauri()
+                    ? t('settings.smartRoutingWorkflowDescriptionLocal') ||
+                      'Prompt is embedded by the local model, relevant tools are retrieved from LanceDB (hybrid search), only relevant tools are exposed.'
+                    : t('settings.smartRoutingWorkflowDescription') ||
+                      'Prompt is embedded, top-k similar tools are retrieved from pgvector, only relevant tools are exposed.'}
                 </p>
                 <div
                   className="grid items-center"
                   style={{ gridTemplateColumns: 'repeat(9, 1fr)' }}
                 >
                   {[
-                    { icon: <CodeIcon size={16} />, title: 'Prompt', sub: 'client' },
+                    { icon: <CodeIcon size={16} />, title: t('settings.wfPrompt') || 'Prompt', sub: t('settings.wfClient') || 'client' },
                     null,
-                    { icon: <Zap size={16} />, title: 'Embedding', sub: 'openai · 1536d' },
+                    isTauri()
+                      ? { icon: <Zap size={16} />, title: t('settings.wfEmbedding') || 'Embedding', sub: t('settings.srLocalModeTitle') }
+                      : { icon: <Zap size={16} />, title: t('settings.wfEmbedding') || 'Embedding', sub: 'openai · 1536d' },
                     null,
-                    { icon: <Database size={16} />, title: 'pgvector', sub: 'ann · cosine' },
+                    isTauri()
+                      ? { icon: <Database size={16} />, title: 'LanceDB', sub: t('settings.wfLancedb') || 'hybrid · cosine' }
+                      : { icon: <Database size={16} />, title: 'pgvector', sub: 'ann · cosine' },
                     null,
-                    { icon: <Wrench size={16} />, title: 'Top-K', sub: 'score > 0.7' },
+                    isTauri()
+                      ? { icon: <Wrench size={16} />, title: 'Top-K', sub: t('settings.wfTopk') || 'weight · threshold' }
+                      : { icon: <Wrench size={16} />, title: 'Top-K', sub: 'score > 0.7' },
                     null,
-                    { icon: <Sparkles size={16} />, title: 'LLM', sub: 'relevant subset' },
+                    { icon: <Sparkles size={16} />, title: 'LLM', sub: t('settings.wfLlm') || 'relevant subset' },
                   ].map((step, i) =>
                     step === null ? (
                       <div key={`sep-${i}`} className="flex justify-center">
@@ -2352,24 +2550,26 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Required Fields Information */}
-              <div
-                className="mb-4 flex items-start gap-2"
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: 7,
-                  background: 'var(--hub-accent-soft)',
-                  color: 'var(--hub-accent)',
-                  fontSize: 12.5,
-                }}
-              >
-                <span>{t('settings.smartRoutingRequiredFields')}</span>
-              </div>
+              {/* Required Fields Information (web external-provider mode only) */}
+              {!isTauri() && (
+                <div
+                  className="mb-4 flex items-start gap-2"
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: 7,
+                    background: 'var(--hub-accent-soft)',
+                    color: 'var(--hub-accent)',
+                    fontSize: 12.5,
+                  }}
+                >
+                  <span>{t('settings.smartRoutingRequiredFields')}</span>
+                </div>
+              )}
 
               <div className="space-y-3 hub-sr-fields">
 
-              {/* hide when DB_URL env is set */}
-              {smartRoutingConfig.dbUrl !== '${DB_URL}' && (
+              {/* hide when DB_URL env is set; hidden entirely on desktop (local runtime) */}
+              {!isTauri() && smartRoutingConfig.dbUrl !== '${DB_URL}' && (
                 <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                   <div className="mb-2">
                     <h3 className="font-medium text-gray-700">
@@ -2390,6 +2590,12 @@ const SettingsPage: React.FC = () => {
                 </div>
               )}
 
+              {isTauri() ? (
+                /* 本地模式无独立提示卡：本地模型提示由下方 Workflow 图的
+                   Embedding 节点承载（srLocalModeTitle），无需单独说明块。 */
+                <></>
+              ) : (
+                <>
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
@@ -2660,7 +2866,10 @@ const SettingsPage: React.FC = () => {
                   </div>
                 </>
               )}
+                </>
+              )}
 
+              {!isTauri() && (
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
@@ -2706,27 +2915,10 @@ const SettingsPage: React.FC = () => {
                     }
                   />
                 </div>
-                <div className="flex items-center justify-between mt-3">
-                  <div>
-                    <h4 className="font-medium text-gray-700">
-                      {t('settings.embeddingDimensionsApiPassthrough') ||
-                        'Forward dimensions to API (MRL passthrough)'}
-                    </h4>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {t('settings.embeddingDimensionsApiPassthroughDescription') ||
-                        "Only models known to support Matryoshka (MRL) receive the dimensions parameter. Enable this to force it for other MRL-capable models. Non-MRL models (Qwen3-Embedding, BGE, vLLM/sglang) reject the parameter outright, so leave this off for them."}
-                    </p>
-                  </div>
-                  <Switch
-                    disabled={loading || !smartRoutingConfig.enabled}
-                    checked={smartRoutingConfig.embeddingDimensionsApiPassthrough}
-                    onCheckedChange={(checked) =>
-                      updateSmartRoutingConfig('embeddingDimensionsApiPassthrough', checked)
-                    }
-                  />
-                </div>
               </div>
+              )}
 
+              {!isTauri() && (
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
@@ -2767,7 +2959,9 @@ const SettingsPage: React.FC = () => {
 
 
               </div>
+              )}
 
+              {!isTauri() && (
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
@@ -2797,7 +2991,9 @@ const SettingsPage: React.FC = () => {
                   </select>
                 </div>
               </div>
+              )}
 
+              {!isTauri() && (
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
@@ -2841,7 +3037,10 @@ const SettingsPage: React.FC = () => {
                   })()}
                 </p>
               </div>
+              )}
 
+              {/* Embedding task prefixes: desktop local model handles this internally — web/external-provider only */}
+              {!isTauri() && (
               <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.embeddingPrefixes')}</h3>
@@ -2883,6 +3082,93 @@ const SettingsPage: React.FC = () => {
                 />
                 {renderEnvOverrideWarning('embeddingDocumentPrefix')}
               </div>
+              )}
+
+              {/* Desktop: tool description verbosity for the meta-tool catalog */}
+              {isTauri() && (
+                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="mb-2">
+                    <h3 className="font-medium text-gray-700">
+                      {t('settings.serverDescriptionMode')}
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {t('settings.serverDescriptionModeDescription')}
+                    </p>
+                  </div>
+                  <select
+                    value={smartRoutingConfig.serverDescriptionMode || 'names'}
+                    onChange={(e) =>
+                      updateSmartRoutingConfig(
+                        'serverDescriptionMode',
+                        e.target.value as 'names' | 'full',
+                      )
+                    }
+                    className="w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
+                    disabled={loading}
+                  >
+                    <option value="names">{t('settings.serverDescriptionModeNames')}</option>
+                    <option value="full">{t('settings.serverDescriptionModeFull')}</option>
+                  </select>
+                </div>
+              )}
+
+              {/* Desktop: hybrid retrieval settings (RAG-style sliders + manual input, replaces origin's three-tier thresholds) */}
+              {isTauri() && (
+                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="mb-3">
+                    <h3 className="font-medium text-gray-700">{t('settings.srSearchSection')}</h3>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+                    <SrSlider
+                      label={t('settings.srVectorWeight')}
+                      value={parseFloat(tempSmartRoutingConfig.vectorWeight) || 0}
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      disabled={loading}
+                      onChange={(v) => handleSrWeightChange('vectorWeight', v)}
+                    />
+                    <SrSlider
+                      label={t('settings.srKeywordWeight')}
+                      value={parseFloat(tempSmartRoutingConfig.keywordWeight) || 0}
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      disabled={loading}
+                      onChange={(v) => handleSrWeightChange('keywordWeight', v)}
+                    />
+                    <div
+                      className="col-span-2 text-[12px] hub-mono"
+                      style={{ color: 'var(--hub-ink-3)', marginTop: -8 }}
+                    >
+                      {t('pages.rag.weightSumHint', {
+                        sum: (
+                          (parseFloat(tempSmartRoutingConfig.vectorWeight) || 0) +
+                          (parseFloat(tempSmartRoutingConfig.keywordWeight) || 0)
+                        ).toFixed(2),
+                      })}
+                    </div>
+                    <SrSlider
+                      label={t('settings.srMaxResults')}
+                      value={parseInt(tempSmartRoutingConfig.maxResults, 10) || 50}
+                      min={1}
+                      max={200}
+                      step={1}
+                      disabled={loading}
+                      onChange={(v) => handleSmartRoutingConfigChange('maxResults', String(v))}
+                    />
+                    <SrSlider
+                      label={t('settings.srScoreThreshold')}
+                      value={parseFloat(tempSmartRoutingConfig.scoreThreshold) || 0}
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      disabled={loading}
+                      onChange={(v) => handleSmartRoutingConfigChange('scoreThreshold', String(v))}
+                    />
+                  </div>
+                </div>
+              )}
 
               <div
                 className="flex items-center justify-between"
@@ -2922,12 +3208,14 @@ const SettingsPage: React.FC = () => {
               </div>
 
               <div style={{ marginTop: 20 }}>
-                <SmartRoutingIndexPanel enabled={smartRoutingConfig.enabled} />
+                {!isTauri() && (
+                  <SmartRoutingIndexPanel enabled={smartRoutingConfig.enabled} />
+                )}
               </div>
             </div>
           )}
         </div>
-      </PermissionChecker>}
+      </PermissionChecker>
 
       {/* Tool Result Compression Settings - Hidden in desktop client */}
       {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_SMART_ROUTING}>
@@ -3857,6 +4145,11 @@ const SettingsPage: React.FC = () => {
           )}
         </div>
       </PermissionChecker>
+
+      {/* 模型和向量（桌面端专属）：共享的本地 embedding 模型与向量库运行时
+          管理入口（单实例，RAG / Smart Routing 共享）。Web 模式无本地运行时，
+          不渲染。见 doc/smart_routing_port_plan_20260925.md §3.4。 */}
+      {isTauri() && <ModelVectorSettings />}
 
       {/* Route Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_ROUTE_CONFIG}>

@@ -7,6 +7,9 @@ import { useSettingsData } from '@/hooks/useSettingsData';
 import { formatTokens } from '@/utils/contextCost';
 import { getToolDescriptionInfo } from '@/utils/toolDescription';
 
+/** Smart Routing meta tools — never shareable into groups (exclusive to $smart). */
+const SMART_META_TOOLS = ['smart_route_search', 'smart_route_describe', 'smart_route_call'];
+
 type CapabilityKey = 'tools' | 'prompts' | 'resources';
 
 const EMPTY_SELECTIONS: Pick<IGroupServerConfig, CapabilityKey> = {
@@ -212,6 +215,11 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     if (capability === 'tools') {
       return (server.tools || [])
         .filter((tool) => tool.enabled !== false)
+        // Smart Routing meta tools are exclusive to the $smart access point —
+        // never offered in the group tool-selection UI (backend filters them
+        // from group scopes too, but hiding them here avoids confusing
+        // snapshots in group config).
+        .filter((tool) => !SMART_META_TOOLS.includes(tool.name))
         .map((tool: Tool) => ({
           key: tool.name,
           value: normalizeNamedCapability(server.name, tool.name),

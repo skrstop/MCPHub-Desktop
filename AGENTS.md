@@ -212,6 +212,17 @@ npm run build                     # 生产构建
 - `runtimes/skill/install.json`：65 条（对齐上游 vercel-labs/skills 77 agent，同路径合并复合名，含桌面自定义 `.agents/skills` 与 `.config/agents/skills`）。
 - agents 列表持久化在 `config_json.skills.agents`，`list_agents` 仅在键缺失时回退 catalog——**catalog 变更需迁移回填**（migrate_v25 幂等追加缺失 id）。
 
+### 3.8 Smart Routing 本地化移植（Phase 1-4，桌面端独有，2026-09-26）
+
+> 复刻 origin Smart Routing 到本地模型栈（无 API provider/pgvector 依赖）。设计与五轮复核记录：`doc/smart_routing_port_plan_20260925.md`（§6 各 Phase 落地记录 + §10.4 复核表）。
+
+- **mv 共享运行时**（`src/mv/`，Phase 2）：进程单例 GGUF 嵌入模型 + lancedb 连接，消费方注册制（`rag`/`smart`）——任一消费方开启即运行，全部关闭才 drop + mimalloc 归还。模型选择单写 `mv.model`（读取回退 `rag.model` 兼容存量）；`mv.device`（AUTO/GPU/CPU）经 `load_embedder_with_user_platform` 生效（env > user > deploy.json）。`rag::start/stop` 改为 mv 消费方化，`rag.indexedModel` 新键修复同维度换模型不重嵌缺口（reindex_all 完成后回写）。
+- **smart_routing 模块**（`src/smart_routing/`，Phase 3）：lancedb `smart_tool` 表（每工具+每服务器一行，cosine）；toolSetHash **origin 逐参数复刻**（scrypt N=2048/r=8/p=1，上游描述免疫——`{name, inputSchema, description: null}` 归一形状）；skip-check 四条件（count+contentIds+hash+server 行）；生命周期钩子（connect→后台索引 / delete/rename/disable→清行 / update→re-save / boot→reindex_all）。混合检索 `merge_hits` 纯函数（vw+kw 加权、阈值、max_results；**不用** origin 动态阈值）。
+- **$smart 端点**（Phase 4）：`/mcp/$smart(/{group})` 只暴露元工具 `search_tools`/`describe_tool`/`call_tool`（origin 逐字 description）；call 经共享 pool（on-demand 唤醒天然生效）；`/api/$smart/openapi.json` + `/search`、`/describe`、`/call` REST（bearer 鉴权）。`$smart` 范围 prompts/resources 返回空。RAG builtin server 不入 smart 索引（与 origin 一致）。
+- **前端**：设置页【模型和向量】卡片（真实维度 `RagStatus.embedDim`/`mvRunning`）+ Smart Routing 区块桌面化（检索设置滑条+权重联动、serverDescriptionMode、桌面隐藏 API provider/dbUrl/维度/MRL/嵌入前缀）+ Dashboard/AccessUrlDialog SMART 端点行 + SmartRoutingIndexPanel 经 tauriClient 映射接线。
+- **Tauri 命令**：`smart_routing_status` / `smart_routing_reindex` / `smart_routing_performance`。
+- **已知边界**：设备变更在模型下次启动时生效（与 UI 提示一致）；`replace_server` 非事务（失败自愈重建）；LIKE 通配符 %/_ 不转义（与 RAG keyword_search 一致）；12 项 RAG 冒烟 + MCP 客户端全链 E2E 待用户真机验证（清单在计划 §8.2）。
+
 ---
 
 ## 4. 上游 mcphub-origin 同步记录（重要）
@@ -278,7 +289,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 | --- | --- |
 | **当前已同步到 origin commit** | `85a530f`（origin/main，= v1.0.40 tag 后 4 个未发布提交） |
 | **对应 origin tag** | `v1.0.40` |
-| **桌面端版本号** | `1.0.40002` |
+| **桌面端版本号** | `1.0.40003` |
 | **同步执行日期** | 2026-09-25 |
 
 > 下次同步以 `85a530f` 为基线起点（`git log --oneline 85a530f..HEAD`）。
@@ -294,14 +305,14 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 **评估无需同步/镜像**：`f49ba5b`/`10736a2` #1213/`85a530f` #1214 纯 docs/CI（docs/ 不同步）；#1210/#1212 后端（smartRouting env 解析、vectorSearch 前缀应用、serverController 校验）——Smart Routing 未实现，无 Rust 落点；新配置键经 `config_service::update` JSON 深合并透明 round-trip。
 
-- 版本 `1.0.40001 → 1.0.40002`（四源 + Cargo.lock）；changelog `doc/upgrade/1.0.40002.md`。
+- 版本 `1.0.40001 → 1.0.40002`（四源 + Cargo.lock）；changelog **合并为 `doc/upgrade/1.0.40003.md`**（原 1.0.40002.md 已并入删除）。
 - **影响功能点**：设置页 Smart Routing 区块（桌面 Tauri 运行时隐藏，仅 web dev 可见）新增嵌入任务前缀输入块与 env 遮蔽警示（桌面后端不计算 `envOverriddenFields`，警示恒不显示，行为与 origin 部署一致需 origin 后端）；web 模式按钮 hover 指针光标；locales settings 段 +6 键 ×4。**结果**：桌面端运行行为不变（Smart Routing 未实现、隐藏区块代码保持与 origin 对齐）；新配置键 `embeddingQueryPrefix`/`embeddingDocumentPrefix`/`envOverriddenFields` 可透传存储。tsc 19 = 基线 19（0 新增）；`npm run build` 通过。用户无需操作。
 
 #### 2026-09-24（第二轮）：`8ed6478` -> `f8615ab`（2 commit，v1.0.40 + 1 未发布）
 
 - `984028e` #1205/#1206：pg 连接池加固 —— **无需镜像**（桌面 sqlx SQLite 本地，无 pg-pool）。
 - `f8615ab` #1209：Smart Routing 配置键白名单 —— **无需镜像**（Smart Routing 未实现；`config_service::update` JSON 深合并透明 round-trip）。
-- 无 frontend/locales/Rust 改动；版本 `1.0.39001 → 1.0.40001`；changelog `doc/upgrade/1.0.40002.md`。影响功能点：无。
+- 无 frontend/locales/Rust 改动；版本 `1.0.39001 → 1.0.40001`；changelog **合并为 `doc/upgrade/1.0.40003.md`**（原 1.0.40002.md 已并入删除）。影响功能点：无。
 
 #### 2026-09-24（第一轮）：`6b1fdb7` -> `8ed6478`（43 commit，跨 v1.0.36~v1.0.39）
 
@@ -318,7 +329,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 **评估无需镜像**（节选）：#1157（桌面有 is_starting 守卫）、#1156（独立 spawn 天然隔离）、#1149（session 策略 fallback 天然成立）、#1162（暂不镜像，已有 staggered startup）、#1135/#1155 等限流（无登录端点）、OAuth/BetterAuth/per-user credentials 后端（无链路）、依赖/CI/文档类。
 
-- 版本 `1.0.35003 → 1.0.39001`；changelog `doc/upgrade/1.0.40002.md`（合并单文件）。
+- 版本 `1.0.35003 → 1.0.39001`；changelog **合并为 `doc/upgrade/1.0.40003.md`**（单文件，含 1.0.40002 历史内容）。
 - **影响功能点**：Servers/Group 卡片复制与端点 chip、客户端预设对话框、SettingsPage OAuth TTL + Smart Routing 面板（隐藏）、logService 退避、Rust 三处安全/稳定性修复、locales +82 键。
 - **结果**：新增服务器复制/预设复制/OpenAPI 端点展示；修复禁用工具 REST 调用漏洞、on-demand 长调用误关、npx 重装波及、日志流退避、编辑竞态。**用户需重启生效**。
 

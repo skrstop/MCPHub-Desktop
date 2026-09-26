@@ -56,6 +56,7 @@ const transportLabel = (t: any, type?: string) => {
   if (type === 'sse') return t('server.typeSse') || 'sse';
   if (type === 'streamable-http') return t('server.typeStreamableHttp') || 'http';
   if (type === 'openapi') return t('server.typeOpenapi') || 'openapi';
+  if (type === 'builtin') return t('server.typeBuiltin') || 'builtin';
   return type;
 };
 
@@ -323,15 +324,6 @@ const DashboardPage: React.FC = () => {
             configValue={() => buildMcpConfigJson(`${baseUrl}/mcp`)}
             configCopiedMessage={configCopiedMessage}
           />
-          {/* SMART routing not implemented in desktop client */}
-          {!isTauri() && (
-            <EndpointCopy
-              label="SMART"
-              url={`${baseUrl}/mcp/$smart`}
-              configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/$smart`)}
-              configCopiedMessage={configCopiedMessage}
-            />
-          )}
           <EndpointCopy
             className="hub-endpoint-wrap"
             label="SERVER/GROUP"
@@ -340,6 +332,15 @@ const DashboardPage: React.FC = () => {
             configValue={() =>
               buildMcpConfigJson(`${baseUrl}/mcp/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'}`)
             }
+            configCopiedMessage={configCopiedMessage}
+          />
+          {/* SMART routing: desktop runs the smart meta-tool via the local Model & Vector runtime.
+              Group/server suffix is optional — shown in parentheses, copied URL stays clean. */}
+          <EndpointCopy
+            label="SMART"
+            url={`${baseUrl}/mcp/$smart(/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'})`}
+            copyValue={`${baseUrl}/mcp/$smart`}
+            configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/$smart`)}
             configCopiedMessage={configCopiedMessage}
           />        </div>
       </div>
@@ -367,6 +368,14 @@ const DashboardPage: React.FC = () => {
             label="SERVER/GROUP"
             url={`${baseUrl}/api/${t('pages.dashboard.openapiNamePlaceholder') || '<server-name>'}/openapi.json`}
             copyValue={`${baseUrl}/api/${t('pages.dashboard.openapiNamePlaceholder') || '<server-name>'}/openapi.json`}
+          />
+          {/* SMART: OpenAPI spec of the smart meta-tool (search/describe/call) for OpenWebUI-style clients.
+              Optional server/group scope in parentheses; copied URL is the unscoped spec. */}
+          <EndpointCopy
+            className="hub-endpoint-wrap"
+            label="SMART"
+            url={`${baseUrl}/api/$smart(/${t('pages.dashboard.openapiNamePlaceholder') || '<server-name>'})/openapi.json`}
+            copyValue={`${baseUrl}/api/$smart/openapi.json`}
           />
         </div>
         <p className="hub-sub" style={{ marginTop: 10 }}>

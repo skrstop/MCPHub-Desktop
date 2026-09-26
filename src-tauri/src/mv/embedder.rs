@@ -18,7 +18,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::rag::gguf::GgufEmbedder;
+use crate::mv::gguf::GgufEmbedder;
 
 /// A loaded embedding model (GGUF). Produces an `embed_dim`-long L2-normalized
 /// f32 vector per input text, exposes its context window (for the chunk-size
@@ -182,12 +182,23 @@ pub fn read_deploy_description(size_dir: &Path) -> String {
 }
 
 /// Resolve the effective platform: `RAG_GGUF_DEVICE` env override (debug) >
-/// `deploy.json` > Auto. Both backends call this at load with their size dir.
-pub fn resolve_platform(size_dir: &Path) -> Platform {
+/// the user's `mv.device` setting (Phase 4: the UI selector actually drives
+/// the engine) > `deploy.json` > Auto. Callers pass the user override read
+/// from config (None = "auto" / unset).
+pub fn resolve_platform_with_user(size_dir: &Path, user: Option<Platform>) -> Platform {
     if let Some(p) = env_platform_override() {
         return p;
     }
+    if let Some(p) = user {
+        return p;
+    }
     read_deploy_platform(size_dir)
+}
+
+/// Legacy entry (deploy.json only) — kept for any caller without a user
+/// override; mv's load path uses `resolve_platform_with_user`.
+pub fn resolve_platform(size_dir: &Path) -> Platform {
+    resolve_platform_with_user(size_dir, None)
 }
 
 /// `load_embedder` env override: if `RAG_GGUF_DEVICE` is set it overrides the
@@ -241,8 +252,17 @@ pub trait Embedder: Send + Sync {
 /// accepted). Returns an error if none is present (the size isn't ready - the
 /// caller should have checked via `list_models`).
 pub fn load_embedder(size_dir: &Path) -> Result<Box<dyn Embedder>> {
+    load_embedder_with_user_platform(size_dir, None)
+}
+
+/// `load_embedder` + the user's `mv.device` selection ("auto" → None).
+/// Precedence: RAG_GGUF_DEVICE env (debug) > user setting > deploy.json.
+pub fn load_embedder_with_user_platform(
+    size_dir: &Path,
+    user: Option<Platform>,
+) -> Result<Box<dyn Embedder>> {
     if let Some(gguf) = find_gguf(size_dir) {
-        GgufEmbedder::load(&gguf).map(|m| Box::new(m) as Box<dyn Embedder>)
+        GgufEmbedder::load_with_user_platform(&gguf, user).map(|m| Box::new(m) as Box<dyn Embedder>)
     } else {
         Err(anyhow!(
             "no model file in '{}' (need a *.gguf file) - download it first",
@@ -293,7 +313,7 @@ pub fn read_max_context(model_dir: &Path) -> u32 {
             }
         }
     }
-    if let Some(ctx) = crate::rag::gguf::read_gguf_context_length(model_dir) {
+    if let Some(ctx) = crate::mv::gguf::read_gguf_context_length(model_dir) {
         return ctx;
     }
     2048

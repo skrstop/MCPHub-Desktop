@@ -57,7 +57,7 @@ use candle_core::quantized::gguf_file::Content;
 use candle_core::{Device, Module, Tensor};
 use candle_nn::{ops, RmsNorm};
 
-use crate::rag::gguf_gemma::{
+use crate::mv::gguf_gemma::{
     apply_rope, attn_bias, l2_normalize, linear, sliding_window_mask, GgufArch,
 };
 
@@ -286,7 +286,7 @@ impl GgufArch for ModernBertArch {
             1 => {
                 // MEAN (masked) + L2 — for completeness if a future modern-bert
                 // GGUF declares mean pooling.
-                crate::rag::gguf_gemma::pool_and_normalize(&x, attention_mask)
+                crate::mv::gguf_gemma::pool_and_normalize(&x, attention_mask)
             }
             other => {
                 log::warn!(
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     #[ignore]
     fn granite_cosine_probe() {
-        use crate::rag::embedder::Embedder;
+        use crate::mv::embedder::Embedder;
         let size_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("runtimes/rag/model/granite/97m");
         if !size_dir.exists() {
@@ -405,8 +405,8 @@ mod tests {
             .find(|p| p.extension().and_then(|x| x.to_str()) == Some("gguf"))
             .expect("no .gguf in size dir");
         let mut embedder =
-            crate::rag::gguf::GgufEmbedder::load(&gguf).expect("load GgufEmbedder");
-        let cfg = crate::rag::embedder::read_deploy_config(&size_dir);
+            crate::mv::gguf::GgufEmbedder::load(&gguf).expect("load GgufEmbedder");
+        let cfg = crate::mv::embedder::read_deploy_config(&size_dir);
         eprintln!("deploy: query_prefix={:?} doc_prefix={:?}", cfg.search_query_prefix, cfg.import_doc_prefix);
 
         let probes: &[&str] = &[

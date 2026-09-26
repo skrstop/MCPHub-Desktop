@@ -688,6 +688,22 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   // RAG endpoints — (rag_toggle, rag_status, list_rag_docs, get_rag_doc,
   // upload_rag_docs, delete_rag_doc, rag_search_command, get_rag_settings,
   // save_rag_settings, open_rag_file_location).
+  // ── Smart Routing (desktop commands, Phase 4) ─────────────────────────
+  // NOTE: must live OUTSIDE the `segs[0] === 'rag'` block — it was previously
+  // nested inside it, so /smart-routing/* never matched ("Unmapped route").
+  // GET /smart-routing/performance — index summary mapped into the origin
+  // panel shape (vectorStore rows + byServer; coverage/database are
+  // desktop-degenerate but keep the keys the panel reads).
+  if (p === 'smart-routing/performance' && m === 'GET')
+    return { command: 'smart_routing_performance', args: {} };
+  // POST /smart-routing/reindex — full index rebuild (skip-check makes it
+  // cheap); returns the count of servers re-indexed.
+  if (p === 'smart-routing/reindex' && m === 'POST')
+    return { command: 'smart_routing_reindex', args: {} };
+  // GET /smart-routing/status
+  if (p === 'smart-routing/status' && m === 'GET')
+    return { command: 'smart_routing_status', args: {} };
+
   if (segs[0] === 'rag') {
     // GET /rag/status — runtime status (switch state)
     if (segs[1] === 'status' && m === 'GET')
@@ -998,6 +1014,60 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   }
   if (command === 'logout' || command === 'change_password') {
     return { success: true };
+  }
+
+  // ── Smart Routing commands: map desktop shapes into the origin panel API ──
+  if (command === 'smart_routing_performance') {
+    const r = (result ?? {}) as {
+      serverRows?: number; toolRows?: number; totalRows?: number;
+    };
+    // Desktop command returns row totals; per-server breakdown arrives via a
+    // follow-up status call in the service layer when available.
+    return {
+      success: true,
+      data: {
+        enabled: true,
+        reindexing: false,
+        config: { provider: 'local', model: null, configuredDimensions: null },
+        database: { connected: true, healthy: true, lastError: null },
+        vectorStore: {
+          available: true,
+          totalRows: r.totalRows ?? 0,
+          toolRows: r.toolRows ?? 0,
+          serverRows: r.serverRows ?? 0,
+          distinctServers: r.serverRows ?? 0,
+          dimensions: null,
+          byModel: [],
+          byServer: [],
+          oldestUpdatedAt: null,
+          newestUpdatedAt: null,
+        },
+        coverage: {
+          totalServers: r.serverRows ?? 0,
+          connectedServers: r.serverRows ?? 0,
+          personalCredentialServers: 0,
+          indexedServers: r.serverRows ?? 0,
+          missingIndexServerCount: 0,
+          missingIndexServers: [],
+        },
+      },
+    };
+  }
+  if (command === 'smart_routing_reindex') {
+    const n = typeof result === 'number' ? result : 0;
+    return {
+      success: true,
+      data: {
+        syncedServers: n,
+        failedServers: 0,
+        skippedServers: 0,
+        totalTools: n,
+        results: [],
+      },
+    };
+  }
+  if (command === 'smart_routing_status') {
+    return { success: true, data: result };
   }
 
   // ── Void-return commands ──────────────────────────────────────────────────

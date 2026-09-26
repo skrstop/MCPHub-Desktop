@@ -106,3 +106,60 @@ pub async fn run(filename: &str, bytes: Vec<u8>) -> Result<String> {
     }
     result
 }
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    const TEST_PDF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../doc/test/苏州2.pdf");
+
+    #[tokio::test]
+    async fn real_pdf_extracts_to_markdown() {
+        if !std::path::Path::new(TEST_PDF).exists() {
+            return; // asset not present in CI checkout
+        }
+        let bytes = std::fs::read(TEST_PDF).unwrap();
+        let out = run("苏州2.pdf", bytes).await.expect("pdf extract");
+        assert!(!out.trim().is_empty(), "pdf text layer should produce content");
+    }
+
+    #[tokio::test]
+    async fn minimal_docx_extracts_with_table_and_cjk() {
+        // Build a minimal .docx in-memory (zip): [Content_Types].xml +
+        // document.xml with a paragraph and a table cell containing CJK.
+        use std::io::Write;
+        let buf = Vec::new();
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(buf));
+        let opts: zip::write::SimpleFileOptions = Default::default();
+        w.start_file("[Content_Types].xml", opts).unwrap();
+        w.write_all(br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#).unwrap();
+        w.start_file("_rels/.rels", opts).unwrap();
+        w.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#).unwrap();
+        w.start_file("word/document.xml", opts).unwrap();
+        w.write_all("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>\u{9879}\u{76ee}\u{6807}\u{9898}</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>\u{8868}\u{683c}\u{6570}\u{636e}</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>".as_bytes()).unwrap();
+        let cursor = w.finish().unwrap();
+        let bytes = cursor.into_inner();
+
+        let out = run("report.docx", bytes).await.expect("docx extract");
+        assert!(out.contains("项目标题"), "paragraph text extracted: {out}");
+        assert!(out.contains("表格数据"), "table cell text extracted: {out}");
+    }
+
+    #[tokio::test]
+    async fn unsupported_binary_rejected_by_text_fallback() {
+        let out = run("blob.bin", vec![0u8, 159, 146, 150, 0, 1, 2]).await;
+        assert!(out.is_err(), "binary junk must not silently extract");
+    }
+
+    #[test]
+    fn can_extract_and_produces_markdown_matrix() {
+        assert!(can_extract("a.pdf"));
+        assert!(can_extract("a.docx"));
+        assert!(can_extract("a.png"));
+        assert!(!can_extract("a.bin"));
+        assert!(produces_markdown("a.pdf"));
+        assert!(produces_markdown("a.docx"));
+        assert!(!produces_markdown("a.png"), "OCR output is plain text, not markdown");
+        assert!(!produces_markdown("a.txt"));
+    }
+}

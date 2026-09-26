@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.40002"
+version = "1.0.40003"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -88,6 +88,10 @@ uuid = { version = "1", features = ["v4"] }
 # fingerprint stored in DocMeta.md5). Lightweight; matches the "md5" naming in
 # the feature spec.
 md-5 = "0.10"
+
+# scrypt KDF for the smart-routing toolset hash (origin parity: N=2048, r=8,
+# p=1, 32 bytes over a stable-serialized normalized tool list).
+scrypt = { version = "0.11", default-features = false }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

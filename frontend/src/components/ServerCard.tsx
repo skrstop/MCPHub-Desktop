@@ -43,6 +43,9 @@ import {
   normalizeServerVisibility,
 } from '@/utils/serverVisibility';
 
+/** Smart Routing meta tools — exposed only via /mcp/$smart. */
+const SMART_META_TOOLS = ['smart_route_search', 'smart_route_describe', 'smart_route_call'];
+
 interface ServerCardProps {
   server: Server;
   cost?: ServerCost;
@@ -121,6 +124,7 @@ const transportLabel = (t: any, type?: string) => {
   if (type === 'sse') return t('server.typeSse') || 'sse';
   if (type === 'streamable-http') return t('server.typeStreamableHttp') || 'http';
   if (type === 'openapi') return t('server.typeOpenapi') || 'openapi';
+  if (type === 'builtin') return t('server.typeBuiltin') || 'builtin';
   return type;
 };
 
@@ -510,6 +514,11 @@ const ServerCard = ({
 
   const serverEndpoint = `${baseUrl}/mcp/${server.name}`;
   const serverOpenApiEndpoint = `${baseUrl}/api/${server.name}`;
+  // Smart Routing meta tools: shown on the builtin card with a Smart badge;
+  // their only HTTP access point is /mcp/$smart (non-$smart /mcp|/api paths
+  // filter them out server-side).
+  const smartRoutingEnabled = server.name === 'mcphub-desktop'
+    && (server.tools ?? []).some((t) => SMART_META_TOOLS.includes(t.name));
 
   const copyEndpoint = async (value: string) => {
     const ok = await copyText(value);
@@ -1061,6 +1070,58 @@ const ServerCard = ({
                     <Copy size={12} />
                   </button>
                 </div>
+                {/* Smart Routing meta tools are ONLY exposed via $smart —
+                    surface their access point on the builtin server card. */}
+                {isBuiltin && smartRoutingEnabled && (
+                  <>
+                    <div className="hub-endpoint" style={{ height: 26, borderColor: 'var(--hub-accent)' }}>
+                      <div
+                        className="hub-endpoint-label"
+                        title={t('server.smartMetaTooltip')}
+                        style={{ color: 'var(--hub-accent)' }}
+                      >
+                        /mcp/
+                      </div>
+                      <div className="hub-endpoint-url" title={`${baseUrl}/mcp/$smart`} style={{ maxWidth: 200, color: 'var(--hub-accent)' }}>
+                        $smart
+                      </div>
+                      <button
+                        type="button"
+                        className="hub-endpoint-copy"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void copyEndpoint(`${baseUrl}/mcp/$smart`);
+                        }}
+                        title={t('common.copyUrl')}
+                      >
+                        <Copy size={12} />
+                      </button>
+                    </div>
+                    <div className="hub-endpoint" style={{ height: 26, borderColor: 'var(--hub-accent)' }}>
+                      <div
+                        className="hub-endpoint-label"
+                        title={t('server.smartMetaTooltip')}
+                        style={{ color: 'var(--hub-accent)' }}
+                      >
+                        /api/
+                      </div>
+                      <div className="hub-endpoint-url" title={`${baseUrl}/api/$smart/openapi.json`} style={{ maxWidth: 200, color: 'var(--hub-accent)' }}>
+                        $smart
+                      </div>
+                      <button
+                        type="button"
+                        className="hub-endpoint-copy"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void copyEndpoint(`${baseUrl}/api/$smart/openapi.json`);
+                        }}
+                        title={t('common.copyOpenApiUrl')}
+                      >
+                        <Copy size={12} />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 

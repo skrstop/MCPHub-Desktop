@@ -54,9 +54,60 @@ pub async fn get_system_config() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub async fn update_system_config(config: serde_json::Value) -> Result<serde_json::Value, String> {
+    // Capture the PREVIOUS smartRouting.enabled so a false→true transition can
+    // pull the model + index up immediately (otherwise the user must restart
+    // the app before Smart Routing works — the UI switch implies live effect).
+    let prev_smart_enabled = config_service::get()
+        .await
+        .ok()
+        .and_then(|c| {
+            c.get("smartRouting")
+                .and_then(|r| r.get("enabled"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false);
+
     let result = config_service::update(&config).await.map_err(|e| e.to_string())?;
     // Sync HTTP server state (start/stop) based on updated config
     http_server::sync_with_config().await;
+
+    // Smart Routing enable/disable transitions (fire-and-forget; errors logged).
+    let new_smart_enabled = result
+        .get("smartRouting")
+        .and_then(|r| r.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !prev_smart_enabled && new_smart_enabled {
+        let Some(app) = crate::mcp::progress::get_app_handle().cloned() else {
+            log::warn!("[smart] post-enable hook skipped: app handle not ready");
+            return Ok(result);
+        };
+        tauri::async_runtime::spawn(async move {
+            match crate::mv::ensure_started("smart", &app).await {
+                Ok(_) => {
+                    // Model up — index the connected servers (skip-check makes
+                    // repeat runs cheap; no-op when already indexed).
+                    if let Err(e) = crate::smart_routing::index::reindex_all().await {
+                        log::warn!("[smart] post-enable reindex: {}", e);
+                    }
+                }
+                Err(e) => log::error!("[smart] post-enable model start failed: {:#}", e),
+            }
+        });
+    } else if prev_smart_enabled && !new_smart_enabled {
+        // Only release when RAG isn't holding the model too. Release INSIDE a
+        // spawned task that first waits for any in-flight enable-load: a fast
+        // enable→disable would otherwise take the (still empty) runtime slot
+        // and leak the model running with zero consumers once the load
+        // completes.
+        let rag_enabled = crate::rag::service::config_enabled().await;
+        if !rag_enabled {
+            tauri::async_runtime::spawn(async move {
+                crate::mv::wait_while_initializing(std::time::Duration::from_secs(180)).await;
+                crate::mv::release("smart").await;
+            });
+        }
+    }
     Ok(result)
 }
 

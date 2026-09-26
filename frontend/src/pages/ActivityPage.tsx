@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { copyText } from "@/utils/clipboard";
+import { useToast } from "@/contexts/ToastContext";
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -40,6 +42,8 @@ const ActivityPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedActivity, setSelectedActivity] = useState<Activity | null>(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [showResponseModal, setShowResponseModal] = useState(false);
+  const { showToast } = useToast();
 
   // Filter state
   const [appliedFilters, setAppliedFilters] = useState<ActivityFilter>({});
@@ -211,6 +215,34 @@ const ActivityPage: React.FC = () => {
       return JSON.parse(str);
     } catch {
       return str;
+    }
+  };
+
+  // Extract the human-readable response text from a tool-call output payload:
+  // MCP shape is `{ content: [{ type: "text", text: "..." }], isError? }` —
+  // concatenate every text block. Returns null when there is no text content.
+  const extractResponseText = (outputData: any): string | null => {
+    const content = outputData?.content;
+    if (!Array.isArray(content)) return null;
+    const texts = content
+      .filter((c: any) => c?.type === 'text' && typeof c.text === 'string')
+      .map((c: any) => c.text as string);
+    if (texts.length === 0) return null;
+    return texts.join('\n\n');
+  };
+
+  // Format response text for viewing: if the text itself is JSON, pretty-print
+  // it (tool outputs are usually single-line JSON); otherwise show as-is
+  // (whitespace/newlines preserved by <pre>).
+  const formatResponseText = (text: string): string => {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        return JSON.stringify(parsed, null, 2);
+      }
+      return text;
+    } catch {
+      return text;
     }
   };
 
@@ -467,7 +499,7 @@ const ActivityPage: React.FC = () => {
           >
             <h3 className="hub-card-title">{t('activity.details')}</h3>
             <button
-              onClick={() => setShowDetailModal(false)}
+              onClick={() => { setShowDetailModal(false); setShowResponseModal(false); }}
               className="hub-icon-btn sm"
               aria-label="close"
             >
@@ -575,9 +607,22 @@ const ActivityPage: React.FC = () => {
 
             {outputData && (
               <div>
-                <label className="block text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
-                  {t('activity.output')}
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
+                    {t('activity.output')}
+                  </label>
+                  {(() => {
+                    const responseText = extractResponseText(outputData);
+                    return responseText ? (
+                      <button
+                        onClick={() => setShowResponseModal(true)}
+                        className="hub-btn text-xs"
+                      >
+                        {t('activity.viewResponse')}
+                      </button>
+                    ) : null;
+                  })()}
+                </div>
                 <pre className="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm overflow-auto">
                   {typeof outputData === 'string'
                     ? outputData
@@ -585,6 +630,68 @@ const ActivityPage: React.FC = () => {
                 </pre>
               </div>
             )}
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+  };
+
+  // Response-content modal: the output's `content[].text` formatted for
+  // reading (JSON pretty-printed; raw text otherwise). Large content scrolls.
+  const renderResponseModal = () => {
+    if (!showResponseModal || !selectedActivity) return null;
+    const outputData = safeParseJSON(selectedActivity.output);
+    const responseText = outputData ? extractResponseText(outputData) : null;
+    const formatted = responseText !== null ? formatResponseText(responseText) : '';
+    return createPortal(
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[80]">
+        <div
+          className="hub-card max-w-5xl w-full mx-4 flex flex-col"
+          style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: '90vh' }}
+        >
+          <div
+            className="flex items-center justify-between px-5 py-3 flex-shrink-0"
+            style={{ borderBottom: '1px solid var(--hub-line-2)' }}
+          >
+            <h3 className="hub-card-title">{t('activity.responseContent')}</h3>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  const ok = await copyText(formatted);
+                  showToast(
+                    ok
+                      ? t('common.copySuccess') || 'Copied to clipboard'
+                      : t('common.copyFailed') || 'Copy failed',
+                    ok ? 'success' : 'error',
+                  );
+                }}
+                className="hub-btn text-xs"
+              >
+                {t('common.copy')}
+              </button>
+              <button
+                onClick={() => setShowResponseModal(false)}
+                className="hub-icon-btn"
+                aria-label="Close"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                  <path
+                    fillRule="evenodd"
+                    d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div className="px-5 py-4 overflow-auto flex-1">
+            <pre
+              className="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm whitespace-pre-wrap break-words"
+              style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+            >
+              {formatted}
+            </pre>
           </div>
         </div>
       </div>,
@@ -703,6 +810,7 @@ const ActivityPage: React.FC = () => {
       )}
 
       {renderDetailModal()}
+      {renderResponseModal()}
     </div>
   );
 };

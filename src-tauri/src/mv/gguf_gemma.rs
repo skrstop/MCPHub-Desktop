@@ -351,9 +351,11 @@ pub(crate) fn linear(h: &Tensor, w: &Tensor) -> Result<Tensor> {
     }
 }
 
-/// L2-normalize a `[b, dim]` tensor row-wise. The vectordb uses L2 distance
-/// assuming normalized embeddings (so L2 ranking == cosine ranking) - every
-/// arch must normalize its pooled output, even when the HF reference doesn't
+/// L2-normalize a `[b, dim]` tensor row-wise. The vectordb uses COSINE
+/// distance, which is well-defined for any magnitudes, but normalizing keeps
+/// every arch's output on the unit sphere (identical ranking; scores are
+/// directly comparable across archs) - every arch must normalize its pooled
+/// output, even when the HF reference doesn't
 /// (e.g. LFM2's `modules.json` has no Normalize module).
 pub(crate) fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     let b = x.dim(0)?;

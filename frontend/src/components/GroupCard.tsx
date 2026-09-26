@@ -13,6 +13,9 @@ import { useToast } from '@/contexts/ToastContext';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { formatTokens, percentSaved } from '@/utils/contextCost';
 
+/** Smart Routing meta tools — exclusive to $smart, never group-visible. */
+const SMART_META_TOOLS = ['smart_route_search', 'smart_route_describe', 'smart_route_call'];
+
 interface GroupCardProps {
   group: Group;
   servers: Server[];
@@ -94,7 +97,9 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
   const tally = (server: Server) => {
     const cfg = getServerConfig(group, server.name);
     const prefix = `${server.name}${nameSeparator}`;
-    const allTools = server.tools || [];
+    // Smart meta tools never count toward group visibility (excluded from
+    // the selection UI and filtered server-side in group scopes).
+    const allTools = (server.tools || []).filter((t) => !SMART_META_TOOLS.includes(t.name));
     const allPrompts = server.prompts || [];
     const allResources = server.resources || [];
 

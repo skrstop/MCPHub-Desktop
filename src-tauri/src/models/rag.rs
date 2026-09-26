@@ -497,6 +497,17 @@ pub struct RagStatus {
     /// true until `reindex_all` completes. Cleared on disable.
     #[serde(default)]
     pub needs_reindex: bool,
+    /// Embedding dimension of the currently loaded model (real value from the
+    /// GGUF at load time). `None` while nothing is loaded. Drives the
+    /// 【模型和向量】status line "运行中：<model> · <dim> 维 · <device>".
+    #[serde(default)]
+    pub embed_dim: Option<u32>,
+    /// True when the SHARED mv runtime is running (model loaded for ANY
+    /// consumer — RAG or Smart Routing). The 【模型和向量】card keys its
+    /// "running" display off this so the model can be up while RAG itself is
+    /// off. Additive field; existing consumers ignore it.
+    #[serde(default)]
+    pub mv_running: bool,
 }
 
 /// Single-doc update check result (drives the per-row UpdateDialog branches):

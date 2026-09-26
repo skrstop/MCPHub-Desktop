@@ -27,8 +27,9 @@ use crate::models::rag::{
     RagUpdateCheck,
 };
 use crate::rag::chunker::chunk_document_with_progress;
-use crate::rag::embedder::{check_memory_sufficient, detect_format, load_embedder, read_max_context, Embedder};
+use crate::mv::{self, embedder::check_memory_sufficient};
 use crate::rag::vectordb::{ChunkInput, VectorDb};
+pub use crate::mv::RagModelInfo;
 
 /// Write a RAG log line to both the env logger and the DB log panel (visible
 /// in the Logs page, filterable by server = "rag"). `level` is "info"/"warn"/"error".
@@ -995,10 +996,11 @@ fn write_meta_atomic(meta_path: &Path, meta: &DocMeta) -> Result<()> {
     Ok(())
 }
 
-/// The loaded runtime. Dropped on disable to release resources. `model` is a
-/// GGUF `Embedder` (candle) selected at load by `embedder::load_embedder`.
+/// The loaded runtime. Dropped on disable to release resources. The embedding
+/// MODEL lives in the shared mv runtime (`crate::mv`) since Phase 2 — this
+/// struct holds only RAG's own table handle + per-model deploy knobs read
+/// from the active model's deploy.json at start.
 struct Runtime {
-    model: Box<dyn Embedder>,
     db: VectorDb,
     /// Prefix prepended to each search query before embedding (from the loaded
     /// model's deploy.json `searchQueryPrefix`). "" for symmetric models. Used
@@ -1018,7 +1020,6 @@ struct Runtime {
 }
 
 static RUNTIME: OnceLock<Mutex<Option<Runtime>>> = OnceLock::new();
-static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static INITIALIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Set when the vector table was recreated on the last enable (model swapped
 /// to a different embedding dim). The frontend reads `RagStatus.needs_reindex`
@@ -1026,6 +1027,12 @@ static INITIALIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// embeddings are gone (table recreated), so the docs are still on disk but
 /// search returns nothing until re-indexed with the new model.
 static NEEDS_REINDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the RAG consumer is currently registered with the shared mv
+/// runtime (i.e. RAG's own feature surface — MCP tools / search / reindex —
+/// is active). Replaces the old ENABLED semantics ("model loaded"): with the
+/// shared runtime the model may be up for Smart Routing while RAG is off, so
+/// RAG's gates must key on RAG's own registration, not on mv::is_running().
+static RAG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn runtime() -> &'static Mutex<Option<Runtime>> {
     RUNTIME.get_or_init(|| Mutex::new(None))
@@ -1044,574 +1051,6 @@ fn lancedb_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("lancedb"))
 }
 
-/// Bundled model root. In **dev** (`tauri dev`) the source dir
-/// (`CARGO_MANIFEST_DIR/runtimes/rag/model`) is preferred so edits to the
-/// model files take effect live WITHOUT tauri recopying them to the target
-/// dir - and so deleted size dirs don't linger as stale copies under
-/// `target/debug/runtimes/` (tauri copies resources to target but does NOT
-/// remove dirs deleted from source, which made phantom `f16`/`q4` entries
-/// appear in the dropdown). In a packaged build the source path doesn't exist
-/// on the user's machine, so we fall back to the bundled resource dir.
-fn model_root(app: &AppHandle) -> Result<PathBuf> {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("runtimes")
-        .join("rag")
-        .join("model");
-    if src.exists() {
-        return Ok(src);
-    }
-    if let Ok(resource) = app.path().resource_dir() {
-        let p = resource.join("runtimes").join("rag").join("model");
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    Ok(src)
-}
-
-/// Writable store for DOWNLOADED models: `<app_data>/rag/models/<family>/<size>/`.
-/// The bundled resource dir is read-only in a signed app, so models fetched via
-/// `download.url` land here. Mirrors the bundled layout.
-fn download_root(app: &AppHandle) -> Result<PathBuf> {
-    Ok(data_dir(app)?.join("models"))
-}
-
-/// The out-of-box default ready size: the size whose `deploy.json` has
-/// `"default": true` (and is ready), else the first ready size. Also the
-/// fallback when the persisted selection is gone (a model deleted in a later
-/// version). Sync (scans the model dirs).
-fn default_size(app: &AppHandle) -> Option<String> {
-    let models = list_models(app).ok()?;
-    models
-        .iter()
-        .find(|m| m.is_default && m.ready)
-        .or_else(|| models.iter().find(|m| m.ready))
-        .map(|m| m.size.clone())
-}
-
-/// The model's context window in tokens, from the SELECTED (or default) size
-/// dir's `config.json` `max_position_embeddings`. Used by the UI to cap the
-/// `chunk_size` input. Async because it reads the persisted selection; reads
-/// the file directly (no runtime) so the bound is available with RAG off.
-/// GGUF size dirs ship a config.json, so this works without loading the model.
-/// Falls back to 2048 if no size resolves.
-pub async fn model_max_context(app: &AppHandle) -> u32 {
-    let size = current_model().await.or_else(|| default_size(app));
-    let dir = size.and_then(|s| resolve_model_paths(app, &s).ok().flatten());
-    dir.map(|d| read_max_context(&d)).unwrap_or(2048)
-}
-
-/// The loaded model's chunk-size recommendation: `(max_context, chunk_size?,
-/// chunk_overlap?)`. The chunk values come from the selected size's
-/// `deploy.json` (`chunkSize` / `chunkOverlap`) — the model author's
-/// recommended retrieval granularity. `None` when the size dir isn't ready or
-/// the deploy.json omits the fields (the service falls back to 1024/100).
-/// Surfaced via `rag_model_limits` so the frontend's Auto mode can SHOW the
-/// resolved values (sliders disabled) and seed them when the user switches to
-/// manual. `max_context` is read the same way as `model_max_context`.
-pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, Option<u32>) {
-    let size = current_model().await.or_else(|| default_size(app));
-    let dir = size.and_then(|s| resolve_model_paths(app, &s).ok().flatten());
-    let Some(d) = dir else {
-        return (2048, None, None);
-    };
-    let max_ctx = read_max_context(&d);
-    let cfg = crate::rag::embedder::read_deploy_config(&d);
-    (max_ctx, cfg.chunk_size, cfg.chunk_overlap)
-}
-
-/// Sum the on-disk size of the model file(s) in a ready size dir: any `*.gguf`
-/// file (bundled `model.gguf` or downloaded `model.gguf`). Small aux files
-/// (tokenizer.json/config.json) are excluded so the number reflects the model
-/// payload only.
-fn model_file_size(dir: &Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".gguf") {
-                if let Ok(m) = e.metadata() {
-                    total += m.len();
-                }
-            }
-        }
-    }
-    total
-}
-
-/// The parsed `download.url` (stage-18 JSON format): a `type` (must be "gguf")
-/// + an array of model-file URLs to fetch.
-#[derive(Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct DownloadUrl {
-    #[serde(default, rename = "type")]
-    format: String,
-    #[serde(default)]
-    model_url: Vec<String>,
-}
-
-fn read_download_url(path: &Path) -> Result<DownloadUrl> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
-    let dl = serde_json::from_str::<DownloadUrl>(&text)
-        .map_err(|e| anyhow!("parse {} as JSON ({{type, modelUrl}}): {}", path.display(), e))?;
-    if !dl.format.is_empty() && dl.format != "gguf" {
-        return Err(anyhow!(
-            "download.url in {} has type '{}' - only 'gguf' is supported (ONNX backend was removed)",
-            path.display(),
-            dl.format
-        ));
-    }
-    Ok(dl)
-}
-
-// ── model selection ─────────────────────────────────────────────────────────
-
-/// One selectable model size, surfaced to the frontend dropdown.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RagModelInfo {
-    /// Size key, e.g. "default", "q4", "f16". Used as the selection key
-    /// (persisted in `config_json.rag.model`).
-    pub size: String,
-    /// Dropdown label, e.g. "model_q4".
-    pub label: String,
-    /// "ready" (model file present, bundled or downloaded) | "downloadable"
-    /// (only download.url, not yet downloaded) | "unavailable".
-    pub status: String,
-    /// True if the model file (*.gguf) is available now
-    /// (selectable).
-    pub ready: bool,
-    /// True if a download.url exists (can be fetched).
-    pub downloadable: bool,
-    /// Backend format: "gguf" | "" (not ready). Drives the strategy
-    /// (`embedder::load_embedder`) and shows as a dropdown badge. For
-    /// downloadable sizes the future format is read from download.url's `type`
-    /// so the badge shows even before download.
-    #[serde(default)]
-    pub format: String,
-    /// Total size in bytes of the model file(s) on disk (ready sizes only);
-    /// 0 for downloadable sizes (unknown until downloaded). Shown in the
-    /// dropdown.
-    #[serde(default)]
-    pub file_size: u64,
-    /// Human description from the size dir's `deploy.json` `"description"` field
-    /// (shown in the dropdown next to the file size). Empty when absent.
-    #[serde(default)]
-    pub description: String,
-    /// True if this size's `deploy.json` has `"default": true` - the out-of-box
-    /// model and the fallback when the persisted selection is gone (a model
-    /// deleted in a later version). Surfaced so the dropdown can badge it.
-    #[serde(default, rename = "default")]
-    pub is_default: bool,
-    /// Sort order from deploy.json `"sort"` (lower = higher in dropdown; 0 default).
-    #[serde(default)]
-    pub sort: i32,
-}
-
-/// Scan `model/<family>/<size>/` and return one entry per size. A size is
-/// "ready" if its size dir (downloaded copy preferred, else the bundled dir)
-/// contains a `*.gguf` file; "downloadable" if a `download.url` is
-/// present but no model file yet. `format` is detected from the file present
-/// (ready) or read from download.url's `type` (downloadable).
-pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
-    let root = model_root(app)?;
-    let dl_root = download_root(app)?;
-    let mut out: Vec<RagModelInfo> = Vec::new();
-    if !root.exists() {
-        return Ok(out);
-    }
-    for fam in std::fs::read_dir(&root)? {
-        let fam_path = fam?.path();
-        if !fam_path.is_dir() {
-            continue;
-        }
-        let fam_name = fam_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        for sz in std::fs::read_dir(&fam_path)? {
-            let sz_path = sz?.path();
-            if !sz_path.is_dir() {
-                continue;
-            }
-            let size = sz_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-            if size.is_empty() {
-                continue;
-            }
-            let downloaded_dir = dl_root.join(fam_name).join(&size);
-            // Ready dir = downloaded copy if it has a model file, else bundled.
-            // `detect_format` returns "gguf"/"" by file presence.
-            let ready_dir = if !detect_format(&downloaded_dir).is_empty() {
-                Some(downloaded_dir)
-            } else if !detect_format(&sz_path.clone()).is_empty() {
-                Some(sz_path.clone())
-            } else {
-                None
-            };
-            let (ready, format, file_size) = match &ready_dir {
-                Some(d) => (true, detect_format(d).to_string(), model_file_size(d)),
-                None => (false, String::new(), 0u64),
-            };
-            let downloadable = sz_path.join("download.url").exists() && !ready;
-            // For downloadable sizes, surface the FUTURE format from
-            // download.url's `type` so the badge shows before download.
-            let format = if !format.is_empty() {
-                format
-            } else if downloadable {
-                read_download_url(&sz_path.join("download.url"))
-                    .map(|d| d.format)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let deploy_cfg = crate::rag::embedder::read_deploy_config(&sz_path);
-            out.push(RagModelInfo {
-                // Label = "<family-dir>-<size-dir>" (e.g. "embeddinggemma-default"),
-                // so multiple families/sizes are distinguishable in the dropdown.
-                label: format!("{}-{}", fam_name, size),
-                status: if ready {
-                    "ready".into()
-                } else if downloadable {
-                    "downloadable".into()
-                } else {
-                    "unavailable".into()
-                },
-                ready,
-                downloadable,
-                format,
-                file_size,
-                // Description, default flag, sort order from the bundled size
-                // dir's deploy.json (one read).
-                description: deploy_cfg.description.clone(),
-                is_default: deploy_cfg.is_default,
-                sort: deploy_cfg.sort,
-                size,
-            });
-        }
-    }
-    // `read_dir` returns entries in filesystem (arbitrary) order; sort by label
-    // for a stable ASCII-ordered dropdown (default < f16 < q4 < quantized ...).
-    // Sort by deploy.json `sort` (lower = higher), then label as tiebreaker.
-    out.sort_by(|a, b| a.sort.cmp(&b.sort).then(a.label.cmp(&b.label)));
-    Ok(out)
-}
-
-/// Resolve the size dir for the given size: the downloaded copy (under
-/// `<app_data>/rag/models/<family>/<size>/`) if it has a model file, else the
-/// bundled size dir if it has a model file. Returns `None` if the size isn't
-/// found or not ready (download.url only). Each size dir is self-contained
-/// (holds a *.gguf file + tokenizer.json + config.json).
-fn resolve_model_paths(app: &AppHandle, size: &str) -> Result<Option<PathBuf>> {
-    let root = model_root(app)?;
-    let dl_root = download_root(app)?;
-    for fam in std::fs::read_dir(&root)? {
-        let fam_path = fam?.path();
-        if !fam_path.is_dir() {
-            continue;
-        }
-        let fam_name = fam_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let bundled = fam_path.join(size);
-        if !bundled.is_dir() {
-            continue;
-        }
-        let downloaded_dir = dl_root.join(fam_name).join(size);
-        let size_dir = if !detect_format(&downloaded_dir).is_empty() {
-            downloaded_dir
-        } else if !detect_format(&bundled).is_empty() {
-            bundled
-        } else {
-            return Ok(None);
-        };
-        return Ok(Some(size_dir));
-    }
-    Ok(None)
-}
-
-/// The persisted selected model size (`config_json.rag.model`), or None.
-pub async fn current_model() -> Option<String> {
-    crate::services::config_service::get()
-        .await
-        .ok()
-        .and_then(|c| {
-            c.get("rag")
-                .and_then(|r| r.get("model"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-}
-
-/// Persist `rag.model = <size>` (deep-merge; leaves other rag settings intact).
-async fn set_current_model(size: &str) {
-    let patch = json!({ "rag": { "model": size } });
-    if let Err(e) = crate::services::config_service::update(&patch).await {
-        rag_log("warn", format!("failed to persist rag.model: {}", e));
-    }
-}
-
-/// Select a model size: persist it, then auto-restart RAG if currently enabled
-/// (stop + start reloads the new model). If RAG is off, the next enable loads
-/// it. Returns the post-restart status (with `needs_reindex` if the dim
-/// changed). Errors if the size isn't ready.
-pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
-    if resolve_model_paths(app, size)?.is_none() {
-        return Err(anyhow!(
-            "model '{}' is not ready - download it first",
-            size
-        ));
-    }
-    set_current_model(size).await;
-    rag_log("info", format!("selected model size '{}'", size));
-    if is_enabled() {
-        stop().await;
-        start(app).await?;
-    }
-    Ok(status())
-}
-
-// ── model download ──────────────────────────────────────────────────────────
-
-/// Progress for a model download, emitted on `rag://model-download` so the
-/// dropdown's download item can show a rich progress bar. `phase` is
-/// "downloading" | "done" | "error". The bar shows total %, speed (B/s), ETA
-/// (seconds), and which file out of how many.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RagModelDownloadProgress {
-    size: String,
-    phase: String,
-    /// Bytes downloaded so far (phase "downloading"), cumulative across files.
-    downloaded: u64,
-    /// Total bytes across all files (0 if unknown).
-    total: u64,
-    /// 0..100 (best-effort; 0 when total unknown).
-    percent: u8,
-    /// Download speed in bytes/sec (sliding-window estimate; 0 at the start).
-    speed: u64,
-    /// Estimated seconds remaining (0 if unknown / just started).
-    eta: u64,
-    /// 1-based index of the file currently downloading.
-    file_current: u32,
-    /// Total number of files in this model (length of download.url modelUrl).
-    file_total: u32,
-    /// Human message (current file name / "done").
-    message: Option<String>,
-}
-
-const MODEL_DOWNLOAD_EVENT: &str = "rag://model-download";
-
-fn emit_model_download(app: &AppHandle, p: RagModelDownloadProgress) {
-    if let Err(e) = app.emit(MODEL_DOWNLOAD_EVENT, &p) {
-        log::warn!("[RAG] emit model-download failed: {e}");
-    }
-}
-
-/// Download a model size via its `download.url` (stage-18 JSON format:
-/// `{"type":"gguf", "modelUrl":[...]}`). Each URL is streamed directly into
-/// `<app_data>/rag/models/<family>/<size>/`: file 0 -> `model.gguf`; additional
-/// URLs (if any) keep their URL basename. After success the size becomes
-/// "ready" and selectable. Emits `rag://model-download` throughout with
-/// cumulative %, speed, ETA, and file index/total.
-pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
-    // Locate the download.url + family for this size.
-    let root = model_root(app)?;
-    let dl_root = download_root(app)?;
-    let mut family: Option<String> = None;
-    let mut dl_url: Option<DownloadUrl> = None;
-    for fam in std::fs::read_dir(&root)? {
-        let fam_path = fam?.path();
-        if !fam_path.is_dir() {
-            continue;
-        }
-        let url_file = fam_path.join(size).join("download.url");
-        if url_file.exists() {
-            family = fam_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(String::from);
-            dl_url = Some(read_download_url(&url_file)?);
-            break;
-        }
-    }
-    let family = family.ok_or_else(|| anyhow!("family dir not found for '{}'", size))?;
-    let dl_url = dl_url.ok_or_else(|| anyhow!("no download.url found for model '{}'", size))?;
-    if dl_url.model_url.is_empty() {
-        return Err(anyhow!(
-            "download.url for '{}' has no modelUrl entries",
-            size
-        ));
-    }
-    let fmt = dl_url.format.as_str();
-    let urls = dl_url.model_url.clone();
-    let file_total = urls.len() as u32;
-    let target_dir = dl_root.join(&family).join(size);
-    std::fs::create_dir_all(&target_dir)?;
-
-    rag_log(
-        "info",
-        format!(
-            "downloading model '{}': format={} files={}",
-            size, fmt, urls.len()
-        ),
-    );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600))
-        .build()
-        .map_err(|e| anyhow!("http client: {}", e))?;
-
-    // HEAD each URL first to learn the total size (for the cumulative % bar +
-    // ETA). Missing/zero content-length is tolerated (total stays 0 -> bar
-    // shows speed + file count but not %).
-    let mut sizes: Vec<u64> = Vec::with_capacity(urls.len());
-    for url in &urls {
-        let len = client
-            .head(url.as_str())
-            .send()
-            .await
-            .ok()
-            .and_then(|r| r.error_for_status().ok())
-            .and_then(|r| r.content_length())
-            .unwrap_or(0);
-        sizes.push(len);
-    }
-    let total: u64 = sizes.iter().sum();
-
-    // Download each file sequentially, accumulating cumulative progress across
-    // files. Speed/ETA use a sliding window reset every emit tick.
-    let mut cumulative: u64 = 0;
-    for (idx, url) in urls.iter().enumerate() {
-        let file_current = (idx as u32) + 1;
-        // Output filename: file 0 -> model.gguf; others keep URL basename.
-        let out_name = if idx == 0 {
-            "model.gguf".to_string()
-        } else {
-            url_basename(url)
-        };
-        let out_path = target_dir.join(&out_name);
-
-        emit_model_download(
-            app,
-            RagModelDownloadProgress {
-                size: size.to_string(),
-                phase: "downloading".into(),
-                downloaded: cumulative,
-                total,
-                percent: pct(cumulative, total),
-                speed: 0,
-                eta: 0,
-                file_current,
-                file_total,
-                message: Some(out_name.clone()),
-            },
-        );
-
-        let resp = client
-            .get(url.as_str())
-            .send()
-            .await
-            .map_err(|e| anyhow!("{} request: {}", out_name, e))?
-            .error_for_status()
-            .map_err(|e| anyhow!("{} status: {}", out_name, e))?;
-        {
-            use futures_util::StreamExt;
-            use tokio::io::AsyncWriteExt;
-            let mut file = tokio::fs::File::create(&out_path)
-                .await
-                .map_err(|e| anyhow!("create {}: {}", out_name, e))?;
-            let mut stream = resp.bytes_stream();
-            let mut last_emit = std::time::Instant::now();
-            let mut since_emit: u64 = 0; // bytes since last speed sample
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| anyhow!("{} stream: {}", out_name, e))?;
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|e| anyhow!("write {}: {}", out_name, e))?;
-                let n = chunk.len() as u64;
-                cumulative = cumulative.saturating_add(n);
-                since_emit = since_emit.saturating_add(n);
-                if last_emit.elapsed() >= std::time::Duration::from_millis(200) {
-                    let elapsed_secs = last_emit.elapsed().as_secs_f64().max(0.001);
-                    let speed = (since_emit as f64 / elapsed_secs) as u64;
-                    let downloaded = cumulative;
-                    let percent = pct(downloaded, total);
-                    let eta = if speed > 0 && total > downloaded {
-                        (total - downloaded) / speed
-                    } else {
-                        0
-                    };
-                    emit_model_download(
-                        app,
-                        RagModelDownloadProgress {
-                            size: size.to_string(),
-                            phase: "downloading".into(),
-                            downloaded,
-                            total,
-                            percent,
-                            speed,
-                            eta,
-                            file_current,
-                            file_total,
-                            message: Some(out_name.clone()),
-                        },
-                    );
-                    last_emit = std::time::Instant::now();
-                    since_emit = 0;
-                }
-            }
-            file.flush()
-                .await
-                .map_err(|e| anyhow!("flush {}: {}", out_name, e))?;
-        }
-        let _ = &sizes[idx]; // per-file size available if needed for logging
-    }
-
-    // Verify the model file landed.
-    let model_file = "model.gguf";
-    if !target_dir.join(model_file).exists() {
-        return Err(anyhow!("{} download failed for '{}'", model_file, size));
-    }
-
-    rag_log(
-        "info",
-        format!("model '{}' downloaded ({} files)", size, file_total),
-    );
-    emit_model_download(
-        app,
-        RagModelDownloadProgress {
-            size: size.to_string(),
-            phase: "done".into(),
-            downloaded: total,
-            total,
-            percent: 100,
-            speed: 0,
-            eta: 0,
-            file_current: file_total,
-            file_total,
-            message: Some("done".into()),
-        },
-    );
-    Ok(())
-}
-
-/// 0..100 percent of `done / total`; 0 when total is unknown.
-fn pct(done: u64, total: u64) -> u8 {
-    if total == 0 {
-        0
-    } else {
-        ((done as f64 / total as f64) * 100.0).min(100.0) as u8
-    }
-}
-
-/// Basename of a URL's path - used to save an additional model file under its
-/// URL basename. Strips a trailing query string first; falls back to
-/// "model_data.bin".
-fn url_basename(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
-    path.rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("model_data.bin")
-        .to_string()
-}
-
 // ── lifecycle ───────────────────────────────────────────────────────────────
 
 /// Enable or disable RAG. Enabling blocks until the model + vector DB are
@@ -1626,6 +1065,25 @@ pub async fn toggle(app: &AppHandle, enabled: bool) -> Result<RagStatus> {
     // Persist the intent (only reached on success — start() returns early on
     // failure, so a failed enable leaves the previous intent unchanged).
     persist_enabled(app, enabled).await;
+    // The builtin server's SR-index rows must follow the toggle: enabling
+    // adds rag_* tools to smart_route_search's corpus, disabling removes
+    // them (stale rows would advertise tools that now error "RAG disabled").
+    // Meta tools are excluded by the indexer itself. Best-effort.
+    {
+        let h = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let desc = Some("Built-in capabilities (RAG, Smart Routing, prompts, resources)".to_string());
+            if enabled {
+                let tools = builtin_tools();
+                if !tools.is_empty() {
+                    let _ = crate::smart_routing::index::save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, desc.as_deref(), &tools).await;
+                }
+            } else {
+                let _ = crate::smart_routing::index::remove_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME).await;
+            }
+            let _ = h;
+        });
+    }
     Ok(status())
 }
 
@@ -1651,27 +1109,26 @@ async fn persist_enabled(app: &AppHandle, enabled: bool) {
 
 pub async fn start(app: &AppHandle) -> Result<()> {
     INITIALIZING.store(true, std::sync::atomic::Ordering::SeqCst);
-    rag_log("info", "enabling RAG (loading embedding model + opening vector DB)…");
-    let res = async {
+    rag_log("info", "enabling RAG (ensuring shared mv runtime + opening rag_chunk table)…");
+    let res: Result<bool, anyhow::Error> = async {
         check_memory_sufficient()?;
-        // Resolve the selected model size: the persisted selection, else the
-        // out-of-box default (the size whose deploy.json has "default": true).
-        // If the persisted size can't be resolved (deleted in a later version),
-        // fall back to the default and persist it so we don't keep trying the
-        // gone one. The size dir is self-contained (*.gguf file +
-        // tokenizer + config); `embedder::load_embedder` detects the format.
+        // Resolve the selected model size: the persisted selection (mv.model,
+        // fallback rag.model), else the out-of-box default (the size whose
+        // deploy.json has "default": true). If the persisted size can't be
+        // resolved (deleted in a later version), fall back to the default and
+        // persist it so we don't keep trying the gone one.
         let size = {
-            let persisted = current_model().await;
+            let persisted = mv::current_model().await;
             let resolved = persisted
                 .as_ref()
-                .and_then(|s| resolve_model_paths(app, s).ok().flatten());
+                .and_then(|s| mv::models::resolve_model_paths(app, s).ok().flatten());
             match resolved {
                 // Persisted selection is still ready - use it.
                 Some(_) => persisted.unwrap(),
                 None => {
                     // No selection, OR the persisted one is gone (deleted) -
                     // fall back to the default ready size and persist it.
-                    let default = default_size(app)
+                    let default = mv::models::default_size(app)
                         .ok_or_else(|| anyhow!("no ready model - download one first"))?;
                     if persisted.as_deref() != Some(&default) {
                         rag_log(
@@ -1682,20 +1139,23 @@ pub async fn start(app: &AppHandle) -> Result<()> {
                                 default
                             ),
                         );
-                        set_current_model(&default).await;
+                        mv::models::persist_selection(&default).await;
                     }
                     default
                 }
             }
         };
-        let size_dir = resolve_model_paths(app, &size)?
-            .ok_or_else(|| anyhow!("model '{}' not ready - download it first", size))?;
-        let model = load_embedder(&size_dir)?;
+        let _ = &size; // ensure_started reads the same persisted selection
+        // Shared runtime: loads the model (or reuses/reloads it when another
+        // consumer kept it alive and the persisted selection differs).
+        let info = mv::ensure_started("rag", app).await?;
+        let size_dir = mv::models::resolve_model_paths(app, &info.active_model)?
+            .ok_or_else(|| anyhow!("model '{}' not ready - download it first", info.active_model))?;
         // Read the model's deploy.json once for the asymmetric embedding
         // prefixes (searchQueryPrefix / importDocPrefix) - applied per-call in
         // `search` (query side) and `reindex_doc` (document side). "" for
         // symmetric models (Gemma) so behavior is unchanged when unset.
-        let deploy = crate::rag::embedder::read_deploy_config(&size_dir);
+        let deploy = mv::embedder::read_deploy_config(&size_dir);
         // Model name = "<family>-<size>" (the dropdown label, e.g.
         // "embeddinggemma-default") - derived from the resolved size dir so it
         // works for the GGUF backend and matches what the user sees.
@@ -1704,30 +1164,40 @@ pub async fn start(app: &AppHandle) -> Result<()> {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        let model_name = format!("{}-{}", family, size);
+        let model_name = format!("{}-{}", family, info.active_model);
         // Surface the model + backend + execution-provider decision to the Logs
-        // page so slow imports can be diagnosed. `backend()` = gguf;
-        // `ep_label()` carries the EP detail (e.g. "Metal", "CoreML+CPU", "CPU").
-        // This is THE signal for whether the model is on GPU or stuck on CPU.
+        // page (same line as pre-mv, so log-based diagnostics keep working).
         rag_log(
             "info",
             format!(
-                "model loaded: name={} dim={} max_context={} backend={} ep={} query_prefix={:?} doc_prefix={:?}",
-                model_name,
-                model.embed_dim(),
-                model.max_context(),
-                model.backend(),
-                model.ep_label(),
-                deploy.search_query_prefix,
-                deploy.import_doc_prefix,
+                "model loaded: name={} dim={} backend=gguf query_prefix={:?} doc_prefix={:?}",
+                model_name, info.embed_dim, deploy.search_query_prefix, deploy.import_doc_prefix,
             ),
         );
-        // Open the vector DB for the loaded model's embed_dim. If an existing
+        // Open the RAG table on the SHARED mv connection (mv owns the single
+        // lancedb connection; consumers own their tables). If an existing
         // table has a different dim (model swapped), it's dropped+recreated —
         // `db.needs_reindex()` then tells us to re-index all docs (old
         // embeddings are gone / meaningless under the new model).
-        let db = VectorDb::open(&lancedb_dir(app)?, model.embed_dim()).await?;
+        let conn = mv::connection_async().await?;
+        let db = VectorDb::open_with_conn(conn, &lancedb_dir(app)?, info.embed_dim).await?;
         let mut needs_reindex = db.needs_reindex();
+        // Same-dim model swap fix (Phase 2): the table's dim check can't see a
+        // model change that kept the dim (e.g. f16 -> q4 of the same family).
+        // Compare the model the index was built with against the now-active
+        // one; a difference forces a re-embed even though the schema matches.
+        let indexed_model = get_indexed_model().await;
+        if !needs_reindex && indexed_model.as_deref().is_some_and(|m| m != info.active_model) {
+            rag_log(
+                "info",
+                format!(
+                    "model changed ({} -> {}) at the same embedding dim — reindex required",
+                    indexed_model.as_deref().unwrap_or("(none)"),
+                    info.active_model
+                ),
+            );
+            needs_reindex = true;
+        }
         if needs_reindex {
             // Old embeddings are gone; zero the on-disk `.meta` chunk_count so
             // the list view reflects reality (0) until reindex repopulates.
@@ -1735,8 +1205,8 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         } else {
             // List-vs-vector consistency check (the "起码的数据一致" invariant):
             // every doc whose meta claims chunks must be vector-searchable.
-            // `open` above silently creates a FRESH table when the lancedb dir
-            // was wiped / corrupted / deleted — that case reports
+            // `open_with_conn` above silently creates a FRESH table when the
+            // lancedb dir was wiped / corrupted / deleted — that case reports
             // needs_reindex=false (no prior data from the table's view) while
             // the .meta files still say chunk_count>0, which would leave the
             // doc list showing "indexed" docs that vector search can never
@@ -1759,15 +1229,18 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         }
         let mut guard = runtime().lock().await;
         *guard = Some(Runtime {
-            model,
             db,
             search_query_prefix: deploy.search_query_prefix,
             import_doc_prefix: deploy.import_doc_prefix,
             deploy_chunk_size: deploy.chunk_size,
             deploy_chunk_overlap: deploy.chunk_overlap,
         });
-        let rss_after_load = crate::rag::embedder::process_rss_mib().unwrap_or(0);
-        rag_log("info", format!("model stored in runtime (RSS: {} MiB)", rss_after_load));
+        drop(guard);
+        if !needs_reindex {
+            // Embeddings are valid under this model — record it so a future
+            // same-dim swap is detectable.
+            set_indexed_model(&info.active_model).await;
+        }
         Ok::<_, anyhow::Error>(needs_reindex)
     }
     .await;
@@ -1779,7 +1252,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
             return Err(e);
         }
     };
-    ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    RAG_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     NEEDS_REINDEX.store(needs_reindex, std::sync::atomic::Ordering::SeqCst);
     // Startup reconciliation: rebuild the SQL mirror tables (rag_docs /
     // rag_doc_tags / rag_tags) from the on-disk .meta files. Cheap (one scan +
@@ -1801,60 +1274,123 @@ pub async fn start(app: &AppHandle) -> Result<()> {
 }
 
 pub async fn stop() {
-    let rss_before = crate::rag::embedder::process_rss_mib().unwrap_or(0);
+    // Don't race an in-flight start(): wait (bounded) for INITIALIZING to
+    // clear, otherwise a boot auto-restore / toggle enable could re-assert
+    // RAG_ACTIVE AFTER this stop ran and leave RAG "enabled" against the
+    // user's intent.
+    let waited = std::time::Instant::now();
+    while INITIALIZING.load(std::sync::atomic::Ordering::SeqCst) {
+        if waited.elapsed() > std::time::Duration::from_secs(180) {
+            rag_log("warn", "stop: start() still initializing after 180s — proceeding anyway");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let mut guard = runtime().lock().await;
     if let Some(rt) = guard.take() {
-        rag_log("info", "stop: runtime found, dropping model + db");
-        let Runtime { model, db, .. } = rt;
-        drop(db);    // lancedb Connection -> freed
-        // Drop the model (candle GgufEmbedder). For candle:
-        //   CPU: Tensors (CpuStorage Vec<f32>) freed by Rust drop; mi_collect
-        //        returns freed pages to OS.
-        //   Metal: Tensors (MetalStorage Arc<Buffer>) freed when the buffer
-        //        pool Arc hits 0 (all MetalDevice clones dropped). Metal
-        //        framework releases GPU buffers (not mimalloc-managed).
-        drop(model);
+        rag_log("info", "stop: runtime found, dropping rag_chunk table handle");
+        let Runtime { db, .. } = rt;
+        drop(db);    // lancedb table/connection handle -> freed
     } else {
         rag_log("info", "stop: no runtime (model was never loaded or already stopped)");
     }
     drop(guard);
-    ENABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    RAG_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
     NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
-    // Use the `libmimalloc-sys` binding (not a raw extern): referencing the
-    // crate forces its static archive into this (cdylib) link, so the
-    // `mi_collect` symbol resolves. See Cargo.toml for why the bin's
-    // #[global_allocator] alone isn't enough for the lib.
-    unsafe { libmimalloc_sys::mi_collect(true); }
-    // Wait 5s for mimalloc's purge_delay (default 10ms) to complete so the
-    // RSS measurement reflects the actual freed memory (MADV_DONTNEED returns
-    // pages to OS asynchronously on macOS).
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    let rss_after = crate::rag::embedder::process_rss_mib().unwrap_or(0);
-    rag_log(
-        "info",
-        format!(
-            "RAG disabled (RSS: {} -> {} MiB, freed {} MiB, mi_collect done)",
-            rss_before, rss_after, rss_before.saturating_sub(rss_after)
-        ),
-    );
+    // Shared runtime: release the consumer slot. When no other consumer (e.g.
+    // Smart Routing) is registered, mv drops the model + connection and does
+    // the mimalloc collect + RSS logging (the old stop semantics); otherwise
+    // the model stays up for the remaining consumer.
+    crate::mv::release("rag").await;
 }
 
 // `mi_collect` is provided by `libmimalloc-sys` (the `extended` feature) —
-// used above to force mimalloc to return freed pages to the OS after RAG
-// shutdown. See Cargo.toml for the linkage rationale.
+// used inside `mv::release` to force mimalloc to return freed pages to the OS
+// after the last consumer releases. See Cargo.toml for the linkage rationale.
 
 pub fn status() -> RagStatus {
     RagStatus {
-        enabled: ENABLED.load(std::sync::atomic::Ordering::SeqCst),
+        enabled: RAG_ACTIVE.load(std::sync::atomic::Ordering::SeqCst),
         initializing: INITIALIZING.load(std::sync::atomic::Ordering::SeqCst),
         needs_reindex: NEEDS_REINDEX.load(std::sync::atomic::Ordering::SeqCst),
+        embed_dim: crate::mv::embed_dim().map(|d| d as u32),
+        mv_running: crate::mv::is_running(),
     }
 }
 
-/// Whether RAG is enabled (runtime loaded). Used by the MCP layer to decide
-/// whether to advertise `rag_search` / `rag_get`.
+/// Whether RAG's own feature surface is active (consumer registered with the
+/// shared runtime). Used by the MCP layer to decide whether to advertise
+/// `rag_search` / `rag_get`. NOTE: the shared model may be running (for
+/// Smart Routing) while this is false — use `crate::mv::is_running()` for
+/// "model loaded" semantics.
 pub fn is_enabled() -> bool {
-    ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+    RAG_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The model the current vector index was built with (`rag.indexedModel`),
+/// persisted at start (no reindex needed) and after `reindex_all`. Used to
+/// detect a same-dim model swap, which the table's dim check cannot see.
+async fn get_indexed_model() -> Option<String> {
+    crate::services::config_service::get()
+        .await
+        .ok()
+        .and_then(|c| {
+            c.get("rag")
+                .and_then(|r| r.get("indexedModel"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+async fn set_indexed_model(model: &str) {
+    let patch = json!({ "rag": { "indexedModel": model } });
+    if let Err(e) = crate::services::config_service::update(&patch).await {
+        rag_log("warn", format!("failed to persist rag.indexedModel: {}", e));
+    }
+}
+
+// ── model management (thin delegates to mv — command contract unchanged) ────
+
+pub fn list_models(app: &AppHandle) -> Result<Vec<crate::mv::RagModelInfo>> {
+    mv::list_models(app)
+}
+
+pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
+    mv::download_model(app, size).await
+}
+
+pub async fn current_model() -> Option<String> {
+    mv::current_model().await
+}
+
+pub async fn model_max_context(app: &AppHandle) -> u32 {
+    mv::model_max_context(app).await
+}
+
+pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, Option<u32>) {
+    mv::model_chunk_recommendation(app).await
+}
+
+/// Select a model size: persist it (mv.model), then auto-restart RAG if
+/// currently enabled (stop + start reloads the new model — mv's
+/// ensure_started sees the changed selection and reloads). If RAG is off, the
+/// next enable loads it. Returns the post-restart status (with
+/// `needs_reindex` if the dim changed OR a same-dim model swap was detected).
+pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
+    mv::ensure_model_ready(app, size)?;
+    mv::persist_selection(size).await;
+    if is_enabled() {
+        stop().await;
+        start(app).await?;
+    } else if crate::mv::is_running() {
+        // Smart-Routing-only (RAG off) with the shared model up: reload the
+        // model so the new selection takes effect immediately. release("smart")
+        // drops the last consumer → model freed; ensure_started re-registers
+        // and loads the newly-selected model (needs_reload sees the change).
+        crate::mv::release("smart").await;
+        mv::ensure_started("smart", app).await?;
+    }
+    Ok(status())
 }
 
 /// The app-level RAG tool definitions (name / description / inputSchema) that
@@ -2070,11 +1606,21 @@ pub async fn call_builtin_tool(
 ///   - resources: all builtin resources (resource_service)
 /// The frontend renders it like any server (with management actions disabled);
 /// groups select its tools/prompts/resources per-server like any server.
+/// ALL tools the builtin "mcphub-desktop" server exposes — the single source
+/// of truth used by BOTH the server listing (UI / tools/list / cost) AND the
+/// Smart Routing index (which filters out the meta tools itself). New builtin
+/// capabilities append here once and propagate everywhere; nothing downstream
+/// hardcodes tool names.
+pub async fn builtin_server_tools() -> Vec<crate::models::server::Tool> {
+    let mut tools = if is_enabled() { builtin_tools() } else { Vec::new() };
+    // Smart Routing meta tools on the builtin server (UI + test invocation).
+    tools.extend(crate::smart_routing::meta::builtin_meta_tools().await);
+    tools
+}
+
 pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> {
     use crate::models::server::{ServerConfig, ServerInfo, ServerStatus, ServerType};
-    // Tools: RAG tools only while RAG is enabled. Always-empty when off so the
-    // server still shows (with its prompts/resources).
-    let tools = if is_enabled() { builtin_tools() } else { Vec::new() };
+    let tools = builtin_server_tools().await;
     let tool_count = tools.len();
     // Prompts/resources: the builtin library (always available, independent of RAG).
     let prompts = crate::services::prompt_service::list_all().await.unwrap_or_default();
@@ -4380,27 +3926,42 @@ async fn reindex_doc(
 ) -> Result<usize> {
     let settings = get_settings().await?;
     let n_chunks;
-    {
-        let mut guard = runtime().lock().await;
-        let Some(rt) = guard.as_mut() else {
+    // Phase the work so mv's model lock and rag's table lock are never held
+    // together: (1) sync phase under mv::with_model — chunk + embed ALL
+    // batches (progress events are sync emits, safe inside); (2) async phase
+    // under the rag runtime lock — delete old rows + insert.
+    let (chunks, embeddings) = {
+        // Model-derived params first: effective chunk size / overlap. `0` in
+        // the user's global setting means "auto" -> use the model's
+        // deploy.json-recommended value (chunkSize/chunkOverlap); a positive
+        // value is an explicit override. `chunk_size` is capped by the loaded
+        // model's context window so a chunk can never exceed what the embedder
+        // accepts (the GGUF backend silently truncates at max_context, which
+        // would drop the chunk tail). Fallbacks: 1024 / 100 when neither the
+        // user nor deploy.json specify.
+        if !is_enabled() {
             return Err(anyhow!("RAG not enabled"));
+        }
+        let max_ctx = mv::model_max_context_loaded().await?;
+        let deploy = {
+            let guard = runtime().lock().await;
+            let Some(rt) = guard.as_ref() else {
+                return Err(anyhow!("RAG not enabled"));
+            };
+            (
+                rt.deploy_chunk_size,
+                rt.deploy_chunk_overlap,
+                rt.import_doc_prefix.clone(),
+            )
         };
-        // Resolve the effective chunk size / overlap. `0` in the user's global
-        // setting means "auto" -> use the model's deploy.json-recommended value
-        // (chunkSize/chunkOverlap); a positive value is an explicit override.
-        // `chunk_size` is capped by the loaded model's context window so a chunk
-        // can never exceed what the embedder accepts (the GGUF/ONNX backends
-        // silently truncate at max_context, which would drop the chunk tail).
-        // Fallbacks: 1024 / 100 when neither the user nor deploy.json specify.
-        let max_ctx = rt.model.max_context().max(1) as u32;
         let chunk_size = match settings.chunk_size {
-            0 => rt.deploy_chunk_size.unwrap_or(1024),
+            0 => deploy.0.unwrap_or(1024),
             v => v,
         }
         .min(max_ctx)
         .max(1) as usize;
         let chunk_overlap = match settings.chunk_overlap {
-            0 => rt.deploy_chunk_overlap.unwrap_or(100),
+            0 => deploy.1.unwrap_or(100),
             v => v,
         } as usize;
         // Chunk via the strategy pattern (text/markdown/code) — text-splitter
@@ -4416,105 +3977,120 @@ async fn reindex_doc(
         // for that whole phase, which reads as a hung import.
         let total_chars = content.chars().count() as u64;
         emit_upload_progress(app, doc_name, 0, total_chars);
-        // Route the chunker's per-partition progress to the frontend: for a
-        // multi-MB code file the chunking pass itself takes minutes, and
-        // without these ticks the "分片中…" row is static for that whole phase.
-        let chunks = chunk_document_with_progress(
-            doc_name,
-            content,
-            &*rt.model,
-            chunk_size as u32,
-            chunk_overlap as u32,
-            &|done, total| emit_chunking_progress(app, doc_name, done, total),
-        );
-        // Progress denominator for the embed loop: the SUM of chunk char
-        // counts, not the document char count. Consecutive chunks share
-        // `chunk_overlap` tokens of tail text, and the loop below accumulates
-        // per-chunk chars — against the document total that double-counts the
-        // overlap and saturates the bar EARLY (capped at 100%) while chunks
-        // still remain (observed: "char bar 100%, chunk bar still going").
-        // The chunk sum is exactly what the loop accumulates, so the bar hits
-        // 100% precisely when the last chunk embeds (sum ≈ doc chars + total
-        // overlap, typically ~10% larger with chunk_size=1024/overlap=100).
-        let progress_total_chars: u64 = if chunks.is_empty() {
-            total_chars
-        } else {
-            chunks.iter().map(|c| c.chars().count() as u64).sum()
-        };
-
-        // Adaptive batch size: if the doc has few chunks (<=32), process them
-        // ALL in one embed_batch call -> one big GEMM (max BLAS/AMX efficiency).
-        // If many chunks, batch in 32 -> multiple progress ticks (the bar moves)
-        // while keeping each GEMM large enough for efficient tiling. 32 is a
-        // sweet spot: big enough for AMX/BLAS GEMM efficiency, small enough that
-        // a 1000-chunk doc still gets ~30 progress ticks. This replaces the old
-        // hardcoded 8 (too small for f32 BLAS efficiency).
-        let batch_size = chunks.len().min(32);
-        let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
-        let mut chars_done: u64 = 0;
-        let t_embed = std::time::Instant::now();
-        // (The 0% tick was already emitted BEFORE chunking — see above — so
-        // the bar shows the real char total through the whole phase.)
-        // Empty / whitespace-only docs produce no chunks (`chunk_document`
-        // returns an empty vec after trim). Skip the batch loop in that case:
-        // `Vec::chunks(0)` panics with "chunk size must be non-zero", so without
-        // this guard an empty file (e.g. 0-byte upload or whitespace-only) would
-        // panic during reindex — a latent bug surfaced by reindexing after a
-        // model swap. The doc is still stored, just with zero searchable chunks.
-        // Prepend the model's document prefix (deploy.json `importDocPrefix`) to
-        // each chunk before embedding - asymmetric models (Qwen3, BGE) require a
-        // distinct prefix on the document side. Cloned once (a few bytes) so the
-        // mutable `rt.model.embed_batch` borrow below is unencumbered. The
-        // stored chunk_text + the char-progress count use the ORIGINAL chunk
-        // (no prefix) so retrieved snippets + the progress bar reflect the real
-        // content, and the prefix doesn't inflate the char total.
-        let import_doc_prefix = rt.import_doc_prefix.clone();
-        // For an empty doc the loop below doesn't run (no chunks to embed), so
-        // emit the 100% tick here to finish its progress bar.
-        if chunks.is_empty() {
-            emit_upload_progress(app, doc_name, progress_total_chars, progress_total_chars);
-        }
-        let total_chunks = chunks.len() as u32;
-        let mut chunks_done: u32 = 0;
-        for sub in chunks.chunks(batch_size.max(1)) {
-            let prefixed: Vec<String> = sub
-                .iter()
-                .map(|c| format!("{}{}", import_doc_prefix, c))
-                .collect();
-            let sub_refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
-            let embs = if sub_refs.is_empty() {
-                Vec::new()
-            } else {
-                rt.model
-                    .embed_batch(&sub_refs)
-                    .map_err(|e| anyhow!("embed_batch failed for '{}': {}", doc_name, e))?
-            };
-            let sub_chars: u64 = sub.iter().map(|c| c.chars().count() as u64).sum();
-            chars_done = chars_done.saturating_add(sub_chars);
-            chunks_done = chunks_done.saturating_add(sub.len() as u32);
-            embeddings.extend(embs);
-            emit_upload_progress_chunks(
-                app,
+        let import_doc_prefix = deploy.2;
+        mv::with_model(|model| {
+            // Route the chunker's per-partition progress to the frontend: for
+            // a multi-MB code file the chunking pass itself takes minutes, and
+            // without these ticks the "分片中…" row is static for that whole
+            // phase.
+            let chunks = chunk_document_with_progress(
                 doc_name,
-                chars_done,
-                progress_total_chars,
-                chunks_done,
-                total_chunks,
+                content,
+                model,
+                chunk_size as u32,
+                chunk_overlap as u32,
+                &|done, total| emit_chunking_progress(app, doc_name, done, total),
             );
-        }
-        let embed_ms = t_embed.elapsed().as_millis();
+            // Progress denominator for the embed loop: the SUM of chunk char
+            // counts, not the document char count. Consecutive chunks share
+            // `chunk_overlap` tokens of tail text, and the loop below
+            // accumulates per-chunk chars — against the document total that
+            // double-counts the overlap and saturates the bar EARLY (capped at
+            // 100%) while chunks still remain (observed: "char bar 100%, chunk
+            // bar still going"). The chunk sum is exactly what the loop
+            // accumulates, so the bar hits 100% precisely when the last chunk
+            // embeds (sum ≈ doc chars + total overlap, typically ~10% larger
+            // with chunk_size=1024/overlap=100).
+            let progress_total_chars: u64 = if chunks.is_empty() {
+                total_chars
+            } else {
+                chunks.iter().map(|c| c.chars().count() as u64).sum()
+            };
 
-        rag_log(
-            "info",
-            format!(
-                "indexed '{}' -> {} chunks (chunk_size={} overlap={}, embedMs={})",
-                doc_name,
-                chunks.len(),
-                chunk_size,
-                chunk_overlap,
-                embed_ms
-            ),
-        );
+            // Adaptive batch size: if the doc has few chunks (<=32), process
+            // them ALL in one embed_batch call -> one big GEMM (max BLAS/AMX
+            // efficiency). If many chunks, batch in 32 -> multiple progress
+            // ticks (the bar moves) while keeping each GEMM large enough for
+            // efficient tiling. 32 is a sweet spot: big enough for AMX/BLAS
+            // GEMM efficiency, small enough that a 1000-chunk doc still gets
+            // ~30 progress ticks. This replaces the old hardcoded 8 (too small
+            // for f32 BLAS efficiency).
+            let batch_size = chunks.len().min(32);
+            let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
+            let mut chars_done: u64 = 0;
+            let t_embed = std::time::Instant::now();
+            // (The 0% tick was already emitted BEFORE chunking — see above —
+            // so the bar shows the real char total through the whole phase.)
+            // Empty / whitespace-only docs produce no chunks
+            // (`chunk_document` returns an empty vec after trim). Skip the
+            // batch loop in that case: `Vec::chunks(0)` panics with "chunk
+            // size must be non-zero", so without this guard an empty file
+            // (e.g. 0-byte upload or whitespace-only) would panic during
+            // reindex — a latent bug surfaced by reindexing after a model
+            // swap. The doc is still stored, just with zero searchable chunks.
+            // Prepend the model's document prefix (deploy.json
+            // `importDocPrefix`) to each chunk before embedding - asymmetric
+            // models (Qwen3, BGE) require a distinct prefix on the document
+            // side. Cloned once (a few bytes) so the mutable
+            // `model.embed_batch` borrow below is unencumbered. The stored
+            // chunk_text + the char-progress count use the ORIGINAL chunk
+            // (no prefix) so retrieved snippets + the progress bar reflect
+            // the real content, and the prefix doesn't inflate the char total.
+            // For an empty doc the loop below doesn't run (no chunks to
+            // embed), so emit the 100% tick here to finish its progress bar.
+            if chunks.is_empty() {
+                emit_upload_progress(app, doc_name, progress_total_chars, progress_total_chars);
+            }
+            let total_chunks = chunks.len() as u32;
+            let mut chunks_done: u32 = 0;
+            for sub in chunks.chunks(batch_size.max(1)) {
+                let prefixed: Vec<String> = sub
+                    .iter()
+                    .map(|c| format!("{}{}", import_doc_prefix, c))
+                    .collect();
+                let sub_refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
+                let embs = if sub_refs.is_empty() {
+                    Vec::new()
+                } else {
+                    model
+                        .embed_batch(&sub_refs)
+                        .map_err(|e| anyhow!("embed_batch failed for '{}': {}", doc_name, e))?
+                };
+                let sub_chars: u64 = sub.iter().map(|c| c.chars().count() as u64).sum();
+                chars_done = chars_done.saturating_add(sub_chars);
+                chunks_done = chunks_done.saturating_add(sub.len() as u32);
+                embeddings.extend(embs);
+                emit_upload_progress_chunks(
+                    app,
+                    doc_name,
+                    chars_done,
+                    progress_total_chars,
+                    chunks_done,
+                    total_chunks,
+                );
+            }
+            let embed_ms = t_embed.elapsed().as_millis() as u64;
+
+            rag_log(
+                "info",
+                format!(
+                    "indexed '{}' -> {} chunks (chunk_size={} overlap={}, embedMs={})",
+                    doc_name,
+                    chunks.len(),
+                    chunk_size,
+                    chunk_overlap,
+                    embed_ms
+                ),
+            );
+            Ok((chunks, embeddings))
+        })
+        .await?
+    };
+    {
+        let guard = runtime().lock().await;
+        let Some(rt) = guard.as_ref() else {
+            return Err(anyhow!("RAG not enabled"));
+        };
         // Remove any existing chunks for this doc (tag re-edit / re-upload).
         let _ = rt.db.delete_by_doc(doc_id).await;
         let inputs: Vec<ChunkInput> = chunks
@@ -4693,6 +4269,18 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
         }
     }
     NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Record the model the index was just rebuilt with, so the same-dim swap
+    // detection at start() doesn't force another reindex next time.
+    let built_with = match crate::mv::active_model().await {
+        Some(m) => Some(m),
+        None => crate::mv::current_model().await,
+    };
+    match built_with.as_deref() {
+        Some(m) => set_indexed_model(m).await,
+        None => {
+            rag_log("warn", "reindex: could not resolve active model to persist rag.indexedModel");
+        }
+    }
     emit_reindex_progress(app, total, total, "");
     // Tags are unchanged by reindex (carried over), but a full mirror rebuild is
     // cheap and keeps the SQL tables consistent if any meta was skipped/corrupt.
@@ -6039,24 +5627,30 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
     let vw = settings.vector_weight.max(0.0).min(1.0);
     let kw = settings.keyword_weight.max(0.0).min(1.0);
 
-    let mut guard = runtime().lock().await;
-    let Some(rt) = guard.as_mut() else {
-        return Err(anyhow!("RAG not enabled"));
-    };
-
     // When a tag filter is active, fetch more candidates so Rust-side filtering
     // (intersection with requested tags) still yields enough hits after pruning.
     let want_tags: Vec<String> = tags.into_iter().filter(|t| !t.is_empty()).collect();
     let fetch = if want_tags.is_empty() { (limit * 2).max(limit) } else { (limit * 4).max(limit) };
 
-    // Vector channel.
+    // Embed the query on the shared mv model first (mv lock taken and
+    // released BEFORE the rag table lock — no nesting). The query prefix from
+    // the loaded model's deploy.json (`searchQueryPrefix`) is prepended for
+    // asymmetric models (Qwen3, BGE); the keyword channel below uses the RAW
+    // query (no prefix) since it's literal text matching.
+    let query_prefix = {
+        let guard = runtime().lock().await;
+        let Some(rt) = guard.as_ref() else {
+            return Err(anyhow!("RAG not enabled"));
+        };
+        rt.search_query_prefix.clone()
+    };
     let vec_hits = if vw > 0.0 {
-        // Prepend the model's query prefix (deploy.json `searchQueryPrefix`)
-        // before embedding - asymmetric models (Qwen3, BGE) require a distinct
-        // prefix on the query side. The keyword channel below uses the RAW
-        // query (no prefix) since it's literal text matching.
-        let q = format!("{}{}", &rt.search_query_prefix, query);
-        let qvec = rt.model.embed(&q)?;
+        let q = format!("{}{}", query_prefix, query);
+        let qvec = mv::with_model(|m| m.embed(&q)).await?;
+        let guard = runtime().lock().await;
+        let Some(rt) = guard.as_ref() else {
+            return Err(anyhow!("RAG not enabled"));
+        };
         match rt.db.search(&qvec, fetch).await {
             Ok(hits) => hits,
             Err(e) => {
@@ -6070,6 +5664,10 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
 
     // Keyword channel.
     let kw_hits = if kw > 0.0 {
+        let guard = runtime().lock().await;
+        let Some(rt) = guard.as_ref() else {
+            return Err(anyhow!("RAG not enabled"));
+        };
         match rt.db.keyword_search(&query, fetch).await {
             Ok(hits) => hits,
             Err(e) => {
@@ -6437,5 +6035,95 @@ mod exclusion_tests {
         ]);
         assert_eq!(out, vec!["/x/a.txt".to_string(), "/x/b.txt".to_string()]);
         assert!(normalize_excluded_paths(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn meta_from(json: &str) -> DocMeta {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn legacy_meta_no_method_no_original_is_copy_semantics() {
+        // Legacy: no method, no original_path, no md5.
+        let m = meta_from(r#"{"id":"a","name":"a.md","size":1,"uploaded_at":"t"}"#);
+        let c = classify_original(&m, &[]);
+        assert_eq!(c.method, "copy");
+        assert!(!c.has_original_path);
+        assert!(!c.has_md5);
+        assert!(!c.original_changed, "no original path -> cannot be changed");
+        assert!(!c.lost_original);
+    }
+
+    #[test]
+    fn symlink_lost_original_detected() {
+        let m = meta_from(
+            r#"{"id":"a","name":"a.md","size":1,"uploaded_at":"t","method":"symlink","original_path":"/definitely/not/here/x.md","md5":"abc"}"#,
+        );
+        let c = classify_original(&m, &[]);
+        assert!(c.has_original_path);
+        assert!(!c.original_exists);
+        assert!(!c.original_changed, "missing source is not 'changed'");
+        assert!(c.lost_original, "symlink + missing source = lost");
+    }
+
+    #[test]
+    fn copy_lost_original_also_lost_badge() {
+        let m = meta_from(
+            r#"{"id":"a","name":"a.md","size":1,"uploaded_at":"t","method":"copy","original_path":"/definitely/not/here/x.md","md5":"abc"}"#,
+        );
+        let c = classify_original(&m, &[]);
+        assert!(c.lost_original, "copy docs with vanished source are lost too");
+    }
+
+    #[test]
+    fn legacy_no_md5_with_existing_source_is_changed() {
+        // Real temp file so md5_of_file/existence checks run.
+        let dir = std::env::temp_dir().join(format!("rag-cls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("src.md");
+        std::fs::write(&p, b"hello").unwrap();
+        let json = format!(
+            r#"{{"id":"a","name":"a.md","size":1,"uploaded_at":"t","method":"symlink","original_path":"{}"}}"#,
+            p.to_str().unwrap().replace('\\', "\\\\")
+        );
+        let m = meta_from(&json);
+        let c = classify_original(&m, &[]);
+        assert!(c.original_exists);
+        assert!(!c.has_md5);
+        assert!(c.original_changed, "legacy (no md5) + existing source = has update");
+        assert!(!c.lost_original);
+
+        // Store the md5 -> not changed. Then modify the file -> changed.
+        let md5 = md5_of_file(&p).unwrap();
+        let json2 = format!(
+            r#"{{"id":"a","name":"a.md","size":1,"uploaded_at":"t","method":"symlink","original_path":"{}","md5":"{}"}}"#,
+            p.to_str().unwrap().replace('\\', "\\\\"),
+            md5
+        );
+        let m2 = meta_from(&json2);
+        assert!(!classify_original(&m2, &[]).original_changed);
+        std::fs::write(&p, b"hello world").unwrap();
+        assert!(classify_original(&m2, &[]).original_changed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn excluded_paths_skip_changed_detection() {
+        let dir = std::env::temp_dir().join(format!("rag-clx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("src.md");
+        std::fs::write(&p, b"x").unwrap();
+        let json = format!(
+            r#"{{"id":"a","name":"a.md","size":1,"uploaded_at":"t","method":"symlink","original_path":"{}"}}"#,
+            p.to_str().unwrap().replace('\\', "\\\\")
+        );
+        let m = meta_from(&json);
+        let c = classify_original(&m, &[dir.to_string_lossy().to_string()]);
+        assert!(c.excluded);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

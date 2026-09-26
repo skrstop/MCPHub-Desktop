@@ -6,8 +6,10 @@ pub mod commands;
 pub mod db;
 pub mod mcp;
 pub mod models;
+pub mod mv;
 pub mod rag;
 pub mod services;
+pub mod smart_routing;
 pub mod tray;
 
 use std::path::PathBuf;
@@ -328,21 +330,61 @@ pub fn run() {
                 // read; safe regardless of RAG enable state.
                 rag::git::sweep_stale_dirs(&app_handle2);
 
-                // Auto-restore RAG if it was enabled before restart. Reads the
-                // persisted `rag.enabled` intent; if true, load the embedding
-                // model + open the vector DB so /mcp rag_search/rag_get work
-                // immediately. The frontend syncs the switch via rag_status.
-                if rag::service::config_enabled().await {
+                // Auto-restore the shared mv runtime if either consumer was
+                // enabled before restart: `rag.enabled` (RAG full runtime:
+                // model + rag_chunk table + MCP tools) or `smartRouting.enabled`
+                // (mv model preload only — the Smart Routing indexing/search
+                // features arrive in Phase 3, but the model must be up so the
+                // 【模型和向量】status shows running immediately after boot).
+                let rag_was = rag::service::config_enabled().await;
+                let sr_was = mv::smart_routing_config_enabled().await;
+                if rag_was || sr_was {
                     let app_for_rag = app_handle2.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = rag::service::start(&app_for_rag).await {
-                            log::error!("[RAG] auto-start on boot failed: {:#}", e);
+                        if rag_was {
+                            if let Err(e) = rag::service::start(&app_for_rag).await {
+                                log::error!("[RAG] auto-start on boot failed: {:#}", e);
+                            }
+                            // start() re-arms the auto doc-update timer itself on
+                            // success; on failure arm it anyway so it retries via
+                            // the next manual enable (its ticks no-op while RAG is
+                            // off, so this is cheap).
+                            rag::service::restart_auto_update_timer(&app_for_rag);
+                        } else if let Err(e) = mv::ensure_started("smart", &app_for_rag).await {
+                            log::error!("[mv] smart-only auto-start on boot failed: {:#}", e);
                         }
-                        // start() re-arms the auto doc-update timer itself on
-                        // success; on failure arm it anyway so it retries via
-                        // the next manual enable (its ticks no-op while RAG is
-                        // off, so this is cheap).
-                        rag::service::restart_auto_update_timer(&app_for_rag);
+                        // Smart Routing index restore (Phase 3): cheap when the
+                        // tool sets are unchanged (hash skip-check), full rebuild
+                        // after a model swap (table dim check).
+                        //
+                        // WAIT for the mv model before reindexing: the RAG
+                        // branch above loads the model as a spawned task chain
+                        // — reindex_all's `mv::is_running()` gate returns
+                        // false while the model is still loading, the boot
+                        // reindex silently no-ops ("mv runtime not running",
+                        // previously only log::warn! — invisible in the log
+                        // page), and the builtin server's rows never land.
+                        // Poll up to 3 minutes; skip quietly if SR got
+                        // disabled meanwhile.
+                        if sr_was {
+                            let mut waited = 0u32;
+                            while !crate::mv::is_running() && waited < 180 {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                waited += 1;
+                            }
+                            if crate::mv::is_running() {
+                                match smart_routing::index::reindex_all().await {
+                                    Ok(n) => {
+                                        log::info!("[smart] boot reindex done: {n} servers indexed");
+                                        let _ = crate::services::app_logger::log_to_db("info", &format!("[smart] boot reindex done: {n} servers indexed"));
+                                    }
+                                    Err(e) => {
+                                        log::warn!("[smart] boot reindex failed: {}", e);
+                                        let _ = crate::services::app_logger::log_to_db("warn", &format!("[smart] boot reindex failed: {e:#}"));
+                                    }
+                                }
+                            }
+                        }
                     });
                 }
 
@@ -425,6 +467,9 @@ pub fn run() {
             commands::config::update_system_config,
             commands::config::get_settings,
             commands::config::get_public_config,
+            commands::smart_routing::smart_routing_status,
+            commands::smart_routing::smart_routing_reindex,
+            commands::smart_routing::smart_routing_performance,
             commands::config::import_settings,
             commands::config::export_settings,
             commands::config::save_settings_json,
@@ -481,6 +526,8 @@ pub fn run() {
             commands::http_server::start_http_server,
             commands::http_server::stop_http_server,
             commands::http_server::get_http_server_status,
+            commands::http_server::detect_port_occupier,
+            commands::http_server::kill_port_occupier,
             // Runtime version management
             commands::runtime::list_node_versions,
             commands::runtime::list_python_versions,

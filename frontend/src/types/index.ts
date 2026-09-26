@@ -510,6 +510,12 @@ export interface RagStatus {
    *  swapped). The frontend must trigger `reindexAll` to re-embed docs with
    *  the new model — old embeddings are gone. */
   needsReindex?: boolean;
+  /** Real embedding dimension of the loaded model (from the GGUF at load
+   *  time). Undefined while nothing is loaded. */
+  embedDim?: number;
+  /** True when the SHARED mv runtime is running (model loaded for any
+   *  consumer — RAG or Smart Routing), not just RAG itself. */
+  mvRunning?: boolean;
 }
 
 /** One selectable model size (scanned from runtimes/rag/model/<family>/<size>/).

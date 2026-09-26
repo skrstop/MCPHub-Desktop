@@ -16,7 +16,7 @@ use candle_core::quantized::QMatMul;
 use candle_core::{DType, Device, Module, Tensor};
 use candle_nn::{ops, RmsNorm};
 
-use crate::rag::gguf_gemma::GgufArch;
+use crate::mv::gguf_gemma::GgufArch;
 
 /// One Qwen3 decoder layer (pre-norm: 2 RMSNorms + attention + MLP).
 struct Qwen3Layer {

@@ -29,7 +29,7 @@ use text_splitter::{
 };
 use tree_sitter::Language;
 
-use crate::rag::embedder::Embedder;
+use crate::mv::embedder::Embedder;
 
 /// Sizer that sizes a candidate chunk in **tokens**, using the loaded model's
 /// own tokenizer. text-splitter calls `size` repeatedly as it walks splitter
@@ -544,7 +544,7 @@ fn semantic_strategy<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rag::embedder::Embedder;
+    use crate::mv::embedder::Embedder;
 
     /// A stub embedder that tokenizes on whitespace boundaries — so `size(chunk)`
     /// == word count. Lets us exercise the splitter pipeline without a real model.

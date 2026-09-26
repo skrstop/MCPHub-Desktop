@@ -274,6 +274,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         match connect_result {
             Ok(Ok(())) => {
                 let tools = entry_client.list_tools().await.unwrap_or_default();
+                let tools_for_index = tools.clone();
                 let tool_count = tools.len();
                 // Capture the server-reported version before moving the client
                 // into the pool, for a best-effort "update available" check.
@@ -321,6 +322,13 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                         running_version,
                     );
                 }
+                // Smart Routing index (Phase 3): background, skip-check makes
+                // repeat connects cheap; errors are logged inside.
+                crate::smart_routing::index::on_server_connected(
+                    name.clone(),
+                    tools_for_index,
+                    cfg.description.clone(),
+                );
                 return status;
             }
             Ok(Err(e)) => {
@@ -529,7 +537,11 @@ pub async fn list_tools_for(server_name: &str) -> Result<Vec<Tool>> {
     // the RAG builtin tools - return them so the Tauri call_tool path and the
     // "servers" panel can list/enable/disable them like any other server.
     if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
-        return Ok(crate::rag::service::builtin_tools());
+        let mut tools = crate::rag::service::builtin_tools();
+        // Smart Routing meta tools ride on the builtin server too (UI listing
+        // + test invocation) — empty when Smart Routing is disabled.
+        tools.extend(crate::smart_routing::meta::builtin_meta_tools().await);
+        return Ok(tools);
     }
     let map = pool().read().await;
     let entry = map.get(server_name).ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
@@ -548,6 +560,19 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
     // Route to the RAG dispatch so invoking rag_* via the Tauri call_tool
     // command / "servers" panel works instead of erroring "not connected".
     if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        // Smart Routing meta tools (smart_route_search / smart_route_describe / smart_route_call):
+        // global scope, executed in-process. Checked BEFORE RAG dispatch —
+        // names never collide (rag_* vs meta names).
+        if crate::smart_routing::meta::is_meta_tool(tool_name) {
+            // Box::pin: meta call_tool re-enters pool::call_tool for the
+            // RESOLVED real tool (different name) — a legal mutual recursion
+            // the compiler can't size without boxing.
+            return Box::pin(crate::smart_routing::meta::call_meta_tool_builtin(
+                tool_name,
+                &arguments,
+            ))
+            .await;
+        }
         let app = crate::mcp::progress::get_app_handle()
             .ok_or_else(|| anyhow!("app handle unavailable"))?;
         return crate::rag::service::call_builtin_tool(&app, tool_name, &arguments).await;

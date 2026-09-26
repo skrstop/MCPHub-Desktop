@@ -45,7 +45,7 @@ use candle_core::quantized::gguf_file::Content;
 use candle_core::{Device, Module, Tensor};
 use candle_nn::{ops, LayerNorm};
 
-use crate::rag::gguf_gemma::{apply_rope, attn_bias, linear, pool_and_normalize, GgufArch};
+use crate::mv::gguf_gemma::{apply_rope, attn_bias, linear, pool_and_normalize, GgufArch};
 
 /// One transformer block: attention (combined QKV + RoPE) + post-norm, then an
 /// FFN (dense GELU OR top-2 MoE) + post-norm.

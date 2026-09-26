@@ -9,6 +9,12 @@
   }
 }
 
+/* 【模型和向量】设置区：共享运行时未启动时，模型切换/运行设备等设置禁用 */
+.mv-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 /* ----- redesign tokens (hairline borders, Linear-style density) ----- */
 :root {
   --hub-bg: oklch(0.985 0.002 250);
@@ -459,8 +465,9 @@
   font-size: 11px;
   color: var(--hub-ink-3);
   font-family: var(--hub-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  /* No text-transform: the label IS a URL path fragment (/mcp/, /api/) —
+     uppercasing it misrepresents the actual endpoint casing. */
+  letter-spacing: 0.02em;
   flex: 0 0 auto;
 }
 .hub-endpoint .hub-endpoint-url {

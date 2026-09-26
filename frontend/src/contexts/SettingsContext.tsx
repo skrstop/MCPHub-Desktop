@@ -51,6 +51,13 @@ interface SmartRoutingConfig {
   embeddingMaxTokens?: number;
   embeddingQueryPrefix?: string;
   embeddingDocumentPrefix?: string;
+  /** Desktop local mode: tool description verbosity for the meta-tool catalog */
+  serverDescriptionMode?: 'names' | 'full';
+  /** Desktop hybrid retrieval settings (RAG-style, replacing origin's three-tier thresholds) */
+  vectorWeight?: number;
+  keywordWeight?: number;
+  maxResults?: number;
+  scoreThreshold?: number;
   /**
    * Read-only metadata from the server (issue #642): fields whose runtime value
    * comes from an environment variable, so whatever is typed into the form for
@@ -384,6 +391,11 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     embeddingMaxTokens: undefined,
     embeddingQueryPrefix: '',
     embeddingDocumentPrefix: '',
+    serverDescriptionMode: 'names' as 'names' | 'full',
+    vectorWeight: 0.5,
+    keywordWeight: 0.5,
+    maxResults: 20,
+    scoreThreshold: 0.5,
   });
 
   const [toolResultCompressionConfig, setToolResultCompressionConfig] =
@@ -484,6 +496,14 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           embeddingQueryPrefix: data.data.systemConfig.smartRouting.embeddingQueryPrefix || '',
           embeddingDocumentPrefix:
             data.data.systemConfig.smartRouting.embeddingDocumentPrefix || '',
+          serverDescriptionMode:
+            data.data.systemConfig.smartRouting.serverDescriptionMode === 'full'
+              ? 'full'
+              : 'names',
+          vectorWeight: data.data.systemConfig.smartRouting.vectorWeight ?? 0.5,
+          keywordWeight: data.data.systemConfig.smartRouting.keywordWeight ?? 0.5,
+          maxResults: data.data.systemConfig.smartRouting.maxResults ?? 20,
+          scoreThreshold: data.data.systemConfig.smartRouting.scoreThreshold ?? 0.5,
           envOverriddenFields: data.data.systemConfig.smartRouting.envOverriddenFields ?? [],
         });
       }

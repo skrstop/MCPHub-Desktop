@@ -141,13 +141,20 @@ pub async fn toggle_server(server_name: &str) -> Result<bool> {
             .unwrap_or(false);
         if is_starting {
             log::info!("[{}] Server is still connecting, will not kill process — waiting for connect to finish", server_name);
-            app_logger::log_to_db("info", &format!("[{}] Server still connecting, skipping disconnect to avoid race condition", server_name));
-        } else {
+            app_logger::log_to_db("info", &format!("[{}] Server still connecting, skipping disconnect to avoid race condition", server_name));        } else {
             if let Err(e) = pool::disconnect_server(server_name).await {
                 log::error!("[{}] Failed to disconnect: {}", server_name, e);
                 app_logger::log_to_db("error", &format!("[{}] Failed to disconnect: {}", server_name, e));
             }
         }
+        // Disabled servers contribute no Smart Routing rows — drop them
+        // (best-effort; logged inside).
+        let n = server_name.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = crate::smart_routing::index::remove_server_embeddings(&n).await {
+                log::warn!("[smart] remove embeddings for disabled '{}': {}", n, e);
+            }
+        });
     }
     Ok(cfg.enabled)
 }

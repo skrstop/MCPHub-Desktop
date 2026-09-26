@@ -25,6 +25,9 @@ import ResetDescriptionButton from './ResetDescriptionButton';
 import { formatTokens } from '@/utils/contextCost';
 import { getToolDescriptionInfo } from '@/utils/toolDescription';
 
+/** Smart Routing meta tools (only exposed via /mcp/$smart). */
+const SMART_META_TOOLS = ['smart_route_search', 'smart_route_describe', 'smart_route_call'];
+
 interface ToolCardProps {
   server: string;
   tool: Tool;
@@ -260,6 +263,17 @@ const ToolCard = ({ tool, server, readOnly = false, onToggle, onDescriptionUpdat
           <span className="hub-mono font-medium" style={{ fontSize: 13, color: 'var(--hub-ink)' }}>
             {toolDisplayName}
           </span>
+          {/* Smart Routing meta tools: highlighted so users see they belong to
+              the $smart access point, not the server's own toolset. */}
+          {SMART_META_TOOLS.includes(toolDisplayName) && (
+            <span
+              className="hub-tag flex-shrink-0"
+              style={{ background: 'var(--hub-accent-soft)', color: 'var(--hub-accent)' }}
+              title={t('server.smartMetaTooltip')}
+            >
+              {t('server.smartBadge')}
+            </span>
+          )}
           <button
             className="hub-icon-btn sm"
             onClick={handleCopyToolName}

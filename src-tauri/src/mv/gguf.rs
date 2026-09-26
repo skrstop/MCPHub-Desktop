@@ -39,12 +39,12 @@ use tokenizers::pre_tokenizers::{
 };
 use tokenizers::tokenizer::Tokenizer;
 
-use crate::rag::embedder::{Embedder, Platform};
-use crate::rag::gguf_gemma::{Gemma3EmbedArch, GgufArch};
-use crate::rag::gguf_lfm2::Lfm2Arch;
-use crate::rag::gguf_modernbert::ModernBertArch;
-use crate::rag::gguf_nomic::NomicBertMoeArch;
-use crate::rag::gguf_qwen3::Qwen3EmbedArch;
+use crate::mv::embedder::{Embedder, Platform};
+use crate::mv::gguf_gemma::{Gemma3EmbedArch, GgufArch};
+use crate::mv::gguf_lfm2::Lfm2Arch;
+use crate::mv::gguf_modernbert::ModernBertArch;
+use crate::mv::gguf_nomic::NomicBertMoeArch;
+use crate::mv::gguf_qwen3::Qwen3EmbedArch;
 
 /// Read the model's max context length from a GGUF file's metadata, WITHOUT
 /// loading the model - parses only the GGUF header (metadata key-values, no
@@ -94,14 +94,14 @@ impl GgufEmbedder {
     /// its parent). Reads the GGUF `Content` ONCE and shares it with the
     /// tokenizer builder + the arch (avoids a double-read). Device from
     /// `deploy.json` (AUTO/GPU/CPU; `RAG_GGUF_DEVICE` env overrides).
-    pub fn load(gguf_path: &Path) -> Result<Self> {
+    pub fn load_with_user_platform(gguf_path: &Path, user: Option<Platform>) -> Result<Self> {
         if !gguf_path.exists() {
             return Err(anyhow!("GGUF model not found: {}", gguf_path.display()));
         }
         let size_dir = gguf_path
             .parent()
             .ok_or_else(|| anyhow!("gguf path has no parent dir"))?;
-        let platform = crate::rag::embedder::resolve_platform(size_dir);
+        let platform = crate::mv::embedder::resolve_platform_with_user(size_dir, user);
         let (device, ep_label) = pick_device(platform)?;
 
         // Read the GGUF Content ONCE - shared by the tokenizer builder (reads
@@ -175,6 +175,13 @@ impl GgufEmbedder {
             eos_id,
         })
     }
+
+    /// Origin-parity entry: no user override (deploy.json decides, env still
+    /// wins). mv's load path uses `load_with_user_platform`.
+    pub fn load(gguf_path: &Path) -> Result<Self> {
+        Self::load_with_user_platform(gguf_path, None)
+    }
+
 
     /// Tokenize `text` WITHOUT auto special tokens, then manually prepend bos
     /// (if add_bos) / append eos (if add_eos) per the GGUF's convention.

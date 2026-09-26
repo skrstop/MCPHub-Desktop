@@ -297,6 +297,36 @@ pub async fn update_server(name: String, config: ServerConfig) -> Result<ServerI
         .await
         .map_err(|e| e.to_string())?;
 
+    // Smart Routing index (Phase 3): a rename orphans the old name's rows, and
+    // any update can change the server-level searchable text (description).
+    // Both are background best-effort; the skip check makes no-op updates free.
+    if is_renaming {
+        let old = name.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = crate::smart_routing::index::remove_server_embeddings(&old).await {
+                log::warn!("[smart] remove embeddings for renamed server '{}': {}", old, e);
+            }
+        });
+    }
+    {
+        let saved_for_index = saved.clone();
+        tauri::async_runtime::spawn(async move {
+            let n = saved_for_index.name.clone();
+            let desc = saved_for_index.description.clone();
+            if !saved_for_index.enabled {
+                let _ = crate::smart_routing::index::remove_server_embeddings(&n).await;
+                return;
+            }
+            if let Some((_, tools)) = crate::mcp::pool::get_entry_info(&n).await {
+                if tools.is_empty() {
+                    let _ = crate::smart_routing::index::remove_server_embeddings(&n).await;
+                } else {
+                    let _ = crate::smart_routing::index::save_server_embeddings(&n, desc.as_deref(), &tools).await;
+                }
+            }
+        });
+    }
+
     if needs_reconnect && saved.enabled {
         // Connection-relevant field changed (command/url/args/env/headers/
         // options/openapi/perSessionClient/startOnDemand/idleTimeoutMs/proxy/
@@ -452,7 +482,12 @@ fn is_empty_or_null(v: &serde_json::Value) -> bool {
 #[tauri::command]
 pub async fn delete_server(name: String) -> Result<(), String> {
     pool::disconnect_server(&name).await.ok();
-    server_service::delete(&name).await.map_err(|e| e.to_string())
+    server_service::delete(&name).await.map_err(|e| e.to_string())?;
+    // Smart Routing index cleanup (best-effort; logged inside).
+    if let Err(e) = crate::smart_routing::index::remove_server_embeddings(&name).await {
+        log::warn!("[smart] remove embeddings for deleted '{}': {}", name, e);
+    }
+    Ok(())
 }
 
 #[tauri::command]

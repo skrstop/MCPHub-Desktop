@@ -41,8 +41,9 @@ pub struct SearchHit {
     pub doc_name: String,
     pub chunk_index: i64,
     pub chunk_text: String,
-    /// lancedb `_distance` (lower = closer). Convert to a similarity score at
-    /// the caller (embeddings are normalized, so ranking == cosine ranking).
+    /// lancedb `_distance` (lower = closer) with `DistanceType::Cosine`:
+    /// `_distance = 1 - cos similarity`, so the caller converts to a similarity
+    /// score via `1 - distance` (clamp [0,1] for numerical safety).
     pub distance: f32,
     pub tags: Vec<String>,
 }
@@ -100,6 +101,14 @@ impl VectorDb {
             .execute()
             .await
             .map_err(|e| anyhow!("lancedb connect {}: {}", dir.display(), e))?;
+        let needs_reindex = Self::ensure_table(&conn, embed_dim).await?;
+        Ok(Self { conn, embed_dim, needs_reindex })
+    }
+
+    /// Same as `open`, but on the SHARED mv connection (Phase 2): consumers
+    /// must not open their own lancedb connections — the mv runtime owns the
+    /// single connection process-wide. `dir` is only used for error messages.
+    pub async fn open_with_conn(conn: Connection, _dir: &Path, embed_dim: usize) -> Result<Self> {
         let needs_reindex = Self::ensure_table(&conn, embed_dim).await?;
         Ok(Self { conn, embed_dim, needs_reindex })
     }
@@ -299,11 +308,12 @@ impl VectorDb {
     }
 
     /// Vector nearest-neighbor search. Returns up to `limit` hits sorted by
-    /// distance (closest first). Uses **cosine** distance (magnitude-invariant)
-    /// so ranking reflects semantic direction, not vector magnitude - this
-    /// matters for models whose embeddings aren't L2-normalized (e.g. LFM2);
-    /// with L2 distance, small-magnitude docs would rank high regardless of
-    /// relevance. There's no vector index on this table (only a LabelList index
+    /// distance (closest first). Uses **cosine** distance (explicit
+    /// `DistanceType::Cosine`): `_distance` = 1 - cos similarity ∈ [0,2], so
+    /// the caller's `1 - distance` = cos similarity clamped to [0,1].
+    /// Embeddings are L2-normalized at the model layer regardless (every GGUF
+    /// arch normalizes), making cosine well-defined even for un-normalized
+    /// models. There's no vector index on this table (only a LabelList index
     /// on `tags`), so this is a brute-force cosine scan.
     pub async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
         let table = self

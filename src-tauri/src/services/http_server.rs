@@ -150,6 +150,9 @@ fn build_oauth_401(headers: &HeaderMap, reason: &str) -> Response {
 
 struct ServerHandle {
     abort_tx: tokio::sync::oneshot::Sender<()>,
+    /// Shutdown sender for the loopback serve task (separate oneshot —
+    /// receivers are single-consumer).
+    abort_tx_lb: tokio::sync::oneshot::Sender<()>,
     /// Diagnostics companion of abort_tx (see start()): fired together in
     /// stop() so the serve task can classify its own ending.
     probe_tx: tokio::sync::oneshot::Sender<()>,
@@ -214,6 +217,12 @@ pub struct HttpServerStatus {
     /// the dialog's technical detail line on the "other" kind. None when no error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Loopback-hijack warning (server IS running, but 127.0.0.1:<port> answers
+    /// with a foreign /health — another app bound localhost on the same port,
+    /// so local clients never reach us). Emitted as part of the status event
+    /// so the frontend can toast it; does NOT flip `running` to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 static HTTP_STATUS: OnceLock<std::sync::Mutex<HttpServerStatus>> = OnceLock::new();
@@ -225,6 +234,7 @@ fn status_lock() -> &'static std::sync::Mutex<HttpServerStatus> {
         error: None,
         error_kind: None,
         detail: None,
+        warning: None,
     }))
 }
 
@@ -240,6 +250,7 @@ pub fn current_status() -> HttpServerStatus {
             error: None,
             error_kind: None,
             detail: None,
+                warning: None,
         })
 }
 
@@ -725,6 +736,10 @@ async fn mcp_scope_servers(scope: &str) -> Vec<String> {
 /// Returns None for a disconnected/unknown server (or RAG when disabled).
 async fn tools_for_server(nm: &str) -> Option<Vec<crate::models::server::Tool>> {
     if nm == crate::rag::service::BUILTIN_SERVER_NAME {
+        // HTTP (non-$smart) exposure: RAG tools only. The smart meta tools
+        // are exclusive to the $smart access points — their tools/list builds
+        // them dynamically via build_meta_tools, and letting them leak into
+        // /mcp|/api listings would duplicate (and mis-scope) them.
         if crate::rag::service::is_enabled() {
             Some(crate::rag::service::builtin_tools())
         } else {
@@ -740,7 +755,10 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
     // The RAG builtin server filter, appended to global scope (and exposed on
     // its own single-server scope) when RAG is enabled. Treated like any server
     // by the tools/list aggregation.
-    let rag_filter = || -> Option<ServerFilter> {
+    let rag_filter = move || -> Option<ServerFilter> {
+        // Builtin server surfaces on non-$smart HTTP paths only when RAG is
+        // on (its rag_* tools). The smart meta tools never leak here — they
+        // are exclusive to the $smart access points.
         if crate::rag::service::is_enabled() {
             Some(ServerFilter {
                 name: crate::rag::service::BUILTIN_SERVER_NAME.to_string(),
@@ -778,7 +796,17 @@ async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
     // Try as group (name or id)
     if let Ok(groups) = group_service::list_all().await {
         if let Some(g) = groups.iter().find(|g| g.name == name || g.id == name) {
-            return extract_server_filters(&g.servers);
+            let mut filters = extract_server_filters(&g.servers);
+            // A group can include the builtin "mcphub-desktop" server, whose
+            // stored member tool list was snapshotted at group-edit time and
+            // may contain smart meta tool names. Non-$smart scopes must NEVER
+            // expose them — drop here (single source of truth for the filter).
+            if let Some(bf) = filters.iter_mut().find(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME) {
+                if let Some(ref mut tools) = bf.tools {
+                    tools.retain(|t| !crate::smart_routing::meta::is_meta_tool(t));
+                }
+            }
+            return filters;
         }
     }
     // RAG builtin server accessed directly as a single-server scope.
@@ -976,6 +1004,30 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
         }
         "ping" => jsonrpc_response(id, json!({})),
         "tools/list" => {
+            // $smart scopes expose ONLY the meta tools (search/describe/call)
+            // — real tools are never listed (origin parity). When Smart
+            // Routing is off, answer with the enable hint instead of an empty
+            // tool list (clients surface the message verbatim).
+            if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+                if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
+                    return jsonrpc_error(id, -32603, msg);
+                }
+                let settings = crate::smart_routing::models::get_settings().await;
+                // Bearer-key aware scope: the meta tool descriptions must not
+                // advertise servers the key cannot access (parity with
+                // tools/call's allowed intersection below).
+                let bearer_list = get_allowed_servers(bearer_key.as_ref())
+                    .await
+                    .map(|set| set.into_iter().collect::<Vec<_>>());
+                let (scope_description, servers_list, _) =
+                    crate::smart_routing::meta::compute_scope_with(&scope_clean, bearer_list).await;
+                let meta = crate::smart_routing::meta::build_meta_tools(
+                    &scope_description,
+                    &servers_list,
+                    settings.progressive_disclosure,
+                );
+                return jsonrpc_response(id, json!({"tools": meta}));
+            }
             let mut server_filters = mcp_scope_server_filters(&scope).await;
             // Apply bearer key access control
             if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
@@ -1044,6 +1096,68 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
         "tools/call" => {
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+            // $smart scopes: intercept the three meta tools. call_tool resolves
+            // the real target server itself (origin parity); the allowed list
+            // from bearer-key access control still applies.
+            if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+                if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
+                    return jsonrpc_error(id, -32603, msg);
+                }
+                let allowed = {
+                    let (_, _, scope_allowed) =
+                        crate::smart_routing::meta::compute_scope(&scope_clean).await;
+                    match (scope_allowed, get_allowed_servers(bearer_key.as_ref()).await) {
+                        (Some(list), Some(keys_allowed)) => Some(
+                            list.into_iter()
+                                .filter(|s| keys_allowed.contains(s))
+                                .collect::<Vec<_>>(),
+                        ),
+                        (Some(list), None) => Some(list),
+                        (None, Some(keys_allowed)) => Some(keys_allowed.into_iter().collect()),
+                        (None, None) => None,
+                    }
+                };
+                // Group tool whitelist for $smart/{group} scopes (parity with
+                // the non-smart tools/call path's sf.tools check).
+                let group_gate: Option<
+                    std::collections::HashMap<String, Option<Vec<String>>>,
+                > = if scope_clean.starts_with("$smart/") {
+                    Some(
+                        mcp_scope_server_filters(&scope)
+                            .await
+                            .into_iter()
+                            .map(|sf| (sf.name, sf.tools))
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+                let smart_result: Result<Value, String> = match tool_name {
+                    "smart_route_search" => {
+                        let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                        let limit = args.get("limit").cloned().unwrap_or(json!(10));
+                        crate::smart_routing::meta::handle_search_tools(q, limit, allowed).await
+                    }
+                    "smart_route_describe" => {
+                        let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                        crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref()).await
+                    }
+                    "smart_route_call" => {
+                        let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                        let tool_args = args.get("arguments").cloned().unwrap_or(json!({}));
+                        crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref()).await
+                    }
+                    other => Err(format!(
+                        "Unknown smart routing tool '{}'. Available: smart_route_search, smart_route_describe, smart_route_call",
+                        other
+                    )),
+                };
+                return match smart_result {
+                    Ok(resp) => jsonrpc_response(id, strategy.shape_tool_call_result(resp)),
+                    Err(e) => jsonrpc_error(id, -32603, e),
+                };
+            }
 
             let mut server_filters = mcp_scope_server_filters(&scope).await;
             // Apply bearer key access control
@@ -1234,6 +1348,10 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
             }
         }
         "prompts/list" => {
+            // $smart scopes are tool-discovery only — no prompts.
+            if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+                return jsonrpc_response(id, json!({"prompts": []}));
+            }
             // Builtin prompts are carried by the "mcphub-desktop" builtin server.
             // Its per-server `prompts` selection (None = all, Some = list) in the
             // scope's group config governs which are exposed. If the builtin
@@ -1290,6 +1408,10 @@ async fn dispatch_mcp(headers: HeaderMap, scope: String, body: Value, fallback_i
             }
         }
         "resources/list" => {
+            // $smart scopes are tool-discovery only — no resources.
+            if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+                return jsonrpc_response(id, json!({"resources": []}));
+            }
             let filters = mcp_scope_server_filters(&scope).await;
             let resource_sel = filters
                 .iter()
@@ -1556,7 +1678,21 @@ async fn mcp_root_get(headers: HeaderMap) -> Response {
         .into_response()
 }
 
-async fn mcp_scope_get(headers: HeaderMap, Path(_): Path<String>) -> Response {
+async fn mcp_scope_get(headers: HeaderMap, Path(path): Path<String>) -> Response {
+    // $smart scopes: gate the GET path too (browser info response / SSE
+    // stream) — a disabled Smart Routing must hint at the enable switch no
+    // matter which verb the client used.
+    let scope_clean = path.trim_start_matches('/').trim().to_string();
+    if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+        if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
+            log::warn!("[HTTP] GET /mcp/{} rejected: smart routing not ready", scope_clean);
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"service": "MCPHub Desktop", "error": msg})),
+            )
+                .into_response();
+        }
+    }
     mcp_root_get(headers).await
 }
 
@@ -2335,6 +2471,14 @@ fn build_router(body_limit_bytes: usize) -> Router {
         .route("/api/openapi/stats", get(openapi_stats))
         .route("/api/{name}/openapi.json", get(openapi_named_spec))
         .route("/api/{name}/openapi.yaml", get(openapi_named_spec))
+        // Smart Routing REST surface (origin /api/$smart parity): the meta
+        // tools as plain REST endpoints + their OpenAPI spec (for OpenWebUI
+        // and friends). Literal routes win over the {name} params.
+        .route("/api/$smart/openapi.json", get(smart_openapi_spec))
+        .route("/api/$smart/openapi.yaml", get(smart_openapi_spec))
+        .route("/api/$smart/search", post(smart_rest_search).get(smart_rest_search))
+        .route("/api/$smart/describe", post(smart_rest_describe).get(smart_rest_describe))
+        .route("/api/$smart/call", post(smart_rest_call))
         .route(
             "/api/tools/{server}/{tool}",
             get(openapi_exec_global_get).post(openapi_exec_global_post),
@@ -2357,6 +2501,92 @@ fn build_router(body_limit_bytes: usize) -> Router {
 // Lifecycle
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Loopback-hijack watch: while our server is running, periodically GET
+/// 127.0.0.1:{port}/health and verify the responder is us. A foreign /health
+/// means another app bound the loopback address (possible ANY time — e.g.
+/// Cherry Studio starting after us and grabbing localhost thanks to
+/// SO_REUSEADDR allowing wildcard+specific coexistence). Emits a warning
+/// only on STATE CHANGE (clean -> hijacked, or hijacked -> clean) so the
+/// dialog isn't re-raised every tick, and a later recovery clears it.
+static LOOPBACK_HIJACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOOPBACK_WATCH_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+async fn loopback_ok(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/health");
+    match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => match c.get(&url).send().await {
+            Ok(r) => match r.text().await {
+                Ok(body) => body.contains("mcphub-desktop"),
+                Err(_) => false,
+            },
+            // Unreachable loopback is a different problem (firewall);
+            // not a hijack — stay silent.
+            Err(_) => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// Spawn the one-shot check after bind + the persistent 30s watch task.
+/// The watch is started once per process; each `start()` (bind success or
+/// already-running re-entry) also runs an immediate check so the failure
+/// dialog's "retry start" re-verifies the loopback right away.
+fn spawn_loopback_check(port: u16) {
+    // One-shot, 500ms after bind — covers the startup window.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if !loopback_ok(port).await {
+            report_loopback_hijack(port, true);
+        }
+    });
+    // Persistent watch — covers a squatter binding AFTER us (the one-shot
+    // would have passed and never re-run).
+    if !LOOPBACK_WATCH_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let hijacked = !loopback_ok(port).await;
+                let prev = LOOPBACK_HIJACK.swap(hijacked, std::sync::atomic::Ordering::SeqCst);
+                if hijacked != prev {
+                    report_loopback_hijack(port, hijacked);
+                }
+            }
+        });
+    }
+}
+
+/// Persist + emit the loopback state transition so the frontend dialog opens
+/// (hijack) or clears (recovered). Persisted via set_status — NOT a bare
+/// emit — because events fired before the webview mounts its listener are
+/// lost; the mount-time `get_http_server_status` fetch is the recovery path.
+fn report_loopback_hijack(port: u16, hijacked: bool) {
+    let warning = if hijacked {
+        Some(format!(
+            "localhost:{port} is served by ANOTHER application (loopback hijack).                      External clients via this machine's IP still reach MCPHub Desktop, but                      local clients using localhost will get wrong responses. Change the HTTP                      port in Settings → Routing, or stop the other app."
+        ))
+    } else {
+        None
+    };
+    if hijacked {
+        log::warn!("[http] {}", warning.as_deref().unwrap_or_default());
+        app_logger::log_to_db("warn", &format!("[http] {}", warning.as_deref().unwrap_or_default()));
+    } else {
+        log::info!("[http] loopback recovered on port {port}");
+        app_logger::log_to_db("info", &format!("[http] loopback recovered on port {port}"));
+    }
+    set_status(HttpServerStatus {
+        running: true,
+        port,
+        error: None,
+        error_kind: None,
+        detail: None,
+        warning,
+    });
+}
+
 /// Start the HTTP server on the given port with the given body limit.
 /// If a server is already running on the same port and limit — nothing to do.
 /// Otherwise the old instance is stopped and a new one started.
@@ -2367,6 +2597,12 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     if let Some(ref h) = *guard {
         if h.port == port && h.body_limit_bytes == body_limit_bytes {
             log::info!("HTTP server already running on port {}", port);
+            // Re-verify the loopback: the "retry start" button in the
+            // failure dialog lands here when the server is still up (bind
+            // was never the problem — e.g. loopback hijack). Without this
+            // re-check the dialog closes on success while localhost stays
+            // hijacked, and no future start() would re-raise it.
+            spawn_loopback_check(port);
             return Ok(());
         }
         // Port or body limit changed — stop old instance
@@ -2397,11 +2633,43 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
                 error: Some(err_msg.clone()),
                 error_kind: Some(bind_failure_kind(&e).to_string()),
                 detail: Some(format!("{e}")),
+                warning: None,
             });
             return Err(anyhow::anyhow!(err_msg));
         }
     };
-    let http_msg = format!("MCPHub HTTP server listening on http://0.0.0.0:{} (body limit: {} bytes, trust_proxy: {})", port, body_limit_bytes, trust_proxy);
+    // Explicit loopback bind (mandatory): the wildcard 0.0.0.0 bind leaves the
+    // specific-address slot free, and SO_REUSEADDR (Node/Electron sets it by
+    // default) lets another app bind 127.0.0.1:<port> AFTER us and silently
+    // hijack every localhost client (longest-prefix match). Binding the
+    // loopback OURSELVES closes that slot: any later squatter gets EADDRINUSE
+    // at ITS bind — deterministic, no runtime detection needed. Failure to
+    // bind loopback is fatal: local clients are the primary surface (Tauri
+    // UI, local MCP clients), so start refuses rather than run exposed.
+    let loopback_addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let loopback_listener = match TcpListener::bind(loopback_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            let err_msg = format!(
+                "Failed to bind loopback 127.0.0.1:{} while 0.0.0.0:{} succeeded — another process is squatting on the local address. Local clients would be hijacked; refusing to start exposed. ({e})",
+                port, port
+            );
+            log::error!("[http] {err_msg}");
+            app_logger::log_to_db("error", &err_msg);
+            set_status(HttpServerStatus {
+                running: false,
+                port,
+                error: Some(err_msg.clone()),
+                error_kind: Some("loopbackOccupied".to_string()),
+                detail: Some(format!("{e}")),
+                warning: None,
+            });
+            // Release the wildcard listener we just bound before failing.
+            drop(listener);
+            return Err(anyhow::anyhow!(err_msg));
+        }
+    };
+    let http_msg = format!("MCPHub HTTP server listening on http://0.0.0.0:{} + http://127.0.0.1:{} (body limit: {} bytes, trust_proxy: {})", port, port, body_limit_bytes, trust_proxy);
     log::info!("{}", http_msg);
     app_logger::log_to_db("info", &http_msg);
 
@@ -2426,9 +2694,22 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         error: None,
         error_kind: None,
         detail: None,
+        warning: None,
     });
 
+    // Loopback self-check (runs after the accept loop is up): hit
+    // http://127.0.0.1:<port>/health and verify the responder is THIS app.
+    // Scenario: another app already bound 127.0.0.1:<port> — on macOS a
+    // 0.0.0.0 bind still succeeds, so there is no bind error, but every
+    // `localhost:` client is served by the squatter and never reaches us
+    // (silent breakage). Warn via a status event carrying `warning`.
+    spawn_loopback_check(port);
+
     let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+    // Separate shutdown receiver for the loopback serve task: a oneshot
+    // receiver is consumed by whoever awaits it, so each listener gets its
+    // own cloned sender side.
+    let (abort_tx_lb, abort_rx_lb) = tokio::sync::oneshot::channel::<()>();
     // Diagnostics probe (2026-08-27 "HTTP 服务静默挂掉" investigation): a second
     // channel fired alongside abort_tx in stop(). abort_rx is consumed by the
     // graceful-shutdown future and can't be probed after the fact; this probe
@@ -2448,22 +2729,47 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         // when abort_rx completes (stop()/config restart). The outcome is then
         // classified for the [http-server-watch] diagnostics trail - including
         // panics, which tokio otherwise swallows silently at the task boundary.
+        // Loopback listener shares the router (state is cheap to clone) and
+        // the shutdown signal. Its serve future is awaited alongside the
+        // wildcard one; both must end before the outcome is classified.
+        // Both listeners share the router and the shutdown signal. The
+        // loopback serve runs as a sibling task; we join it with the
+        // catch-unwrapped wildcard future and classify both outcomes.
+        let lb_serve = tokio::spawn({
+            let app = app.clone();
+            async move {
+                use std::future::IntoFuture;
+                axum::serve(loopback_listener, app)
+                    .with_graceful_shutdown(async { let _ = abort_rx_lb.await; })
+                    .into_future()
+                    .await
+            }
+        });
         let serve = axum::serve(listener, app).with_graceful_shutdown(async {
             let _ = abort_rx.await;
         });
         let serve_fut = std::future::IntoFuture::into_future(serve);
-        let outcome = match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(serve_fut)).await {
-            Ok(Ok(())) => "clean stop".to_string(),
-            Ok(Err(e)) => format!("accept-loop error: {e}"),
-            Err(panic) => format!(
-                "PANIC: {}",
-                panic
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "(non-string panic payload)".to_string())
-            ),
-        };
+        let wildcard_res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(serve_fut)).await;
+        let lb_res = lb_serve.await.unwrap_or(Err(std::io::Error::other("loopback serve task panicked")));
+        let outcome = format!(
+            "wildcard={}; loopback={}",
+            match &wildcard_res {
+                Ok(Ok(())) => "clean stop".to_string(),
+                Ok(Err(e)) => format!("accept-loop error: {e}"),
+                Err(panic) => format!(
+                    "PANIC: {}",
+                    panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "(non-string panic payload)".to_string())
+                ),
+            },
+            match &lb_res {
+                Ok(()) => "clean stop".to_string(),
+                Err(e) => format!("accept-loop error: {e}"),
+            }
+        );
         //   Ok(())            -> stop() explicitly fired the probe
         //   Err(Disconnected) -> ServerHandle dropped = start() replacing it
         //                        (port/body-limit config restart) - intentional
@@ -2480,7 +2786,7 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         log::info!("MCPHub HTTP server stopped");
     });
 
-    *guard = Some(ServerHandle { abort_tx, probe_tx, port, body_limit_bytes });
+    *guard = Some(ServerHandle { abort_tx, abort_tx_lb, probe_tx, port, body_limit_bytes });
     Ok(())
 }
 
@@ -2489,6 +2795,7 @@ pub async fn stop() {
     let mut guard = handle().lock().await;
     if let Some(h) = guard.take() {
         let _ = h.abort_tx.send(());
+        let _ = h.abort_tx_lb.send(());
         let _ = h.probe_tx.send(());
         log::info!("MCPHub HTTP server shutdown requested");
         set_status(HttpServerStatus {
@@ -2497,6 +2804,7 @@ pub async fn stop() {
             error: None,
             error_kind: None,
             detail: None,
+                warning: None,
         });
     }
 }
@@ -2718,5 +3026,208 @@ mod openapi_tests {
         assert_eq!(urlencode_component("fs-a_tool.1~"), "fs-a_tool.1~");
         assert_eq!(urlencode_component("a/b c"), "a%2Fb%20c");
         assert_eq!(urlencode_component("中文"), "%E4%B8%AD%E6%96%87");
+    }
+}
+
+// ── Smart Routing REST surface (/api/$smart/*) ──────────────────────────────
+
+/// OpenAPI spec for the three smart-routing meta endpoints (for OpenWebUI
+/// and other REST clients that can't speak MCP). Same bearer gate.
+async fn smart_openapi_spec(headers: HeaderMap) -> Response {
+    if let Err(r) = check_bearer_auth(&headers).await {
+        return r;
+    }
+    // Same gate as the execution endpoints: importing a spec into a client
+    // while Smart Routing is off would only produce opaque call failures —
+    // surface the enable hint right at the spec fetch instead.
+    if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+    }
+    let base = openapi_base_url(&headers);
+    let url = |p: &str| format!("{base}/api/$smart{p}");
+    let spec = json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "MCPHub Desktop Smart Routing API",
+            "description": "AI-powered tool discovery over all connected MCP servers. Search for tools semantically, describe their schemas, and execute them.",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "servers": [{"url": format!("{base}/api/$smart")}],
+        "paths": {
+            "/search": {
+                "post": {
+                    "operationId": "smart_route_search",
+                    "summary": "Search for relevant tools by natural-language query",
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "What you want to accomplish"},
+                            "limit": {"type": "integer", "description": "Max results (default 10)"}
+                        },
+                        "required": ["query"]
+                    }}}},
+                    "responses": {"200": {"description": "Ranked tools with descriptions"}}
+                }
+            },
+            "/describe": {
+                "post": {
+                    "operationId": "smart_route_describe",
+                    "summary": "Get the full input schema for a specific tool",
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {"toolName": {"type": "string"}},
+                        "required": ["toolName"]
+                    }}}},
+                    "responses": {"200": {"description": "Tool info with full inputSchema"}}
+                }
+            },
+            "/call": {
+                "post": {
+                    "operationId": "smart_route_call",
+                    "summary": "Execute a tool by name with the given arguments",
+                    "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "toolName": {"type": "string"},
+                            "arguments": {"type": "object", "additionalProperties": true}
+                        },
+                        "required": ["toolName"]
+                    }}}},
+                    "responses": {"200": {"description": "Tool execution result (content/isError)"}}
+                }
+            }
+        },
+        "_comment_url_search": url("/search"),
+        "_comment_url_describe": url("/describe"),
+        "_comment_url_call": url("/call"),
+    });
+    (StatusCode::OK, Json(spec)).into_response()
+}
+
+/// Shared REST body for search/describe: accepts both JSON body and query
+/// params (GET convenience).
+fn smart_rest_params(
+    body: Option<Json<serde_json::Value>>,
+    q: Option<std::collections::HashMap<String, String>>,
+) -> serde_json::Value {
+    if let Some(Json(v)) = body {
+        return v;
+    }
+    let mut m = serde_json::Map::new();
+    if let Some(q) = q {
+        for (k, v) in q {
+            m.insert(k, Value::String(v));
+        }
+    }
+    Value::Object(m)
+}
+
+async fn smart_allowed_from_bearer(
+    bearer_key: Option<&BearerKey>,
+    scope_allowed: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (scope_allowed, get_allowed_servers(bearer_key).await) {
+        (Some(list), Some(keys)) => Some(list.into_iter().filter(|s| keys.contains(s)).collect()),
+        (Some(list), None) => Some(list),
+        (None, Some(keys)) => Some(keys.into_iter().collect()),
+        (None, None) => None,
+    }
+}
+
+async fn smart_rest_search(
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let gate = crate::smart_routing::meta::not_ready_message().await;
+    if let Some(msg) = gate {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+    }
+    let p = smart_rest_params(body, Some(q));
+    let query = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let limit = p.get("limit").cloned().unwrap_or(json!(10));
+    let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
+    let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
+    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+async fn smart_rest_describe(
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let gate = crate::smart_routing::meta::not_ready_message().await;
+    if let Some(msg) = gate {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+    }
+    let p = smart_rest_params(body, Some(q));
+    let tool_name = p.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+    let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
+    let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
+    match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+async fn smart_rest_call(
+    headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    let bearer_key = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let gate = crate::smart_routing::meta::not_ready_message().await;
+    if let Some(msg) = gate {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+    }
+    let p = body.map(|Json(v)| v).unwrap_or(json!({}));
+    let tool_name = p.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+    let args = p.get("arguments").cloned().unwrap_or(json!({}));
+    let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
+    let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
+    let ip = client_ip_of(&headers).unwrap_or_else(|| "127.0.0.1".to_string());
+    let start = std::time::Instant::now();
+    match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None).await {
+        Ok(v) => {
+            let _ = log_service::write_activity(
+                "smart",
+                tool_name,
+                Some(start.elapsed().as_millis() as i64),
+                "success",
+                None,
+                Some(v.clone()),
+                None,
+                Some(&ip),
+            )
+            .await;
+            (StatusCode::OK, Json(v)).into_response()
+        }
+        Err(e) => {
+            let _ = log_service::write_activity(
+                "smart",
+                tool_name,
+                Some(start.elapsed().as_millis() as i64),
+                "error",
+                None,
+                None,
+                Some(&e),
+                Some(&ip),
+            )
+            .await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response()
+        }
     }
 }

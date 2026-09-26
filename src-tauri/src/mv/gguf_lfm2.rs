@@ -37,7 +37,7 @@ use candle_core::quantized::gguf_file::{Content, Value};
 use candle_core::{Device, Module, Tensor};
 use candle_nn::{ops, RmsNorm};
 
-use crate::rag::gguf_gemma::{apply_rope, attn_bias, l2_normalize, linear, GgufArch};
+use crate::mv::gguf_gemma::{apply_rope, attn_bias, l2_normalize, linear, GgufArch};
 
 /// Attention block params (GQA + per-head q/k RMSNorm + RoPE).
 struct AttnFields {
@@ -303,7 +303,8 @@ impl GgufArch for Lfm2Arch {
         // Final norm (embedding_norm = token_embd_norm).
         let x = self.final_norm.forward(&x)?;
         // CLS pooling: first token (bos). Then L2-normalize - the vectordb uses
-        // L2 distance assuming normalized embeddings (L2 ranking == cosine), so
+        // COSINE distance (well-defined either way; normalization keeps the
+        // unit-sphere convention), so
         // every arch must normalize even though LFM2's HF `modules.json` has no
         // Normalize module (un-normalized embeddings score near 0 under the
         // app's `1/(1+L2dist)` and get filtered out by any non-zero threshold).
