@@ -1497,7 +1497,9 @@
     "smartReindex": "Rebuild Index",
     "smartReindexing": "Rebuilding index...",
     "smartReindexDone": "Smart routing index rebuilt",
-    "smartReindexFailed": "Failed to rebuild smart routing index"
+    "smartReindexFailed": "Failed to rebuild smart routing index",
+    "mcpStrictValidation": "Strict Protocol Validation",
+    "mcpStrictValidationDescription": "Validate request headers and params strictly per MCP spec when enabled; off by default to tolerate incomplete requests from clients lagging new specs"
   },
   "mcpb": {
     "upload": "Upload",

@@ -247,8 +247,18 @@ async fn run_call(
             Ok(r)
         }
         Err(e) => {
-            // Heuristic: treat any call failure as a stale connection. Evict
-            // the entry so the next call rebuilds (basic reconnect).
+            // Evict ONLY on a genuinely broken connection (see session_pool
+            // run_call): upstream JSON-RPC application errors keep the client
+            // alive so the on-demand process (and any state it holds) survives
+            // tool-level failures.
+            let still_connected = client_arc.lock().await.is_connected();
+            if still_connected {
+                log::warn!(
+                    "[on-demand] Tool '{}' failed on '{}' but connection healthy, keeping client: {}",
+                    tool, server_name, e
+                );
+                return Err(e);
+            }
             let client_to_disconnect = {
                 let mut map = store().write().await;
                 map.remove(server_name).map(|e| e.client)

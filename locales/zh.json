@@ -1500,7 +1500,9 @@
     "smartReindex": "重建索引",
     "smartReindexing": "正在重建索引...",
     "smartReindexDone": "智能路由索引重建完成",
-    "smartReindexFailed": "重建智能路由索引失败"
+    "smartReindexFailed": "重建智能路由索引失败",
+    "mcpStrictValidation": "严格协议校验",
+    "mcpStrictValidationDescription": "开启后按 MCP 规范严格校验请求头与参数；默认关闭，宽容不完整请求以兼容未跟进新规范的客户端"
   },
   "mcpb": {
     "upload": "上传",

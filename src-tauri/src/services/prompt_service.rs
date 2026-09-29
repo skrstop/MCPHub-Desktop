@@ -108,68 +108,6 @@ pub async fn search_paged(
         }
     }
 
-    // FTS5 路径（§4.4）：key 非空时优先 FTS（rank 序），enabled 过滤在 Rust 侧；
-    // 空表/Err 降级原 LIKE。builtin 表行数小，Rust 分页代价可忽略。
-    if !key.is_empty() {
-        match crate::services::fts_service::search_ref_ids_weighted(
-            crate::services::fts_service::FtsTable::Prompts,
-            &key,
-            500,
-        )
-        .await
-        {
-            Ok(weighted) if !weighted.is_empty() => {
-                // 命中词数 map：相关度第一优先，同数保持 name 序（稳定排序）
-                let all = sqlx::query(
-                    "SELECT id, name, title, description, template, arguments, enabled, created_at \
-                     FROM builtin_prompts ORDER BY name",
-                )
-                .fetch_all(db::pool())
-                .await?;
-                let counts: std::collections::HashMap<String, i64> =
-                    weighted.iter().cloned().collect();
-                let mut items = all
-                    .iter()
-                    .map(row_to_prompt)
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter(|p| {
-                        counts.contains_key(&p.name)
-                            && match filter {
-                                "active" => p.enabled,
-                                "inactive" => !p.enabled,
-                                _ => true,
-                            }
-                    })
-                    .collect::<Vec<_>>();
-                // 相关度第一优先（稳定排序：同命中数保持 name 序）
-                items.sort_by_key(|p| std::cmp::Reverse(counts.get(&p.name).copied().unwrap_or(0)));
-                let total = items.len() as u64;
-                let window = items
-                    .into_iter()
-                    .skip(offset.max(0) as usize)
-                    .take(page_size as usize)
-                    .collect();
-                return Ok(PromptPage { items: window, total, page, page_size });
-            }
-            Ok(_)
-                if crate::services::fts_service::table_is_empty(
-                    crate::services::fts_service::FtsTable::Prompts,
-                )
-                .await
-                .unwrap_or(false) =>
-            {
-                // 空表兜底：走原 LIKE
-            }
-            Ok(_) => {
-                // 零结果/空表均不返回：落到下方原 LIKE（子串语义补 FTS 词前缀盲区）
-            }
-            Err(e) => {
-                log::warn!("[fts] search prompts failed, fallback to LIKE: {e}");
-            }
-        }
-    }
-
     let mut conds: Vec<String> = Vec::new();
     if !key.is_empty() {
         conds.push(
@@ -236,6 +174,12 @@ pub async fn find_by_id(id: &str) -> Result<Option<BuiltinPrompt>> {
 }
 
 pub async fn create(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
+    let created = create_inner(payload).await?;
+    crate::services::subscription_hub::notify_prompts_list_changed().await;
+    Ok(created)
+}
+
+async fn create_inner(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
     let id = Uuid::new_v4().to_string();
     let args_json = serde_json::to_string(&payload.arguments)?;
     let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
@@ -277,6 +221,14 @@ pub async fn create(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
 }
 
 pub async fn update(id: &str, payload: &BuiltinPromptPayload) -> Result<Option<BuiltinPrompt>> {
+    let updated = update_inner(id, payload).await?;
+    if updated.is_some() {
+        crate::services::subscription_hub::notify_prompts_list_changed().await;
+    }
+    Ok(updated)
+}
+
+async fn update_inner(id: &str, payload: &BuiltinPromptPayload) -> Result<Option<BuiltinPrompt>> {
     let args_json = serde_json::to_string(&payload.arguments)?;
     let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
 
@@ -352,6 +304,9 @@ pub async fn delete(id: &str) -> Result<bool> {
         .await?;
     }
     tx.commit().await?;
+    if affected > 0 {
+        crate::services::subscription_hub::notify_prompts_list_changed().await;
+    }
     Ok(affected > 0)
 }
 

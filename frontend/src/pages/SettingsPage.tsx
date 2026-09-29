@@ -955,12 +955,18 @@ const SettingsPage: React.FC = () => {
       | 'jsonBodyLimit'
       | 'skipAuth'
       | 'exposeHttp'
-      | 'httpPort',
+      | 'httpPort'
+      | 'mcpStrictValidation',
     value: boolean | string | number,
   ) => {
     // exposeHttp and httpPort are top-level config, not inside routing
     if (key === 'exposeHttp' || key === 'httpPort') {
       await updateSystemConfig({ [key]: value });
+      return;
+    }
+    // mcpStrictValidation lives in config.mcp.strictValidation (nested)
+    if (key === 'mcpStrictValidation') {
+      await updateSystemConfig({ mcpStrictValidation: value, mcp: { strictValidation: value } });
       return;
     }
     await updateRoutingConfig(key, value);
@@ -4246,6 +4252,18 @@ const SettingsPage: React.FC = () => {
                   disabled={loading}
                   checked={routingConfig.exposeHttp}
                   onCheckedChange={(checked) => handleRoutingConfigChange('exposeHttp', checked)}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div>
+                  <h3 className="font-medium text-gray-700">{t('settings.mcpStrictValidation', '严格协议校验')}</h3>
+                  <p className="text-sm text-gray-500">{t('settings.mcpStrictValidationDescription', '开启后按 MCP 规范严格校验请求头与参数；默认关闭，宽容不完整请求以兼容未跟进新规范的客户端')}</p>
+                </div>
+                <Switch
+                  disabled={loading}
+                  checked={routingConfig.mcpStrictValidation}
+                  onCheckedChange={(checked) => handleRoutingConfigChange('mcpStrictValidation', checked)}
                 />
               </div>
 

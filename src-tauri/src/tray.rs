@@ -191,6 +191,20 @@ fn show_main_window(app: &AppHandle<tauri::Wry>) {
 /// frontend can use a plain `invoke`.
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
+    // The URL can originate from UNTRUSTED content (tool output rendered as
+    // markdown in the frontend, whose target=_blank links route here). On
+    // Windows the `cmd /C start` path re-parses the command line, so a URL
+    // containing `&`/`|`/`>` etc. would execute injected commands. Only
+    // http(s) URLs are meaningful for a browser, and shell metacharacters /
+    // quotes are never valid inside them — reject everything else.
+    let trimmed = url.trim();
+    let is_http = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+    let has_meta = trimmed
+        .chars()
+        .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '"' | '\'' | '%' | '\0'));
+    if !is_http || has_meta {
+        return Err(format!("refused to open non-http URL: {url}"));
+    }
     let result = {
         #[cfg(target_os = "macos")]
         {

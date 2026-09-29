@@ -1,10 +1,9 @@
 /// Global MCP connection pool — manages live connections to all enabled servers.
 use super::{
     client::McpClient,
-    http_transport::HttpTransport,
     openapi_transport::{OpenApiConfig as TransportOpenApiConfig, OpenApiSecurity as TransportOpenApiSecurity, OpenapiTransport},
+    rmcp_http_transport::RmcpHttpTransport,
     sse_transport::SseTransport,
-    stdio_transport::StdioTransport,
 };
 use crate::models::server::{ServerConfig, ServerStatus, ServerType, Tool, ToolCallResult};
 use crate::services::app_logger;
@@ -55,7 +54,10 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
                 .to_string();
             let args = cfg.args.clone().unwrap_or_default();
             let env = cfg.env.clone().unwrap_or_default();
-            let transport = StdioTransport::new(&name, command, args, env);
+            // rmcp-backed transport (AGENTS.md §3.9.4): official SDK protocol
+            // layer, all desktop behaviours (runtime_env resolution, download
+            // progress, stderr tail, process-tree kill) preserved.
+            let transport = super::rmcp_stdio_transport::RmcpStdioTransport::new(&name, command, args, env);
             Ok(McpClient::new(name, Box::new(transport)))
         }
         ServerType::Sse => {
@@ -75,7 +77,11 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
                 .ok_or_else(|| anyhow!("HTTP server '{}' missing url", name))?
                 .to_string();
             let headers = cfg.headers.clone().unwrap_or_default();
-            let transport = HttpTransport::new(&name, url, headers);
+            // rmcp-backed transport (AGENTS.md §3.9.6): official SDK protocol
+            // layer — Auto lifecycle (discover probe → legacy fallback),
+            // native MRTR, native tasks/get polling, custom headers.
+            let transport =
+                RmcpHttpTransport::new(&name, url, headers);
             Ok(McpClient::new(name, Box::new(transport)))
         }
         ServerType::Openapi => {
@@ -84,30 +90,29 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
 
             let security = openapi_cfg.security.as_ref().map(|s| {
                 let security_type = s.security_type.clone();
-                match security_type.as_str() {
-                    "apiKey" => {
-                        let ak = s.api_key.as_ref().unwrap();
+                // Malformed configs (declared type but missing payload) must not
+                // panic the connect path — fall back to an unauthenticated
+                // bearer/no-op security and let the upstream 401 speak.
+                match (security_type.as_str(), s) {
+                    ("apiKey", crate::models::server::OpenApiSecurity { api_key: Some(ak), .. }) => {
                         TransportOpenApiSecurity::ApiKey {
                             name: ak.name.clone(),
                             location: ak.location.clone(),
                             value: ak.value.clone(),
                         }
                     }
-                    "http" => {
-                        let h = s.http.as_ref().unwrap();
+                    ("http", crate::models::server::OpenApiSecurity { http: Some(h), .. }) => {
                         TransportOpenApiSecurity::Http {
                             scheme: h.scheme.clone(),
                             credentials: h.credentials.clone(),
                         }
                     }
-                    "oauth2" => {
-                        let o = s.oauth2.as_ref().unwrap();
+                    ("oauth2", crate::models::server::OpenApiSecurity { oauth2: Some(o), .. }) => {
                         TransportOpenApiSecurity::OAuth2 {
                             token: o.token.clone(),
                         }
                     }
-                    "openIdConnect" => {
-                        let oidc = s.open_id_connect.as_ref().unwrap();
+                    ("openIdConnect", crate::models::server::OpenApiSecurity { open_id_connect: Some(oidc), .. }) => {
                         TransportOpenApiSecurity::OpenIdConnect {
                             url: oidc.url.clone(),
                             token: oidc.token.clone(),
@@ -555,6 +560,37 @@ pub async fn get_entry_info(name: &str) -> Option<(ServerStatus, Vec<Tool>)> {
 }
 
 /// Call a tool — automatically routes to the correct server
+/// A2/A9: call_tool variant forwarding request-level `_meta` upstream
+/// (MRTR inputResponses retry, OTel trace keys). Falls back to the plain
+/// path for builtin/on-demand/isolated routing (they drop _meta).
+pub async fn call_tool_with_meta(
+    server_name: &str,
+    tool_name: &str,
+    arguments: Value,
+    request_meta: Option<Value>,
+) -> Result<ToolCallResult> {
+    let _ = request_meta; // builtin/on-demand paths keep legacy behavior
+    if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        return call_tool(server_name, tool_name, arguments).await;
+    }
+    let on_demand = {
+        let map = pool().read().await;
+        map.get(server_name).map(|e| e.start_on_demand).unwrap_or(false)
+    };
+    if on_demand {
+        return super::on_demand::call_tool_on_demand(server_name, tool_name, arguments).await;
+    }
+    let map = pool().read().await;
+    let entry = map
+        .get(server_name)
+        .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
+    let client = entry.client.as_ref()
+        .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?;
+    let result = client.call_tool_with_meta(tool_name, arguments, request_meta).await;
+    drop(map);
+    result
+}
+
 pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> Result<ToolCallResult> {
     // Builtin "mcphub-desktop" server (RAG tools): virtual, not in the pool.
     // Route to the RAG dispatch so invoking rag_* via the Tauri call_tool

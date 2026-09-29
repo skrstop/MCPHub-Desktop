@@ -65,6 +65,33 @@ impl SseTransport {
         }
     }
 
+    /// Send a JSON-RPC **notification** (no id — the server never replies).
+    /// Used for `notifications/initialized` after the initialize handshake
+    /// (spec: clients MUST send it; strict servers gate further requests on it).
+    async fn post_notification(&self, method: &str, params: Value) -> Result<()> {
+        let endpoint = self
+            .post_endpoint
+            .as_deref()
+            .ok_or_else(|| anyhow!("SSE endpoint not established"))?;
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let sid = self.session_id.lock().await.clone();
+        let mut req = self.client.post(endpoint).header("Content-Type", "application/json");
+        if !sid.is_empty() {
+            req = req.header("mcp-session-id", &sid);
+        }
+        req = req.json(&body);
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        // Fire-and-forget: notifications get 202-style empty replies at best.
+        let _ = req.send().await?;
+        Ok(())
+    }
+
     async fn post_request(&self, method: &str, params: Value) -> Result<Value> {
         let endpoint = self
             .post_endpoint
@@ -519,6 +546,12 @@ impl McpTransport for SseTransport {
                         }
                     }
                 }
+                // The stream is gone: fail every pending waiter immediately
+                // (dropping the senders closes their oneshot channels) instead
+                // of letting them hang until the 60s timeout, and stop the
+                // pending map from leaking entries that will never be answered.
+                pending.lock().await.clear();
+                log::warn!("[{}] SSE background reader ended; pending waiters failed fast", server_name);
             });
         } else {
             log::info!("[{}] Using Streamable HTTP mode (no background reader)", self.server_name);
@@ -534,6 +567,12 @@ impl McpTransport for SseTransport {
             }),
         )
         .await?;
+
+        // Spec: clients MUST send notifications/initialized after the
+        // initialize response, before any other request.
+        if let Err(e) = self.post_notification("notifications/initialized", json!({})).await {
+            log::warn!("[{}] notifications/initialized failed (continuing): {}", self.server_name, e);
+        }
 
         self.connected = true;
         log::info!("[{}] SSE transport connected", self.server_name);
@@ -584,6 +623,8 @@ impl McpTransport for SseTransport {
         let content = result["content"].as_array().cloned().unwrap_or_default();
         let is_error = result["isError"].as_bool().unwrap_or(false);
         let structured_content = result.get("structuredContent").cloned().filter(|v| !v.is_null());
-        Ok(ToolCallResult { content, is_error, structured_content })
+        // A2/A9: carry upstream _meta verbatim (MRTR input_required, trace).
+        let raw_meta = result.get("_meta").cloned().filter(|v| !v.is_null());
+        Ok(ToolCallResult { content, is_error, structured_content, raw_meta })
     }
 }

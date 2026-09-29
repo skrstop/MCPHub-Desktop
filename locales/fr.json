@@ -1498,7 +1498,9 @@
     "smartReindex": "Reconstruire l'index",
     "smartReindexing": "Reconstruction de l'index...",
     "smartReindexDone": "Index du routage intelligent reconstruit",
-    "smartReindexFailed": "Échec de la reconstruction de l'index du routage intelligent"
+    "smartReindexFailed": "Échec de la reconstruction de l'index du routage intelligent",
+    "mcpStrictValidation": "Validation stricte du protocole",
+    "mcpStrictValidationDescription": "Valide strictement les en-têtes et paramètres selon la spécification MCP ; désactivé par défaut pour tolérer les clients incomplets"
   },
   "mcpb": {
     "upload": "Télécharger",

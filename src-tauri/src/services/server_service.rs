@@ -213,7 +213,9 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .await?;
     tx.commit().await?;
 
-    get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Insert failed"))
+    let out = get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Insert failed"));
+    crate::services::subscription_hub::notify_tools_list_changed().await;
+    out
 }
 
 pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
@@ -283,7 +285,12 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .await?;
     tx.commit().await?;
 
-    get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Server not found after update"))
+    let out = get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Server not found after update"));
+    // A3: command/env/args changes reconnect (tool set may change);
+    // description-only edits are rare enough that a spurious notification is
+    // harmless — keep the notification unconditional for simplicity.
+    crate::services::subscription_hub::notify_tools_list_changed().await;
+    out
 }
 
 pub async fn delete(name: &str) -> Result<()> {
@@ -299,6 +306,7 @@ pub async fn delete(name: &str) -> Result<()> {
     )
     .await?;
     tx.commit().await?;
+    crate::services::subscription_hub::notify_tools_list_changed().await;
     Ok(())
 }
 

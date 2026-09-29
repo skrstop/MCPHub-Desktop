@@ -118,23 +118,62 @@ impl OpenapiTransport {
         ))
     }
 
-    /// Build default headers from config.
+    /// Build the outbound default headers: user headers + passthrough headers
+    /// + configured security credentials.
     ///
-    /// Note: rmcp-openapi uses reqwest v0.13 while our project uses v0.12.
-    /// Headers are passed as JSON via environment variable to avoid type mismatch.
-    /// The rmcp-openapi library handles authentication via its security scheme support.
-    fn build_headers_json(&self) -> Option<String> {
-        if self.config.headers.is_empty() && self.config.passthrough_headers.is_empty() {
-            return None;
-        }
-        let mut map = serde_json::Map::new();
+    /// rmcp-openapi and the desktop now share reqwest 0.13 (unified during the
+    /// rmcp migration), so `HeaderMap` types are compatible and the credentials
+    /// can be applied for real — previously this was impossible (version
+    /// mismatch) and `config.security` was dead config (logged, never used).
+    /// Query/cookie-placed apiKey cannot ride default headers; those fall back
+    /// to whatever the spec's security schemes define.
+    fn build_default_headers(&self) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        let mut insert = |name: &str, value: &str| {
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::try_from(name),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                map.insert(n, v);
+            } else {
+                log::warn!("[{}] skipping invalid header '{}' (value encoding)", self.server_name, name);
+            }
+        };
         for (k, v) in &self.config.headers {
-            map.insert(k.clone(), serde_json::Value::String(v.clone()));
+            insert(k, v);
         }
         for (k, v) in &self.config.passthrough_headers {
-            map.insert(k.clone(), serde_json::Value::String(v.clone()));
+            insert(k, v);
         }
-        serde_json::to_string(&map).ok()
+        if let Some(sec) = &self.config.security {
+            match sec {
+                OpenApiSecurity::ApiKey { name, location, value } => {
+                    if location.eq_ignore_ascii_case("header") {
+                        insert(name, value);
+                    } else {
+                        log::warn!(
+                            "[{}] apiKey location '{}' cannot be applied via default headers; relying on spec security schemes",
+                            self.server_name, location
+                        );
+                    }
+                }
+                OpenApiSecurity::Http { scheme, credentials } => {
+                    let v = if scheme.eq_ignore_ascii_case("basic") {
+                        format!("Basic {}", credentials)
+                    } else {
+                        format!("Bearer {}", credentials)
+                    };
+                    insert("Authorization", &v);
+                }
+                OpenApiSecurity::OAuth2 { token } => {
+                    insert("Authorization", &format!("Bearer {}", token));
+                }
+                OpenApiSecurity::OpenIdConnect { token, .. } => {
+                    insert("Authorization", &format!("Bearer {}", token));
+                }
+            }
+        }
+        map
     }
 
     /// Extract base URL from the OpenAPI spec.
@@ -234,19 +273,23 @@ impl McpTransport for OpenapiTransport {
             ))?;
         log::info!("[{}] OpenAPI base_url: {}", self.server_name, base_url);
 
-        // 3. Create the rmcp-openapi server
-        // Note: default_headers is None because reqwest v0.12 HeaderMap != v0.13 HeaderMap.
-        // Authentication is handled via the OpenAPI spec's security schemes.
-        if let Some(hdrs) = self.build_headers_json() {
-            log::info!("[{}] custom headers configured: {}", self.server_name, hdrs);
-        } else {
-            log::info!("[{}] no custom headers configured", self.server_name);
-        }
+        // 3. Create the rmcp-openapi server with real outbound credentials:
+        // reqwest 0.13 is shared with rmcp-openapi, so configured security
+        // (apiKey-in-header / bearer / basic / oauth2 / oidc) + user headers
+        // apply to every API call. Previously default_headers was forced to
+        // None (version-mismatch workaround) and `config.security` was dead.
+        let default_headers = self.build_default_headers();
+        log::info!(
+            "[{}] outbound default headers: {} entrie(s), security applied: {}",
+            self.server_name,
+            default_headers.len(),
+            self.config.security.is_some()
+        );
 
         let mut server = OpenApiServer::new(
             spec_value,
             base_url.clone(),
-            None, // default_headers (reqwest version mismatch)
+            Some(default_headers),
             None, // filters
             false, // skip_tool_descriptions
             false, // skip_parameter_descriptions
@@ -374,7 +417,7 @@ impl McpTransport for OpenapiTransport {
             log::info!("{}", ok_msg);
         }
 
-        Ok(ToolCallResult { content, is_error, structured_content: None })
+        Ok(ToolCallResult { content, is_error, structured_content: None, raw_meta: None })
     }
 }
 

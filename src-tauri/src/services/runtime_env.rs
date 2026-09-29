@@ -85,6 +85,56 @@ fn get_enhanced_path() -> String {
     path
 }
 
+/// Run a command with a wall-clock timeout, returning `None` on timeout or
+/// spawn failure. Synchronous `Command::output()` has no timeout — an
+/// interactive login shell (`-l -i`) can hang forever on user config that
+/// prompts (keychain agents, password prompts), which would freeze app
+/// startup (`runtime_env::init`) and the runtime settings page alike.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::io::Read;
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    // Drain pipes on helper threads so a chatty shell can't fill the pipe
+    // buffer and deadlock the child while we wait.
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => break None,
+        }
+    };
+    let _ = child.kill(); // no-op if already exited
+    let _ = child.wait(); // reap
+    Some(std::process::Output {
+        status: status?,
+        stdout: out_handle.join().unwrap_or_default().into_bytes(),
+        stderr: err_handle.join().unwrap_or_default().into_bytes(),
+    })
+}
+
 /// Get PATH from user's login shell on Unix (macOS/Linux)
 #[cfg(not(target_os = "windows"))]
 fn get_unix_path() -> String {
@@ -93,15 +143,16 @@ fn get_unix_path() -> String {
 
         // Execute shell with -l (login) and -i (interactive) flags
         // to load .bash_profile/.zprofile and .bashrc/.zshrc
-        if let Ok(output) = std::process::Command::new(&shell_path)
-            .arg("-l")
-            .arg("-i")
-            .arg("-c")
-            .arg("echo $PATH")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
+        // Bounded by a timeout: interactive shells can hang on user config
+        // (agents prompting for input), which would block startup forever.
+        if let Some(output) = run_with_timeout(
+            {
+                let mut c = std::process::Command::new(&shell_path);
+                c.arg("-l").arg("-i").arg("-c").arg("echo $PATH");
+                c
+            },
+            std::time::Duration::from_secs(5),
+        ) {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -109,6 +160,8 @@ fn get_unix_path() -> String {
                     return path;
                 }
             }
+        } else {
+            log::warn!("[runtime_env] Shell PATH probe timed out after 5s, using fallback");
         }
     }
 

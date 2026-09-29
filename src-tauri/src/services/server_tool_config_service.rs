@@ -94,9 +94,12 @@ pub async fn upsert(p: &ServerToolConfigPayload) -> Result<ServerToolConfig> {
     .execute(db::pool())
     .await?;
 
-    get_config(&p.server_name, &p.item_type, &p.item_name)
+    let out = get_config(&p.server_name, &p.item_type, &p.item_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Failed to fetch after upsert"))
+        .ok_or_else(|| anyhow::anyhow!("Failed to fetch after upsert"));
+    // A3: tool enable/disable changes the exposed tool list.
+    crate::services::subscription_hub::notify_tools_list_changed().await;
+    out
 }
 
 /// Update only the description of an item.

@@ -726,7 +726,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn tokenize_chinese_word() {
         // "数据库" → jieba 词级切分（"数据"+"库"）+ charabia chinese-normalization
         // 繁体规范形归一（"数据"→"數据"）。查询侧同管道归一，简繁输入互通；
@@ -747,7 +746,6 @@ mod tests {
         assert!(ini.is_empty() || !ini.chars().any(is_cjk));
     }
 
-    #[test]
     #[test]
     fn tokenize_mixed_and_punct() {
         // 混排 + 标点：标点被过滤，中英各归其位；中文词元为繁体规范形

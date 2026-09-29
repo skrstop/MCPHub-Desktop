@@ -1177,6 +1177,17 @@ fn creds_lock() -> &'static std::sync::RwLock<()> {
     LOCK.get_or_init(|| std::sync::RwLock::new(()))
 }
 
+// Poisoned-lock safety: a panic while holding the lock (e.g. a serialization
+// error deep in a writer) must not turn every later credential op into a
+// panic — recover the inner guard instead of unwrapping.
+fn creds_read() -> std::sync::RwLockReadGuard<'static, ()> {
+    creds_lock().read().unwrap_or_else(|p| p.into_inner())
+}
+
+fn creds_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+    creds_lock().write().unwrap_or_else(|p| p.into_inner())
+}
+
 /// `<app_data>/rag/git-credentials.json` — map of repo hash → credential.
 /// Local file instead of the OS keyring: keyring reads pop authorization
 /// prompts on macOS/Windows, which breaks unattended auto-update.
@@ -1197,7 +1208,7 @@ struct StoredCredential {
 }
 
 fn read_credentials(app: &tauri::AppHandle) -> std::collections::HashMap<String, StoredCredential> {
-    let _guard = creds_lock().read().unwrap();
+    let _guard = creds_read();
     let Ok(path) = credentials_path(app) else {
         return Default::default();
     };
@@ -1209,7 +1220,7 @@ fn read_credentials(app: &tauri::AppHandle) -> std::collections::HashMap<String,
 
 /// Store the credential for a repo hash (insert-or-replace, atomic write).
 pub fn store_credential(app: &tauri::AppHandle, repo_hash: &str, username: &str, password: &str) -> Result<()> {
-    let _guard = creds_lock().write().unwrap();
+    let _guard = creds_write();
     let path = credentials_path(app)?;
     let mut creds: std::collections::HashMap<String, StoredCredential> = std::fs::read(&path)
         .ok()
@@ -1251,7 +1262,7 @@ pub fn load_credential(app: &tauri::AppHandle, repo_hash: &str) -> Option<(Strin
 
 /// Remove the stored credential for a repo hash (no-op when absent).
 pub fn delete_credential(app: &tauri::AppHandle, repo_hash: &str) -> Result<()> {
-    let _guard = creds_lock().write().unwrap();
+    let _guard = creds_write();
     let path = credentials_path(app)?;
     let mut creds: std::collections::HashMap<String, StoredCredential> = std::fs::read(&path)
         .ok()
@@ -1313,6 +1324,7 @@ mod url_tests {
     fn dir_of(w: &SshWrapper) -> std::path::PathBuf { w.dir.clone() }
 
     #[tokio::test]
+    #[ignore = "network-dependent: requires git.haidaifu.net to be reachable; run manually (`cargo test -- --ignored canonicalize`); fails offline (host currently returns 000)"]
     async fn canonicalize_upgrades_http_redirect() {
         // Real network: the user's server 308s http -> https. The canonical
         // form must come back with the https scheme; ssh/SCP URLs and

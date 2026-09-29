@@ -96,7 +96,51 @@ fn collect_images(ir: &DocumentIR) -> Vec<Vec<u8>> {
 /// Whether any OCR-able raster image exists (no byte cloning — used only to
 /// decide the "[图片未识别]" note when OCR is unavailable).
 fn has_raster_images(ir: &DocumentIR) -> bool {
-    !collect_images(ir).is_empty()
+    // Count WITHOUT cloning image bytes (collect_images would deep-copy every
+    // embedded image just to answer a yes/no question).
+    count_raster_images(ir) > 0
+}
+
+fn count_raster_images(ir: &DocumentIR) -> usize {
+    let mut n = 0usize;
+    for section in &ir.sections {
+        count_elements(&section.elements, &mut n);
+    }
+    n
+}
+
+fn count_elements(elements: &[Element], out: &mut usize) {
+    for element in elements {
+        match element {
+            Element::Table(t) => {
+                for row in &t.rows {
+                    for cell in &row.cells {
+                        count_elements(&cell.content, out);
+                    }
+                }
+            },
+            Element::List(l) => count_list(l, out),
+            Element::TextBox(tb) => count_elements(&tb.content, out),
+            Element::Footnote(n) | Element::Endnote(n) => count_elements(&n.content, out),
+            Element::Image(img) => {
+                if img.data.is_some()
+                    && !matches!(img.format, Some(ImageFormat::Emf) | Some(ImageFormat::Wmf))
+                {
+                    *out += 1;
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+fn count_list(list: &office_oxide::ir::List, out: &mut usize) {
+    for item in &list.items {
+        count_elements(&item.content, out);
+        if let Some(nested) = &item.nested {
+            count_list(nested, out);
+        }
+    }
 }
 
 fn collect_elements(elements: &[Element], out: &mut Vec<Vec<u8>>) {

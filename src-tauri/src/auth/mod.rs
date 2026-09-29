@@ -14,7 +14,22 @@ pub fn init_secret(secret: String) {
 }
 
 fn secret() -> &'static str {
-    JWT_SECRET.get().map(|s| s.as_str()).unwrap_or("mcphub-default-dev-secret-change-in-prod")
+    // Fallback when `init_secret` was never called (no keychain round-trip in
+    // the current startup path — verified: zero call sites). A STATIC fallback
+    // string would sign every token with a publicly-known secret (it ships in
+    // the open-source repo), letting anyone with the source forge tokens.
+    // Session tokens live only in the in-memory SessionState (they never
+    // survive a restart anyway), so a fresh random secret per process is the
+    // correct fallback — strict improvement over the static string.
+    JWT_SECRET.get_or_init(|| {
+        // 2× uuid v4 (getrandom-backed) = 244 bits of entropy — session-scoped
+        // JWT signing key, sufficient for tokens that live ≤24h in memory.
+        format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        )
+    })
 }
 
 /// Issue a JWT token for the given user

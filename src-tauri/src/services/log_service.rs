@@ -50,6 +50,8 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
                 let counts: std::collections::HashMap<String, i64> =
                     weighted.into_iter().collect();
                 // 回表 + level/server_name 过滤（原生 created_at DESC 序）
+                // 条件必须拼在 ORDER BY 之前（此前 ORDER BY 先入队，
+                // 再追加 AND 生成 "... ORDER BY created_at DESC AND level = ?" 非法 SQL）。
                 let mut qb = sqlx::QueryBuilder::new(
                     "SELECT id, level, message, server_name, created_at FROM app_log WHERE id IN (",
                 );
@@ -59,13 +61,14 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
                     qb.push_bind(id.clone());
                     first = false;
                 }
-                qb.push(") ORDER BY created_at DESC");
+                qb.push(")");
                 if let Some(level) = &q.level {
                     qb.push(" AND level = ").push_bind(level);
                 }
                 if let Some(server) = &q.server_name {
                     qb.push(" AND server_name = ").push_bind(server);
                 }
+                qb.push(" ORDER BY created_at DESC");
                 let rows = qb.build().fetch_all(db::pool()).await?;
                 let mut entries: Vec<LogEntry> = rows
                     .into_iter()

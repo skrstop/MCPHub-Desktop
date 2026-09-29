@@ -1498,7 +1498,9 @@
     "smartReindex": "Indexi yeniden oluştur",
     "smartReindexing": "Index yeniden oluşturuluyor...",
     "smartReindexDone": "Akıllı yönlendirme indexi yeniden oluşturuldu",
-    "smartReindexFailed": "Akıllı yönlendirme indexi yeniden oluşturulamadı"
+    "smartReindexFailed": "Akıllı yönlendirme indexi yeniden oluşturulamadı",
+    "mcpStrictValidation": "Katı Protokol Doğrulaması",
+    "mcpStrictValidationDescription": "Etkinleştirildiğinde istek başlıkları ve parametreleri MCP belirtimine göre katı doğrular; yeni belirtimleri takip etmeyen istemcileri tolere etmek için varsayılan olarak kapalıdır"
   },
   "mcpb": {
     "upload": "Yükle",

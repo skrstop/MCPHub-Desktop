@@ -23,6 +23,7 @@ interface RoutingConfig {
   skipAuth: boolean;
   httpPort: number;
   exposeHttp: boolean;
+  mcpStrictValidation: boolean;
 }
 
 interface InstallConfig {
@@ -141,6 +142,8 @@ interface SystemSettings {
     };
     httpPort?: number;
     exposeHttp?: boolean;
+    mcpStrictValidation?: boolean;
+    mcp?: { strictValidation?: boolean };
   };
   bearerKeys?: BearerKey[];
 }
@@ -357,6 +360,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     skipAuth: false,
     httpPort: 23333,
     exposeHttp: true,
+    mcpStrictValidation: false,
   });
 
   const [tempRoutingConfig, setTempRoutingConfig] = useState<TempRoutingConfig>({
@@ -443,7 +447,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       const data: ApiResponse<SystemSettings> = await apiGet('/settings');
 
       if (data.success && data.data?.systemConfig) {
-        const routing = data.data.systemConfig.routing || {};
+        const routing: Record<string, any> = data.data.systemConfig.routing || {};
         setRoutingConfig({
           enableGlobalRoute: routing.enableGlobalRoute ?? true,
           enableGroupNameRoute: routing.enableGroupNameRoute ?? true,
@@ -454,6 +458,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           skipAuth: routing.skipAuth ?? false,
           httpPort: data.data.systemConfig.httpPort ?? 23333,
           exposeHttp: data.data.systemConfig.exposeHttp ?? true,
+          mcpStrictValidation: data.data.systemConfig.mcp?.strictValidation ?? false,
         });
       }
       if (data.success && data.data?.systemConfig?.install) {
@@ -676,6 +681,9 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
         }
         if ('httpPort' in updates) {
           setRoutingConfig((prev) => ({ ...prev, httpPort: updates.httpPort }));
+        }
+        if ('mcpStrictValidation' in updates) {
+          setRoutingConfig((prev) => ({ ...prev, mcpStrictValidation: updates.mcpStrictValidation }));
         }
         showToast(t('settings.systemConfigUpdated'));
         return true;

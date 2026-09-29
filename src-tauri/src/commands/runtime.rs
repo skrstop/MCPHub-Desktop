@@ -1301,15 +1301,17 @@ fn get_unix_path() -> String {
         log::info!("[runtime] Executing shell with -l -i flags to get PATH");
         crate::services::app_logger::log_to_db("info", "[runtime] Executing shell with -l -i flags to get PATH");
 
-        if let Ok(output) = std::process::Command::new(&shell_path)
-            .arg("-l")      // login shell
-            .arg("-i")      // interactive shell - loads .bashrc/.zshrc
-            .arg("-c")      // execute command
-            .arg("echo $PATH")  // just output PATH
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
+        if let Some(output) = crate::services::runtime_env::run_with_timeout(
+            {
+                let mut c = std::process::Command::new(&shell_path);
+                c.arg("-l")      // login shell
+                    .arg("-i")      // interactive shell - loads .bashrc/.zshrc
+                    .arg("-c")      // execute command
+                    .arg("echo $PATH"); // just output PATH
+                c
+            },
+            std::time::Duration::from_secs(5),
+        ) {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -1326,8 +1328,9 @@ fn get_unix_path() -> String {
                 crate::services::app_logger::log_to_db("warn", &format!("[runtime] Shell command failed: {}", stderr));
             }
         } else {
-            log::warn!("[runtime] Failed to execute shell: {:?}", shell_path);
-            crate::services::app_logger::log_to_db("warn", &format!("[runtime] Failed to execute shell: {:?}", shell_path));
+            let msg = "[runtime] Shell PATH probe timed out after 5s, using fallback";
+            log::warn!("{}", msg);
+            crate::services::app_logger::log_to_db("warn", msg);
         }
     } else {
         log::warn!("[runtime] No user shell detected, using fallback PATH");

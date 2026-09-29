@@ -796,9 +796,18 @@ pub async fn import_skills(app: &AppHandle, items: Vec<ImportItem>) -> Result<Im
 
     for item in items {
         let dir_name = item.dir_name.trim().to_string();
-        if dir_name.is_empty() {
+        // Path-traversal guard: dir_name must be a single path segment —
+        // `lib.join(dir_name)` is used for copy/remove below, so names with
+        // separators or dot segments could escape the library dir and
+        // delete/copy arbitrary user directories.
+        if dir_name.is_empty()
+            || dir_name.contains('/')
+            || dir_name.contains('\\')
+            || dir_name == "."
+            || dir_name == ".."
+        {
             failure_count += 1;
-            results.push(ImportResultItem { dir_name: String::new(), success: false, message: Some("empty dir name".into()) });
+            results.push(ImportResultItem { dir_name, success: false, message: Some("invalid dir name".into()) });
             continue;
         }
         // Filesystem check (not DB): if the library already has this dir, skip.

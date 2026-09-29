@@ -21,7 +21,23 @@ pub trait McpTransport: Send + Sync {
     /// Retrieve the list of tools from the remote server
     async fn list_tools(&self) -> Result<Vec<Tool>>;
     /// Invoke a tool by name with the given arguments
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult>;
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
+        self.call_tool_with_meta(name, arguments, None).await
+    }
+
+    /// A2 MRTR / A9 OTel: call with request-level `_meta` merged into the
+    /// upstream JSON-RPC params (inputResponses retry, traceparent, …).
+    /// Default impl delegates to [`call_tool`] and drops `_meta` — only the
+    /// Streamable HTTP transport carries it upstream.
+    async fn call_tool_with_meta(
+        &self,
+        name: &str,
+        arguments: Value,
+        request_meta: Option<Value>,
+    ) -> Result<ToolCallResult> {
+        let _ = request_meta;
+        self.call_tool(name, arguments).await
+    }
 }
 
 /// Thin wrapper that holds a boxed transport and the server name
@@ -60,5 +76,15 @@ impl McpClient {
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
         self.transport.call_tool(name, arguments).await
+    }
+
+    /// A2/A9: variant that forwards request-level `_meta` upstream.
+    pub async fn call_tool_with_meta(
+        &self,
+        name: &str,
+        arguments: Value,
+        request_meta: Option<Value>,
+    ) -> Result<ToolCallResult> {
+        self.transport.call_tool_with_meta(name, arguments, request_meta).await
     }
 }

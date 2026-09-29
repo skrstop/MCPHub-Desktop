@@ -1395,7 +1395,7 @@ pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
 
 /// The app-level RAG tool definitions (name / description / inputSchema) that
 /// the MCP `tools/list` advertises while RAG is enabled. Single source of
-/// truth - consumed both by the HTTP MCP layer (`dispatch_mcp`) and by the
+/// truth - consumed both by the rmcp bridge (`rmcp_bridge.rs`) and by the
 /// `rag_tools` command that powers the "view tools" dialog in the UI.
 pub fn tool_definitions() -> Vec<serde_json::Value> {
     vec![
@@ -1525,6 +1525,7 @@ pub async fn call_builtin_tool(
     }
     let text_content = |s: String| vec![serde_json::json!({ "type": "text", "text": s })];
     let ok = |s: String| ToolCallResult {
+        raw_meta: None,
         content: text_content(s),
         is_error: false,
         structured_content: None,
@@ -4161,7 +4162,9 @@ fn zero_all_chunk_counts(app: &AppHandle) -> Result<()> {
             continue;
         }
         meta.chunk_count = 0;
-        if std::fs::write(&path, serde_json::to_vec(&meta)?).is_ok() {
+        // write_meta_atomic（tmp + rename）而非裸写：与所有其它 meta 写路径一致，
+        // 防崩溃留下半截 JSON 导致该文档被全部扫描器静默跳过。
+        if write_meta_atomic(&path, &meta).is_ok() {
             n += 1;
         }
     }

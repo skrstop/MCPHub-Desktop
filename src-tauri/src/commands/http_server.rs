@@ -91,7 +91,7 @@ pub async fn detect_port_occupier(port: u16) -> Result<Vec<PortOccupier>, String
                         continue;
                     }
                     // users:(("name",pid=1234,fd=...))
-                    if let (Some(start), Some(rest)) = (line.find("pid="), None::<()>) {
+                    if let Some(start) = line.find("pid=") {
                         let after = &line[start + 4..];
                         if let Some(end) = after.find(',') {
                             if let Ok(pid) = after[..end].parse::<u32>() {

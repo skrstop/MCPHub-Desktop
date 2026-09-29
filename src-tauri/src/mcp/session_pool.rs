@@ -240,10 +240,21 @@ async fn run_call(
             Ok(r)
         }
         Err(e) => {
-            // Heuristic: treat any call failure as a stale connection. Evict
-            // the entry so the next call rebuilds. (Origin does fine-grained
-            // HTTP 40x / SSE retry; we keep it simple — a single reconnect on
-            // the next call.)
+            // Evict ONLY on a genuinely broken connection. An upstream
+            // JSON-RPC application error (e.g. "tool not found", business
+            // validation) also surfaces as Err here, but the client and its
+            // underlying connection remain healthy — evicting on those would
+            // destroy per-session state (e.g. a Playwright browser session)
+            // for a mere tool-level failure. `is_connected()` distinguishes:
+            // the transport flag drops on real transport/IO failures.
+            let still_connected = client_arc.lock().await.is_connected();
+            if still_connected {
+                log::warn!(
+                    "[session-pool] Tool '{}' failed on session {} -> {} but connection healthy, keeping client: {}",
+                    tool, key.0, key.1, e
+                );
+                return Err(e);
+            }
             let mut map = store().write().await;
             map.remove(key);
             drop(map);

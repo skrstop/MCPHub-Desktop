@@ -222,6 +222,12 @@ pub struct ToolCallResult {
     /// only when the tool declared an outputSchema and returned structured data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<serde_json::Value>,
+    /// Upstream result `_meta`, verbatim (A2/A9: carries MRTR
+    /// `resultType: "input_required"` + `inputRequests`, and OTel trace keys
+    /// when the upstream echoes them). Downstream shaping decides what to do
+    /// with it per protocol revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_meta: Option<serde_json::Value>,
 }
 
 /// Combined server info returned to the dashboard

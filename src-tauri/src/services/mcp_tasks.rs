@@ -19,10 +19,6 @@
 //! `cancelled` and discards any late result. See the `ponytail:` note in
 //! `cancel`.
 
-use crate::{
-    mcp::{pool, session_pool},
-    services::mcp_version::VersionStrategy,
-};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -31,7 +27,6 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 /// Default polling hint returned to clients (ms).
 const DEFAULT_POLL_INTERVAL: u64 = 5000;
@@ -49,6 +44,7 @@ enum TaskStatus {
     // it — but kept so the state machine stays complete.
     #[allow(dead_code)]
     InputRequired,
+    #[allow(dead_code)] // only constructed by the removed in-hub task executor; kept for terminal-state classification
     Completed,
     Failed,
     Cancelled,
@@ -171,101 +167,70 @@ pub fn to_json(t: &Task) -> Value {
     v
 }
 
-/// Create a task wrapping a `tools/call`. Spawns the background upstream call;
-/// returns a `working` snapshot immediately.
-#[allow(clippy::too_many_arguments)]
-pub async fn create_tool_task(
-    server_name: String,
-    tool_name: String,
-    args: Value,
-    session_id: Option<String>,
-    is_isolated: bool,
-    client_ip: String,
-    strategy: &'static dyn VersionStrategy,
-    ttl: Option<u64>,
-) -> Value {
-    let task_id = Uuid::new_v4().to_string();
-    let now = now_rfc3339();
-    let task = Task {
-        task_id: task_id.clone(),
-        status: TaskStatus::Working,
-        status_message: Some("The operation is now in progress.".to_string()),
-        created_at: now.clone(),
-        last_updated_at: now,
-        ttl,
-        completed_at: None,
-        result: None,
-        error: None,
-    };
-    tasks().write().await.insert(task_id.clone(), task);
-    let snapshot = to_json(&tasks().read().await.get(&task_id).cloned().unwrap());
-
-    // Run the real upstream call in the background, then record the outcome.
-    tokio::spawn(async move {
-        let call_result = if is_isolated {
-            let sid = session_id.as_deref().unwrap_or("");
-            session_pool::call_tool_isolated(sid, &server_name, &tool_name, args.clone()).await
-        } else {
-            pool::call_tool(&server_name, &tool_name, args.clone()).await
-        };
-
-        // Record the outcome under a short-lived write lock, cloning out what
-        // the activity log needs so the lock is not held across the DB write.
-        let activity = {
-            let mut map = tasks().write().await;
-            let now = now_rfc3339();
-            let Some(entry) = map.get_mut(&task_id) else {
-                return; // swept by TTL before completion
-            };
-            // If the client already cancelled, discard the late result and
-            // stay terminal. Spec: terminal states never transition.
-            if entry.status.is_terminal() {
-                return;
-            }
-            match call_result {
-                Ok(r) => {
-                    let mut call_resp = json!({"content": r.content, "isError": r.is_error});
-                    if let Some(sc) = &r.structured_content {
-                        call_resp["structuredContent"] = sc.clone();
-                    }
-                    entry.result = Some(strategy.shape_tool_call_result(call_resp));
-                    entry.status = if r.is_error {
-                        TaskStatus::Failed
-                    } else {
-                        TaskStatus::Completed
-                    };
-                }
-                Err(e) => {
-                    entry.error = Some(e.to_string());
-                    entry.status = TaskStatus::Failed;
-                }
-            }
-            entry.status_message = None;
-            entry.last_updated_at = now.clone();
-            entry.completed_at = Some(now);
-            (
-                if entry.status == TaskStatus::Completed { "success" } else { "error" },
-                entry.result.clone(),
-                entry.error.clone(),
-            )
-        };
-
-        // Best-effort activity log for traceability in the log panel
-        // (lock released; write_activity takes Option<&str> for error/source_ip).
-        let _ = crate::services::log_service::write_activity(
-            &server_name,
-            &tool_name,
-            None,
-            activity.0,
-            Some(args),
-            activity.1,
-            activity.2.as_deref(),
-            Some(&client_ip),
-        )
-        .await;
+/// Serialize a Task as the 2026-07-28 extension `Task` shape: flat fields with
+/// `ttlMs` / `pollIntervalMs` naming (2025-11 uses `ttl` / `pollInterval`).
+pub fn to_json_ext(t: &Task) -> Value {
+    let mut v = json!({
+        "taskId": t.task_id,
+        "status": t.status.as_str(),
+        "createdAt": t.created_at,
+        "lastUpdatedAt": t.last_updated_at,
+        "ttlMs": t.ttl,
+        "pollIntervalMs": DEFAULT_POLL_INTERVAL,
     });
+    if let Some(ref msg) = t.status_message {
+        v["statusMessage"] = json!(msg);
+    }
+    v
+}
 
-    snapshot
+pub async fn get_ext(task_id: &str) -> Option<Value> {
+    let map = tasks().read().await;
+    let t = map.get(task_id)?;
+    let mut v = to_json_ext(t);
+    match t.status {
+        TaskStatus::Completed => {
+            let mut r = t.result.clone().unwrap_or_else(|| json!({"content": []}));
+            // Every 2026 result carries resultType — embed it in the
+            // CallToolResult too, not just the tasks/get envelope.
+            if let Some(obj) = r.as_object_mut() {
+                obj.entry("resultType").or_insert(json!("complete"));
+            }
+            v["result"] = r;
+        }
+        TaskStatus::Failed => {
+            // Failed requires an `error` object. Prefer the transport error
+            // message; if the failure was an isError:true tool result, derive
+            // the message from the stored result text.
+            let msg = t.error.clone().unwrap_or_else(|| {
+                t.result
+                    .as_ref()
+                    .map(|r| serde_json::to_string(r).unwrap_or_default())
+                    .unwrap_or_else(|| "task failed".to_string())
+            });
+            v["error"] = json!({"code": -32000, "message": msg});
+        }
+        _ => {}
+    }
+    Some(v)
+}
+
+/// `tasks/update` (2026-07-28 extension): accept client `inputResponses` for
+/// outstanding `inputRequests`. The hub never produces `inputRequests` (its
+/// tasks run straight through upstream calls), so per spec we acknowledge with
+/// an empty result and ignore the payloads; a task parked in
+/// `input_required` would resume to `working`.
+pub async fn update_input(task_id: &str, _input_responses: Value) -> Result<(), (i32, String)> {
+    let mut map = tasks().write().await;
+    let Some(t) = map.get_mut(task_id) else {
+        return Err((-32602, format!("Task '{}' not found", task_id)));
+    };
+    if t.status == TaskStatus::InputRequired {
+        t.status = TaskStatus::Working;
+        t.status_message = Some("Client input received; resuming.".to_string());
+        t.last_updated_at = now_rfc3339();
+    }
+    Ok(())
 }
 
 /// `tasks/get` — return the current Task snapshot, or None if unknown.

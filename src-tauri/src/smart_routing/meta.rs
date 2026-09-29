@@ -583,6 +583,7 @@ pub async fn call_meta_tool_builtin(
     use crate::models::server::ToolCallResult;
     if let Some(msg) = not_ready_message().await {
         return Ok(ToolCallResult {
+            raw_meta: None,
             content: vec![json!({"type": "text", "text": msg})],
             is_error: true,
             structured_content: None,
@@ -607,11 +608,13 @@ pub async fn call_meta_tool_builtin(
     };
     Ok(match result {
         Ok(payload) => ToolCallResult {
+            raw_meta: None,
             content: vec![json!({"type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default()})],
             is_error: false,
             structured_content: None,
         },
         Err(e) => ToolCallResult {
+            raw_meta: None,
             content: vec![json!({"type": "text", "text": e})],
             is_error: true,
             structured_content: None,

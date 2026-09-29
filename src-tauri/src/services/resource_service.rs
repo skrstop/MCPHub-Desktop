@@ -169,6 +169,14 @@ pub async fn find_by_id(id: &str) -> Result<Option<BuiltinResource>> {
 }
 
 pub async fn create(payload: &BuiltinResourcePayload) -> Result<BuiltinResource> {
+    let created = create_inner(payload).await?;
+    // A3: content changed → notify both list-changed and the specific URI.
+    crate::services::subscription_hub::notify_resources_list_changed().await;
+    crate::services::subscription_hub::notify_resource_updated(&created.uri).await;
+    Ok(created)
+}
+
+async fn create_inner(payload: &BuiltinResourcePayload) -> Result<BuiltinResource> {
     let id = Uuid::new_v4().to_string();
     let fts_text = resource_fts_text(
         payload.name.as_deref().unwrap_or(""),
@@ -266,7 +274,12 @@ pub async fn update(id: &str, payload: &BuiltinResourcePayload) -> Result<Option
     )
     .await?;
     tx.commit().await?;
-    find_by_id(id).await
+    let out = find_by_id(id).await;
+    if let Ok(Some(ref r)) = out {
+        crate::services::subscription_hub::notify_resources_list_changed().await;
+        crate::services::subscription_hub::notify_resource_updated(&r.uri).await;
+    }
+    out
 }
 
 pub async fn delete(id: &str) -> Result<bool> {
@@ -292,6 +305,9 @@ pub async fn delete(id: &str) -> Result<bool> {
         .await?;
     }
     tx.commit().await?;
+    if affected > 0 {
+        crate::services::subscription_hub::notify_resources_list_changed().await;
+    }
     Ok(affected > 0)
 }
 
