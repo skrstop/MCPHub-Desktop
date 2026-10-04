@@ -31,32 +31,36 @@ pub async fn list_all() -> Result<Vec<BearerKey>> {
 }
 
 pub async fn find_by_token(token: &str) -> Result<Option<BearerKey>> {
-    let row = sqlx::query(
-        "SELECT id, name, token, enabled, access_type, allowed_groups, allowed_servers, created_at \
-         FROM bearer_keys WHERE token = ?",
-    )
-    .bind(token)
-    .fetch_optional(db::pool())
-    .await?;
-
-    match row {
-        None => Ok(None),
-        Some(r) => {
-            let enabled: i64 = r.try_get("enabled")?;
-            let groups_json: String = r.try_get("allowed_groups")?;
-            let servers_json: String = r.try_get("allowed_servers")?;
-            Ok(Some(BearerKey {
-                id: r.try_get("id")?,
-                name: r.try_get("name")?,
-                token: r.try_get("token")?,
-                enabled: enabled != 0,
-                access_type: r.try_get("access_type")?,
-                allowed_groups: serde_json::from_str(&groups_json).unwrap_or_default(),
-                allowed_servers: serde_json::from_str(&servers_json).unwrap_or_default(),
-                created_at: r.try_get("created_at")?,
-            }))
+    // Constant-time token comparison: an indexed `WHERE token = ?` lookup
+    // leaks timing information about matching prefixes. The key count is
+    // small (desktop scale), so load ALL keys and compare in constant time —
+    // the CALLER filters disabled keys (a disabled key must fail 401, not
+    // pass auth).
+    let candidates = list_all().await?;
+    let token_bytes = token.as_bytes();
+    let mut best: Option<BearerKey> = None;
+    let mut best_found = 0u8;
+    for key in candidates {
+        let k = key.token.as_bytes();
+        // Constant-time equality over min length + length difference folded
+        // in, so early-exit timing on length is eliminated.
+        let n = k.len().max(token_bytes.len());
+        let mut diff = (k.len() ^ token_bytes.len()) as u8;
+        for i in 0..n {
+            let a = k.get(i).copied().unwrap_or(0);
+            let b = token_bytes.get(i).copied().unwrap_or(0);
+            diff |= a ^ b;
         }
+        let matched = (diff == 0) as u8;
+        // Branchless-ish selection: `best_found` accumulates a match bit so
+        // later keys can never overwrite an earlier match; the `if` only
+        // guards the assignment, not the comparison outcome.
+        if best_found == 0 && matched == 1 {
+            best = Some(key);
+        }
+        best_found |= matched;
     }
+    Ok(best)
 }
 
 pub async fn create(payload: &BearerKeyPayload) -> Result<BearerKey> {

@@ -77,7 +77,10 @@ pub async fn compute_scope_with(
     let mut allowed: Vec<String> = crate::mcp::pool::get_all_statuses()
         .await
         .into_iter()
-        .filter(|s| s.connected)
+        // Sleeping on-demand servers keep their cached tools discoverable —
+        // same rule as the global scope filter and reindex_all
+        // (connected || start_on_demand); pool::call_tool wakes them on demand.
+        .filter(|s| s.connected || s.start_on_demand)
         .map(|s| s.name)
         .collect();
     // The builtin "mcphub-desktop" server is virtual (no pool entry) — add it
@@ -369,7 +372,9 @@ async fn resolve_tool(
             let mut names: Vec<String> = crate::mcp::pool::get_all_statuses()
                 .await
                 .into_iter()
-                .filter(|s| s.connected)
+                // Same rule as compute_scope_with / reindex_all: include
+                // sleeping on-demand servers (their cached tools are indexed).
+                .filter(|s| s.connected || s.start_on_demand)
                 .map(|s| s.name)
                 .collect();
             // resolve_tool only looks at tools of servers in this list; the
@@ -386,9 +391,25 @@ async fn resolve_tool(
         .ok()
         .and_then(|c| c.get("nameSeparator").and_then(|v| v.as_str()).map(str::to_string))
         .unwrap_or_else(|| "-".to_string());
+    // Longest server name first: with prefix-stripping servers (`git` vs
+    // `github`), a short name could otherwise steal a prefix match whose
+    // remainder happens to collide with one of its own tools (review round 8).
+    let mut servers = servers;
+    servers.sort_by_key(|s| std::cmp::Reverse(s.len()));
     for sn in &servers {
         let prefix = format!("{sn}{sep}");
         let orig = tool_name.strip_prefix(&prefix).unwrap_or(tool_name);
+        // Meta tools (smart_route_*) must never resolve onto the BUILTIN
+        // server: pool::call_tool(BUILTIN, meta) re-enters handle_call_tool,
+        // and the builtin server's list_tools includes the meta tools — a
+        // bare or builtin-prefixed meta name would recurse without bound
+        // (async Box::pin per level) until the process aborts (review round
+        // 8, 2026-10-04). A server-PREFIXED meta name targets a real
+        // upstream server and is safe — only the builtin/bare branch is
+        // skipped (review round 9).
+        if sn == crate::rag::service::BUILTIN_SERVER_NAME && is_meta_tool(orig) {
+            continue;
+        }
         if let Ok(ts) = crate::mcp::pool::list_tools_for(sn).await {
             if ts.iter().any(|t| t.name == orig) {
                 return Some((sn.clone(), orig.to_string()));
@@ -466,19 +487,37 @@ pub async fn handle_call_tool(
         ));
     }
     // Enabled check (index may be stale after a post-index disable).
-    if let Ok(ts) = crate::mcp::pool::list_tools_for(&server).await {
-        let filtered =
-            crate::services::server_tool_config_service::apply_tool_filters(&server, ts)
-                .await
-                .unwrap_or_default();
-        if let Some(t) = filtered.iter().find(|t| t.name == orig) {
-            if !t.enabled {
-                return Err(format!("Tool '{}' is disabled", orig));
+    // NOT fail-open: a filter-store read error must refuse the call, not
+    // bypass the disable check (same semantics as the direct /mcp gate).
+    match crate::mcp::pool::list_tools_for(&server).await {
+        Ok(ts) => {
+            match crate::services::server_tool_config_service::apply_tool_filters(&server, ts).await {
+                Ok(filtered) => {
+                    if filtered.iter().any(|t| t.name == orig && !t.enabled) {
+                        return Err(format!("Tool '{}' is disabled", orig));
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[smart] tool-filter check failed for '{}': {} — refusing call", orig, e);
+                    return Err(format!(
+                        "Tool '{}' unavailable (tool filter check failed)",
+                        orig
+                    ));
+                }
             }
+        }
+        Err(e) => {
+            log::warn!("[smart] tool list failed for '{}': {} — refusing call", server, e);
+            return Err(format!("Tool '{}' unavailable (tool list failed)", orig));
         }
     }
     log::info!("[smart] meta smart_route_call '{}' -> {}:{}", tool_name, server, orig);
-    let result = crate::mcp::pool::call_tool(&server, &orig, args)
+    // 600s dead-transport guard (mcp::time): all three smart_route_call
+    // entrypoints (MCP $smart scope, REST /rest/smart/call, Tauri test dialog)
+    // funnel through here — without this wrapper a hung upstream parks the
+    // caller forever AND holds the pool's per-client mutex, deadlocking every
+    // subsequent shared-path call for that server (M3 parity).
+    let result = crate::mcp::time::timeout_tool_call(crate::mcp::pool::call_tool(&server, &orig, args))
         .await
         .map_err(|e| e.to_string())?;
     let mut resp = json!({"content": result.content, "isError": result.is_error});

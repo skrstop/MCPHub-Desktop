@@ -1,7 +1,9 @@
 use crate::{
+    commands::auth::SessionState,
     models::prompt::{BuiltinPrompt, BuiltinPromptPayload, PromptPage},
     services::prompt_service,
 };
+use tauri::State;
 
 #[tauri::command]
 pub async fn list_builtin_prompts() -> Result<Vec<BuiltinPrompt>, String> {
@@ -17,8 +19,12 @@ pub async fn get_builtin_prompt(id: String) -> Result<Option<BuiltinPrompt>, Str
 
 #[tauri::command]
 pub async fn create_builtin_prompt(
+    session: State<'_, SessionState>,
     payload: BuiltinPromptPayload,
 ) -> Result<BuiltinPrompt, String> {
+    // Write op: shared builtin prompts are exposed to every MCP client —
+    // non-admin sessions must not create them (review round 8, 2026-10-04).
+    crate::commands::config::require_admin(&session).await?;
     prompt_service::create(&payload)
         .await
         .map_err(|e| e.to_string())
@@ -26,9 +32,11 @@ pub async fn create_builtin_prompt(
 
 #[tauri::command]
 pub async fn update_builtin_prompt(
+    session: State<'_, SessionState>,
     id: String,
     payload: BuiltinPromptPayload,
 ) -> Result<BuiltinPrompt, String> {
+    crate::commands::config::require_admin(&session).await?;
     prompt_service::update(&id, &payload)
         .await
         .map_err(|e| e.to_string())?
@@ -36,7 +44,11 @@ pub async fn update_builtin_prompt(
 }
 
 #[tauri::command]
-pub async fn delete_builtin_prompt(id: String) -> Result<bool, String> {
+pub async fn delete_builtin_prompt(
+    session: State<'_, SessionState>,
+    id: String,
+) -> Result<bool, String> {
+    crate::commands::config::require_admin(&session).await?;
     prompt_service::delete(&id)
         .await
         .map_err(|e| e.to_string())
@@ -55,6 +67,9 @@ pub async fn call_builtin_prompt(
     if !prompt.enabled {
         return Err(format!("Prompt '{}' is disabled", id));
     }
+
+    prompt_service::validate_required_args(&prompt.arguments, &args)
+        .map_err(|e| e)?;
 
     Ok(prompt_service::render_template(&prompt.template, &args))
 }

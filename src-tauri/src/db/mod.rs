@@ -56,7 +56,9 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
     // Run version-wise migrations
     migration::run_pending(&pool).await?;
 
-    DB_POOL.set(pool).ok();
+    DB_POOL
+        .set(pool)
+        .map_err(|_| anyhow::anyhow!("db pool already initialized"))?;
     log::info!("Database initialized at {}", db_path.display());
     Ok(())
 }

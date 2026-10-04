@@ -41,6 +41,9 @@ use tokio::time::{timeout, Duration};
 /// Connect timeout for a freshly spawned on-demand client. Matches the shared
 /// pool's 120s budget (npx/uvx first-run package downloads can be slow).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Cap on the post-connect tools/list sweep (rmcp peer requests have no
+/// default timeout); creation lock is held until this completes.
+const TOOLS_LIST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default idle-shutdown delay when `idle_timeout_ms` is unset (5 min).
 const DEFAULT_IDLE_MS: u64 = 300_000;
@@ -55,6 +58,15 @@ struct OnDemandEntry {
     /// Handle to the pending idle-shutdown task. Aborted + replaced on every
     /// successful call to push the shutdown out.
     idle_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Number of tool calls currently in flight (COUNTER, not a bool). The
+    /// idle timer must not tear the client down while this is > 0 — a call can
+    /// legally run longer than `idle_ms` (pool upstream calls may take up to
+    /// 600s), and the pre-call `last_used` bump otherwise keeps the timer's
+    /// generation snapshot matching for the entire call duration, causing a
+    /// deterministic teardown right after the call returns. A bool was wrong
+    /// for CONCURRENT calls: the first finisher cleared the flag while the
+    /// second was still running, letting the timer disconnect a live call.
+    in_flight: u32,
 }
 
 type Store = Arc<RwLock<HashMap<String, OnDemandEntry>>>;
@@ -138,6 +150,32 @@ pub async fn call_tool_on_demand(
         ),
     );
 
+    // Serialize with connect/disconnect on the same server so the cold start
+    // cannot interleave with a disable/reload/delete cycle: without this, a
+    // `disconnect_server` running concurrently would clean the pool shadow and
+    // terminate lifecycle management while we spawn a fresh client — producing
+    // an orphaned client that keeps its process alive until the idle timer
+    // fires (and the late timer would then stomp on whatever entry replaced
+    // the shadow). Holding the connect lock spans config load + spawn +
+    // insert; mark_* mutators now also guard on entry identity.
+    let _connect_guard = pool::pool_connect_lock(server_name).await;
+
+    // Re-check the store after acquiring the connect lock: a racing cold
+    // start that held the lock before us may have already spawned.
+    {
+        let map = store().read().await;
+        if let Some(entry) = map.get(server_name) {
+            let client_arc = entry.client.clone();
+            let idle_ms = entry.idle_ms;
+            drop(map);
+            log::debug!(
+                "[on-demand] Client for '{}' appeared while waiting for connect lock (tool '{}')",
+                server_name, tool
+            );
+            return run_call(server_name, &client_arc, tool, arguments, idle_ms).await;
+        }
+    }
+
     // Build + connect a fresh client. The DB read happens only here (once per
     // wake), not on every call.
     let cfg = server_service::get_by_name(server_name)
@@ -183,6 +221,7 @@ pub async fn call_tool_on_demand(
                 last_used: Instant::now(),
                 idle_ms,
                 idle_handle: Mutex::new(None),
+                in_flight: 0,
             },
         );
     }
@@ -202,6 +241,39 @@ pub async fn call_tool_on_demand(
 /// Run `call_tool` on a cached on-demand client. On a connection-class error
 /// the entry is evicted so the next call rebuilds. On success the idle-shutdown
 /// timer is reset.
+/// RAII guard for the `in_flight` busy flag (see `run_call`). On Drop —
+/// including future cancellation — spawns a detached task that clears the
+/// flag (generation-guarded) and re-arms the idle timer.
+struct InFlightGuard {
+    server_name: String,
+    client_arc: Arc<Mutex<McpClient>>,
+    idle_ms: u64,
+    /// Set false on the normal completion path so Drop is a no-op.
+    armed: bool,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let server_name = self.server_name.clone();
+        let client_arc = self.client_arc.clone();
+        let idle_ms = self.idle_ms;
+        let _ = tokio::spawn(async move {
+            let mut map = store().write().await;
+            if let Some(entry) = map.get_mut(&server_name) {
+                if Arc::ptr_eq(&entry.client, &client_arc) {
+                    entry.in_flight = entry.in_flight.saturating_sub(1);
+                    entry.last_used = Instant::now();
+                }
+            }
+            drop(map);
+            schedule_idle(&server_name, idle_ms).await;
+        });
+    }
+}
+
 async fn run_call(
     server_name: &str,
     client_arc: &Arc<Mutex<McpClient>>,
@@ -210,22 +282,75 @@ async fn run_call(
     idle_ms: u64,
 ) -> Result<ToolCallResult> {
     let call_start = Instant::now();
-    // Bump `last_used` before the call starts (origin #1164): a long-running
-    // tool must not be shut down mid-call by the idle timer, which checks
-    // `last_used` when it fires. Without this bump the timer's generation
-    // snapshot still matches during the call and the entry gets removed while
-    // the client lock is held.
+    // Mark the entry busy + bump `last_used` before the call starts. The busy
+    // flag is what actually protects long calls: a tool can legally run longer
+    // than `idle_ms` (upstream calls may take up to 600s while the default
+    // idle is 300s), and during the call `last_used` does not change — so the
+    // timer's generation snapshot would keep matching and the entry would be
+    // torn down the moment the call returned. The idle timer skips removal
+    // while `in_flight` is set and re-arms instead.
     {
         let mut map = store().write().await;
         if let Some(entry) = map.get_mut(server_name) {
+            // Generation guard (mirrors the clear path below): if this call's
+            // entry was torn down (lifecycle) and cold-start-rebuilt before we
+            // even got here, the map now holds the NEW generation — blindly
+            // setting in_flight=true on it would stick forever (the stale
+            // call's clear is ptr_eq-guarded), and the new generation's idle
+            // timer would then never tear it down (process leak).
+            if !Arc::ptr_eq(&entry.client, client_arc) {
+                return Err(anyhow::anyhow!(
+                    "[on-demand] '{}' entry was rebuilt during call setup; retry",
+                    server_name
+                ));
+            }
             entry.last_used = Instant::now();
+            entry.in_flight += 1;
         }
     }
+    // NOTE: no await between the increment above and the guard construction
+    // below — a cancellation in that window would leak the counter (neither
+    // the manual clear nor the guard Drop would run). schedule_idle moved
+    // after the guard for exactly this reason.
+    // Cancellation guard: if this future is dropped mid-await (e.g. the 600s
+    // `timeout_tool_call` wrapper fires while we're parked on the client
+    // mutex or the upstream call), the manual clear below never runs and
+    // `in_flight` would stick true forever — the idle timer would then never
+    // tear the entry down (process leak). The guard's Drop spawns a detached
+    // clear (ptr_eq-guarded) that runs even on cancellation. Disarmed on the
+    // normal path so the manual clear below is the only actor.
+    let mut guard = InFlightGuard {
+        server_name: server_name.to_string(),
+        client_arc: client_arc.clone(),
+        idle_ms,
+        armed: true,
+    };
+    // Re-arm AFTER the guard exists (moved from before it): the store
+    // read/entry-mutex awaits are now covered — a cancellation there runs the
+    // guard's Drop decrement instead of leaking the counter.
     schedule_idle(server_name, idle_ms).await;
     let result = {
         let client = client_arc.lock().await;
         client.call_tool(tool, arguments).await
     };
+    guard.armed = false;
+    // Clear the busy flag (both Ok and Err paths) before re-arming the timer.
+    // Generation guard: if this call's entry was torn down (lifecycle) and
+    // cold-start-rebuilt during the call, `map[server_name]` now holds the NEW
+    // generation whose own run_call has set in_flight=true — blindly clearing
+    // it by name would let the new generation's idle timer tear down a live
+    // in-flight call.
+    {
+        let mut map = store().write().await;
+        if let Some(entry) = map.get_mut(server_name) {
+            if Arc::ptr_eq(&entry.client, client_arc) {
+                entry.in_flight = entry.in_flight.saturating_sub(1);
+                if result.is_ok() {
+                    entry.last_used = Instant::now();
+                }
+            }
+        }
+    }
     match result {
         Ok(r) => {
             let status = if r.is_error { "error" } else { "success" };
@@ -236,13 +361,7 @@ async fn run_call(
                 status,
                 call_start.elapsed().as_millis()
             );
-            // Update last_used (brief write lock) and reset the idle timer.
-            {
-                let mut map = store().write().await;
-                if let Some(entry) = map.get_mut(server_name) {
-                    entry.last_used = Instant::now();
-                }
-            }
+            // Reset the idle timer (last_used + in_flight already updated above).
             schedule_idle(server_name, idle_ms).await;
             Ok(r)
         }
@@ -250,7 +369,9 @@ async fn run_call(
             // Evict ONLY on a genuinely broken connection (see session_pool
             // run_call): upstream JSON-RPC application errors keep the client
             // alive so the on-demand process (and any state it holds) survives
-            // tool-level failures.
+            // tool-level failures. NOTE: `is_connected()` only flips on
+            // explicit connect/disconnect — upstream process death does not
+            // lower it (best-effort check; the idle timer is the real reaper).
             let still_connected = client_arc.lock().await.is_connected();
             if still_connected {
                 log::warn!(
@@ -261,15 +382,31 @@ async fn run_call(
             }
             let client_to_disconnect = {
                 let mut map = store().write().await;
-                map.remove(server_name).map(|e| e.client)
+                // Only evict THIS client (ptr_eq) — a concurrent cold start
+                // may have replaced the entry between our read and now.
+                let evict = map
+                    .get(server_name)
+                    .map(|e| Arc::ptr_eq(&e.client, client_arc))
+                    .unwrap_or(false);
+                if evict {
+                    map.remove(server_name).map(|e| e.client)
+                } else {
+                    None
+                }
             };
+            let evicted = client_to_disconnect.is_some();
             if let Some(arc) = client_to_disconnect {
                 let mut client = arc.lock().await;
                 let _ = client.disconnect().await;
             }
-            // Mark the pool placeholder sleeping (keep cached tools) so the
-            // server re-wakes on the next call.
-            pool::mark_on_demand_sleeping(server_name).await;
+            // Mark the pool placeholder sleeping (keep cached tools) only when
+            // we actually evicted OUR entry — if the ptr_eq guard refused
+            // (a concurrent cold start already replaced it), the store holds a
+            // live awake client and the pool placeholder must not flip to
+            // sleeping.
+            if evicted {
+                pool::mark_on_demand_sleeping(server_name).await;
+            }
             let msg = format!(
                 "[on-demand] Tool '{}' call failed on '{}' ({}ms), evicted client: {}",
                 tool,
@@ -298,7 +435,31 @@ async fn build_and_connect(
     let mut client = pool::build_client(cfg)?;
     match timeout(CONNECT_TIMEOUT, client.connect()).await {
         Ok(Ok(())) => {
-            let tools = client.list_tools().await.unwrap_or_default();
+            // 60s cap on tools/list: rmcp peer requests have no default
+            // timeout, and a server that completes initialize then stalls on
+            // tools/list would hang here while the per-server creation lock is
+            // still held — queuing every subsequent first-call forever.
+            // Same guard as pool::connect_server; timeout counts as failure so
+            // the half-built client is reaped.
+            let tools = match timeout(TOOLS_LIST_TIMEOUT, client.list_tools()).await {
+                Ok(Ok(ts)) => ts,
+                Ok(Err(e)) => {
+                    log::warn!("[on-demand] '{}' tools/list failed: {}", cfg.name, e);
+                    Vec::new()
+                }
+                Err(_) => {
+                    log::warn!(
+                        "[on-demand] '{}' tools/list timed out after {}s; disconnecting half-built client",
+                        cfg.name,
+                        TOOLS_LIST_TIMEOUT.as_secs()
+                    );
+                    let _ = client.disconnect().await;
+                    return Err(anyhow::anyhow!(
+                        "tools/list timed out after {}s",
+                        TOOLS_LIST_TIMEOUT.as_secs()
+                    ));
+                }
+            };
             let server_version = client.server_version();
             Ok((client, tools, server_version))
         }
@@ -329,6 +490,15 @@ async fn build_and_connect(
 /// first so each successful call pushes shutdown out by `idle_ms`. The timer
 /// task captures the current `last_used` as a generation; if a newer call
 /// resets `last_used` before the timer fires, the shutdown is skipped.
+/// Non-async timer spawner: keeps the schedule/shutdown future types from
+/// forming a recursive opaque-type cycle (shutdown re-arms through this).
+fn spawn_idle_timer(server_name: String, idle_ms: u64, snapshot: Instant) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(idle_ms)).await;
+        shutdown_on_demand_idle(&server_name, snapshot).await;
+    });
+}
+
 async fn schedule_idle(server_name: &str, idle_ms: u64) {
     let snapshot = {
         let map = store().read().await;
@@ -365,11 +535,14 @@ async fn schedule_idle(server_name: &str, idle_ms: u64) {
 /// tools) unless a newer call reset `last_used` since this timer was armed.
 pub async fn shutdown_on_demand_idle(server_name: &str, snapshot: Instant) {
     // Re-check last_used under the write lock. If it changed, a newer call
-    // arrived after this timer was armed - abort the shutdown.
+    // arrived after this timer was armed - abort the shutdown. A call in
+    // flight (`in_flight`) also blocks removal: it may legally outlast
+    // idle_ms, and tearing down right after it returns would drop a healthy
+    // client and lose stateful server state.
     let client_to_disconnect = {
         let mut map = store().write().await;
         let remove = match map.get(server_name) {
-            Some(entry) => entry.last_used == snapshot,
+            Some(entry) => entry.last_used == snapshot && entry.in_flight == 0,
             None => false,
         };
         if remove {
@@ -381,10 +554,24 @@ pub async fn shutdown_on_demand_idle(server_name: &str, snapshot: Instant) {
     let client_arc = match client_to_disconnect {
         Some(c) => c,
         None => {
-            log::debug!(
-                "[on-demand] Idle shutdown for '{}' skipped (newer call reset timer)",
-                server_name
-            );
+            // A newer call reset last_used — but through the handle-swap race
+            // in schedule_idle the surviving timer may be THIS (stale) one,
+            // leaving NO live timer for the newer generation. Re-arm here so
+            // idle shutdown can never be lost permanently.
+            let idle_ms = {
+                let map = store().read().await;
+                map.get(server_name).map(|e| (e.idle_ms, e.last_used))
+            };
+            if let Some((idle_ms, last_used)) = idle_ms {
+                log::debug!(
+                    "[on-demand] Idle shutdown for '{}' skipped (newer call); re-arming timer",
+                    server_name
+                );
+                // Re-arm via the non-async free helper: awaiting schedule_idle
+                // here would form a recursive future (schedule → spawned timer
+                // → this fn → schedule) whose opaque type never computes.
+                spawn_idle_timer(server_name.to_string(), idle_ms, last_used);
+            }
             return;
         }
     };
@@ -424,16 +611,17 @@ pub async fn shutdown_on_demand_lifecycle(server_name: &str) {
 
 /// Remove the on-demand entry for `server_name` under the store write lock and
 /// return its client Arc (caller does the disconnect I/O outside the lock).
-/// Also drops the per-server creation lock so a later re-enable creates fresh.
+/// The per-server creation lock is intentionally KEPT in the map: a cold-start
+/// holds that lock across connect(120s)+list_tools(60s), and removing it
+/// mid-flight lets a concurrent call create a second lock and a second
+/// cold-start — the loser's client then overwrites the winner's store entry
+/// and is abandoned without disconnect (orphaned stdio grandchildren). The
+/// map is bounded by the server count; reuse across re-enables is harmless.
 async fn tear_down_on_demand_client(server_name: &str) -> Option<Arc<Mutex<McpClient>>> {
     let removed = {
         let mut map = store().write().await;
         map.remove(server_name).map(|e| e.client)
     };
-    {
-        let mut locks = create_locks().lock().await;
-        locks.remove(server_name);
-    }
     removed
 }
 

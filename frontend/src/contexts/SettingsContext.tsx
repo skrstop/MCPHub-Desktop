@@ -353,11 +353,14 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
   const [routingConfig, setRoutingConfig] = useState<RoutingConfig>({
     enableGlobalRoute: true,
     enableGroupNameRoute: true,
-    enableBearerAuth: true,
+    // Initial values mirror the Rust runtime defaults (enableBearerAuth
+    // unwrap_or(false), skipAuth default true) so the pre-fetch render never
+    // lies about the actual auth state (review round 8, 2026-10-04).
+    enableBearerAuth: false,
     bearerAuthKey: '',
     bearerAuthHeaderName: 'Authorization',
     jsonBodyLimit: '1mb',
-    skipAuth: false,
+    skipAuth: true,
     httpPort: 23333,
     exposeHttp: true,
     mcpStrictValidation: false,
@@ -451,11 +454,17 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
         setRoutingConfig({
           enableGlobalRoute: routing.enableGlobalRoute ?? true,
           enableGroupNameRoute: routing.enableGroupNameRoute ?? true,
-          enableBearerAuth: routing.enableBearerAuth ?? true,
+          // Rust (http_server.rs) reads enableBearerAuth with unwrap_or(false) —
+          // a fresh install without a `routing` config node runs bearer auth
+          // OFF. The UI default must match or the toggle lies about protection.
+          enableBearerAuth: routing.enableBearerAuth ?? false,
           bearerAuthKey: routing.bearerAuthKey || '',
           bearerAuthHeaderName: routing.bearerAuthHeaderName || 'Authorization',
           jsonBodyLimit: routing.jsonBodyLimit || '1mb',
-          skipAuth: routing.skipAuth ?? false,
+          // Rust get_public_config defaults skipAuth to TRUE (desktop login-free
+          // mode); the UI default must match or the toggle shows OFF while the
+          // app is actually in login-free mode.
+          skipAuth: routing.skipAuth ?? true,
           httpPort: data.data.systemConfig.httpPort ?? 23333,
           exposeHttp: data.data.systemConfig.exposeHttp ?? true,
           mcpStrictValidation: data.data.systemConfig.mcp?.strictValidation ?? false,
@@ -1137,7 +1146,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     setLoading(true);
     setError(null);
     try {
-      return await apiGet(`/mcp-settings/export?serverName=${serverName ? serverName : ''}`);
+      return await apiGet(`/mcp-settings/export?serverName=${serverName ? encodeURIComponent(serverName) : ''}`);
     } catch (error) {
       console.error('Failed to export MCP settings', { serverName, error });
       const errorMessage = error instanceof Error ? error.message : 'Failed to export MCP settings';

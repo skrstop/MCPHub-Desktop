@@ -152,11 +152,21 @@ impl ModernBertArch {
         let mut blocks = Vec::with_capacity(block_count);
         for i in 0..block_count {
             // Layer 0's attn_norm is Identity — the GGUF has no
-            // `blk.0.attn_norm.weight` tensor (HF: `nn.Identity()`). Absence → None.
-            let attn_norm = content
-                .tensor(file, &format!("blk.{i}.attn_norm.weight"), device)
-                .ok()
-                .map(|w| RmsNorm::new(w.dequantize(device).unwrap(), eps));
+            // `blk.0.attn_norm.weight` tensor (HF: `nn.Identity()`). Absence
+            // is legal ONLY for layer 0; layers 1.. must propagate load
+            // errors (`?`), otherwise a wrong tensor name / corrupt file
+            // would silently build a model with missing norms and produce
+            // degraded embeddings. The inner dequantize is `?` too (was an
+            // unwrap → panic on the async load thread).
+            let attn_norm = if i == 0 {
+                match content.tensor(file, "blk.0.attn_norm.weight", device) {
+                    Ok(w) => Some(RmsNorm::new(w.dequantize(device)?, eps)),
+                    Err(_) => None,
+                }
+            } else {
+                let w = content.tensor(file, &format!("blk.{i}.attn_norm.weight"), device)?;
+                Some(RmsNorm::new(w.dequantize(device)?, eps))
+            };
             let is_sliding = i % pattern != 0;
             blocks.push(ModernBertBlock {
                 attn_norm,

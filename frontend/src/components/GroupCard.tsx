@@ -83,13 +83,13 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
     }
   };
 
-  const groupEndpoint = `${baseUrl}/mcp/${group.name}`;
-  // Only the client-config dialog needs a URL-encoded path segment: group names
-  // may contain spaces/CJK, and the generated client snippets must be valid URLs.
-  // The raw groupEndpoint above is intentionally left as-is for the legacy
-  // "Copy URL" actions.
-  const clientConfigEndpoint = `${baseUrl}/mcp/${encodeURIComponent(group.name)}`;
-  const groupOpenApiEndpoint = `${baseUrl}/api/${group.name}`;
+  // Path segments are URL-encoded for ALL consumers: group names may contain
+  // spaces/CJK, and the copy buttons hand users a URL every MCP/REST client
+  // must be able to request — a raw `my tools` in the clipboard is simply a
+  // broken URL, not a style choice.
+  const groupEndpoint = `${baseUrl}/mcp/${encodeURIComponent(group.name)}`;
+  const clientConfigEndpoint = groupEndpoint;
+  const groupOpenApiEndpoint = `${baseUrl}/api/${encodeURIComponent(group.name)}`;
 
   const serverNames = getServerNames(group.servers);
   const groupServers = servers.filter((s) => serverNames.includes(s.name));

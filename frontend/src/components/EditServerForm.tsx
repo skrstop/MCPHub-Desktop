@@ -22,9 +22,12 @@ const EditServerForm = ({ server, onEdit, onCancel }: EditServerFormProps) => {
       // Check if name is being changed
       const isRenaming = payload.name && payload.name !== server.name;
 
-      // Build the request body
+      // Build the request body. `enabled` is injected from the live server
+      // record: the edit form has no enable/disable control, and without
+      // this the payload omits `enabled`, letting Rust's default (true)
+      // silently re-enable a disabled server on any edit (R117 F4).
       const requestBody = {
-        config: payload.config,
+        config: { ...payload.config, enabled: server.enabled !== false },
         ...(isRenaming ? { newName: payload.name } : {}),
       };
 

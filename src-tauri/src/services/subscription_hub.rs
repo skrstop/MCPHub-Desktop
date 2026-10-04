@@ -31,12 +31,46 @@ struct Subscriber {
     subscription_id: Value,
     filter: Value,
     tasks_opted_in: bool,
+    /// Exact `taskIds` the subscriber opted into (empty = NOT opted in).
+    /// Matching is strictly per-id so a subscriber of t1 never sees t2's state.
+    task_ids: Vec<String>,
     tx: mpsc::UnboundedSender<String>,
 }
 
 type Subs = Vec<Subscriber>;
 
 static SUBSCRIBERS: OnceLock<tokio::sync::RwLock<Subs>> = OnceLock::new();
+
+/// Typed change events, consumed by the rmcp-native `subscriptions/listen`
+/// streams (see `rmcp_bridge::listen`). The raw-string `Subs` registry above
+/// serves the legacy hand-written SSE path semantics (kept for parity/tests);
+/// the rmcp path forwards these into the typed `SubscriptionSink`.
+#[derive(Debug, Clone)]
+pub enum HubEvent {
+    ToolsListChanged,
+    PromptsListChanged,
+    ResourcesListChanged,
+    ResourceUpdated(String),
+    TaskStatus(Value),
+}
+
+fn event_bus() -> &'static tokio::sync::broadcast::Sender<HubEvent> {
+    static BUS: OnceLock<tokio::sync::broadcast::Sender<HubEvent>> = OnceLock::new();
+    BUS.get_or_init(|| {
+        let (tx, _) = tokio::sync::broadcast::channel(256);
+        tx
+    })
+}
+
+/// Subscribe to typed hub events (one receiver per live listen stream).
+pub fn subscribe_events() -> tokio::sync::broadcast::Receiver<HubEvent> {
+    event_bus().subscribe()
+}
+
+fn publish(ev: HubEvent) {
+    // No receivers (or slow receivers) are fine — fire-and-forget.
+    let _ = event_bus().send(ev);
+}
 
 fn subscribers() -> &'static tokio::sync::RwLock<Subs> {
     SUBSCRIBERS.get_or_init(|| tokio::sync::RwLock::new(Vec::new()))
@@ -68,22 +102,34 @@ fn honored_filter(filter: &Value) -> Value {
 /// Register a new subscriber. Returns (acknowledged-filter, receiver). The
 /// caller sends the `acknowledged` notification as the FIRST message on the
 /// stream (spec MUST), then drains the receiver.
+///
+/// ⚠️ Production note: after the rmcp migration the hand-written
+/// `subscriptions/listen` route is gone and the only live listen path is
+/// `rmcp_bridge::HubBridge::listen` (bus-driven). No production code calls
+/// this `register` today — the registry survives for unit tests and as the
+/// drop-in delivery lane if a future non-rmcp listen route is added.
 pub async fn register(
     subscription_id: Value,
     requested_filter: Value,
 ) -> (Value, mpsc::UnboundedReceiver<String>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let filter = honored_filter(&requested_filter);
-    let tasks_opted_in = requested_filter
+    let task_ids: Vec<String> = requested_filter
         .get("taskIds")
         .and_then(|a| a.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let tasks_opted_in = !task_ids.is_empty();
     let ack = filter_with_id(&filter, subscription_id.clone());
     subscribers().write().await.push(Subscriber {
         subscription_id,
         filter,
         tasks_opted_in,
+        task_ids,
         tx,
     });
     (ack, rx)
@@ -135,6 +181,7 @@ async fn broadcast_filtered(method: &str, filter_key: &str, params: Value) {
 /// that changes the exposed tool set).
 pub async fn notify_tools_list_changed() {
     super::rmcp_bridge::spawn_native_notify("tools");
+    publish(HubEvent::ToolsListChanged);
     broadcast_filtered(
         "notifications/tools/list_changed",
         "toolsListChanged",
@@ -145,6 +192,7 @@ pub async fn notify_tools_list_changed() {
 
 pub async fn notify_prompts_list_changed() {
     super::rmcp_bridge::spawn_native_notify("prompts");
+    publish(HubEvent::PromptsListChanged);
     broadcast_filtered(
         "notifications/prompts/list_changed",
         "promptsListChanged",
@@ -155,6 +203,7 @@ pub async fn notify_prompts_list_changed() {
 
 pub async fn notify_resources_list_changed() {
     super::rmcp_bridge::spawn_native_notify("resources");
+    publish(HubEvent::ResourcesListChanged);
     broadcast_filtered(
         "notifications/resources/list_changed",
         "resourcesListChanged",
@@ -166,6 +215,13 @@ pub async fn notify_resources_list_changed() {
 /// A subscribed resource's content changed. `uri` must be in the subscriber's
 /// `resourceSubscriptions` list to be delivered.
 pub async fn notify_resource_updated(uri: &str) {
+    publish(HubEvent::ResourceUpdated(uri.to_string()));
+    // Legacy (2025-style) sessions subscribed via resources/subscribe get the
+    // native notifications/resources/updated on their session stream.
+    let uri_owned = uri.to_string();
+    tokio::spawn(async move {
+        super::rmcp_bridge::fan_out_legacy_resource_updated(&uri_owned).await;
+    });
     let mut map = subscribers().write().await;
     prune(&mut map).await;
     for s in map.iter() {
@@ -192,10 +248,14 @@ pub async fn notify_resource_updated(uri: &str) {
 /// Task terminal state (A4). Delivered only to subscribers that opted in via
 /// the tasks extension (`taskIds` in their filter).
 pub async fn notify_task_status(task_json: Value) {
+    publish(HubEvent::TaskStatus(task_json.clone()));
+    let task_id = task_json.get("taskId").and_then(|t| t.as_str());
     let mut map = subscribers().write().await;
     prune(&mut map).await;
     for s in map.iter() {
-        if s.tasks_opted_in {
+        if s.tasks_opted_in
+            && task_id.is_some_and(|id| s.task_ids.iter().any(|f| f == id))
+        {
             let body = json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/tasks",
@@ -280,5 +340,25 @@ mod tests {
         assert!(rx4.try_recv().is_err());
 
         assert_eq!(live_count().await, 4);
+    }
+
+    /// Typed event bus (rmcp-native listen source): publishes reach
+    /// subscribers that registered before the event.
+    #[tokio::test]
+    async fn event_bus_publishes_typed_events() {
+        let mut rx = subscribe_events();
+        // publish() directly: notify_* would also touch the global Subs
+        // registry, perturbing the other test's ordering assumptions.
+        publish(HubEvent::ToolsListChanged);
+        publish(HubEvent::ResourceUpdated("file:///x.txt".into()));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HubEvent::ToolsListChanged)
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HubEvent::ResourceUpdated(ref u)) if u == "file:///x.txt"
+        ));
+        assert!(rx.try_recv().is_err());
     }
 }

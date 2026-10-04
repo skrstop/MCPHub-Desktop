@@ -48,7 +48,10 @@ pub async fn smart_routing_status() -> Result<SmartRoutingStatus, String> {
 }
 
 #[tauri::command]
-pub async fn smart_routing_reindex() -> Result<usize, String> {
+pub async fn smart_routing_reindex(session: tauri::State<'_, crate::commands::auth::SessionState>) -> Result<usize, String> {
+    // Triggers a full embedding re-index and can spin up the shared mv model
+    // runtime — admin-only (review round 8, 2026-10-04).
+    crate::commands::config::require_admin(&session).await?;
     crate::smart_routing::index::reindex_all()
         .await
         .map_err(|e| e.to_string())

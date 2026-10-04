@@ -94,8 +94,13 @@ const LoginPage: React.FC = () => {
   }, [buildRedirectTarget, navigate, returnUrl]);
 
   useEffect(() => {
-    if (!auth.loading && auth.isAuthenticated) redirectAfterLogin();
-  }, [auth.isAuthenticated, auth.loading, redirectAfterLogin]);
+    // The default-password warning modal must gate navigation: login() flips
+    // isAuthenticated in the same batch as setShowDefaultPasswordWarning, so
+    // an unguarded effect would navigate away before the modal ever paints.
+    if (!auth.loading && auth.isAuthenticated && !showDefaultPasswordWarning) {
+      redirectAfterLogin();
+    }
+  }, [auth.isAuthenticated, auth.loading, showDefaultPasswordWarning, redirectAfterLogin]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -123,7 +128,13 @@ const LoginPage: React.FC = () => {
         oidc: betterAuth.providers?.oidc?.enabled === true,
       });
     };
-    loadAuthProviders();
+    loadAuthProviders().catch((err) => {
+      // Backend unreachable/500 — reset to defaults (no social buttons) and
+      // don't leave an unhandled rejection; the page's other async paths all
+      // have explicit handling.
+      console.error('Failed to load auth providers:', err);
+      setSocialProviders({ google: false, github: false, oidc: false });
+    });
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {

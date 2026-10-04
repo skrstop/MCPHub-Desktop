@@ -85,7 +85,16 @@ const FileTypeRenderer: React.FC<FileTypeRendererProps> = ({
   // language isn't registered; `detect: true` lets it auto-detect when the hint
   // is absent.
   if (lang) {
-    const fenced = '```' + lang + '\n' + content + '\n```';
+    // Use a fence LONGER than any backtick run inside the content: a plain
+    // ``` fence terminates early when the content itself contains a ``` line
+    // (embedded markdown, docstrings), and the remainder renders as arbitrary
+    // markdown instead of code.
+    let maxRun = 0;
+    for (const m of content.match(/`+/g) ?? []) {
+      if (m.length > maxRun) maxRun = m.length;
+    }
+    const fence = '`'.repeat(Math.max(3, maxRun + 1));
+    const fenced = fence + lang + '\n' + content + '\n' + fence;
     return (
       <div className={className} style={inline ? { margin: 0 } : undefined}>
         <ReactMarkdown

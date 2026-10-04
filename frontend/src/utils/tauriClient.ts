@@ -503,7 +503,7 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     }
     // /market/servers/:name
     if (segs[1] === 'servers' && segs[2])
-      return { command: 'get_market_server', args: { name: segs[2] } };
+      return { command: 'get_market_server', args: { name: decodeURIComponent(segs[2]) } };
     // /market/servers (list all)
     if (m === 'GET') return { command: 'list_market_servers', args: {} };
     return { command: '__stub__', args: { __response: { success: true, data: null } } };
@@ -511,7 +511,26 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
 
   if (segs[0] === 'registry') {
     if (segs[1] === 'servers' && segs[2] && segs[3] === 'versions' && m === 'GET')
-      return { command: 'get_registry_server_versions', args: { name: decodeURIComponent(segs[2]) } };
+      return { command: 'get_registry_server_versions', args: { serverName: decodeURIComponent(segs[2]) } };
+    // /registry/servers/versions?serverName=X — query-based variant used by
+    // useRegistryData's version list; without this branch it falls through to
+    // list_registry_servers and silently returns the whole registry.
+    if (segs[1] === 'servers' && segs[2] === 'versions' && m === 'GET') {
+      const qsIdx = endpoint.indexOf('?');
+      const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
+      const serverName = qs.get('serverName');
+      if (serverName)
+        return { command: 'get_registry_server_versions', args: { serverName } };
+    }
+    // /registry/servers/version?serverName=X&version=Y — single version detail
+    if (segs[1] === 'servers' && segs[2] === 'version' && m === 'GET') {
+      const qsIdx = endpoint.indexOf('?');
+      const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
+      const serverName = qs.get('serverName');
+      const version = qs.get('version');
+      if (serverName && version)
+        return { command: 'get_registry_server_version', args: { serverName, version } };
+    }
     if (segs[1] === 'servers' && m === 'GET') {
       const qsIdx = endpoint.indexOf('?');
       const qs = qsIdx >= 0 ? new URLSearchParams(endpoint.slice(qsIdx + 1)) : new URLSearchParams();
@@ -543,6 +562,20 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // /cloud/servers
     if (segs[1] === 'servers' && m === 'GET')
       return { command: 'list_cloud_servers', args: {} };
+    // /cloud/servers/:name/tools/:tool/call — tool calls for remote MCPRouter
+    // cloud servers are not supported by the desktop client. Must NOT fall
+    // through to the success stub below: callServerTool treats success:true
+    // as a real invocation and would show a false "call succeeded" toast.
+    if (segs[1] === 'servers' && segs[2] && segs[3] === 'tools' && m === 'POST')
+      return {
+        command: '__stub__',
+        args: {
+          __response: {
+            success: false,
+            message: 'Tool calls for cloud (MCPRouter) servers are not supported in desktop mode',
+          },
+        },
+      };
     // /cloud/categories and /cloud/tags — no separate cloud equivalents, return empty
     if (segs[1] === 'categories' || segs[1] === 'tags')
       return { command: '__stub__', args: { __response: { success: true, data: [] } } };
@@ -1071,7 +1104,25 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   }
 
   // ── Void-return commands ──────────────────────────────────────────────────
+  // NOTE: commands returning Option<T> (get_server, get_market_server, ...)
+  // must NOT hit this generic null-success fallback — a null here means
+  // "not found" and must surface as a failure. Those are handled explicitly
+  // below (and in their own branches), so intercept them first.
   if (result === null || result === undefined) {
+    // All Result<Option<T>, String> commands: a null result must surface as a
+  // not-found FAILURE, not {success:true} with no data (stale-list opens
+  // rendered empty dialogs instead of "no longer exists" errors).
+  const optionCommands = [
+    'get_server',
+    'get_market_server',
+    'get_rag_doc',
+    'get_rag_doc_paged',
+    'get_builtin_prompt',
+    'get_builtin_resource',
+  ];
+    if (optionCommands.includes(command)) {
+      return { success: false, message: 'Server not found' };
+    }
     return { success: true };
   }
 
@@ -1223,7 +1274,7 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     if (!r) return { success: true, data: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 1, hasNextPage: false, hasPrevPage: false } };
     const totalPages = Math.max(1, Math.ceil(r.total / (r.pageSize || 20)));
     // Transform backend camelCase fields to frontend expected format
-    const activities = (r.data || []).map((e: Record<string, unknown>) => ({
+    const activities = ((r.data || []) as Record<string, unknown>[]).map((e) => ({
       id: e.id,
       createdAt: e.createdAt,
       server: e.server,
@@ -1410,27 +1461,27 @@ export async function invokeMapped<T>(command: string, args: Record<string, unkn
       return { success: false, message: `Group '${id}' not found` } as T;
     }
     const currentServers = Array.isArray(group.servers) ? (group.servers as unknown[]) : [];
-    const namesOf = (list: unknown[]): string[] =>
-      list
-        .map(s => (typeof s === 'string' ? s : (s as { name?: string })?.name ?? ''))
-        .filter(Boolean);
-    let nextNames: string[];
+    const nameOf = (s: unknown): string =>
+      typeof s === 'string' ? s : ((s as { name?: string })?.name ?? '');
+    // Preserve the FULL member objects (strings stay strings, config objects
+    // keep url/headers/...) — collapsing to bare names silently dropped
+    // per-member config when adding/removing a single member.
+    let nextServers: unknown[];
     if (command === '__group_add_server__') {
       const sn = String(args.serverName ?? '');
-      const set = new Set(namesOf(currentServers));
-      if (sn) set.add(sn);
-      nextNames = Array.from(set);
+      const exists = currentServers.some(s => nameOf(s) === sn);
+      nextServers = exists ? [...currentServers] : sn ? [...currentServers, { name: sn }] : [...currentServers];
     } else if (command === '__group_remove_server__') {
       const sn = String(args.serverName ?? '');
-      nextNames = namesOf(currentServers).filter(n => n !== sn);
+      nextServers = currentServers.filter(s => nameOf(s) !== sn);
     } else {
-      // For __group_update_servers__, preserve the full config format
-      nextNames = namesOf((args.servers as unknown[]) ?? []);
+      // For __group_update_servers__, use the caller-provided full configs
+      nextServers = (args.servers as unknown[]) ?? [];
     }
     const payload = {
       name: group.name,
       description: group.description,
-      servers: command === '__group_update_servers__' ? (args.servers as unknown[] ?? []) : nextNames,
+      servers: nextServers,
     };
     try {
       const updated = await invoke<Record<string, unknown>>('update_group', {

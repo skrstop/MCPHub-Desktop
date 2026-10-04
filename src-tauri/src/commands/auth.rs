@@ -2,7 +2,7 @@ use crate::{
     auth as auth_util,
     models::{
         auth::{AuthToken, LoginRequest},
-        user::{UserInfo, UserPayload, UserRole},
+        user::{UserInfo, UserRole},
     },
     services::{config_service, user_service},
 };
@@ -12,17 +12,26 @@ use tokio::sync::Mutex;
 /// In-memory session: stores current user token
 pub struct SessionState(pub Mutex<Option<AuthToken>>);
 
-/// Check if skipAuth is enabled in config
+/// Check if skipAuth is enabled in config.
+/// Defaults to true (desktop): when the config read fails, the frontend enters
+/// guest mode while require_admin would reject — a mismatch that breaks
+/// settings export / bearer-key management. Migration 0005 seeds this key, so
+/// the fallback only triggers on corrupted configs.
 pub(crate) async fn is_skip_auth_enabled() -> bool {
-    config_service::get()
-        .await
-        .ok()
-        .and_then(|c| {
-            c.get("routing")
-                .and_then(|r| r.get("skipAuth"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
+    match config_service::get().await {
+        Ok(c) => c
+            .get("routing")
+            .and_then(|r| r.get("skipAuth"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        // DB read failure: keep the desktop-friendly default (skipAuth on) so a
+        // transient error never locks the local user out, but log loudly —
+        // in an auth-enabled deployment this window keeps require_admin open.
+        Err(e) => {
+            log::warn!("[auth] skipAuth config read failed ({e}); falling back to skipAuth=true");
+            true
+        }
+    }
 }
 
 #[tauri::command]
@@ -30,17 +39,35 @@ pub async fn login(
     request: LoginRequest,
     session: State<'_, SessionState>,
 ) -> Result<AuthToken, String> {
-    let user = user_service::find_by_username(&request.username)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Invalid username or password".to_string())?;
+    let user = match user_service::find_by_username(&request.username).await {
+        Ok(Some(u)) => Some(u),
+        Ok(None) => None,
+        Err(e) => return Err(e.to_string()),
+    };
 
-    let valid = auth_util::verify_password(&request.password, &user.password_hash)
-        .map_err(|e| e.to_string())?;
+    // Constant-time-ish login: when the user doesn't exist, verify against a
+    // dummy hash so the response time matches the "wrong password" path
+    // (prevents username enumeration via bcrypt timing).
+    let (password_hash, user) = match user {
+        Some(u) => (u.password_hash.clone(), Some(u)),
+        None => (
+            // bcrypt hashes are exactly 60 bytes (7-byte prefix + 53 chars);
+            // bcrypt::verify rejects any other length in microseconds without
+            // running the KDF, which would reintroduce the timing oracle.
+            "$2b$12$00000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            None,
+        ),
+    };
+    let valid = auth_util::verify_password(&request.password, &password_hash)
+        // A malformed stored hash (or the dummy) must NOT leak a different
+        // error string than the wrong-password path — that difference is a
+        // username-enumeration oracle. Treat verify errors as "invalid".
+        .unwrap_or(false);
 
-    if !valid {
+    let Some(user) = user.filter(|_| valid) else {
         return Err("Invalid username or password".to_string());
-    }
+    };
 
     let role_str = match user.role {
         crate::models::user::UserRole::Admin => "admin",
@@ -65,36 +92,18 @@ pub async fn logout(session: State<'_, SessionState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Register a new (non-admin) user. Only usable when registration is open.
+/// Register a new (non-admin) user. Disabled on desktop: the app ships a
+/// fixed admin account and has no open-registration flow — leaving the
+/// endpoint ungated would let any local IPC caller create accounts in
+/// auth-enabled mode.
 #[tauri::command]
 pub async fn register(
     username: String,
     password: String,
     session: State<'_, SessionState>,
 ) -> Result<AuthToken, String> {
-    // Check username uniqueness
-    if user_service::find_by_username(&username)
-        .await
-        .map_err(|e| e.to_string())?
-        .is_some()
-    {
-        return Err("Username already exists".to_string());
-    }
-
-    let payload = UserPayload {
-        username: username.clone(),
-        password,
-        role: Some(UserRole::User),
-    };
-    let user = user_service::create(&payload).await.map_err(|e| e.to_string())?;
-
-    let token =
-        auth_util::issue_token(&user.id, &user.username, "user").map_err(|e| e.to_string())?;
-
-    let mut guard = session.0.lock().await;
-    *guard = Some(token.clone());
-
-    Ok(token)
+    let _ = (username, password, session);
+    Err("Registration is disabled in the desktop app".to_string())
 }
 
 #[tauri::command]

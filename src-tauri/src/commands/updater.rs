@@ -85,8 +85,26 @@ pub async fn install_update_cancelable(
     let app = webview.app_handle().clone();
 
     let mut slot = task_slot().lock().await;
+    // Capture + mark the PREVIOUS attempt as cancelled before replacing the
+    // id: it is being aborted here and would otherwise never emit a terminal
+    // event (its dialog hangs on "installing").
     if let Some(previous) = slot.take() {
+        let already_finished = previous.is_finished();
         previous.abort();
+        if !already_finished {
+            // Only an in-flight attempt needs a synthetic "cancelled" terminal
+            // event; one that already emitted ok/error must not receive a
+            // contradictory late event (review round 10).
+            let old_id = *install_id_slot().lock().unwrap();
+            let _ = app.emit(
+                "updater://install-result",
+                InstallResult {
+                    install_id: old_id,
+                    status: "cancelled".into(),
+                    error: None,
+                },
+            );
+        }
     }
     *install_id_slot().lock().unwrap() = install_id;
 
@@ -131,8 +149,12 @@ pub async fn install_update_cancelable(
 /// a still-running task was actually aborted.
 #[tauri::command]
 pub async fn cancel_update_install(app: tauri::AppHandle) -> Result<bool, String> {
-    let install_id = *install_id_slot().lock().unwrap();
     let mut slot = task_slot().lock().await;
+    // Read the install id AFTER acquiring the slot lock: otherwise a
+    // concurrent install_update_cancelable could have already replaced the id
+    // (its own abort of the previous attempt races ours) and this cancel would
+    // tag the wrong attempt, leaving the new one without a terminal event.
+    let install_id = *install_id_slot().lock().unwrap();
     if let Some(handle) = slot.take() {
         if handle.is_finished() {
             // Task already completed and emitted its own ok/error result —

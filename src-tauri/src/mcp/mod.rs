@@ -8,3 +8,4 @@ pub mod pool;
 pub mod progress;
 pub mod session_pool;
 pub mod on_demand;
+pub mod time;

@@ -3,6 +3,10 @@
 /// Allows the frontend to list, install, uninstall, and switch between
 /// different Node.js and Python runtime versions, all isolated within
 /// the app's data directory (no impact on the user's system).
+use tauri::State;
+
+use crate::commands::auth::SessionState;
+
 use crate::services::{config_service, runtime_env};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -66,6 +70,11 @@ fn emit_progress(app: &AppHandle, payload: RuntimeProgress) {
 // 进程内缓存：避免每次刷新列表都发起远程请求
 static NODE_VERSIONS_CACHE: OnceLock<AsyncMutex<Option<Vec<String>>>> = OnceLock::new();
 static PYTHON_VERSIONS_CACHE: OnceLock<AsyncMutex<Option<Vec<String>>>> = OnceLock::new();
+// Per-runtime install mutexes: two concurrent installs of the same version
+// (double-click / retry) both remove_dir_all + extract into the same dest and
+// corrupt each other. Serializes the whole install/uninstall flow per side.
+static NODE_INSTALL_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+static PYTHON_INSTALL_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 /// 获取 Node.js LTS 版本列表（带缓存）
 async fn get_node_versions() -> Vec<String> {
@@ -74,9 +83,17 @@ async fn get_node_versions() -> Vec<String> {
     if let Some(v) = guard.as_ref() {
         return v.clone();
     }
-    let fetched = fetch_node_lts_versions().await;
-    *guard = Some(fetched.clone());
-    fetched
+    // Cache only REAL fetches: the fallback list (offline / parse failure)
+    // must not be cached — OnceLock lives for the whole process, so caching it
+    // would pin the shipped list until restart even after connectivity
+    // returns. None = fallback path, leave cache empty to retry next call.
+    match fetch_node_lts_versions().await {
+        Some(v) => {
+            *guard = Some(v.clone());
+            v
+        }
+        None => fallback_node_versions(),
+    }
 }
 
 /// 获取 Python 版本列表（带缓存）
@@ -86,13 +103,18 @@ async fn get_python_versions() -> Vec<String> {
     if let Some(v) = guard.as_ref() {
         return v.clone();
     }
-    let fetched = fetch_python_versions().await;
-    *guard = Some(fetched.clone());
-    fetched
+    // Same as Node: never cache the offline fallback.
+    match fetch_python_versions().await {
+        Some(v) => {
+            *guard = Some(v.clone());
+            v
+        }
+        None => fallback_python_versions(),
+    }
 }
 
 /// 从 nodejs.org 拉取所有发布信息，按主版本聚合，取最近 10 个 LTS 主版本的最新 patch。
-async fn fetch_node_lts_versions() -> Vec<String> {
+async fn fetch_node_lts_versions() -> Option<Vec<String>> {
     #[derive(Deserialize)]
     struct NodeRelease {
         version: String, // 形如 "v22.14.0"
@@ -101,17 +123,17 @@ async fn fetch_node_lts_versions() -> Vec<String> {
     }
 
     let url = "https://nodejs.org/dist/index.json";
-    let releases: Vec<NodeRelease> = match reqwest::get(url).await {
+    let releases: Vec<NodeRelease> = match http_client().get(url).send().await {
         Ok(resp) => match resp.json().await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[runtime] 解析 Node.js 版本列表失败，回退到内置列表: {e}");
-                return fallback_node_versions();
+                return None;
             }
         },
         Err(e) => {
             log::warn!("[runtime] 拉取 Node.js 版本列表失败，回退到内置列表: {e}");
-            return fallback_node_versions();
+            return None;
         }
     };
 
@@ -151,13 +173,13 @@ async fn fetch_node_lts_versions() -> Vec<String> {
     entries.sort_by(|a, b| b.0.cmp(&a.0));
     let result: Vec<String> = entries.into_iter().take(10).map(|(_, v)| v).collect();
     if result.is_empty() {
-        return fallback_node_versions();
+        return None;
     }
-    result
+    Some(result)
 }
 
 /// 从 endoflife.date 拉取 Python 各 minor 版本的最新 patch，3.x 与 2.x 各取最多 10 个。
-async fn fetch_python_versions() -> Vec<String> {
+async fn fetch_python_versions() -> Option<Vec<String>> {
     #[derive(Deserialize)]
     struct PyCycle {
         cycle: String, // 形如 "3.13" / "2.7"
@@ -173,7 +195,7 @@ async fn fetch_python_versions() -> Vec<String> {
         Ok(c) => c,
         Err(e) => {
             log::warn!("[runtime] 创建 HTTP client 失败: {e}");
-            return fallback_python_versions();
+            return None;
         }
     };
 
@@ -182,12 +204,12 @@ async fn fetch_python_versions() -> Vec<String> {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[runtime] 解析 Python 版本列表失败，回退到内置列表: {e}");
-                return fallback_python_versions();
+                return None;
             }
         },
         Err(e) => {
             log::warn!("[runtime] 拉取 Python 版本列表失败，回退到内置列表: {e}");
-            return fallback_python_versions();
+            return None;
         }
     };
 
@@ -216,9 +238,9 @@ async fn fetch_python_versions() -> Vec<String> {
     let mut result: Vec<String> = v3.into_iter().take(10).map(|(_, v)| v).collect();
     result.extend(v2.into_iter().take(10).map(|(_, v)| v));
     if result.is_empty() {
-        return fallback_python_versions();
+        return None;
     }
-    result
+    Some(result)
 }
 
 /// 网络异常时使用的内置 Node.js LTS 版本列表（保底）
@@ -255,7 +277,11 @@ fn fallback_python_versions() -> Vec<String> {
 #[tauri::command]
 pub async fn list_node_versions() -> Result<Vec<RuntimeVersion>, String> {
     let active = runtime_env::get_active_node();
-    let system_ver = detect_system_node_version();
+    // Detect runs synchronous subprocesses (and may shell-probe PATH); keep
+    // them off the async worker (review round 8, 2026-10-04).
+    let system_ver = tauri::async_runtime::spawn_blocking(detect_system_node_version)
+        .await
+        .unwrap_or(None);
     let bundled_ver = detect_bundled_node_version();
     let mut result: Vec<RuntimeVersion> = Vec::new();
 
@@ -306,7 +332,9 @@ pub async fn list_node_versions() -> Result<Vec<RuntimeVersion>, String> {
 pub async fn list_python_versions() -> Result<Vec<RuntimeVersion>, String> {
     let active = runtime_env::get_active_python();
     let installed_entries = get_installed_python_versions().await;
-    let system_ver = detect_system_python_version();
+    let system_ver = tauri::async_runtime::spawn_blocking(detect_system_python_version)
+        .await
+        .unwrap_or(None);
 
     let mut result: Vec<RuntimeVersion> = Vec::new();
 
@@ -372,12 +400,53 @@ pub async fn list_python_versions() -> Result<Vec<RuntimeVersion>, String> {
 // Install commands
 // ────────────────────────────────────────────────────────────────────────────
 
+
+/// Shared HTTP client for runtime downloads/registry queries: without an
+/// explicit timeout a hung nodejs.org connection would block the command
+/// (and the progress UI) forever.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Defensive whitelist for user-supplied version identifiers: they end up in
+/// `base.join(&version)` (uninstall/remove_dir_all), archive URLs, and cache
+/// dir names. Reject path separators, `..`, and control chars; allow the
+/// shapes used in practice (`22.14.0`, `3.14`, `cpython-3.14.1`).
+fn validate_version_arg(version: &str) -> Result<(), String> {
+    let ok = !version.is_empty()
+        && version.len() <= 64
+        && !version.contains("..")
+        && !version.contains('/')
+        && !version.contains('\\')
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("Invalid version identifier: {version:?}"))
+    }
+}
+
 #[tauri::command]
 pub async fn install_node_version(
+    session: State<'_, SessionState>,
     app: AppHandle,
     version: String,
     force: Option<bool>,
 ) -> Result<(), String> {
+    // Installs runtimes (downloads + extracts) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
+    validate_version_arg(&version)?;
+    // Serialize concurrent installs of this runtime (see NODE_INSTALL_LOCK).
+    let _install_guard = NODE_INSTALL_LOCK
+        .get_or_init(|| AsyncMutex::new(()))
+        .lock()
+        .await;
     let force = force.unwrap_or(false);
     let base = runtime_env::node_versions_base()
         .ok_or_else(|| "Cannot determine app data directory".to_string())?;
@@ -397,13 +466,27 @@ pub async fn install_node_version(
     // 强制重装：先把整个版本目录清掉，确保走完整下载/解压流程
     if force && dest.exists() {
         log::warn!("[runtime] 强制重装 Node.js {version}，清理目录: {dest:?}");
-        let _ = std::fs::remove_dir_all(&dest);
+        // Large directory deletion (~80MB runtimes) can take seconds — keep
+        // it off the async worker (review round 8, 2026-10-04).
+        let d2 = dest.clone();
+        if let Err(e) =
+            tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(&d2)).await
+        {
+            log::warn!("[runtime] Node.js {version} 目录清理失败（继续流程）: {e}");
+        }
     }
 
     // 兜底：若已存在残留目录但缺少可执行文件，先清理；正常已安装的直接复用
     if dest.exists() && !node_bin_in(&dest).exists() {
         log::warn!("[runtime] 清理 Node.js {version} 残留目录: {dest:?}");
-        let _ = std::fs::remove_dir_all(&dest);
+        // Large directory deletion (~80MB runtimes) can take seconds — keep
+        // it off the async worker (review round 8, 2026-10-04).
+        let d2 = dest.clone();
+        if let Err(e) =
+            tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(&d2)).await
+        {
+            log::warn!("[runtime] Node.js {version} 目录清理失败（继续流程）: {e}");
+        }
     }
     if !force && node_bin_in(&dest).exists() {
         emit_progress(
@@ -432,7 +515,9 @@ pub async fn install_node_version(
         },
     );
 
-    let response = reqwest::get(&url)
+    let response = http_client()
+        .get(&url)
+        .send()
         .await
         .map_err(|e| {
             let msg = format!("下载失败: {e}");
@@ -446,7 +531,11 @@ pub async fn install_node_version(
     }
 
     let total = response.content_length();
-    let mut buf: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+    // Cap the pre-allocation: a spoofed/broken Content-Length must not trigger
+    // a giant upfront allocation before a single body byte arrives (the real
+    // Node tarballs are ~25-50MB; 200MB is a generous ceiling).
+    let prealloc = total.unwrap_or(0).clamp(0, 200 * 1024 * 1024) as usize;
+    let mut buf: Vec<u8> = Vec::with_capacity(prealloc);
     let mut downloaded: u64 = 0;
     let mut last_pct: i32 = -1;
     // 即便没有 Content-Length，也每累计这么多字节推送一次心跳，避免前端假死
@@ -460,6 +549,14 @@ pub async fn install_node_version(
             msg
         })?;
         downloaded += chunk.len() as u64;
+        // Hard cumulative cap: a compromised source / hijacked proxy streaming
+        // an endless body must not grow `buf` unbounded (OOM).
+        const MAX_DOWNLOAD_BYTES: u64 = 300 * 1024 * 1024;
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            let msg = format!("下载超过 {} 上限，已中止", human_bytes(MAX_DOWNLOAD_BYTES));
+            emit_error(&app, "node", &version, &msg);
+            return Err(msg);
+        }
         buf.extend_from_slice(&chunk);
 
         match total {
@@ -506,6 +603,54 @@ pub async fn install_node_version(
         }
     }
 
+    // Integrity: verify SHA-256 against nodejs.org's SHASUMS256.txt for the
+    // exact archive name. The archive yields the `node` binary that later
+    // executes arbitrary MCP server code — TLS alone is not enough against a
+    // CDN compromise / intercepting proxy. Unreachable SHASUMS → loud warn
+    // and continue (install must not brick on network variance); digest
+    // mismatch → hard fail.
+    {
+        let archive_name = url.rsplit('/').next().unwrap_or("").to_string();
+        let shasums_url = format!("https://nodejs.org/dist/v{version}/SHASUMS256.txt");
+        match http_client().get(&shasums_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.text().await.unwrap_or_default();
+                let expected = body
+                    .lines()
+                    .find_map(|l| {
+                        let (hash, name) = l.split_once("  ")?;
+                        (name.trim() == archive_name).then(|| hash.trim().to_lowercase())
+                    })
+                    .filter(|h| h.len() == 64);
+                match expected {
+                    Some(expected) => {
+                        use sha2::{Digest, Sha256};
+                        let digest = hex::encode(Sha256::digest(&buf));
+                        if digest != expected {
+                            let msg = format!(
+                                "Node.js {version} 下载校验失败（SHA-256 不匹配），已中止安装"
+                            );
+                            log::error!("[runtime] {msg}: expected={expected} got={digest}");
+                            crate::services::app_logger::log_to_db("error", &msg);
+                            emit_error(&app, "node", &version, &msg);
+                            return Err(msg);
+                        }
+                        log::info!("[runtime] Node.js {version} SHA-256 校验通过");
+                    }
+                    None => {
+                        log::warn!("[runtime] SHASUMS256.txt 中未找到 {archive_name}，跳过校验");
+                    }
+                }
+            }
+            Ok(resp) => {
+                log::warn!("[runtime] SHASUMS256.txt 获取失败 HTTP {}，跳过校验", resp.status());
+            }
+            Err(e) => {
+                log::warn!("[runtime] SHASUMS256.txt 获取失败: {e}，跳过校验");
+            }
+        }
+    }
+
     emit_progress(
         &app,
         RuntimeProgress {
@@ -521,7 +666,14 @@ pub async fn install_node_version(
     if let Err(e) = extract_node_archive(&buf, &dest) {
         // 解压失败 → 清理残留，避免下次被错误识别为「已安装」
         log::warn!("[runtime] Node.js {version} 解压失败，清理目录 {dest:?}");
-        let _ = std::fs::remove_dir_all(&dest);
+        // Large directory deletion (~80MB runtimes) can take seconds — keep
+        // it off the async worker (review round 8, 2026-10-04).
+        let d2 = dest.clone();
+        if let Err(e) =
+            tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(&d2)).await
+        {
+            log::warn!("[runtime] Node.js {version} 目录清理失败（继续流程）: {e}");
+        }
         emit_error(&app, "node", &version, &e);
         return Err(e);
     }
@@ -532,7 +684,14 @@ pub async fn install_node_version(
 
     // 二次校验：解压完仍无可执行文件 → 视为失败并清理
     if !node_bin_in(&dest).exists() {
-        let _ = std::fs::remove_dir_all(&dest);
+        // Large directory deletion (~80MB runtimes) can take seconds — keep
+        // it off the async worker (review round 8, 2026-10-04).
+        let d2 = dest.clone();
+        if let Err(e) =
+            tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(&d2)).await
+        {
+            log::warn!("[runtime] Node.js {version} 目录清理失败（继续流程）: {e}");
+        }
         let msg = format!("Node.js {version} 安装失败：解压完成但未找到可执行文件");
         emit_error(&app, "node", &version, &msg);
         return Err(msg);
@@ -550,6 +709,17 @@ pub async fn install_node_version(
     );
     let healthy = verify_node_version(&version).await;
     if !healthy {
+        // Clean up like the other failure paths — otherwise the reuse path
+        // (`node_bin_in(&dest).exists()` without a health check) permanently
+        // reports a broken/partial install as "already installed".
+        // Large directory deletion (~80MB runtimes) can take seconds — keep
+        // it off the async worker (review round 8, 2026-10-04).
+        let d2 = dest.clone();
+        if let Err(e) =
+            tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(&d2)).await
+        {
+            log::warn!("[runtime] Node.js {version} 目录清理失败（继续流程）: {e}");
+        }
         let msg = format!("Node.js {version} 校验失败：版本号或可执行文件异常");
         emit_error(&app, "node", &version, &msg);
         return Err(msg);
@@ -571,10 +741,19 @@ pub async fn install_node_version(
 
 #[tauri::command]
 pub async fn install_python_version(
+    session: State<'_, SessionState>,
     app: AppHandle,
     version: String,
     #[allow(unused_variables)] force: Option<bool>,
 ) -> Result<(), String> {
+    // Installs runtimes (downloads + extracts) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
+    validate_version_arg(&version)?;
+    // Serialize concurrent installs of this runtime (see PYTHON_INSTALL_LOCK).
+    let _install_guard = PYTHON_INSTALL_LOCK
+        .get_or_init(|| AsyncMutex::new(()))
+        .lock()
+        .await;
     let uv = runtime_env::get_uv_path()
         .ok_or_else(|| "Bundled uv not found. Run the download-runtimes script first.".to_string())?;
     let python_dir = runtime_env::uv_python_install_dir()
@@ -767,12 +946,29 @@ fn is_uv_minor_link_name(name: &str) -> bool {
 // ────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn uninstall_node_version(version: String) -> Result<(), String> {
+pub async fn uninstall_node_version(
+    session: State<'_, SessionState>,
+    version: String,
+) -> Result<(), String> {
+    // Downloads/removes runtimes — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
+    validate_version_arg(&version)?;
+    // Uninstall racing an install of the same version corrupts the dir; take
+    // the same install mutex.
+    let _install_guard = NODE_INSTALL_LOCK
+        .get_or_init(|| AsyncMutex::new(()))
+        .lock()
+        .await;
     let base = runtime_env::node_versions_base()
         .ok_or_else(|| "Cannot determine app data directory".to_string())?;
     let dir = base.join(&version);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        // Off the async worker (review round 8, 2026-10-04).
+        let d2 = dir.clone();
+        tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(&d2))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
     }
     // Reset to system if this was the active version
     if runtime_env::get_active_node() == version {
@@ -783,7 +979,17 @@ pub async fn uninstall_node_version(version: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn uninstall_python_version(version: String) -> Result<(), String> {
+pub async fn uninstall_python_version(
+    session: State<'_, SessionState>,
+    version: String,
+) -> Result<(), String> {
+    // Downloads/removes runtimes — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
+    validate_version_arg(&version).map_err(|e| format!("invalid version: {e}"))?;
+    let _install_guard = PYTHON_INSTALL_LOCK
+        .get_or_init(|| AsyncMutex::new(()))
+        .lock()
+        .await;
     let uv = runtime_env::get_uv_path()
         .ok_or_else(|| "Bundled uv not available".to_string())?;
     let python_dir = runtime_env::uv_python_install_dir()
@@ -827,13 +1033,31 @@ pub async fn get_active_python_version() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn set_active_node_version(version: String) -> Result<(), String> {
+pub async fn set_active_node_version(
+    session: State<'_, SessionState>,
+    version: String,
+) -> Result<(), String> {
+    // Switches the global runtime for every stdio server — admin-gated.
+    crate::commands::config::require_admin(&session).await?;
+    // Same shape guard as install/uninstall: the version is joined into
+    // node-versions/{version} paths by resolve_command/env_overrides — a
+    // `../`-bearing value would resolve outside the runtimes dir.
+    if version != "system" {
+        validate_version_arg(&version).map_err(|e| format!("invalid version: {e}"))?;
+    }
     runtime_env::set_active_node(version.clone());
     save_version_to_db("nodeVersion", &version).await
 }
 
 #[tauri::command]
-pub async fn set_active_python_version(version: String) -> Result<(), String> {
+pub async fn set_active_python_version(
+    session: State<'_, SessionState>,
+    version: String,
+) -> Result<(), String> {
+    crate::commands::config::require_admin(&session).await?;
+    if version != "system" {
+        validate_version_arg(&version).map_err(|e| format!("invalid version: {e}"))?;
+    }
     runtime_env::set_active_python(version.clone());
     save_version_to_db("pythonVersion", &version).await
 }
@@ -869,7 +1093,10 @@ fn detect_system_node_version() -> Option<String> {
     c.arg("-v")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .env("PATH", get_enhanced_path());
+        // Never block_on from inside a (possibly async-worker) caller —
+        // panics on a tokio runtime worker. Prefer the warm cache filled by
+        // runtime_env::init at startup; fall back to the raw PATH env.
+        .env("PATH", runtime_env::cached_enhanced_path_or_env());
     #[cfg(windows)]
     { c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
     let output = c.output().ok()?;
@@ -907,7 +1134,7 @@ fn detect_bundled_node_version() -> Option<String> {
 /// Detect the system's Python version by running `python3 --version` (then `python`).
 /// Returns the version string (e.g. "3.12.8") or None if not found.
 fn detect_system_python_version() -> Option<String> {
-    let enhanced_path = get_enhanced_path();
+    let enhanced_path = runtime_env::cached_enhanced_path_or_env();
     for cmd in &["python3", "python"] {
         let mut c = std::process::Command::new(cmd);
         c.arg("--version")
@@ -1002,6 +1229,46 @@ fn extract_node_archive(bytes: &[u8], dest: &Path) -> Result<(), String> {
             continue;
         }
         let out = dest.join(&stripped);
+        // Zip-slip guard (mirrors Windows zip's mangled_name): reject entries
+        // that escape `dest` via parent components or absolute/root paths.
+        // ALSO guard symlink/hardlink entries: `Entry::unpack` follows link
+        // targets without validation, so a crafted tarball could place a
+        // symlink inside `dest` pointing anywhere and then write through it.
+        // Source is trusted (nodejs.org over TLS), but the guard is cheap.
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
+        {
+            return Err(format!("archive entry has unsafe path: {}", path.display()));
+        }
+        match entry.header().entry_type() {
+            tar::EntryType::Symlink | tar::EntryType::Link => {
+                let target = entry
+                    .link_name()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or_default();
+                let target = if target.is_absolute() {
+                    target.into_owned()
+                } else {
+                    out.parent().unwrap_or(dest).join(target)
+                };
+                let Ok(canon) = target.canonicalize() else {
+                    // Dangling link target: creating the link is still safe
+                    // (nothing writes through it during this archive).
+                    let _ = std::fs::remove_file(&out);
+                    entry.unpack(&out).map_err(|e| e.to_string())?;
+                    continue;
+                };
+                if !canon.starts_with(dest) {
+                    return Err(format!(
+                        "archive link target escapes destination: {} -> {}",
+                        path.display(),
+                        target.display()
+                    ));
+                }
+            }
+            _ => {}
+        }
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -1256,6 +1523,11 @@ fn push_recent(buf: &Arc<Mutex<Vec<String>>>, line: &str, max: usize) {
 /// source their shell profile to get the complete PATH with tools like
 /// asdf, nvm, pyenv, volta, homebrew, etc.
 fn get_enhanced_path() -> String {
+    // Prefer the PATH cached at runtime_env::init (single 5s shell probe per
+    // process); only probe again if init hasn't populated it yet.
+    if let Some(cached) = crate::services::runtime_env::cached_enhanced_path() {
+        return cached;
+    }
     log::info!("[runtime] Getting enhanced PATH from user's login shell");
     crate::services::app_logger::log_to_db("info", "[runtime] Getting enhanced PATH from user's login shell");
 
@@ -1269,7 +1541,10 @@ fn get_enhanced_path() -> String {
 
     // Log the result (truncated for readability)
     let display_path = if path.len() > 300 {
-        format!("{}...", &path[..300])
+        // Byte-safe truncation: take the largest BYTE offset whose char starts
+        // at or before 300 bytes, so the slice never lands mid-UTF-8.
+        let cut = path.char_indices().map(|(i, _)| i).take_while(|&i| i <= 300).last().unwrap_or(0);
+        format!("{}...", &path[..cut])
     } else {
         path.clone()
     };
@@ -1313,7 +1588,22 @@ fn get_unix_path() -> String {
             std::time::Duration::from_secs(5),
         ) {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let raw = String::from_utf8_lossy(&output.stdout);
+                // User rc files often echo extra lines (nvm hints, banners).
+                // A PATH value must contain ':' separators — take the last
+                // line that looks like a PATH instead of trusting all stdout.
+                // Guards: >= 2 separators (minimal legitimate PATH has 2),
+                // contains '/', no '=' (env assignments like FOO=bar/baz:...
+                // are not PATH output). Whitespace is NOT a rejection signal:
+                // macOS PATH entries legitimately contain spaces
+                // (`/Applications/VMware Fusion.app/...`); banner lines are
+                // filtered by the separator+slash guards instead.
+                let path = raw
+                    .lines()
+                    .filter(|l| l.matches(':').count() >= 2 && l.contains('/') && !l.contains('='))
+                    .last()
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default();
                 if !path.is_empty() {
                     log::info!("[runtime] Successfully got PATH from shell (length: {})", path.len());
                     crate::services::app_logger::log_to_db("info", &format!("[runtime] Successfully got PATH from shell (length: {})", path.len()));

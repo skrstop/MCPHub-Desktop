@@ -9,8 +9,15 @@ static SERVERS: OnceLock<Vec<MarketServer>> = OnceLock::new();
 
 fn all_servers() -> &'static Vec<MarketServer> {
     SERVERS.get_or_init(|| {
-        let map: HashMap<String, MarketServer> =
-            serde_json::from_str(SERVERS_JSON).unwrap_or_default();
+        // Log parse failure loudly: unwrap_or_default alone turns a shape
+        // drift into a silently empty Market page (no log, no error).
+        let map: HashMap<String, MarketServer> = match serde_json::from_str(SERVERS_JSON) {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("[market] bundled servers.json parse failed, market will be empty: {e}");
+                Default::default()
+            }
+        };
         map.into_values().collect()
     })
 }

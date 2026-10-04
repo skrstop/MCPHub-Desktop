@@ -390,6 +390,10 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   // 弹框内新增的排除（未持久化）。确认导入时一次性 diff 持久化，取消即丢弃。
   // 仅文件夹/Git 数据源提供排除（file 数据源不参与数据源级同步）。
   const [excludedBase, setExcludedBase] = useState<Set<string>>(new Set());
+  // 打开弹框时的注册表原始快照（不可变参照）：persistExclusionDiff 的
+  // 「移除」必须对它 diff——excludedBase 在弹框内被原地取消（删元素），
+  // 对 union ⊇ base 的差集恒空，取消排除永远无法持久化。
+  const excludedOriginalRef = useRef<Set<string>>(new Set());
   const [excludedLocal, setExcludedLocal] = useState<Set<string>>(new Set());
   const excludedUnion = useMemo(
     () => new Set([...excludedBase, ...excludedLocal]),
@@ -409,14 +413,40 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     } else {
       setExcludedLocal((prev) => new Set(prev).add(matchPath));
     }
+    // 排除的文件同时移出选择集：否则行渲染灰了、计数也减了，但
+    // selectedPickedFiles 仍按 sel.has(path) 把它送进上传管线——
+    // 用户明确标「不导入」的文件被静默导入。
+    setSelectedPaths((prev) => {
+      if (prev === null) return prev;
+      if (!prev.has(matchPath)) return prev;
+      const next = new Set(prev);
+      next.delete(matchPath);
+      return next;
+    });
   };
   const toggleGroupExcluded = (files: RagScanFile[]) => {
     const paths = files.map((f) => f.matchPath || f.path).filter(Boolean);
     if (paths.length === 0) return;
+    // 单快照批量计算：逐个调用 toggleExcluded 会在循环内读到渲染闭包的
+    // 陈旧 Set——取消排除第 2 个文件时第 1 个的删除被旧快照覆盖（复活）。
     const allExcluded = paths.every((p) => excludedUnion.has(p));
-    for (const p of paths) toggleExcluded(p);
+    const nextBase = new Set(excludedBase);
+    const nextLocal = new Set(excludedLocal);
+    for (const p of paths) {
+      if (nextBase.has(p)) nextBase.delete(p);
+      else if (nextLocal.has(p)) nextLocal.delete(p);
+      else nextLocal.add(p);
+    }
+    setExcludedBase(nextBase);
+    setExcludedLocal(nextLocal);
     if (allExcluded) {
-      // 全部已排除 → 全部取消：上面逐个 toggle 已处理（基线/本地各自移除）。
+      // 全部已排除 → 全部取消：上面批量已处理（基线/本地各自移除）。
+      setSelectedPaths((prev) => {
+        if (prev === null) return prev;
+        const next = new Set(prev);
+        for (const p of paths) next.delete(p);
+        return next;
+      });
     }
   };
   // 打开弹框时拉取注册表快照；关闭时清空本地未持久化状态。
@@ -424,8 +454,14 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     if (!showUpload) return;
     let cancelled = false;
     listRagExcludedPaths()
-      .then((paths) => { if (!cancelled) setExcludedBase(new Set(paths)); })
-      .catch(() => { if (!cancelled) setExcludedBase(new Set()); });
+      .then((paths) => {
+        if (!cancelled) {
+          const snap = new Set(paths);
+          excludedOriginalRef.current = snap;
+          setExcludedBase(new Set(snap));
+        }
+      })
+      .catch(() => { if (!cancelled) { excludedOriginalRef.current = new Set(); setExcludedBase(new Set()); } });
     return () => {
       cancelled = true;
     };
@@ -433,7 +469,9 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   // 确认导入后持久化排除 diff：基线中被移除的 + 本地新增的。
   const persistExclusionDiff = async () => {
     // 最终语义 = base ∪ local（base 已是「打开时注册表 − 弹框内取消的」）。
-    const removed = [...excludedBase].filter((p) => !excludedUnion.has(p));
+    // 「移除」对打开时的原始快照 diff：union ⊇ excludedBase（base 已被弹框
+    // 内取消操作删过元素），对 base 差集恒空 → 取消排除永远无法持久化。
+    const removed = [...excludedOriginalRef.current].filter((p) => !excludedUnion.has(p));
     const added = [...excludedLocal];
     if (removed.length === 0 && added.length === 0) return;
     try {
@@ -452,10 +490,14 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   useEffect(() => {
     if (!isTauri()) return;
     let un: UnlistenFn | undefined;
+    let disposed = false;
     listen<{ received: number; total: number; speed: number }>('rag://git-clone-progress', (e) => {
       setGitProgress(e.payload);
-    }).then((f) => { un = f; }).catch(() => {});
-    return () => { un?.(); };
+    }).then((f) => {
+      if (disposed) { f(); return; } // unmounted before listen resolved
+      un = f;
+    }).catch(() => {});
+    return () => { disposed = true; un?.(); };
   }, []);
 
   // 更新检查（预扫描）进度监听：批量/数据源级 preview 在扫描期间发射
@@ -465,10 +507,14 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   useEffect(() => {
     if (!isTauri()) return;
     let un: UnlistenFn | undefined;
+    let disposed = false;
     listen<{ current: number; total: number; name: string; phase: string }>('rag://preview-progress', (e) => {
       setPreviewProgress(e.payload);
-    }).then((f) => { un = f; }).catch(() => {});
-    return () => { un?.(); };
+    }).then((f) => {
+      if (disposed) { f(); return; }
+      un = f;
+    }).catch(() => {});
+    return () => { disposed = true; un?.(); };
   }, []);
   // 浅克隆深度（depth）：1 = 只取最新提交（默认，最省流量/时间）。
   // ── 列表视图切换（需求3：平铺 / 树形；树形仅 GUI 展示） ──
@@ -755,7 +801,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     if (!scan) return [];
     return scan.groups
       .flatMap((g) => g.files)
-      .filter((f) => sel.has(f.path))
+      .filter((f) => sel.has(f.path) && !excludedUnion.has(f.matchPath || f.path))
       .map((f) => ({
         path: f.path,
         name: f.name,
@@ -770,7 +816,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
         ),
       }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scan, selectedPaths, uploadDataSource, gitSourceMeta]);
+  }, [scan, selectedPaths, uploadDataSource, gitSourceMeta, excludedUnion]);
 
   // 重置选择状态(切换数据源 tab / 关闭对话框 / 完成导入共用)。
   const resetPickState = () => {
@@ -856,9 +902,15 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
-    await remove(deleteTarget.id);
-    showToast(t('pages.rag.delete'), 'success');
-    setDeleteTarget(null);
+    try {
+      await remove(deleteTarget.id);
+      showToast(t('pages.rag.delete'), 'success');
+      setDeleteTarget(null);
+    } catch (err) {
+      // remove 失败会 re-throw（useRagData）——必须反馈且保留弹窗
+      // （review round 9，对齐 handleBatchDelete 的容错）。
+      showToast(err instanceof Error ? err.message : t('common.operationFailed', '操作失败'), 'error');
+    }
   };
 
   // Batch delete: remove every selected doc, then clear the selection.
@@ -935,16 +987,22 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   };
 
   // 「检查原始文件」：调后端 check_rag_update（读 meta + md5 比对源文件）。
+  // reqId 守卫：快速切换目标文档时，慢的旧响应不得覆盖新目标的检查结果
+  // （review round 9）。
+  const updateCheckReqRef = useRef(0);
   const runUpdateCheck = async (id: string) => {
+    const reqId = ++updateCheckReqRef.current;
     setUpdateChecking(true);
     setUpdateCheck(null);
     try {
       const result = await checkUpdate(id);
+      if (reqId !== updateCheckReqRef.current) return; // stale
       setUpdateCheck(result);
     } catch (err) {
+      if (reqId !== updateCheckReqRef.current) return; // stale
       showToast(err instanceof Error ? err.message : t('pages.rag.updateFailed', '更新文档失败'), 'error');
     } finally {
-      setUpdateChecking(false);
+      if (reqId === updateCheckReqRef.current) setUpdateChecking(false);
     }
   };
 
@@ -1041,13 +1099,6 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   const [sourceConfirmPreview, setSourceConfirmPreview] = useState<BatchPreview | null>(null);
   const [sourceConfirmChecking, setSourceConfirmChecking] = useState(false);
   const handleRefreshSource = async (target: { kind: 'git' | 'folder' | 'file'; url?: string; root?: string }) => {
-    const srcKey = target.kind === 'git'
-      ? target.root
-        ? `git\n${target.url}\n${target.root}`
-        : `git\n${target.url}`
-      : target.kind === 'file'
-        ? 'file\n'
-        : `folder\n${target.root}`;
     if (refreshingSourceKey || batchUpdateRunning) {
       // 已有更新在跑：只打开进度弹框（与批量按钮同语义）。
       setShowBatchUpdateDialog(true);
@@ -2965,13 +3016,6 @@ const UploadDialog: React.FC<{
               {t('pages.rag.ocrPreflightHint')}
             </p>
           )}
-                    {/* OCR 预检提示：Linux 无 tesseract 时提前告知（图片/PDF/Office 依赖） */}
-          {ocrStatus && !ocrStatus.available && (
-            <p className="text-[12px] flex items-start gap-1.5" style={{ color: 'var(--hub-ink-3)' }}>
-              <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" style={{ color: '#d97706' }} />
-              {t('pages.rag.ocrPreflightHint')}
-            </p>
-          )}
           {/* 扫描中占位(大目录递归扫描/Git 拉取可能 >1s)。
               Git 拉取时 spinner 下方追加下载进度条 + 字节量 + 速度。 */}
           {(scanning || (dataSource === 'git' && gitScanning)) && (
@@ -4569,6 +4613,7 @@ const ViewDialog: React.FC<{
   onOpenSourceFile?: () => void;
 }> = ({ doc, moreLoading, onLoadMore, onClose, onSaveTags, onOpenSourceFile }) => {
   const { t } = useTranslation();
+  const { showToast } = useToast();
   const [tags, setTags] = useState<string[]>(doc.tags || []);
   const [busy, setBusy] = useState(false);
   // Render vs source view + zoom level. Zoom is gesture-driven (Ctrl/Cmd +
@@ -4630,10 +4675,15 @@ const ViewDialog: React.FC<{
   }, [doc]);
 
   const handleChange = async (next: string[]) => {
+    const prev = tags;
     setTags(next); // optimistic
     setBusy(true);
     try {
       await onSaveTags(next);
+    } catch (err) {
+      // 保存失败回滚乐观更新并反馈（review round 10）。
+      setTags(prev);
+      showToast(err instanceof Error ? err.message : t('common.operationFailed', '操作失败'), 'error');
     } finally {
       setBusy(false);
     }
@@ -4885,6 +4935,7 @@ const BatchTagsDialog: React.FC<{
   onConfirm: (tags: string[]) => Promise<void>;
 }> = ({ mode, count, onClose, onConfirm }) => {
   const { t } = useTranslation();
+  const { showToast } = useToast();
   const [tags, setTags] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -4892,6 +4943,10 @@ const BatchTagsDialog: React.FC<{
     setBusy(true);
     try {
       await onConfirm(tags);
+    } catch (err) {
+      // 部分失败的批量标签写入必须反馈（review round 9）：吞错会让弹窗
+      // 停留在打开态且用户不知道哪些文档已改/未改。
+      showToast(err instanceof Error ? err.message : t('common.operationFailed', '操作失败'), 'error');
     } finally {
       setBusy(false);
     }
@@ -4913,7 +4968,7 @@ const BatchTagsDialog: React.FC<{
             {t('pages.rag.batchTagsHint')}
           </p>
           <div className="hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
-            {count} selected
+            {t('pages.rag.selectedCount', { count })}
           </div>
           <div className="hub-card" style={{ padding: '6px 10px', background: 'var(--hub-surface)' }}>
             <TagEditor tags={tags} onChange={setTags} />

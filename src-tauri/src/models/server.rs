@@ -159,6 +159,20 @@ pub struct ServerConfig {
     /// from the frontend so an edit of any other field does not drop it.
     #[serde(default)]
     pub proxy: Option<ProxychainsConfig>,
+    /// Keep-alive toggle for sse/streamable-http servers (frontend round-trip).
+    /// Persisted and compared for connection-relevant edits, but the rmcp
+    /// transport currently manages its own connection health — not yet wired
+    /// to runtime behavior.
+    #[serde(default)]
+    pub enable_keep_alive: Option<bool>,
+    /// Keep-alive ping interval in milliseconds (frontend round-trip only).
+    #[serde(default)]
+    pub keep_alive_interval: Option<u64>,
+    /// Extra headers passed through to the upstream on every request
+    /// (sse/streamable-http). Persisted for round-trip; consumed by the rmcp
+    /// transport's request headers once wired.
+    #[serde(default)]
+    pub passthrough_headers: Option<Vec<String>>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

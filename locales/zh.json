@@ -146,7 +146,8 @@
     "passwordRequireLetter": "密码必须包含至少一个字母",
     "passwordRequireNumber": "密码必须包含至少一个数字",
     "passwordRequireSpecial": "密码必须包含至少一个特殊字符",
-    "passwordStrengthHint": "密码必须至少 8 个字符，且包含字母、数字和特殊字符"
+    "passwordStrengthHint": "密码必须至少 8 个字符，且包含字母、数字和特殊字符",
+    "user": "用户"
   },
   "server": {
     "searchPlaceholder": "搜索名称或描述",
@@ -338,7 +339,8 @@
     "packageVersion": "已安装的包版本（runner 缓存中最后安装的版本）",
     "smartBadge": "Smart",
     "smartMetaRoute": "Smart Routing 元工具",
-    "smartMetaTooltip": "Smart Routing 元工具：仅通过 /mcp/$smart 接入点暴露，不在普通 /mcp、/api 路径中提供。"
+    "smartMetaTooltip": "Smart Routing 元工具：仅通过 /mcp/$smart 接入点暴露，不在普通 /mcp、/api 路径中提供。",
+    "unknownError": "未知错误"
   },
   "status": {
     "sleeping": "休眠",
@@ -365,7 +367,15 @@
     "failedToUpdateSystemConfig": "更新系统配置失败",
     "failedToUpdateRouteConfig": "更新路由配置失败",
     "failedToUpdateSmartRoutingConfig": "更新智能路由配置失败",
-    "failedToUpdateBetterAuthConfig": "更新 Better Auth 配置失败"
+    "failedToUpdateBetterAuthConfig": "更新 Better Auth 配置失败",
+    "failedToUpdateRoutingConfig": "更新路由配置失败",
+    "failedToUpdateInstallConfig": "更新安装配置失败",
+    "failedToUpdateMCPRouterConfig": "更新 MCP Router 配置失败",
+    "failedToUpdateNameSeparator": "更新名称分隔符失败",
+    "failedToUpdateOAuthServerConfig": "更新 OAuth 服务器配置失败",
+    "failedToUpdateSessionRebuild": "更新会话重建设置失败",
+    "failedToUpdateSettings": "更新设置失败",
+    "failedToUpdateBearerKey": "更新 Bearer Key 失败"
   },
   "common": {
     "loading": "加载中...",
@@ -424,7 +434,8 @@
     "searchPlaceholder": "搜索名称或描述",
     "started": "已启动",
     "notStarted": "未启动",
-    "copyOpenApiUrl": "复制OpenAPI URL"
+    "copyOpenApiUrl": "复制OpenAPI URL",
+    "operationFailed": "操作失败"
   },
   "pagination": {
     "rowsPerPage": "每页行数",
@@ -875,7 +886,8 @@
       "excludeFileGroupAdd": "排除这些文件（更新检查忽略）",
       "excludeFileGroupRemove": "取消排除这些文件（恢复参与更新检查）",
       "refreshSourceDone": "数据源更新完成：导入 {{added}}，移除 {{removed}}，更新 {{updated}}",
-      "refreshSourceTitle": "数据源更新"
+      "refreshSourceTitle": "数据源更新",
+      "selectedCount": "已选 {{count}} 项"
     }
   },
   "logs": {
@@ -1249,6 +1261,7 @@
     "httpPort": "HTTP 服务端口",
     "httpPortDescription": "MCP HTTP 服务监听端口，修改后需重启应用生效",
     "httpPortWarning": "修改端口后需要重启应用才能生效",
+    "httpPortInvalid": "端口需在 1024–65535 之间",
     "nodeVersion": "Node.js 版本",
     "nodeVersionDescription": "选择或安装特定的 Node.js 版本用于运行 MCP 服务器",
     "pythonVersion": "Python 版本",
@@ -1502,7 +1515,8 @@
     "smartReindexDone": "智能路由索引重建完成",
     "smartReindexFailed": "重建智能路由索引失败",
     "mcpStrictValidation": "严格协议校验",
-    "mcpStrictValidationDescription": "开启后按 MCP 规范严格校验请求头与参数；默认关闭，宽容不完整请求以兼容未跟进新规范的客户端"
+    "mcpStrictValidationDescription": "开启后按 MCP 规范严格校验请求头与参数；默认关闭，宽容不完整请求以兼容未跟进新规范的客户端",
+    "selectAtLeastOneGroupOrServer": "请至少选择一个分组或服务器"
   },
   "mcpb": {
     "upload": "上传",
@@ -1601,7 +1615,8 @@
     "statsError": "获取用户统计失败",
     "deleteConfirmation": "您确定要删除用户 '{{username}}' 吗？此操作无法撤消。",
     "confirmDelete": "删除用户",
-    "deleteWarning": "您确定要删除用户 '{{username}}' 吗？此操作无法撤消。"
+    "deleteWarning": "您确定要删除用户 '{{username}}' 吗？此操作无法撤消。",
+    "fetchError": "加载用户列表失败"
   },
   "api": {
     "errors": {
@@ -1644,7 +1659,8 @@
       "failedToGetMarketTags": "获取市场标签失败",
       "failedToSearchMarketServers": "搜索市场服务器失败",
       "failedToFilterMarketServers": "过滤市场服务器失败",
-      "failedToProcessMcpbFile": "处理 MCPB 文件失败"
+      "failedToProcessMcpbFile": "处理 MCPB 文件失败",
+      "failedToReloadServer": "重载服务器失败"
     },
     "success": {
       "serverCreated": "服务器创建成功",
@@ -2033,5 +2049,15 @@
     "showAll": "显示所有服务器",
     "loading": "加载中…",
     "empty": "暂无需要个人凭据的共享服务器。"
+  },
+  "accessUrl": {
+    "title": "服务访问地址",
+    "baseUrl": "基础地址",
+    "globalRoute": "全局路由（所有服务器）",
+    "groupRoute": "分组路由",
+    "serverRoute": "单服务器路由",
+    "smartRoute": "智能路由端点",
+    "smartApiRoute": "智能路由 REST API",
+    "sseRoute": "SSE 端点"
   }
 }

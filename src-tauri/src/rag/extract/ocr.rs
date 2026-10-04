@@ -90,12 +90,26 @@ pub fn image_bytes(bytes: &[u8]) -> Result<String> {
     recognize_blocking(bytes)
 }
 
+/// Decode with allocation/geometry limits — image decompression bombs
+/// (small PNG declaring a gigapixel canvas) must not OOM the process.
+fn decode_limited(bytes: &[u8]) -> Result<image::DynamicImage> {
+    let mut limits = image::Limits::default();
+    // 64MiB allocation cap + 12000px side cap are plenty for OCR input.
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits.max_image_width = Some(12000);
+    limits.max_image_height = Some(12000);
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()?;
+    let mut reader = reader;
+    reader.limits(limits);
+    reader.decode().map_err(Into::into)
+}
+
 /// Synchronous recognition on an already-validated image payload.
 fn recognize_blocking(bytes: &[u8]) -> Result<String> {
     // Validate decodeability first so every backend gets sane input (and the
     // error names the real problem instead of a framework-level mystery).
-    let _probe = image::load_from_memory(bytes)
-        .map_err(|e| anyhow!("image decode failed: {e}"))?;
+    let _probe = decode_limited(bytes).map_err(|e| anyhow!("image decode failed: {e}"))?;
 
     #[cfg(target_os = "macos")]
     {
@@ -311,10 +325,16 @@ mod linux {
     fn probe() -> &'static Probe {
         static PROBE: OnceLock<Probe> = OnceLock::new();
         PROBE.get_or_init(|| {
-            let tesseract = std::process::Command::new("tesseract")
-                .arg("--version")
+            let mut cmd = std::process::Command::new("tesseract");
+            cmd.arg("--version")
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let tesseract = cmd
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
@@ -322,8 +342,14 @@ mod linux {
                 return Probe { tesseract: false, missing_langs: vec![] };
             }
             // List installed language packs; report the ones we need missing.
-            let langs = std::process::Command::new("tesseract")
-                .arg("--list-langs")
+            let mut cmd = std::process::Command::new("tesseract");
+            cmd.arg("--list-langs");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let langs = cmd
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_default();
@@ -370,20 +396,25 @@ mod linux {
 
         // Re-encode to PNG (tesseract/leptonica reads it everywhere) in a
         // unique temp file, run the CLI, clean up regardless of outcome.
-        let img = image::load_from_memory(bytes).map_err(|e| anyhow!("image decode failed: {e}"))?;
+        let img = decode_limited(bytes).map_err(|e| anyhow!("image decode failed: {e}"))?;
         let tmp = std::env::temp_dir().join(format!("mcphub-ocr-{}.png", uuid::Uuid::new_v4()));
         img.save_with_format(&tmp, image::ImageFormat::Png)
             .map_err(|e| anyhow!("png encode failed: {e}"))?;
 
         let lang = TESSERACT_LANGS.join("+");
-        let result = std::process::Command::new("tesseract")
-            .arg(&tmp)
+        let mut cmd = std::process::Command::new("tesseract");
+        cmd.arg(&tmp)
             .arg("stdout")
             .arg("-l")
             .arg(&lang)
             .arg("--psm")
-            .arg("1")
-            .output();
+            .arg("1");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let result = cmd.output();
         let _ = std::fs::remove_file(&tmp);
 
         match result {

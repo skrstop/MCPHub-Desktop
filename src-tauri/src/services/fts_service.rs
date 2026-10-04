@@ -178,9 +178,13 @@ fn fts_escape(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-/// 判断 token 是否全 ASCII（字母/数字）
+/// 判断 token 是否可归入 ascii（拼音/首字母）路由段。
+/// 非 CJK 的带重音/西里尔等 Unicode 词也归入：charabia 是全语言分词器，
+/// 写入侧 tokenize_fields 把它们原样索引进 zh/py 列，查询侧若按
+/// ascii_alphanumeric 收窄会把这些词元整体丢弃 → build_match_query 返回
+/// None → 调用方按「空输入=查全部」返回未过滤全量（带重音查询退化）。
 fn is_ascii_token(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric())
+    !s.is_empty() && !has_cjk(s) && s.chars().any(|c| c.is_alphanumeric())
 }
 
 /// 构造 FTS5 MATCH 查询串。
@@ -348,6 +352,28 @@ pub async fn sync_upsert(table: FtsTable, ref_id: &str, text: &str) -> Result<()
 }
 
 /// 同步 upsert（外部事务版：不提交，由调用方与源表写同事务提交——§4.3 铁律）
+/// Insert-only FTS sync for append-only tables (app_log): skips the ref_id
+/// rowid lookup that full-scans an UNINDEXED column on every call. Only valid
+/// when ref_id is guaranteed fresh (new UUID) — never reuse for updatable
+/// tables (servers/prompts/etc), which must keep sync_upsert_tx.
+pub async fn sync_insert_tx(
+    tx: &mut sqlx::SqliteConnection,
+    table: FtsTable,
+    ref_id: &str,
+    text: &str,
+) -> Result<()> {
+    let (zh, py, ini) = tokenize_fields(text);
+    let ins = sqls(table).insert;
+    sqlx::query(ins)
+        .bind(ref_id)
+        .bind(&zh)
+        .bind(&py)
+        .bind(&ini)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
 pub async fn sync_upsert_tx(
     tx: &mut sqlx::SqliteConnection,
     table: FtsTable,
@@ -460,8 +486,7 @@ pub(crate) async fn search_ref_ids_weighted_on(
 
     let sql = sqls(table).search;
     // ref_id → (命中数, 首次出现序)。首次出现序 = 各 token 查询的 rank 序依次
-    // 合并的顺序，作为 count 相同时的确定性 tiebreak（调用方通常还会用
-    // 表原生序再稳定排序覆盖它）。
+    // 合并的顺序，作为 count 相同时的确定性 tiebreak。
     let mut merged: std::collections::HashMap<String, (i64, u32)> = std::collections::HashMap::new();
     for expr in &exprs {
         let ids: Vec<String> = sqlx::query_scalar(sql)
@@ -475,11 +500,14 @@ pub(crate) async fn search_ref_ids_weighted_on(
         }
     }
 
-    let mut out: Vec<(String, i64)> = merged.into_iter().map(|(id, (c, _))| (id, c)).collect();
-    // 命中数降序；count 相同保持首次出现序（sort_by_key 稳定）
-    out.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+    // 命中数降序；count 相同按首次出现序。⚠️ 不能依赖 sort_by_key 的稳定性
+    // 兜底——HashMap 迭代序随机，必须把 seq 纳入排序键，否则并列命中的输出
+    // 序非确定（下游 log 翻页会重复/丢条目）。
+    let mut out: Vec<(String, i64, u32)> =
+        merged.into_iter().map(|(id, (c, seq))| (id, c, seq)).collect();
+    out.sort_by_key(|&(_, c, seq)| (std::cmp::Reverse(c), seq));
     out.truncate(limit.max(0) as usize);
-    Ok(out)
+    Ok(out.into_iter().map(|(id, c, _)| (id, c)).collect())
 }
 
 /// FTS 表行数（对账/兜底判断用）
@@ -523,22 +551,23 @@ pub async fn backfill_app_log_if_empty() {
         }
     }
 
-    let rows = match sqlx::query("SELECT id, message FROM app_log")
-        .fetch_all(crate::db::pool())
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("[fts] backfill app_log read failed: {e}");
-            return;
-        }
-    };
-
     let pool = crate::db::pool();
-    let mut tx = match pool.begin().await {
+    let mut tx = match pool.begin_with("BEGIN IMMEDIATE").await {
         Ok(t) => t,
         Err(e) => {
             log::warn!("[fts] backfill app_log begin failed: {e}");
+            return;
+        }
+    };
+    // Read the source rows INSIDE the transaction: a concurrent add_log
+    // inserts app_log + fts_app_log atomically; if we read outside the tx and
+    // then DELETE+reinsert inside it, the clear would also drop the new row's
+    // FTS entry while our stale snapshot lacks it — a permanently unsearchable
+    // row. Reading inside the tx keeps the snapshot consistent with the clear.
+    let rows = match sqlx::query("SELECT id, message FROM app_log").fetch_all(&mut *tx).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[fts] backfill app_log read failed: {e}");
             return;
         }
     };
@@ -654,15 +683,26 @@ pub async fn rebuild_one(pool: &sqlx::SqlitePool, table: FtsTable) -> Result<i64
         s.leak()
     };
 
-    let rows = sqlx::query(select_sql).fetch_all(pool).await?;
-    if rows.is_empty() {
-        let clear_sql = sqls(table).clear;
-        sqlx::query(clear_sql).execute(pool).await?;
-        return Ok(0);
-    }
+    // 单事务：读源表 + 清空 + 批量插入。The SELECT must run inside the same
+    // tx as the clear: a concurrent writer committing between an
+    // out-of-tx read and the in-tx clear would have its fresh FTS row
+    // deleted with no replacement (row permanently unsearchable until the
+    // next rebuild). Same fix backfill_app_log_if_empty got (see its
+    // comment). sqlx requires the query borrow to end before clear reuses
+    // the connection, so collect rows first *within* the tx.
+    // BEGIN IMMEDIATE (not deferred): a deferred tx's SELECT takes a WAL read
+    // snapshot, and a concurrent writer can still commit between that snapshot
+    // and the in-tx DELETE — the clear removes the writer's fresh FTS row
+    // while our inserts come from the stale snapshot (row permanently
+    // unsearchable until the next rebuild). IMMEDIATE takes the write lock
+    // first so concurrent writers block until this rebuild commits.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let rows = sqlx::query(select_sql).fetch_all(&mut *tx).await?;
+    let clear_sql = sqls(table).clear;
+    sqlx::query(clear_sql).execute(&mut *tx).await?;
 
-    // 拼接：fts_ref = ref 列，之后按白名单列序单空格拼接（NULL/空串跳过）
-    let mut entries: Vec<(String, String)> = Vec::with_capacity(rows.len());
+    let ins = sqls(table).insert;
+    let mut n: i64 = 0;
     for row in &rows {
         let ref_id: Option<String> = row.try_get(0)?;
         let Some(ref_id) = ref_id else { continue };
@@ -682,20 +722,9 @@ pub async fn rebuild_one(pool: &sqlx::SqlitePool, table: FtsTable) -> Result<i64
                 }
             }
         }
-        entries.push((ref_id, text));
-    }
-
-    // 单事务：清空 + 批量插入
-    let mut tx = pool.begin().await?;
-    let clear_sql = sqls(table).clear;
-    sqlx::query(clear_sql).execute(&mut *tx).await?;
-
-    let ins = sqls(table).insert;
-    let mut n: i64 = 0;
-    for (ref_id, text) in &entries {
-        let (zh, py, ini) = tokenize_fields(text);
+        let (zh, py, ini) = tokenize_fields(&text);
         sqlx::query(ins)
-            .bind(ref_id)
+            .bind(&ref_id)
             .bind(&zh)
             .bind(&py)
             .bind(&ini)

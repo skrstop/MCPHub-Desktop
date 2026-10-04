@@ -375,7 +375,13 @@ async fn refresh_git_repo(app: &AppHandle, repo_url: &str) -> Result<bool, GitSo
         rag_log("info", format!("git: refresh deferred (import in progress): {repo_url}"));
         return Ok(false);
     }
-    let hash = super::git::repo_hash(repo_url);
+    // Canonicalize BEFORE keying the lock/TTL: two raw spellings of the
+    // same repo (http vs https redirect form) otherwise get different locks
+    // and race concurrent refresh_persistent calls on the SAME canonical
+    // `{hash}.new` clone dir (the second remove_dir_all wipes the first's
+    // in-flight fetch → corrupt clone can be swapped in). TTL bypass per
+    // spelling has the same root cause.
+    let hash = super::git::repo_hash(&super::git::canonicalize_url(repo_url).await);
     // Serialize per repo (see GIT_REFRESH_LOCKS), then re-check the TTL
     // inside the lock — a concurrent caller may have just refreshed.
     let repo_lock = git_refresh_lock(&hash);
@@ -406,12 +412,16 @@ async fn refresh_git_repo(app: &AppHandle, repo_url: &str) -> Result<bool, GitSo
             // mapping) -> the fix is credentials; anything else (not found /
             // network) -> the address may have moved or be unreachable.
             let auth = msg.starts_with("GIT_AUTH_REQUIRED");
-            let detail = msg
-                .strip_prefix("GIT_AUTH_REQUIRED:")
-                .unwrap_or(&msg)
-                .trim()
-                .to_string();
-            rag_log("warn", format!("git: refresh {repo_url} failed: {msg}"));
+            let detail = crate::rag::git::scrub_credentials(
+                msg.strip_prefix("GIT_AUTH_REQUIRED:")
+                    .unwrap_or(&msg)
+                    .trim(),
+            )
+            .to_string();
+            rag_log(
+                "warn",
+                format!("git: refresh {repo_url} failed: {}", crate::rag::git::scrub_credentials(&msg)),
+            );
             let branch = String::new();
             let err = GitSourceError {
                 url: repo_url.to_string(),
@@ -464,7 +474,9 @@ async fn refresh_git_repo_best_effort(app: &AppHandle, repo_url: &str) {
 /// clears immediately instead of showing a stale warning until the next
 /// successful refresh.
 pub async fn clear_git_source_error_for(repo_url: &str) {
-    let hash = super::git::repo_hash(repo_url);
+    // Cache/errors are keyed by the CANONICAL hash (see refresh_git_repo) —
+    // canonicalize first or the clear silently no-ops for re-spelled urls.
+    let hash = super::git::repo_hash(&super::git::canonicalize_url(repo_url).await);
     if let Ok(mut errs) = git_refresh_errors().lock() {
         errs.remove(&hash);
     }
@@ -834,16 +846,16 @@ async fn plan_source_sync(
 async fn run_source_sync(app: &AppHandle, added: Vec<SourceSyncAdd>, removed: Vec<(String, String)>) -> (u32, u32) {
     let mut added_count = 0u32;
     for a in added {
-        // Race guard: the plan (plan_source_sync) classified this file as
-        // "unreferenced" from a meta snapshot taken BEFORE the import. Between
-        // then and now a concurrent manual upload / update may have recorded
-        // the same path as a doc's original_path — importing would create a
-        // duplicate doc for one file (observed: manual update while the auto
-        // tick ran -> same file twice in the tree). Re-scan the metas fresh,
-        // under META_LOCK (serializes against update_doc_from_file's write),
-        // and skip paths that are now referenced.
+        // Race guard + import in ONE META_LOCK critical section: the plan
+        // (plan_source_sync) classified this file as "unreferenced" from a
+        // meta snapshot taken BEFORE the import. A concurrent manual
+        // upload/update may record the same path as a doc's original_path —
+        // re-scan the metas fresh AND import while still holding META_LOCK
+        // (the upload path itself does not acquire it, so no re-entrant
+        // deadlock; releasing before import would reopen the observed
+        // "same file twice" window).
+        let _meta_guard = meta_lock().await.lock().await;
         {
-            let _meta_guard = meta_lock().await.lock().await;
             let dir = match files_dir(app) {
                 Ok(d) => d,
                 Err(e) => {
@@ -1047,6 +1059,29 @@ fn files_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("files"))
 }
 
+/// Validate a document id before it is ever joined into a filesystem path.
+/// Doc ids reach `dir.join(format!("{}.meta", id))` and friends from MCP tool
+/// arguments (`rag_get` / `rag_file_delete` / ...) that are exposed through
+/// the public HTTP MCP gateway — an unvalidated id containing `/`, `\` or a
+/// `..` segment escapes `rag/files/` (path traversal: arbitrary file delete /
+/// read-probe). Ids are generated as UUIDs; accept only a conservative
+/// charset so no legitimate id is rejected.
+pub(crate) fn validate_doc_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 128
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains('\0')
+    {
+        return Err(anyhow!("invalid document id"));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        return Err(anyhow!("invalid document id"));
+    }
+    Ok(())
+}
+
 fn lancedb_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("lancedb"))
 }
@@ -1201,7 +1236,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
         if needs_reindex {
             // Old embeddings are gone; zero the on-disk `.meta` chunk_count so
             // the list view reflects reality (0) until reindex repopulates.
-            zero_all_chunk_counts(app)?;
+            zero_all_chunk_counts(app).await?;
         } else {
             // List-vs-vector consistency check (the "起码的数据一致" invariant):
             // every doc whose meta claims chunks must be vector-searchable.
@@ -1222,7 +1257,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
                             "vector store is empty but {indexed_metas} doc(s) claim indexed chunks — vectors lost, reindex required"
                         ),
                     );
-                    zero_all_chunk_counts(app)?;
+                    zero_all_chunk_counts(app).await?;
                     needs_reindex = true;
                 }
             }
@@ -1301,6 +1336,11 @@ pub async fn stop() {
     // Smart Routing) is registered, mv drops the model + connection and does
     // the mimalloc collect + RSS logging (the old stop semantics); otherwise
     // the model stays up for the remaining consumer.
+    // Wait for an mv-level model load first: release() takes the runtime slot
+    // only if populated — if Smart Routing just triggered ensure_started, the
+    // slot is filled AFTER release returns and the model would run with zero
+    // consumers (leaked, never released). See mv/mod.rs release docs.
+    crate::mv::wait_while_initializing(std::time::Duration::from_secs(180)).await;
     crate::mv::release("rag").await;
 }
 
@@ -1643,6 +1683,9 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
             start_on_demand: None,
             idle_timeout_ms: None,
             proxy: None,
+            enable_keep_alive: None,
+            keep_alive_interval: None,
+            passthrough_headers: None,
             enabled: true,
         },
         status: ServerStatus {
@@ -1663,7 +1706,7 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
 
 // ── documents ───────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct DocMeta {
     id: String,
     name: String,
@@ -2482,6 +2525,7 @@ async fn get_doc_inner(
     id: &str,
     range: Option<(u64, u64)>,
 ) -> Result<Option<(RagDoc, u64)>> {
+    validate_doc_id(id)?;
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", id));
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
@@ -2579,6 +2623,7 @@ async fn get_doc_inner(
 /// (chunks live in lancedb). Returns an empty vec if the doc has no chunks
 /// (not yet indexed / model swapped + not re-indexed).
 pub async fn get_doc_chunks(id: &str) -> Result<Vec<crate::models::rag::RagChunk>> {
+    validate_doc_id(id)?;
     // Unpaged: all chunks (kept for any internal caller).
     let (chunks, _total) = get_doc_chunks_inner(id, 0, u32::MAX).await?;
     Ok(chunks)
@@ -2957,7 +3002,11 @@ async fn write_doc_and_index(
     let write_content = method.as_deref() != Some("symlink");
     if write_content {
         let content_path = dir.join(file_stem);
-        std::fs::write(&content_path, content)?;
+        // Atomic write (tmp+rename): a crash mid-write must not truncate the
+        // existing content file (mirrors write_meta_atomic durability).
+        let tmp_path = dir.join(format!(".{}.tmp", file_stem));
+        std::fs::write(&tmp_path, content)?;
+        std::fs::rename(&tmp_path, &content_path)?;
     }
     let chunk_count = reindex_doc(app, doc_id, display_name, content, tags.clone()).await? as u32;
     let title = extract_title(content, display_name);
@@ -3017,6 +3066,7 @@ pub async fn upload_one_path(
 ///
 /// Holds META_LOCK across the read-modify-write (lock order: meta -> runtime).
 pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) -> Result<u32> {
+    validate_doc_id(id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let path = Path::new(file_path);
@@ -3047,17 +3097,13 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     let old_meta: DocMeta = serde_json::from_slice(&old_meta_bytes)?;
     let tags = old_meta.tags.clone();
 
-    // Remove the OLD on-disk content file (resolved by the old meta's name)
-    // so a different extension doesn't leave an orphan. The new file is
-    // written below by write_doc_and_index. (For symlink docs there's no copy
-    // to remove, but content_path_for falls back to meta_name which won't exist
-    // — the .exists() guard handles it.)
+    // The OLD on-disk content file is removed AFTER the new file is written
+    // and indexed successfully (delete-after-write): removing it up front and
+    // failing mid-write/reindex would leave the doc listable with no content
+    // file on disk and stale vectors — a silently corrupted doc. The exists()
+    // + path-difference check handles same-name same-ext updates and symlink
+    // docs (no copy on disk).
     let old_content = content_path_for(&dir, id, &old_meta.name);
-    if old_content.exists() {
-        if let Err(e) = std::fs::remove_file(&old_content) {
-            rag_log("warn", format!("update: remove old {} failed: {}", old_content.display(), e));
-        }
-    }
 
     // New on-disk filename: `{id}{ext}` with the NEW file's extension for
     // text sources; `{id}.md` for extractable sources (content is derived
@@ -3121,6 +3167,14 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     )
     .await?;
 
+    // New content is durable + indexed; now drop the old content file if it
+    // has a different path (different extension/name case).
+    if old_content.exists() && old_content != dir.join(&file_stem) {
+        if let Err(e) = std::fs::remove_file(&old_content) {
+            rag_log("warn", format!("update: remove old {} failed: {}", old_content.display(), e));
+        }
+    }
+
     Ok(chunk_count)
 }
 
@@ -3133,6 +3187,7 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
 /// Holds META_LOCK across the whole read-modify-write so a concurrent
 /// delete/update of the same doc can't interleave (lock order: meta -> runtime).
 pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> {
+    validate_doc_id(id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", id));
@@ -3179,14 +3234,11 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
     // (symlink docs have no copy). For "copy" docs the on-disk name is
     // `{id}{ext}`; recompute it from the OLD meta name.
     let is_symlink = old_meta.method.as_deref() == Some("symlink");
-    if !is_symlink {
-        let old_content = content_path_for(&dir, id, &old_meta.name);
-        if old_content.exists() {
-            if let Err(e) = std::fs::remove_file(&old_content) {
-                rag_log("warn", format!("update-from-original: remove old {} failed: {}", old_content.display(), e));
-            }
-        }
-    }
+    // Old content file removal happens AFTER the write+index below
+    // (delete-after-write): failing mid-write with the old copy already gone
+    // would leave a listable doc with no content file. Symlink docs have no
+    // copy to remove.
+    let old_content = if is_symlink { None } else { Some(content_path_for(&dir, id, &old_meta.name)) };
 
     // On-disk filename: `{id}{ext}` for text sources, `{id}.md` for
     // extractable sources (derived Markdown — see upload_one_path_inner).
@@ -3226,6 +3278,15 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         old_meta.source.clone(),
     )
     .await?;
+
+    // Content durable + indexed; drop the old copy if it has a different path.
+    if let Some(old_content) = old_content {
+        if old_content.exists() && old_content != dir.join(&file_stem) {
+            if let Err(e) = std::fs::remove_file(&old_content) {
+                rag_log("warn", format!("update-from-original: remove old {} failed: {}", old_content.display(), e));
+            }
+        }
+    }
 
     Ok(chunk_count)
 }
@@ -3317,6 +3378,12 @@ async fn upload_one_path_inner(
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
         .unwrap_or_default();
+    // Reject `.meta` uploads: `{id}.meta` is the meta JSON path itself —
+    // writing content there would clobber the meta (or vice versa) and
+    // content_path_for candidate 1 would resolve to the meta file.
+    if ext == ".meta" {
+        return Err(anyhow!("UNSUPPORTED_FORMAT: '.meta' is a reserved internal extension"));
+    }
     let file_stem = if extractable {
         format!("{id}.md")
     } else {
@@ -3400,10 +3467,12 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()));
-    // Candidate 1: {id}{ext} (current scheme). Only when there IS an ext.
+    // Candidate 1: {id}{ext} (current scheme). Only when there IS an ext,
+    // and never the meta file itself ({id}.meta is always a meta JSON —
+    // a collision here means legacy corruption, not content).
     if let Some(ref ext) = ext {
         let by_id_ext = dir.join(format!("{id}{ext}"));
-        if by_id_ext.exists() {
+        if by_id_ext.exists() && by_id_ext != dir.join(format!("{id}.meta")) {
             return by_id_ext;
         }
     }
@@ -3626,6 +3695,14 @@ pub async fn create_doc_from_content(
     if dt.is_empty() {
         return Err(anyhow!("docType must not be empty"));
     }
+    // docType becomes part of the on-disk filename — restrict to a bare
+    // extension charset so a hostile MCP client cannot traverse out of files/
+    // via `md/../../evil` (docName is sanitized separately; docType was not).
+    if !dt.chars().all(|c| c.is_ascii_alphanumeric()) || dt.eq_ignore_ascii_case("meta") {
+        return Err(anyhow!(
+            "docType must be a bare extension (letters/digits only, not 'meta')"
+        ));
+    }
     // If docName already ends with .{docType}, keep it; else append.
     let file_name = if name_base.to_lowercase().ends_with(&format!(".{}", dt.to_lowercase())) {
         name_base.clone()
@@ -3655,6 +3732,12 @@ pub async fn create_doc_from_content(
     // always a fresh document (fresh uuid), matching the upload path.
 
     let id = Uuid::new_v4().to_string();
+    // On-disk name is `{id}.{docType}` (uuid-prefixed, like uploads) so two
+    // same-named creates coexist with independent content files; the
+    // human-readable name lives in meta.name only. content_path_for
+    // candidate 1 ({id}{ext}) resolves it; candidate 4 ({meta.name}) keeps
+    // legacy create docs working.
+    let disk_name = format!("{id}.{dt}");
     rag_log(
         "info",
         format!("rag_file_create '{}' ({} bytes), indexing...", file_name, byte_len),
@@ -3666,7 +3749,7 @@ pub async fn create_doc_from_content(
         app,
         &dir,
         &id,
-        &file_name,
+        &disk_name,
         &file_name,
         content,
         tags,
@@ -3707,6 +3790,7 @@ pub async fn update_doc(
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
 ) -> Result<()> {
+    validate_doc_id(doc_id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", doc_id));
@@ -3796,6 +3880,16 @@ pub async fn update_doc(
         } else {
             content_path.clone()
         };
+        // Tag-only update on a copy doc whose content file has vanished:
+        // reading yields "" and reindex_doc would delete the old vectors and
+        // insert 0 chunks (same irreversible loss the symlink_lost guard
+        // prevents). Skip the re-index and keep the existing chunks.
+        if content.is_none() && !is_symlink && !content_path.exists() {
+            rag_log(
+                "warn",
+                format!("rag_file_update: '{}' content file missing; tags saved without re-index (chunks keep old data)", meta.name),
+            );
+        } else {
         let content_text = if let Some(c) = content {
             let new_content = if append {
                 let old = std::fs::read_to_string(&content_path).unwrap_or_default();
@@ -3810,7 +3904,12 @@ pub async fn update_doc(
                     byte_len, MAX_UPLOAD_BYTES
                 ));
             }
-            std::fs::write(&content_path, &new_content)?;
+            let tmp_path = content_path.with_extension(format!(
+                "{}.tmp",
+                content_path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+            ));
+            std::fs::write(&tmp_path, &new_content)?;
+            std::fs::rename(&tmp_path, &content_path)?;
             meta.size = byte_len as u64;
             new_content
         } else {
@@ -3822,6 +3921,7 @@ pub async fn update_doc(
         if content.is_some() {
             content_text_for_md5 = Some(content_text);
         }
+        } // else (copy tag-only, content file missing): skipped re-index
         } // else (symlink_lost tag-only): skipped re-index above
     }
 
@@ -3831,18 +3931,36 @@ pub async fn update_doc(
     if meta.name != old_name {
         let by_id = dir.join(doc_id);
         if !by_id.exists() {
-            let old_path = dir.join(&old_name);
-            let new_path = dir.join(&meta.name);
+            // Resolve via the full candidate chain: upload docs live at
+            // {id}{ext} (old_name alone never matches them on disk), create
+            // docs at {old_name}. Renaming to the resolved-new target keeps
+            // content_path_for working after the name change.
+            let old_path = content_path_for(&dir, doc_id, &old_name);
+            let new_path = content_path_for(&dir, doc_id, &meta.name);
             if old_path.exists() && old_path != new_path {
-                let _ = std::fs::rename(&old_path, &new_path);
+                if let Err(e) = std::fs::rename(&old_path, &new_path) {
+                    rag_log(
+                        "warn",
+                        format!("rag_file_update: renaming content file {:?} -> {:?} failed: {} (content may be unreachable under the new name)", old_path, new_path, e),
+                    );
+                }
             }
         }
     }
 
     // If content changed, refresh the stored md5 so future update detection
-    // compares against the new baseline.
+    // compares against the new baseline. For docs with a live original source
+    // (folder/git/copy with original_path), the md5 baseline must describe the
+    // SOURCE bytes — overwriting it with the copy's new content hash would
+    // make every later update check flag "original changed" and let a source
+    // refresh clobber MCP-written content. Keep the source baseline instead.
     if let Some(ct) = content_text_for_md5 {
-        meta.md5 = Some(compute_md5(ct.as_bytes()));
+        let source_md5 = meta
+            .original_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| md5_of_file(Path::new(p)).ok());
+        meta.md5 = source_md5.or_else(|| Some(compute_md5(ct.as_bytes())));
     }
 
     write_meta_atomic(&meta_path, &meta)?;
@@ -4093,7 +4211,10 @@ async fn reindex_doc(
             return Err(anyhow!("RAG not enabled"));
         };
         // Remove any existing chunks for this doc (tag re-edit / re-upload).
-        let _ = rt.db.delete_by_doc(doc_id).await;
+        // A failed delete followed by a successful add leaves BOTH old and
+        // new chunks in the table — stale text stays searchable (review
+        // round 8, 2026-10-04). Fail instead of writing on top.
+        rt.db.delete_by_doc(doc_id).await?;
         let inputs: Vec<ChunkInput> = chunks
             .iter()
             .enumerate()
@@ -4145,7 +4266,7 @@ fn count_indexed_metas(app: &AppHandle) -> Result<u32> {
 /// the vector table is recreated on a model swap (dim mismatch). Until
 /// `reindex_all` repopulates them, the list view shows 0 (honest: the table is
 /// empty) instead of a stale pre-swap count.
-fn zero_all_chunk_counts(app: &AppHandle) -> Result<()> {
+async fn zero_all_chunk_counts(app: &AppHandle) -> Result<()> {
     let dir = files_dir(app)?;
     if !dir.exists() {
         return Ok(());
@@ -4164,7 +4285,30 @@ fn zero_all_chunk_counts(app: &AppHandle) -> Result<()> {
         meta.chunk_count = 0;
         // write_meta_atomic（tmp + rename）而非裸写：与所有其它 meta 写路径一致，
         // 防崩溃留下半截 JSON 导致该文档被全部扫描器静默跳过。
-        if write_meta_atomic(&path, &meta).is_ok() {
+        // META_LOCK read-modify-write parity: every other meta writer holds
+        // it — without the lock a concurrent doc update could be overwritten
+        // by this stale copy (review round 8, 2026-10-04). Re-read inside the
+        // lock and merge only chunk_count=0 so concurrent name/tag changes in
+        // the window between the scan and this write survive (review round 9).
+        let _meta_guard = meta_lock().await.lock().await;
+        let written = match std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
+        {
+            Some(mut fresh) => {
+                fresh.chunk_count = 0;
+                write_meta_atomic(&path, &fresh).is_ok()
+            }
+            // Re-read failure (file deleted/corrupted by an external actor)
+            // must NOT write the stale scan snapshot back — that could revive
+            // an orphan meta; skip this doc instead (review round 10).
+            None => {
+                drop(_meta_guard);
+                continue;
+            }
+        };
+        drop(_meta_guard);
+        if written {
             n += 1;
         }
     }
@@ -4208,7 +4352,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
     rag_log("info", format!("reindexing all docs ({} docs, model swapped)…", total));
     emit_reindex_progress(app, 0, total, "");
     let mut done = 0usize;
-    for (i, (meta_path, mut meta)) in docs.into_iter().enumerate() {
+    for (i, (meta_path, meta)) in docs.into_iter().enumerate() {
         emit_reindex_progress(app, i as u32, total, &meta.name);
         // Read the doc content. MUST use `content_path_for` (not `dir.join(id)`)
         // — uploads are stored as `{id}.{ext}` (ext from the original filename),
@@ -4257,9 +4401,37 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
         let tags = meta.tags.clone();
         match reindex_doc(app, &meta.id, &meta.name, &content, tags).await {
             Ok(cc) => {
-                meta.chunk_count = cc as u32;
-                if let Err(e) = write_meta_atomic(&meta_path, &meta) {
-                    rag_log("warn", format!("reindex: rewrite meta for '{}' failed: {}", meta.name, e));
+                // META_LOCK read-modify-write parity with every other meta
+                // writer: without it a concurrent update_doc could be
+                // clobbered by this stale copy (review round 8, 2026-10-04).
+                // RE-READ inside the lock and merge only chunk_count: the
+                // snapshot above was taken before a long reindex, so writing
+                // it back wholesale would revert concurrent name/tag changes
+                // (review round 9). Re-read failure falls back to the stale
+                // snapshot (conservative fallback).
+                let _meta_guard = meta_lock().await.lock().await;
+                let merged: DocMeta = match std::fs::read(&meta_path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
+                {
+                    Some(mut fresh) => {
+                        fresh.chunk_count = cc as u32;
+                        fresh
+                    }
+                    None => {
+                        // Re-read failed (meta removed/corrupted mid-reindex):
+                        // do not resurrect the stale snapshot; skip the meta
+                        // rewrite (vectors are already re-embedded) (review
+                        // round 10).
+                        drop(_meta_guard);
+                        done += 1;
+                        continue;
+                    }
+                };
+                let res = write_meta_atomic(&meta_path, &merged);
+                drop(_meta_guard);
+                if let Err(e) = res {
+                    rag_log("warn", format!("reindex: rewrite meta for '{}' failed: {}", merged.name, e));
                 }
                 done += 1;
             }
@@ -4304,6 +4476,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
 /// other call paths. The runtime check happens before `.meta` is written, so a
 /// failure leaves the document unchanged.
 pub async fn set_doc_tags(app: &AppHandle, id: &str, tags: Vec<String>) -> Result<()> {
+    validate_doc_id(id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
     let meta_path = dir.join(format!("{}.meta", id));
@@ -4410,6 +4583,7 @@ async fn rewrite_chunks_with_tags(db: &VectorDb, id: &str, tags: &[String]) -> R
 /// update of the same doc can't re-write the meta after we remove it (the
 /// "deleted doc resurrected" race).
 pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
+    validate_doc_id(id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
 
@@ -4493,6 +4667,14 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
         rag_log("warn", format!("remove_doc_sql for {} failed: {}", id, e));
     }
 
+    // Release META_LOCK before the git refcount section: it performs network
+    // probes (canonicalize_url, up to 10s per spelling) that must never block
+    // every other doc write/import (review round 9). The section only reads
+    // other docs' metas and removes clone/credential artifacts — no meta
+    // read-modify-write, so it is safe outside the lock; in-flight imports
+    // remain guarded by the import_session_active() defer below.
+    drop(_meta_guard);
+
     // Git data source refcount: if the deleted doc came from a git repo and
     // no remaining doc references that repo, remove the persistent clone +
     // local credential file (the temp dir self-heals via the OS).
@@ -4505,15 +4687,41 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
             .map(|g| g.url.clone())
             .filter(|u| !u.is_empty())
         {
-            if count_git_docs_for_repo(app, &git_url).await == 0 {
-                let hash = super::git::repo_hash(&git_url);
-                if let Err(e) = super::git::remove_persistent(app, &hash) {
-                    rag_log("warn", format!("delete_doc: remove git clone {hash} failed: {e}"));
+            // Canonicalize before counting — artifacts are keyed by the
+            // canonical hash; docs under other spellings of the same repo
+            // must keep the refcount above zero.
+            let canonical_git_url = super::git::canonicalize_url(&git_url).await;
+            if count_git_docs_for_repo(app, &canonical_git_url).await == 0 {
+                // Guard the refcount-vs-in-flight-import race: an import of a
+                // new doc from this same repo may be mid-flight (its meta not
+                // yet on disk, so the count above legitimately reads 0 even
+                // though the clone is about to be referenced again). While an
+                // import session is active, defer the clone/credential
+                // cleanup — an unreferenced clone is harmless and will be
+                // collected by the next refcount-zero delete.
+                if import_session_active() {
+                    rag_log(
+                        "info",
+                        format!("git: import session active — deferring clone/credential cleanup for {git_url}"),
+                    );
+                } else {
+                    // Clone + credential are stored under the CANONICAL url's
+                    // hash (clone_to_temp / store_credential_for canonicalize
+                    // first) — hash the canonical form or the cleanup no-ops
+                    // against a dir/key that doesn't exist while the real
+                    // artifacts leak (the sync path already routes through
+                    // persistent_repo_dir_for_url for exactly this reason).
+                    // Reuse the canonicalize from the count above (a cache
+                    // miss costs a network probe; review round 10).
+                    let hash = super::git::repo_hash(&canonical_git_url);
+                    if let Err(e) = super::git::remove_persistent(app, &hash) {
+                        rag_log("warn", format!("delete_doc: remove git clone {hash} failed: {e}"));
+                    }
+                    if let Err(e) = super::git::delete_credential(app, &hash) {
+                        rag_log("warn", format!("delete_doc: remove git credential {hash} failed: {e}"));
+                    }
+                    rag_log("info", format!("git: repo {git_url} has no docs left — clone + credential cleaned up"));
                 }
-                if let Err(e) = super::git::delete_credential(app, &hash) {
-                    rag_log("warn", format!("delete_doc: remove git credential {hash} failed: {e}"));
-                }
-                rag_log("info", format!("git: repo {git_url} has no docs left — clone + credential cleaned up"));
             }
         }
     }
@@ -4521,6 +4729,11 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
 }
 
 /// Count remaining docs whose source came from `repo_url` (kind == "git").
+/// Each doc's stored url is canonicalized before comparison: meta keeps the
+/// RAW url the user imported with, which can differ from `repo_url`'s
+/// spelling (http→https, trailing slash) — an exact comparison would
+/// undercount and let delete_doc remove a clone/credential other docs still
+/// reference (review round 8, 2026-10-04).
 async fn count_git_docs_for_repo(app: &AppHandle, repo_url: &str) -> usize {
     let Ok(dir) = files_dir(app) else { return 0 };
     let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
@@ -4532,14 +4745,18 @@ async fn count_git_docs_for_repo(app: &AppHandle, repo_url: &str) -> usize {
         }
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
-        if meta
+        let u = meta
             .source
             .as_ref()
             .filter(|s| s.kind == "git")
             .and_then(|s| s.git.as_ref())
-            .is_some_and(|g| g.url == repo_url)
-        {
-            count += 1;
+            .map(|g| g.url.clone())
+            .filter(|u| !u.is_empty());
+        if let Some(u) = u {
+            let c = super::git::canonicalize_url(&u).await;
+            if c == repo_url {
+                count += 1;
+            }
         }
     }
     count
@@ -4552,6 +4769,7 @@ async fn count_git_docs_for_repo(app: &AppHandle, repo_url: &str) -> usize {
 /// file under rag/files as before. Returns an error if the resolved target no
 /// longer exists on disk (e.g. a symlink whose source was moved/deleted).
 pub async fn open_file_location(app: &AppHandle, id: &str, target: Option<String>) -> Result<()> {
+    validate_doc_id(id)?;
     let dir = files_dir(app)?;
     let meta = std::fs::read(dir.join(format!("{}.meta", id)))
         .ok()
@@ -4587,6 +4805,7 @@ pub async fn open_file_location(app: &AppHandle, id: &str, target: Option<String
 /// ("view source file" button in the View dialog — PDF/Office/image sources
 /// are stored as extracted Markdown, this re-opens the real file).
 pub async fn open_doc_source(app: &AppHandle, id: &str) -> Result<()> {
+    validate_doc_id(id)?;
     let dir = files_dir(app)?;
     let meta = std::fs::read(dir.join(format!("{}.meta", id)))
         .ok()
@@ -4615,7 +4834,11 @@ fn open_file_with_default_app(file: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         // explorer <file> opens it with the default associated application.
-        std::process::Command::new("explorer").arg(file.as_os_str()).spawn()?;
+        let mut c = std::process::Command::new("explorer");
+        c.arg(file.as_os_str());
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        c.spawn()?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -4631,6 +4854,7 @@ fn open_file_with_default_app(file: &Path) -> std::io::Result<()> {
 /// change / legacy-no-path). Reads `.meta` + stats the source file. Cheap
 /// (one md5 of the source, no embedding).
 pub async fn check_rag_update(app: &AppHandle, id: &str) -> Result<RagUpdateCheck> {
+    validate_doc_id(id)?;
     let dir = files_dir(app)?;
     let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id)))
         .map_err(|e| anyhow!("check: read meta {} failed: {}", id, e))?;
@@ -5066,15 +5290,16 @@ pub async fn refresh_source_update(
     }
 
     // 1. Git: force refresh (TTL bypassed — explicit user action). The
-    //    refresh re-clones into the persistent dir; failures surface to the
-    //    caller as Err (the frontend shows the reason inline) but the sync
-    //    below still runs against the existing clone content.
+    //    refresh re-clones into the persistent dir; failures abort with Err
+    //    (the frontend shows the reason inline) — unlike preview/batch, this
+    //    single-source path does NOT continue against the stale clone.
     if target.kind == "git" {
         if target.url.is_empty() {
             return Err(anyhow!("git source url is empty"));
         }
         // Force: drop the TTL entry so refresh_git_repo actually re-clones.
-        let hash = super::git::repo_hash(&target.url);
+        // TTL entries are keyed by the canonical hash — bypass must match.
+        let hash = super::git::repo_hash(&super::git::canonicalize_url(&target.url).await);
         if let Ok(mut cache) = git_refresh_cache().lock() {
             cache.remove(&hash);
         }
@@ -5378,7 +5603,7 @@ pub async fn preview_source_update(
             return Err(anyhow!("git source url is empty"));
         }
         emit_preview_progress(app, 0, 1, &target.url, "git");
-        let hash = super::git::repo_hash(&target.url);
+        let hash = super::git::repo_hash(&super::git::canonicalize_url(&target.url).await);
         if let Ok(mut cache) = git_refresh_cache().lock() {
             cache.remove(&hash);
         }
@@ -5714,7 +5939,7 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
 
     // Weighted final score, apply tag filter + score threshold, sort desc, take limit.
     let threshold = settings.score_threshold.max(0.0).min(1.0);
-    let mut scored: Vec<(f32, String, String, String)> = merged
+    let mut scored: Vec<(f32, String, i64, String, String)> = merged
         .into_iter()
         .filter(|(_, (_, _, _, _, doc_tags))| {
             if want_tags.is_empty() {
@@ -5723,12 +5948,21 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
                 doc_tags.iter().any(|t| want_tags.iter().any(|w| w.eq_ignore_ascii_case(t)))
             }
         })
-        .map(|((doc_id, _ci), (vs, ks, doc_name, chunk_text, _tags))| {
-            (vw * vs + kw * ks, doc_id, doc_name, chunk_text)
+        .map(|((doc_id, ci), (vs, ks, doc_name, chunk_text, _tags))| {
+            (vw * vs + kw * ks, doc_id, ci, doc_name, chunk_text)
         })
-        .filter(|(score, _, _, _)| *score >= threshold)
+        .filter(|(score, _, _, _, _)| *score >= threshold)
         .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Stable order: HashMap iteration is random, so equal scores must get a
+    // deterministic tie-break (doc_id, then chunk_index — two chunks of the
+    // same doc can tie) — mirrors the fts weighted-seq tiebreak convention
+    // (review rounds 8/9).
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
     let top = scored.into_iter().take(limit).collect::<Vec<_>>();
 
     // Resolve a readable title per unique doc_id from the on-disk DocMeta
@@ -5736,7 +5970,7 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
     let mut titles: HashMap<String, String> = HashMap::new();
     if let Some(app) = crate::mcp::progress::get_app_handle() {
         if let Ok(dir) = files_dir(app) {
-            for (_, doc_id, doc_name, _) in &top {
+            for (_, doc_id, _, doc_name, _) in &top {
                 if titles.contains_key(doc_id) {
                     continue;
                 }
@@ -5752,7 +5986,7 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
 
     let results = top
         .into_iter()
-        .map(|(score, doc_id, doc_name, snippet)| RagSearchResult {
+        .map(|(score, doc_id, _ci, doc_name, snippet)| RagSearchResult {
             title: titles.get(&doc_id).cloned().unwrap_or(doc_name.clone()),
             doc_id,
             doc_name,
@@ -5984,9 +6218,11 @@ fn reveal_in_file_manager(file: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "windows")]
 fn reveal_in_file_manager(file: &Path) -> std::io::Result<()> {
     // `explorer /select,<path>` opens Explorer with the file selected.
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{}", file.display()))
-        .spawn()?;
+    let mut c = std::process::Command::new("explorer");
+    c.arg(format!("/select,{}", file.display()));
+    use std::os::windows::process::CommandExt;
+    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c.spawn()?;
     Ok(())
 }
 #[cfg(all(unix, not(target_os = "macos")))]

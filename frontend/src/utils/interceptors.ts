@@ -1,4 +1,5 @@
 import { addInterceptor, removeInterceptor, type FetchInterceptor } from './fetchInterceptor';
+import { isTauri } from './tauriClient';
 
 // Token key in localStorage
 const TOKEN_KEY = 'mcphub_token';
@@ -43,11 +44,16 @@ export const authInterceptor: FetchInterceptor = {
   response: async (response: Response) => {
     // Handle unauthorized responses
     if (response.status === 401) {
-      // Token might be expired or invalid, remove it
+      // Token might be expired or invalid: clear it AND leave the zombie
+      // session — otherwise ProtectedRoute keeps the user "logged in" while
+      // every request silently fails until a manual reload.
       removeToken();
-
-      // You could also trigger a redirect to login page here
-      // window.location.href = '/login';
+      // Desktop (skipAuth guest mode) has no /login route and a tauri://
+      // origin — force-redirecting there breaks the webview (review round
+      // 10). ProtectedRoute handles the unauthenticated state instead.
+      if (!isTauri() && !window.location.pathname.startsWith('/login')) {
+        window.location.assign('/login');
+      }
     }
 
     return response;
@@ -89,7 +95,7 @@ export const loggingInterceptor: FetchInterceptor = {
 
 // Install the logging interceptor (only in development)
 export const installLoggingInterceptor = (): void => {
-  if (process.env.NODE_ENV === 'development') {
+  if (import.meta.env.DEV) {
     addInterceptor(loggingInterceptor);
   }
 };

@@ -106,12 +106,19 @@ impl RmcpStdioTransport {
                 log::info!("[{}] stderr: {}", server_name, shown);
                 app_logger::log_to_db("info", &format!("[stderr] {}", shown));
                 {
-                    let mut tail = stderr_tail.lock().unwrap();
+                    let mut tail = stderr_tail.lock().unwrap_or_else(|p| p.into_inner());
                     tail.push_str(&line);
                     tail.push('\n');
                     const CAP: usize = 32_768;
                     if tail.len() > CAP {
-                        let start = tail.len() - CAP;
+                        // Byte-offset truncation: advance to the next char
+                        // boundary so drain() never panics on multi-byte UTF-8
+                        // (a panic here would poison the mutex and break all
+                        // future reconnections for this server).
+                        let mut start = tail.len() - CAP;
+                        while start < tail.len() && !tail.is_char_boundary(start) {
+                            start += 1;
+                        }
                         tail.drain(..start);
                     }
                 }
@@ -147,6 +154,8 @@ impl RmcpStdioTransport {
 impl McpTransport for RmcpStdioTransport {
     async fn connect(&mut self) -> Result<()> {
         let connect_start = std::time::Instant::now();
+        // 重连时清掉上一进程的 stderr 尾迹，防止陈旧行混入本次握手失败报错
+        self.stderr_tail.lock().unwrap_or_else(|p| p.into_inner()).clear();
 
         // Resolve command to bundled binary if available (node, npx, uv, uvx, python…)
         let (resolved_cmd, resolved_args) = runtime_env::resolve_command(&self.command, &self.args);
@@ -157,8 +166,12 @@ impl McpTransport for RmcpStdioTransport {
         log::info!("{}", resolve_msg);
         app_logger::log_to_db("info", &resolve_msg);
 
-        // Merged environment: parent process + runtime overrides + user env
-        // (PATH appended after our prepended dirs so bundled binaries win).
+        // Merged environment: parent process + runtime overrides + user env.
+        // PATH: user PATH is PREPENDED (user entries win) so users can pin a
+        // specific node/python ahead of the bundled runtimes; resolve_command
+        // already short-circuits to the bundled binary for known commands,
+        // so this only affects PATH-only lookups (e.g. bare `npx` with no
+        // bundled runtime installed).
         let mut merged_env: HashMap<String, String> = std::env::vars().collect();
         for (k, v) in runtime_env::env_overrides(&self.command, &self.server_name) {
             merged_env.insert(k, v);
@@ -166,7 +179,14 @@ impl McpTransport for RmcpStdioTransport {
         for (k, v) in &self.env {
             if k.to_ascii_uppercase() == "PATH" {
                 if let Some(existing) = merged_env.get("PATH") {
-                    merged_env.insert(k.clone(), format!("{v}{sep}{existing}", v = v, sep = ":", existing = existing));
+                    // Windows PATH separator is ';' — mirror resolve_in_path's
+                    // platform handling (a hardcoded ':' fuses both sides into
+                    // one bogus entry and breaks command resolution).
+                    #[cfg(windows)]
+                    let sep = ";";
+                    #[cfg(not(windows))]
+                    let sep = ":";
+                    merged_env.insert(k.clone(), format!("{v}{sep}{existing}", v = v, sep = sep, existing = existing));
                 } else {
                     merged_env.insert(k.clone(), v.clone());
                 }
@@ -213,8 +233,13 @@ impl McpTransport for RmcpStdioTransport {
         }
 
         let is_pkg_mgr = self.command == "npx" || self.command == "uvx";
+        // ⚠️ 必须在 builder 上声明 stderr(Stdio::piped())：rmcp 的
+        // TokioChildProcessBuilder::spawn 会无条件用 builder 自己的 stdio
+        // 配置覆盖 Command 的设置（child_process.rs:150-157），builder 默认
+        // stderr=inherit —— 若只在 Command 上 piped，stderr 捕获为 None，
+        // 下载进度事件 / 32KB stderr_tail / 日志截断全部静默失效。
         let (child_transport, stderr) =
-            TokioChildProcess::builder(cmd).spawn().map_err(|e| {
+            TokioChildProcess::builder(cmd).stderr(Stdio::piped()).spawn().map_err(|e| {
                 let msg = format!(
                     "[{}] Failed to spawn process: {}\n  command: {}\n  args: {:?}",
                     self.server_name, e, resolved_cmd, resolved_args
@@ -247,7 +272,17 @@ impl McpTransport for RmcpStdioTransport {
                 );
                 log::error!("{}", msg);
                 app_logger::log_to_db("error", &msg);
-                let tail = self.stderr_tail.lock().unwrap().trim_end().to_string();
+                // Kill the process tree BEFORE clearing the pid: handshake
+                // failure ≠ process exit (invalid initialize response /
+                // version mismatch leave the child running), and once the pid
+                // is cleared the pool's error-path disconnect becomes a no-op
+                // (pid.filter(>0)) — npx/uvx grandchildren would orphan.
+                let pid_now = *self.pid.lock().unwrap();
+                if let Some(pid) = pid_now.filter(|p| *p > 0) {
+                    super::stdio_transport::kill_process_tree(pid);
+                }
+                *self.pid.lock().unwrap() = None;
+                let tail = self.stderr_tail.lock().unwrap_or_else(|p| p.into_inner()).trim_end().to_string();
                 if !tail.is_empty() {
                     anyhow!("{}\n--- upstream stderr ---\n{}", msg, tail)
                 } else {
@@ -256,8 +291,14 @@ impl McpTransport for RmcpStdioTransport {
             })?;
 
         // Capture server-reported version for the update-available check.
+        // Empty version string → None so the update check doesn't treat
+        // "unknown" as a real recorded version.
         if let Some(info) = service.peer_info() {
-            self.server_version = Some(info.server_info.as_ref().map(|i| i.version.clone()).unwrap_or_default());
+            self.server_version = info
+                .server_info
+                .as_ref()
+                .map(|i| i.version.clone())
+                .filter(|v| !v.is_empty());
         }
 
         self.service = Some(service);
@@ -287,7 +328,14 @@ impl McpTransport for RmcpStdioTransport {
             super::stdio_transport::kill_process_tree(pid);
         }
         if let Some(service) = self.service.take() {
-            service.cancel().await.ok();
+            // Bounded cancel: a wedged worker must not stall disconnect
+            // forever (the process tree was already killed above).
+            if tokio::time::timeout(std::time::Duration::from_secs(5), service.cancel())
+                .await
+                .is_err()
+            {
+                log::warn!("[{}] rmcp service cancel timed out (5s)", self.server_name);
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         *self.pid.lock().unwrap() = None;
@@ -307,9 +355,27 @@ impl McpTransport for RmcpStdioTransport {
             .service
             .as_ref()
             .ok_or_else(|| anyhow!("[{}] not connected", self.server_name))?;
-        let result = service.peer().list_tools(None).await?;
-        Ok(result
-            .tools
+        // Follow pagination cursors so servers using a small page size are not
+        // silently truncated to their first page. Guarded: a buggy/malicious
+        // server may echo the same cursor forever (or never return None) —
+        // cap pages and break on cursor repetition instead of looping
+        // unboundedly (on_demand's connect path has no outer timeout).
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let params = cursor
+                .clone()
+                .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
+            let result = service.peer().list_tools(params).await?;
+            all.extend(result.tools);
+            match result.next_cursor {
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                // None (done) or repeated/absent-progress cursor — stop.
+                _ => break,
+            }
+        }
+        Ok(all
             .into_iter()
             .map(|t| Tool {
                 name: t.name.to_string(),
@@ -349,20 +415,139 @@ impl McpTransport for RmcpStdioTransport {
                 .unwrap_or_default(),
         );
         params.meta = request_meta_from_value(request_meta);
-        // Peer::call_tool natively drives MRTR input_required retries
-        // (inputResponses/request_state round-trips, bounded rounds).
-        let result = service.peer().call_tool(params).await?;
-        let r = result;
-        let structured_content = r.structured_content.clone().filter(|v| !v.is_null());
-        Ok(ToolCallResult {
-            content: r
-                .content
-                .iter()
-                .filter_map(|c| serde_json::to_value(c).ok())
-                .collect(),
-            is_error: r.is_error.unwrap_or(false),
-            structured_content,
-            raw_meta: r.meta.as_ref().and_then(|m| serde_json::to_value(m).ok()),
-        })
+        // Use call_tool_once + explicit response mapping (mirrors the HTTP
+        // transport contract): Peer::call_tool hard-errors on
+        // CallToolResponse::Task (service/client.rs UnexpectedResponse), but a
+        // 2026 upstream MAY answer a plain tools/call with a task
+        // (SEP-2663 server's choice) — poll it to terminal like HTTP does.
+        let response = service
+            .peer()
+            .call_tool_once(params)
+            .await
+            .map_err(|e| anyhow!("tools/call failed: {}", e))?;
+        match response {
+            rmcp::model::CallToolResponse::Complete(r) => {
+                let structured_content = r.structured_content.clone().filter(|v| !v.is_null());
+                Ok(ToolCallResult {
+                    content: r
+                        .content
+                        .iter()
+                        .filter_map(|c| serde_json::to_value(c).ok())
+                        .collect(),
+                    is_error: r.is_error.unwrap_or(false),
+                    structured_content,
+                    raw_meta: r.meta.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+                })
+            }
+            rmcp::model::CallToolResponse::InputRequired(ir) => {
+                let mut raw = serde_json::to_value(&ir).unwrap_or(Value::Object(Default::default()));
+                if let Some(obj) = raw.as_object_mut() {
+                    obj.insert(
+                        "io.modelcontextprotocol/resultType".to_string(),
+                        Value::String("input_required".into()),
+                    );
+                }
+                Ok(ToolCallResult {
+                    content: vec![serde_json::json!({"type":"text","text":"task requires input"})],
+                    is_error: false,
+                    structured_content: None,
+                    raw_meta: Some(raw),
+                })
+            }
+            rmcp::model::CallToolResponse::Task(create) => {
+                // Upstream-supplied interval is clamped: 200ms floor (poll
+                // storm) / 30s cap (a hostile huge value would blow the
+                // 10min deadline in one sleep).
+                let poll_interval =
+                    create.task.poll_interval_ms.unwrap_or(1000).clamp(200, 30_000);
+                let task_id = create.task.task_id.clone();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                let mut transient_failures = 0u32;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(poll_interval)).await;
+                    // Recheck deadline AFTER the sleep — a clamped 30s sleep
+                    // must not overshoot the deadline check.
+                    if std::time::Instant::now() > deadline {
+                        return Err(anyhow!("modern task '{}' poll timed out (10min)", task_id));
+                    }
+                    // Bounded tolerance for transient errors (review round 9).
+                    let snap = match service
+                        .peer()
+                        .get_task(rmcp::model::GetTaskParams::new(task_id.clone()))
+                        .await
+                    {
+                        Ok(s) => {
+                            transient_failures = 0;
+                            s
+                        }
+                        Err(e) => {
+                            transient_failures += 1;
+                            if transient_failures >= 3 {
+                                return Err(anyhow!("tasks/get failed: {}", e));
+                            }
+                            continue;
+                        }
+                    };
+                    match &snap.task.payload {
+                        rmcp::model::TaskPayload::Working => continue,
+                        rmcp::model::TaskPayload::InputRequired { input_requests } => {
+                            let mut raw = serde_json::to_value(&snap)
+                                .unwrap_or(Value::Object(Default::default()));
+                            if let Some(obj) = raw.as_object_mut() {
+                                obj.insert(
+                                    "io.modelcontextprotocol/inputRequests".to_string(),
+                                    serde_json::to_value(input_requests).unwrap_or_default(),
+                                );
+                                // Override GetTaskResult's flattened
+                                // resultType:"complete" so the bridge's MRTR
+                                // gate (resultType == "input_required") fires —
+                                // same as the direct-path InputRequired arm.
+                                obj.insert(
+                                    "io.modelcontextprotocol/resultType".to_string(),
+                                    Value::String("input_required".into()),
+                                );
+                            }
+                            return Ok(ToolCallResult {
+                                content: vec![serde_json::json!(
+                                    {"type":"text","text":"task requires input"}
+                                )],
+                                is_error: false,
+                                structured_content: None,
+                                raw_meta: Some(raw),
+                            });
+                        }
+                        rmcp::model::TaskPayload::Completed { result } => {
+                            let content = result
+                                .get("content")
+                                .and_then(|c| c.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let is_error = result
+                                .get("isError")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let structured_content = result
+                                .get("structuredContent")
+                                .cloned()
+                                .filter(|v| !v.is_null());
+                            let raw_meta = result.get("_meta").cloned().filter(|v| !v.is_null());
+                            return Ok(ToolCallResult { content, is_error, structured_content, raw_meta });
+                        }
+                        rmcp::model::TaskPayload::Failed { error } => {
+                            let msg = error
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("upstream task failed");
+                            return Err(anyhow!("modern task failed: {}", msg));
+                        }
+                        rmcp::model::TaskPayload::Cancelled => {
+                            return Err(anyhow!("modern task '{}' was cancelled", task_id));
+                        }
+                        _ => return Err(anyhow!("unknown task status")),
+                    }
+                }
+            }
+            _ => Err(anyhow!("unexpected call_tool response")),
+        }
     }
 }

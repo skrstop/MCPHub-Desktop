@@ -28,6 +28,7 @@ use std::sync::OnceLock;
 use anyhow::{anyhow, Result};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 
 /// Timeout for clone/fetch operations (a shallow clone should be way below
@@ -41,15 +42,47 @@ pub fn temp_root() -> PathBuf {
     std::env::temp_dir().join("mcphub-rag-git")
 }
 
-/// Temp clone dir for one repo: `temp_root()/{repo_hash}`.
-fn temp_repo_dir(repo_hash: &str) -> PathBuf {
-    temp_root().join(repo_hash)
-}
-
 /// Public accessor for the temp dir of a repo hash (the upload command uses
 /// it to locate the source of the copy into app-data).
+///
+/// Clone destinations are `{repo_hash}` (legacy) or `{repo_hash}-{attempt}`
+/// (per-attempt unique dir, see clone_to_temp) — resolve the NEWEST existing
+/// dir for the hash so first-import persist finds the clone the pick flow
+/// just created.
 pub fn temp_dir_for(repo_hash: &str) -> PathBuf {
-    temp_repo_dir(repo_hash)
+    let root = temp_root();
+    let legacy = root.join(repo_hash);
+    // Collect {hash} and {hash}-{32-hex} candidates; pick the most recently
+    // modified existing one (the per-attempt dir the clone just wrote).
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let matches = name == repo_hash
+                || name
+                    .strip_prefix(repo_hash)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .map(|suffix| {
+                        suffix.len() == 32 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+                    })
+                    .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                best = Some((mtime, path));
+            }
+        }
+    }
+    best.map(|(_, p)| p).unwrap_or(legacy)
 }
 
 /// Persistent root: `<app_data>/rag/git/` (sibling of `rag/files`).
@@ -582,7 +615,7 @@ pub(crate) fn clone_blocking(
         gix::create::Options::default(),
         open_opts,
     )
-    .map_err(|e| anyhow!("clone init: {e}"))?;
+    .map_err(|e| anyhow!("clone init: {}", scrub_credentials(&e.to_string())))?;
     let prep = if let Some(b) = branch.filter(|b| !b.trim().is_empty()) {
         // ref_name selects which branch to fetch & check out (NOT the remote name).
         prep.with_ref_name(Some(b.trim()))
@@ -600,13 +633,13 @@ pub(crate) fn clone_blocking(
             CloneProgress::new(counters),
             &std::sync::atomic::AtomicBool::new(false),
         )
-        .map_err(|e| anyhow!("fetch: {e:#}"))?;
+        .map_err(|e| anyhow!("fetch: {}", scrub_credentials(&format!("{e:#}"))))?;
     let (repo, _checkout) = prep_checkout
         .main_worktree(gix::progress::Discard, &std::sync::atomic::AtomicBool::new(false))
-        .map_err(|e| anyhow!("checkout: {e}"))?;
+        .map_err(|e| anyhow!("checkout: {}", scrub_credentials(&e.to_string())))?;
     let head = repo
         .head_commit()
-        .map_err(|e| anyhow!("head: {e}"))?
+        .map_err(|e| anyhow!("head: {}", scrub_credentials(&e.to_string())))?
         .id
         .to_string();
     Ok(head)
@@ -808,7 +841,52 @@ pub fn is_auth_error(err: &anyhow::Error) -> bool {
 /// Structured sentinel the frontend matches on: `GIT_AUTH_REQUIRED:<detail>`.
 /// Generic failures stay plain `anyhow` errors (prefix-free).
 pub fn auth_error(detail: impl std::fmt::Display) -> anyhow::Error {
-    anyhow!("GIT_AUTH_REQUIRED:{detail}")
+    anyhow!("GIT_AUTH_REQUIRED:{}", scrub_credentials(&detail.to_string()))
+}
+
+/// Scrub userinfo credentials out of error text. reqwest/gix request errors
+/// embed the full request URL (`... for url (https://user:pass@host/...)`)
+/// and the url crate does NOT redact userinfo — logging such an error
+/// verbatim would persist the password into the log database.
+pub fn scrub_credentials(msg: &str) -> String {
+    /// Rewrite every `scheme://user:pass@host` (raw or percent-encoded
+    /// colon) to `scheme://user@host`.
+    fn redact(input: &str, colon_marks: &[&str]) -> String {
+        let mut rebuilt = String::with_capacity(input.len());
+        let mut rest = input;
+        while let Some(pos) = rest.find("://") {
+            let after_scheme = &rest[pos + 3..];
+            let authority_end = after_scheme.find(['/', ' ', '?', '"']).unwrap_or(after_scheme.len());
+            let authority = &after_scheme[..authority_end];
+            rebuilt.push_str(&rest[..pos + 3]);
+            match authority.rfind('@') {
+                Some(at) => {
+                    let userinfo = &authority[..at];
+                    let has_credential =
+                        userinfo.contains(':') || colon_marks.iter().any(|m| userinfo.contains(m));
+                    if has_credential {
+                        // Keep the username (before the first colon mark).
+                        let mut user = userinfo.to_string();
+                        for m in [":"].iter().chain(colon_marks.iter()) {
+                            if let Some(idx) = user.find(m) {
+                                user = user[..idx].to_string();
+                            }
+                        }
+                        rebuilt.push_str(&user);
+                        rebuilt.push('@');
+                        rebuilt.push_str(&authority[at + 1..]);
+                    } else {
+                        rebuilt.push_str(authority);
+                    }
+                }
+                None => rebuilt.push_str(authority),
+            }
+            rest = &after_scheme[authority_end..];
+        }
+        rebuilt.push_str(rest);
+        rebuilt
+    }
+    redact(msg, &["%3A", "%3a"])
 }
 
 // ── Public async API ──────────────────────────────────────────────────────
@@ -907,10 +985,6 @@ pub async fn clone_to_temp(
     password: Option<&str>,
     depth: u32,
 ) -> Result<GitSyncResult> {
-    // Serialize picks: the temp-root wipe below is destructive to any
-    // concurrent pick's clone.
-    let _pick_guard = PICK_LOCK.get_or_init(|| Mutex::new(())).lock().await;
-    validate_url(url)?;
     // Canonicalize http->https redirects BEFORE hashing: one canonical repo
     // identity (and no auth-strip dance across the scheme change).
     let url_owned;
@@ -919,9 +993,22 @@ pub async fn clone_to_temp(
         url_owned = c;
         url_owned.as_str()
     };
-    // Register the cancellation token AFTER canonicalization (the canonical
-    // url is the cancel key the command layer passes back).
+    // Register the cancellation token BEFORE acquiring PICK_LOCK: a cancel
+    // arriving while this pick is QUEUED has no token to mark otherwise
+    // (signal_abort_canonical returns false on missing entries) — the
+    // queued pick would then start a full clone the user already cancelled.
     let abort = register_abort(url).await;
+    // Serialize picks: the temp-root wipe below is destructive to any
+    // concurrent pick's clone.
+    let _pick_guard = PICK_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    // Validate BEFORE the abort registration? No — validation happens here,
+    // after registration; on failure the token must be unregistered or a
+    // later stale cancel against the leaked token would poison the NEXT
+    // pick of the same url (review round 8, 2026-10-04).
+    if let Err(e) = validate_url(url) {
+        unregister_abort(url).await;
+        return Err(e);
+    }
     use std::sync::atomic::Ordering;
     // Queued behind PICK_LOCK: if the user already cancelled while waiting,
     // bail before touching the temp root. The flag check (not just
@@ -936,9 +1023,14 @@ pub async fn clone_to_temp(
     let root = temp_root();
     // Wipe the temp root (not just this repo's dir): one repo scans at a
     // time in practice, and stale roots from crashed sessions die here too.
+    // NOTE: an abandoned (cancelled/timed-out) blocking clone thread may
+    // still be writing into the old dest for up to 120s — clone into a
+    // UNIQUE per-attempt dir so a same-URL refetch never races the orphan
+    // writer on the same path (its output is discarded with the attempt).
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root)?;
-    let dest = temp_repo_dir(&hash);
+    let attempt = Uuid::new_v4().simple().to_string();
+    let dest = root.join(format!("{hash}-{attempt}"));
     let clone_url = build_clone_url(url, username, password);
     // Progress sampling: emit `rag://git-clone-progress` while the clone
     // runs (pick flow only — app is None on update-stage refreshes).
@@ -1036,7 +1128,23 @@ pub fn ensure_persisted(app: &tauri::AppHandle, repo_hash: &str, temp_dir: &Path
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    copy_dir_recursive(temp_dir, &dst)?;
+    // Copy to a staging dir first, then rename into place: a crash mid-copy
+    // would otherwise leave a PARTIAL clone at {hash} that dst.exists()
+    // short-circuits on forever ("original lost" for every later sync).
+    // Leftover staging dirs are swept by sweep_stale_dirs. A DISTINCT suffix
+    // from refresh_persistent's `.new`: persist does not hold the per-repo
+    // refresh lock, and sharing the name let the two flows
+    // remove_dir_all each other's in-progress directory (review round 8).
+    // Per-attempt uuid suffix for the same reason: two concurrent
+    // ensure_persisted calls for one repo would otherwise
+    // remove_dir_all each other's staging dir (review round 9).
+    let staging = dst.with_extension(format!("persist-new-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::remove_dir_all(&staging);
+    copy_dir_recursive(temp_dir, &staging)?;
+    if let Err(e) = std::fs::rename(&staging, &dst) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(anyhow!("persist rename {} -> {} failed: {e}", staging.display(), dst.display()));
+    }
     Ok(dst)
 }
 
@@ -1055,6 +1163,17 @@ pub fn map_temp_to_persistent(app: &tauri::AppHandle, path: &str) -> Result<Opti
         return Ok(None);
     };
     let hash = first.to_string_lossy().to_string();
+    // Clone destinations are `{repo_hash}` or `{repo_hash}-{attempt}` (per-
+    // attempt unique dir, see clone_to_temp) — strip a trailing attempt
+    // suffix so the persistent mapping stays keyed by the repo hash.
+    let hash = match hash.rsplit_once('-') {
+        Some((h, suffix))
+            if h.len() >= 8 && suffix.len() == 32 && suffix.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            h.to_string()
+        }
+        _ => hash,
+    };
     let rest: PathBuf = rel.iter().skip(1).collect();
     let persisted = persistent_repo_dir(app, &hash)?;
     let mapped = if rest.as_os_str().is_empty() {
@@ -1151,8 +1270,43 @@ pub fn sweep_stale_dirs(app: &tauri::AppHandle) {
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".old") || name.ends_with(".new") {
+                if let Some(base) = name.strip_suffix(".old") {
+                    // `.old` only exists AFTER a successful swap put a new
+                    // copy at `{base}` — if the main dir is gone the swap
+                    // died between main->old and new->main, so `.old` is the
+                    // only surviving clone: recover it instead of deleting
+                    // (deletion orphaned every git doc of that repo into
+                    // lost-original, review round 8, 2026-10-04).
+                    let main = entry.path().parent().map(|p| p.join(base));
+                    match main {
+                        Some(m) if m.exists() => {
+                            let _ = std::fs::remove_dir_all(entry.path());
+                        }
+                        _ => {
+                            let _ = std::fs::rename(&entry.path(), entry.path().parent().unwrap_or(&entry.path()).join(base));
+                        }
+                    }
+                    continue;
+                }
+                if name.ends_with(".new")
+                    || name.ends_with(".persist-new")
+                    || name.contains(".persist-new-")
+                {
                     let _ = std::fs::remove_dir_all(entry.path());
+                    continue;
+                }
+                // A hash dir missing .git is a pre-atomicity partial persist:
+                // not a valid clone, remove so ensure_persisted re-copies.
+                // repo_hash is md5 → 32 hex chars (a 64-char check never
+                // matches — the legacy partial-persist sweep was dead code).
+                if name.len() == 32
+                    && name.chars().all(|c| c.is_ascii_hexdigit())
+                    && !name.contains('.')
+                {
+                    let git_marker = entry.path().join(".git");
+                    if !git_marker.exists() {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
                 }
             }
         }
@@ -1245,12 +1399,24 @@ fn write_credentials_nolock(
     }
     let json = serde_json::to_vec_pretty(creds)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json).map_err(|e| anyhow!("write creds tmp: {e}"))?;
+    // Create the tmp file AT 0600 (not umask-default then chmod): the window
+    // between write and chmod otherwise exposes plaintext passwords to other
+    // local users. chmod failure propagates (a silent failure leaves 0644).
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| anyhow!("create creds tmp: {e}"))?;
+        f.write_all(&json).map_err(|e| anyhow!("write creds tmp: {e}"))?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp, &json).map_err(|e| anyhow!("write creds tmp: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| anyhow!("rename creds: {e}"))
 }
 

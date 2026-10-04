@@ -1,4 +1,10 @@
 /// SSE transport — connects to a remote MCP server via Server-Sent Events.
+///
+/// ⚠️ Intentionally NOT rmcp-backed (unlike stdio/http/openapi): rmcp's
+/// `transport-sse-client` feature is not enabled, so this is the only
+/// hand-written JSON-RPC implementation left in the codebase. It exists as a
+/// compatibility fallback for legacy SSE-only servers; when the SDK ships a
+/// suitable SSE client, replace it to complete the single-stack migration.
 use super::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
 use crate::services::app_logger;
@@ -26,7 +32,10 @@ pub struct SseTransport {
     /// endpoint returned by SSE /sse handshake for POSTing requests
     post_endpoint: Option<String>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
-    connected: bool,
+    /// Shared so the background reader can flip it off when the stream dies
+    /// (is_connected() used to keep reporting true until the next request
+    /// failed and the pool corrected the status).
+    connected: Arc<std::sync::atomic::AtomicBool>,
     server_name: String,
     /// Whether to use the traditional SSE pattern (background reader)
     /// or Streamable HTTP pattern (response on POST request)
@@ -34,6 +43,12 @@ pub struct SseTransport {
     /// Channel to signal the background reader to stop
     stop_signal: Option<tokio::sync::oneshot::Sender<()>>,
     session_id: Arc<Mutex<String>>,
+    /// Monotonic reader generation. Each connect() bumps it and the spawned
+    /// reader snapshots its own; teardown-time actions (clearing `pending`,
+    /// flipping `connected`) are skipped by a stale reader whose generation no
+    /// longer matches — otherwise a retiring reader wipes the NEW session's
+    /// pending requests and falsely marks the live connection down.
+    reader_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SseTransport {
@@ -42,9 +57,15 @@ impl SseTransport {
         base_url: impl Into<String>,
         headers: HashMap<String, String>,
     ) -> Self {
-        let builder = Client::builder();
-        // Apply per-transport headers via default headers would require building them here
-        let client = builder.build().expect("Failed to build reqwest client");
+        let builder = Client::builder()
+            // Per-read stall guard: a server that accepts the connection but
+            // never sends bytes used to hang call_tool/list_tools forever
+            // (only connect() had a timeout at the pool layer). Time between
+            // bytes — SSE keepalive comments reset it.
+            .read_timeout(std::time::Duration::from_secs(120));
+        let client = builder
+            .build()
+            .unwrap_or_else(|_| Client::new());
         // mcp-session-id priority: server response > user-provided > generated UUID
         // Start with user-provided or empty (will be set from server response)
         let session_id = headers
@@ -58,10 +79,11 @@ impl SseTransport {
             client,
             post_endpoint: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
-            connected: false,
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             use_background_reader: true, // Will be updated during connect
             stop_signal: None,
             session_id: Arc::new(Mutex::new(session_id)),
+            reader_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -85,10 +107,21 @@ impl SseTransport {
         }
         req = req.json(&body);
         for (k, v) in &self.headers {
+            // Never replay a user-provided mcp-session-id here: after the
+            // server assigns a fresh session the replayed stale header is
+            // APPENDED (reqwest .header() adds, not replaces) and servers
+            // then see two conflicting session ids.
+            if k.eq_ignore_ascii_case("mcp-session-id") {
+                continue;
+            }
             req = req.header(k, v);
         }
         // Fire-and-forget: notifications get 202-style empty replies at best.
-        let _ = req.send().await?;
+        // A non-2xx (session expired etc.) used to vanish silently.
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            log::warn!("[{}] notification '{}' got HTTP {}", self.server_name, method, resp.status());
+        }
         Ok(())
     }
 
@@ -124,11 +157,24 @@ impl SseTransport {
             }
             req = req.json(&body);
             for (k, v) in &self.headers {
+                if k.eq_ignore_ascii_case("mcp-session-id") {
+                    continue;
+                }
                 req = req.header(k, v);
             }
 
             log::debug!("[{}] Sending POST request...", self.server_name);
-            let resp = req.send().await?;
+            let resp = req.send().await.map_err(|e| {
+                e
+            });
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    // Don't leak the pending entry when the POST itself fails.
+                    self.pending.lock().await.remove(&id);
+                    return Err(anyhow!(e));
+                }
+            };
 
             // Capture mcp-session-id from response (highest priority)
             if let Some(sid_header) = resp.headers().get("mcp-session-id") {
@@ -139,22 +185,31 @@ impl SseTransport {
                 }
             }
 
-            log::debug!("[{}] POST response status: {}", self.server_name, resp.status());
+            let post_status = resp.status();
+            log::debug!("[{}] POST response status: {}", self.server_name, post_status);
+            if !post_status.is_success() {
+                // Session expired / endpoint gone: surface the real reason
+                // instead of burning the 60s waiter for a reply that will
+                // never come.
+                let body = resp.text().await.unwrap_or_default();
+                self.pending.lock().await.remove(&id);
+                return Err(anyhow!("MCP POST failed ({}): {}", post_status, body.chars().take(300).collect::<String>()));
+            }
 
             log::debug!("[{}] Waiting for response (id={})...", self.server_name, id);
-            let response = tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                rx,
-            )
-            .await
-            .map_err(|_| {
-                log::error!("[{}] Request timeout waiting for response (id={})", self.server_name, id);
-                anyhow!("Request timeout")
-            })?
-            .map_err(|_| {
-                log::error!("[{}] Response channel closed (id={})", self.server_name, id);
-                anyhow!("Response channel closed")
-            })?;
+            let response = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(_)) => {
+                    self.pending.lock().await.remove(&id);
+                    log::error!("[{}] Response channel closed (id={})", self.server_name, id);
+                    return Err(anyhow!("Response channel closed"));
+                }
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    log::error!("[{}] Request timeout waiting for response (id={})", self.server_name, id);
+                    return Err(anyhow!("Request timeout"));
+                }
+            };
 
             log::info!("[{}] Received response for id={}", self.server_name, id);
 
@@ -172,6 +227,9 @@ impl SseTransport {
             }
             req = req.json(&body);
             for (k, v) in &self.headers {
+                if k.eq_ignore_ascii_case("mcp-session-id") {
+                    continue;
+                }
                 req = req.header(k, v);
             }
 
@@ -199,37 +257,85 @@ impl SseTransport {
                 // Response is SSE stream, parse it
                 use futures_util::StreamExt;
                 let mut stream = resp.bytes_stream();
-                let mut buffer = String::new();
+                // Byte buffer: a multi-byte UTF-8 char split across TCP chunks
+                // must not be lossy-decoded per chunk (U+FFFD would silently
+                // corrupt tool output). Decode only complete lines.
+                let mut buffer: Vec<u8> = Vec::new();
+                // Accumulated `data:` lines of the in-flight event (SSE allows
+                // one JSON payload split across multiple data: lines, joined
+                // with \n and terminated by an empty line) — same per-EVENT
+                // parsing as the background reader below.
+                let mut data_acc: Vec<String> = Vec::new();
                 let mut result: Option<Value> = None;
 
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    let text = String::from_utf8_lossy(&chunk);
-                    buffer.push_str(&text);
+                // Overall deadline: a stream that trickles bytes forever would
+                // otherwise extend the call without bound (the read timeout
+                // only caps inter-BYTE gaps, not total duration).
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
 
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].trim().to_string();
-                        buffer = buffer[newline_pos + 1..].to_string();
+                loop {
+                    // Bound the wait by the REMAINING budget: checking the
+                    // deadline only after a full 60s chunk-wait let a trickle
+                    // feed overshoot to ~120s.
+                    let chunk = tokio::time::timeout_at(deadline, stream.next())
+                    .await
+                    .map_err(|_| anyhow!("SSE stream read exceeded 60s overall budget"))?;
+                    let chunk = match chunk {
+                        Some(c) => c?,
+                        None => break,
+                    };
+                    buffer.extend_from_slice(&chunk);
 
-                        if line.is_empty() || line.starts_with("event:") {
+                    while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                        let line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
+                        // Mirror the background reader: strip ONLY a trailing
+                        // '\r'. A full trim() eats significant whitespace when
+                        // a server splits JSON across data: lines (spaces
+                        // inside string values are payload).
+                        let mut line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                            .to_string();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+
+                        if line.is_empty() {
+                            // Event boundary: flush accumulated data lines.
+                            if data_acc.is_empty() {
+                                continue;
+                            }
+                            let joined = data_acc.join("\n");
+                            data_acc.clear();
+                            if let Ok(msg) = serde_json::from_str::<Value>(&joined) {
+                                if msg.get("method").is_none()
+                                    && msg.get("id").and_then(|v| v.as_u64()) == Some(id)
+                                {
+                                    result = Some(msg);
+                                }
+                            }
+                            if result.is_some() {
+                                break;
+                            }
+                            continue;
+                        }
+                        if line.starts_with("event:") {
                             continue;
                         }
 
+                        // SSE payload semantics: strip only the single
+                        // optional leading space after the colon (matching the
+                        // background reader below) — a full trim() would eat
+                        // significant leading/trailing whitespace inside
+                        // multi-line JSON string values (review round 8).
                         let data_str = if let Some(data) = line.strip_prefix("data: ") {
-                            Some(data.trim())
+                            Some(data.strip_suffix('\r').unwrap_or(data))
                         } else if let Some(data) = line.strip_prefix("data:") {
-                            Some(data.trim())
+                            Some(data.strip_prefix(' ').unwrap_or(data).strip_suffix('\r').unwrap_or(data))
                         } else {
                             None
                         };
 
                         if let Some(data) = data_str {
-                            if let Ok(msg) = serde_json::from_str::<Value>(data) {
-                                if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
-                                    result = Some(msg);
-                                    break;
-                                }
-                            }
+                            data_acc.push(data.to_string());
                         }
                     }
                     if result.is_some() {
@@ -257,6 +363,11 @@ impl SseTransport {
 #[async_trait]
 impl McpTransport for SseTransport {
     async fn connect(&mut self) -> Result<()> {
+        // A re-connect on the same instance must not silently orphan the old
+        // background reader (its stop channel would be dropped here).
+        if let Some(stop_tx) = self.stop_signal.take() {
+            let _ = stop_tx.send(());
+        }
         // Use the URL as-is without adding any suffix
         let sse_url = self.base_url.trim_end_matches('/').to_string();
 
@@ -274,6 +385,13 @@ impl McpTransport for SseTransport {
             req = req.header("mcp-session-id", &sid);
         }
         for (k, v) in &self.headers {
+            // Never replay a user-provided mcp-session-id here: after the
+            // server assigns a fresh session the replayed stale header is
+            // APPENDED (reqwest .header() adds, not replaces) and servers
+            // then see two conflicting session ids.
+            if k.eq_ignore_ascii_case("mcp-session-id") {
+                continue;
+            }
             req = req.header(k, v);
         }
 
@@ -295,6 +413,7 @@ impl McpTransport for SseTransport {
 
         log::info!("[{}] GET response: status={}, content-type={}", self.server_name, status, content_type);
 
+        let mut probe_sent_initialize = false;
         let response = if status.is_success() && content_type.contains("text/event-stream") {
             get_resp
         } else {
@@ -319,6 +438,9 @@ impl McpTransport for SseTransport {
             })).expect("serialize init body");
             req = req.body(init_body);
             for (k, v) in &self.headers {
+                if k.eq_ignore_ascii_case("mcp-session-id") {
+                    continue;
+                }
                 req = req.header(k, v);
             }
 
@@ -341,6 +463,10 @@ impl McpTransport for SseTransport {
             log::info!("[{}] POST response: status={}, content-type={}", self.server_name, status, content_type);
 
             if status.is_success() && content_type.contains("text/event-stream") {
+                // The probe body IS an initialize (id=0) — remember so the
+                // common handshake below doesn't initialize the same session
+                // twice (strict servers reject a second initialize).
+                probe_sent_initialize = true;
                 post_resp
             } else if status.is_success() {
                 // POST returned non-SSE (likely JSON from a Streamable HTTP server)
@@ -352,8 +478,16 @@ impl McpTransport for SseTransport {
                 }
                 self.post_endpoint = Some(sse_url.clone());
                 self.use_background_reader = false;
-                self.connected = true;
+                self.connected.store(true, std::sync::atomic::Ordering::SeqCst);
                 log::info!("[{}] Connected via Streamable HTTP mode (no background reader)", self.server_name);
+                // Spec: clients MUST send notifications/initialized after the
+                // initialize response, before any other request. The early
+                // return used to skip this — strict servers (rmcp included)
+                // then answer the first tools/list with -32002 "Server not
+                // initialized".
+                if let Err(e) = self.post_notification("notifications/initialized", json!({})).await {
+                    log::warn!("[{}] notifications/initialized failed (continuing): {}", self.server_name, e);
+                }
                 return Ok(());
             } else {
                 return Err(anyhow!("SSE connect failed: Neither GET nor POST returned SSE stream (url: {})", sse_url));
@@ -366,27 +500,40 @@ impl McpTransport for SseTransport {
         let mut stream = response.bytes_stream();
         use futures_util::StreamExt;
         let mut endpoint: Option<String> = None;
-        let mut buffer = String::new();
+        // Byte buffer: decode only complete lines so a multi-byte char split
+        // across TCP chunks is never corrupted (see post_request loop).
+        let mut buffer: Vec<u8> = Vec::new();
         let mut current_event_type: Option<String> = None;
         let mut first_chunk = true;
 
+        // Overall deadline on the endpoint capture: some servers open an SSE
+        // stream (200 + text/event-stream) that never sends an endpoint event
+        // but emits periodic keepalive comment lines — those reset reqwest's
+        // read_timeout forever and this loop (unlike post_request's 60s
+        // deadline) would block connect() indefinitely. Fall back to the
+        // base-URL endpoint on timeout.
+        let capture = async {
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let text = String::from_utf8_lossy(&chunk);
+            let Ok(chunk) = chunk else {
+                log::warn!("[{}] SSE endpoint stream error during handshake", self.server_name);
+                break;
+            };
 
             // Log the first chunk to see what the server is sending
             if first_chunk {
-                let preview = if text.len() > 500 { &text[..500] } else { &text };
-                log::info!("[{}] First SSE chunk ({} bytes): {}", self.server_name, text.len(), preview);
+                let preview: String = String::from_utf8_lossy(&chunk).chars().take(300).collect();
+                log::info!("[{}] First SSE chunk ({} bytes): {}", self.server_name, chunk.len(), preview);
                 first_chunk = false;
             }
 
-            buffer.push_str(&text);
+            buffer.extend_from_slice(&chunk);
 
             // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
+            while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
+                let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                    .trim()
+                    .to_string();
 
                 // Skip empty lines (they mark the end of an event)
                 if line.is_empty() {
@@ -431,8 +578,11 @@ impl McpTransport for SseTransport {
                     // Some servers don't send event type, just data
                     if current_event_type.is_none() && (data.starts_with('/') || data.starts_with("http")) {
                         // This might be an endpoint - but be careful, it could also be a message
-                        // Only use it if it looks like a URL path
-                        if data.starts_with('/') && !data.contains("\"jsonrpc\"") {
+                        // Accept both absolute http(s) URLs and root-relative paths;
+                        // anything embedding a JSON-RPC body is a message, not a URL.
+                        if (data.starts_with('/') || data.starts_with("http://") || data.starts_with("https://"))
+                            && !data.contains("\"jsonrpc\"")
+                        {
                             endpoint = Some(data.to_string());
                             log::info!("[{}] Found endpoint from data (no event type): {}", self.server_name, data);
                             break;
@@ -444,6 +594,19 @@ impl McpTransport for SseTransport {
                 break;
             }
         }
+        endpoint
+        };
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(60), capture).await;
+        let mut endpoint = match captured {
+            Ok(ep) => ep,
+            Err(_) => {
+                log::warn!(
+                    "[{}] endpoint capture timed out after 60s (stream alive but no endpoint event); falling back to base URL",
+                    self.server_name
+                );
+                None::<String>
+            }
+        };
 
         // If no endpoint received, try using the base URL itself as the endpoint
         // This handles Streamable HTTP servers that respond with SSE on POST
@@ -480,6 +643,14 @@ impl McpTransport for SseTransport {
         if self.use_background_reader {
             let pending = self.pending.clone();
             let server_name = self.server_name.clone();
+            let connected_flag = self.connected.clone();
+            let reader_gen = {
+                let g = self.reader_generation.load(std::sync::atomic::Ordering::SeqCst) + 1;
+                self.reader_generation
+                    .store(g, std::sync::atomic::Ordering::SeqCst);
+                let arc = self.reader_generation.clone();
+                (g, arc)
+            };
 
             // Continue reading from the existing stream in the background
             // We need to move the stream into the background task
@@ -488,37 +659,96 @@ impl McpTransport for SseTransport {
 
             tokio::spawn(async move {
                 use futures_util::StreamExt;
-                let mut buffer = String::new();
+                // Take over the handshake loop's byte buffer: it may hold residual
+                // bytes AFTER the endpoint event (a TCP chunk can pack the
+                // endpoint event plus the beginning of a subsequent JSON-RPC
+                // response) — starting from an empty buffer would drop them and
+                // the response's id would never reach the pending table (caller
+                // hangs 60s).
+                let mut buffer = buffer;
+                // Accumulated `data:` lines of the in-flight SSE event. Must
+                // persist across chunks: a chunk boundary can fall between the
+                // last data line and its terminating empty line.
+                let mut data_acc: Vec<String> = Vec::new();
 
                 loop {
                     tokio::select! {
                         chunk = stream.next() => {
                             match chunk {
                                 Some(Ok(bytes)) => {
-                                    let text = String::from_utf8_lossy(&bytes);
-                                    buffer.push_str(&text);
+                                    buffer.extend_from_slice(&bytes);
 
                                     // Process complete lines
-                                    while let Some(newline_pos) = buffer.find('\n') {
-                                        let line = buffer[..newline_pos].trim().to_string();
-                                        buffer = buffer[newline_pos + 1..].to_string();
+                                    // SSE spec: an event's payload may span
+                                    // multiple `data:` lines, joined with \n
+                                    // and terminated by an empty line. Parse
+                                    // per-EVENT, not per-line, so servers that
+                                    // split a JSON response across data lines
+                                    // are not dropped (previously: silently
+                                    // lost → 60s timeout). NOTE: `data_acc`
+                                    // must live ACROSS chunks — a chunk
+                                    // boundary can fall between the last data
+                                    // line and its terminating empty line, and
+                                    // a per-chunk accumulator would drop the
+                                    // partial event.
+                                    while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                                        let line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
+                                        // SSE: strip only the trailing CR (CRLF
+                                        // line ends). A full trim() would eat
+                                        // leading/trailing whitespace that is part
+                                        // of the payload when servers split JSON
+                                        // across data lines (spaces inside string
+                                        // values are significant).
+                                        let mut line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                                            .to_string();
+                                        if line.ends_with('\r') {
+                                            line.pop();
+                                        }
 
-                                        // Skip empty lines and event type lines
-                                        if line.is_empty() || line.starts_with("event:") {
+                                        // Skip event type lines
+                                        if line.starts_with("event:") {
+                                            continue;
+                                        }
+                                        // Other legal SSE fields are neither data
+                                        // nor event boundaries — skip them without
+                                        // flushing the accumulator (previously any
+                                        // non-data line cut the event short and
+                                        // multi-part JSON was lost).
+                                        if line.starts_with("id:") || line.starts_with("retry:") || line.starts_with(':') {
                                             continue;
                                         }
 
-                                        // Parse data line
+                                        // Parse data line (both "data: x" and "data:x").
+                                        // SSE says strip ONE optional space after the
+                                        // colon; the rest of the content is payload.
                                         let data_str = if let Some(data) = line.strip_prefix("data: ") {
-                                            Some(data.trim())
+                                            Some(data.to_string())
                                         } else if let Some(data) = line.strip_prefix("data:") {
-                                            Some(data.trim())
+                                            Some(data.strip_prefix(' ').unwrap_or(data).to_string())
                                         } else {
                                             None
                                         };
 
                                         if let Some(data) = data_str {
-                                            if let Ok(msg) = serde_json::from_str::<Value>(data) {
+                                            data_acc.push(data);
+                                            continue;
+                                        }
+
+                                        // Empty / unknown line = event boundary:
+                                        // flush any accumulated data lines.
+                                        if data_acc.is_empty() {
+                                            continue;
+                                        }
+                                        let joined = data_acc.join("\n");
+                                        data_acc.clear();
+                                        if let Ok(msg) = serde_json::from_str::<Value>(&joined) {
+                                                // Only route RESPONSES (no `method`)
+                                                // into the pending table — a
+                                                // colliding server-initiated request
+                                                // would otherwise steal the entry.
+                                                if msg.get("method").is_some() {
+                                                    continue;
+                                                }
                                                 if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
                                                     log::debug!("[{}] Received response for id: {}", server_name, id);
                                                     let mut map = pending.lock().await;
@@ -529,13 +759,18 @@ impl McpTransport for SseTransport {
                                             }
                                         }
                                     }
-                                }
                                 Some(Err(e)) => {
                                     log::warn!("[{}] SSE stream error: {}", server_name, e);
+                                    if reader_gen.0 == reader_gen.1.load(std::sync::atomic::Ordering::SeqCst) {
+                                        connected_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    }
                                     break;
                                 }
                                 None => {
                                     log::info!("[{}] SSE stream ended", server_name);
+                                    if reader_gen.0 == reader_gen.1.load(std::sync::atomic::Ordering::SeqCst) {
+                                        connected_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    }
                                     break;
                                 }
                             }
@@ -550,14 +785,27 @@ impl McpTransport for SseTransport {
                 // (dropping the senders closes their oneshot channels) instead
                 // of letting them hang until the 60s timeout, and stop the
                 // pending map from leaking entries that will never be answered.
-                pending.lock().await.clear();
-                log::warn!("[{}] SSE background reader ended; pending waiters failed fast", server_name);
+                // STALE-READER GUARD: a superseded reader (a newer connect()
+                // already spawned its own) must NOT wipe the new session's
+                // pending entries or flip the shared connected flag — its
+                // teardown would destroy the live connection's in-flight
+                // requests.
+                if reader_gen.0 == reader_gen.1.load(std::sync::atomic::Ordering::SeqCst) {
+                    pending.lock().await.clear();
+                    log::warn!("[{}] SSE background reader ended; pending waiters failed fast", server_name);
+                } else {
+                    log::info!("[{}] SSE background reader ended (stale generation); leaving newer reader's state untouched", server_name);
+                }
             });
         } else {
             log::info!("[{}] Using Streamable HTTP mode (no background reader)", self.server_name);
         }
 
-        // MCP initialize
+        // MCP initialize — skipped when the POST probe above already sent one
+        // (same session; a second initialize is rejected by strict servers).
+        if probe_sent_initialize {
+            log::info!("[{}] Skipping duplicate initialize (probe already initialized)", self.server_name);
+        } else {
         self.post_request(
             "initialize",
             json!({
@@ -566,7 +814,16 @@ impl McpTransport for SseTransport {
                 "clientInfo": { "name": "mcphub-desktop", "version": env!("CARGO_PKG_VERSION") }
             }),
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            // The background reader was already spawned above; on init failure
+            // stop it now, otherwise it lingers consuming the stream (a
+            // keepalive stream may never end on its own).
+            if let Some(tx) = self.stop_signal.take() {
+                let _ = tx.send(());
+            }
+        })?;
+        }
 
         // Spec: clients MUST send notifications/initialized after the
         // initialize response, before any other request.
@@ -574,13 +831,13 @@ impl McpTransport for SseTransport {
             log::warn!("[{}] notifications/initialized failed (continuing): {}", self.server_name, e);
         }
 
-        self.connected = true;
+        self.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         log::info!("[{}] SSE transport connected", self.server_name);
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.connected = false;
+        self.connected.store(false, std::sync::atomic::Ordering::SeqCst);
         let msg = format!("[{}] Disconnecting SSE transport...", self.server_name);
         log::info!("{}", msg);
         app_logger::log_to_db("info", &msg);
@@ -593,7 +850,7 @@ impl McpTransport for SseTransport {
     }
 
     fn is_connected(&self) -> bool {
-        self.connected
+        self.connected.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {

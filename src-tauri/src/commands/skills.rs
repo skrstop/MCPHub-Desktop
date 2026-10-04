@@ -5,10 +5,18 @@
 //! - 2.4–2.6 commands added later; see `doc/agent_20260724.md` §3.8.
 
 use crate::{
+    commands::auth::SessionState,
     models::skill::{ExportResultItem, ImportItem, ImportSummary, Skill, SkillAgent, ScannedSkill, SkillPage},
     services::skill_service,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
+
+/// Skills commands mutate agent config dirs (export installs skill content
+/// into AI agents' config paths) and accept arbitrary filesystem paths —
+/// admin-gated in multi-user mode, matching the rag.rs precedent.
+async fn require_admin(session: &State<'_, SessionState>) -> Result<(), String> {
+    crate::commands::config::require_admin(session).await
+}
 /// List configured AI agents and their skills install paths.
 #[tauri::command]
 pub async fn list_skill_agents() -> Result<Vec<SkillAgent>, String> {
@@ -17,13 +25,15 @@ pub async fn list_skill_agents() -> Result<Vec<SkillAgent>, String> {
 
 /// Persist the full agent list (add/edit/delete).
 #[tauri::command]
-pub async fn save_skill_agents(agents: Vec<SkillAgent>) -> Result<(), String> {
+pub async fn save_skill_agents(session: State<'_, SessionState>, agents: Vec<SkillAgent>) -> Result<(), String> {
+    require_admin(&session).await?;
     skill_service::save_agents(agents).await.map_err(|e| e.to_string())
 }
 
 /// Create a new custom (user-added) agent. Refuses built-in names.
 #[tauri::command]
-pub async fn create_skill_agent(name: String, skills_path: String) -> Result<SkillAgent, String> {
+pub async fn create_skill_agent(session: State<'_, SessionState>, name: String, skills_path: String) -> Result<SkillAgent, String> {
+    require_admin(&session).await?;
     skill_service::create_custom_agent(&name, &skills_path)
         .await
         .map_err(|e| e.to_string())
@@ -31,7 +41,8 @@ pub async fn create_skill_agent(name: String, skills_path: String) -> Result<Ski
 
 /// Delete a custom agent by id. Refuses to delete built-in agents.
 #[tauri::command]
-pub async fn delete_skill_agent(id: String) -> Result<(), String> {
+pub async fn delete_skill_agent(session: State<'_, SessionState>, id: String) -> Result<(), String> {
+    require_admin(&session).await?;
     skill_service::delete_custom_agent(&id).await.map_err(|e| e.to_string())
 }
 
@@ -77,7 +88,8 @@ pub async fn get_skill(app: AppHandle, id: String) -> Result<Skill, String> {
 /// Import selected skills (agentId + dirName) into the library.
 /// State machine: pending insert → copy → ok on success (see skill_service).
 #[tauri::command]
-pub async fn import_skills(app: AppHandle, items: Vec<ImportItem>) -> Result<ImportSummary, String> {
+pub async fn import_skills(session: State<'_, SessionState>, app: AppHandle, items: Vec<ImportItem>) -> Result<ImportSummary, String> {
+    require_admin(&session).await?;
     skill_service::import_skills(&app, items).await.map_err(|e| e.to_string())
 }
 
@@ -85,7 +97,9 @@ pub async fn import_skills(app: AppHandle, items: Vec<ImportItem>) -> Result<Imp
 /// itself if it has SKILL.md, else its direct children with SKILL.md). Returns
 /// skills with agent_id="__manual__" (no source agent).
 #[tauri::command]
-pub async fn scan_folder_for_skills(app: AppHandle, path: String) -> Result<Vec<ScannedSkill>, String> {
+pub async fn scan_folder_for_skills(session: State<'_, SessionState>, app: AppHandle, path: String) -> Result<Vec<ScannedSkill>, String> {
+    // Arbitrary-path enumeration — gated like the write commands.
+    require_admin(&session).await?;
     skill_service::scan_folder_for_skills(&app, &path).await.map_err(|e| e.to_string())
 }
 
@@ -94,11 +108,13 @@ pub async fn scan_folder_for_skills(app: AppHandle, path: String) -> Result<Vec<
 /// privilege, items are batched through one elevated self-relaunch (one UAC).
 #[tauri::command]
 pub async fn export_skills_to_agents(
+    session: State<'_, SessionState>,
     app: AppHandle,
     skill_ids: Vec<String>,
     agent_ids: Vec<String>,
     method: String,
 ) -> Result<Vec<ExportResultItem>, String> {
+    require_admin(&session).await?;
     skill_service::export_to_agents(&app, skill_ids, agent_ids, method)
         .await
         .map_err(|e| e.to_string())
@@ -106,7 +122,8 @@ pub async fn export_skills_to_agents(
 
 /// Uninstall a skill from a single agent (removes the install + export row).
 #[tauri::command]
-pub async fn uninstall_skill(skill_id: String, agent_id: String) -> Result<bool, String> {
+pub async fn uninstall_skill(session: State<'_, SessionState>, skill_id: String, agent_id: String) -> Result<bool, String> {
+    require_admin(&session).await?;
     skill_service::uninstall_skill(&skill_id, &agent_id)
         .await
         .map_err(|e| e.to_string())
@@ -117,10 +134,12 @@ pub async fn uninstall_skill(skill_id: String, agent_id: String) -> Result<bool,
 /// the skill isn't found (so a no-op can't be mistaken for success).
 #[tauri::command]
 pub async fn delete_skill(
+    session: State<'_, SessionState>,
     app: AppHandle,
     id: String,
     cleanup_agent_ids: Vec<String>,
 ) -> Result<(), String> {
+    require_admin(&session).await?;
     skill_service::delete_skill(&app, &id, cleanup_agent_ids)
         .await
         .map_err(|e| e.to_string())
@@ -128,7 +147,9 @@ pub async fn delete_skill(
 
 /// Reveal a path in the OS file manager (expands ~; errors if missing).
 #[tauri::command]
-pub async fn open_path_in_explorer(path: String) -> Result<(), String> {
+pub async fn open_path_in_explorer(session: State<'_, SessionState>, path: String) -> Result<(), String> {
+    // Arbitrary-path open — gated.
+    require_admin(&session).await?;
     skill_service::open_path_in_explorer(&path)
         .await
         .map_err(|e| e.to_string())

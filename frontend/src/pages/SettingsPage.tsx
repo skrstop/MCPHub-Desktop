@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { emit } from '@tauri-apps/api/event';
@@ -36,6 +36,7 @@ interface BearerKeyRowProps {
   loading: boolean;
   availableServers: { value: string; label: string }[];
   availableGroups: { value: string; label: string }[];
+  groupSearchFn: (searchKey: string, page: number, pageSize: number) => Promise<{ items: { value: string; label: string }[]; total: number }>;
   isAdmin: boolean;
   onSave: (
     id: string,
@@ -55,6 +56,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
   loading,
   availableServers,
   availableGroups,
+  groupSearchFn,
   isAdmin,
   onSave,
   onDelete,
@@ -114,6 +116,10 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
         allowedServers: selectedServers.join(', '),
       });
       setIsEditing(false);
+    } catch {
+      // handleSaveExistingBearerKey throws on failure to KEEP the editor open;
+      // the error toast is already shown by the hook — swallow the rejection
+      // here so the click handler doesn't raise an unhandled rejection.
     } finally {
       setSaving(false);
     }
@@ -745,9 +751,16 @@ const SettingsPage: React.FC = () => {
     }
   }, [savedInstallConfig]);
 
+  // Drafts typed into tempSmartRoutingConfig must survive immediate-write
+  // toggles in the same section (progressiveDisclosure etc.): updating the
+  // saved object re-fires this effect, and an unconditional rebuild would
+  // silently discard unsaved edits. Skip the rebuild while dirty; the Save
+  // handler clears the flag (saved == temp then, so the next rebuild is a
+  // no-op anyway).
+  const smartRoutingDirtyRef = useRef(false);
   // Update local tempSmartRoutingConfig when smartRoutingConfig changes
   useEffect(() => {
-    if (smartRoutingConfig) {
+    if (smartRoutingConfig && !smartRoutingDirtyRef.current) {
       setTempSmartRoutingConfig({
         dbUrl: smartRoutingConfig.dbUrl || '',
         basePacingDelayMs:
@@ -945,6 +958,16 @@ const SettingsPage: React.FC = () => {
     }));
   };
 
+  // Draft state for the HTTP port input: commit on blur instead of per
+  // keystroke (per-keystroke commits flipped global loading + toasts and
+  // bounced an intentionally-empty input back to the default).
+  const [httpPortDraft, setHttpPortDraft] = useState(
+    String(routingConfig?.httpPort ?? 23333),
+  );
+  useEffect(() => {
+    setHttpPortDraft(String(routingConfig?.httpPort ?? 23333));
+  }, [routingConfig?.httpPort]);
+
   const handleRoutingConfigChange = async (
     key:
       | 'enableGlobalRoute'
@@ -1042,8 +1065,10 @@ const SettingsPage: React.FC = () => {
       const summary = parts.length > 0 ? parts.join(', ') : t('settings.clearCacheSuccess');
       showToast(summary, 'success');
 
-      // Notify RuntimeVersionManager to refresh version lists
-      emit('cache://cleared');
+      // Notify RuntimeVersionManager to refresh version lists.
+      // The Tauri event API throws on web, which would land in the catch
+      // below and show a spurious "clear failed" toast after a success.
+      if (isTauri()) emit('cache://cleared');
     } catch (err) {
       console.error('Failed to clear cache:', err);
       showToast(t('settings.clearCacheError') || 'Failed to clear cache', 'error');
@@ -1056,6 +1081,10 @@ const SettingsPage: React.FC = () => {
   const handleSrWeightChange = (key: 'vectorWeight' | 'keywordWeight', v: number) => {
     const other = key === 'vectorWeight' ? 'keywordWeight' : 'vectorWeight';
     const otherValue = Math.max(0, Math.min(1, 1 - v));
+    // Mark the panel dirty: without this a same-card immediate write (e.g.
+    // progressiveDisclosure toggle) rebuilds temp state from the saved config
+    // and silently discards the un-saved slider drag (review round 8).
+    smartRoutingDirtyRef.current = true;
     setTempSmartRoutingConfig({
       ...tempSmartRoutingConfig,
       [key]: String(v),
@@ -1087,6 +1116,7 @@ const SettingsPage: React.FC = () => {
       | 'scoreThreshold',
     value: string,
   ) => {
+    smartRoutingDirtyRef.current = true;
     setTempSmartRoutingConfig({
       ...tempSmartRoutingConfig,
       [key]: value,
@@ -1616,7 +1646,13 @@ const SettingsPage: React.FC = () => {
     }
 
     if (Object.keys(updates).length > 0) {
-      await updateSmartRoutingConfigBatch(updates);
+      const ok = await updateSmartRoutingConfigBatch(updates);
+      // Only clear the dirty flag on success — on failure the draft must stay
+      // protected against the rebuild effect (saved object unchanged, but an
+      // immediate-write toggle would otherwise wipe the failed edits).
+      if (ok !== false) {
+        smartRoutingDirtyRef.current = false;
+      }
     } else {
       showToast(t('settings.noChanges') || 'No changes to save', 'info');
     }
@@ -1756,9 +1792,13 @@ const SettingsPage: React.FC = () => {
   };
 
   useEffect(() => {
-    if (sectionsVisible.exportConfig && !mcpSettingsJson) {
+    // Refetch on every open: mcpSettingsJson is a snapshot — after the first
+    // fetch it would serve stale config for Copy/Download even after the user
+    // changed settings.
+    if (sectionsVisible.exportConfig) {
       fetchMcpSettings();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionsVisible.exportConfig]);
 
   const handleCopyConfig = async () => {
@@ -1912,13 +1952,18 @@ const SettingsPage: React.FC = () => {
       allowedServers: string;
     },
   ) => {
-    await updateBearerKey(id, {
+    // Propagate failure: BearerKeyRow only closes the editor on success —
+    // swallowing here collapsed the row and silently discarded user input.
+    const ok = await updateBearerKey(id, {
       name: payload.name,
       enabled: payload.enabled,
       accessType: payload.accessType,
       allowedGroups: parseCommaSeparated(payload.allowedGroups),
       allowedServers: parseCommaSeparated(payload.allowedServers),
     } as any);
+    if (ok === null) {
+      throw new Error(t('errors.failedToUpdateBearerKey') || 'Failed to update bearer key');
+    }
     await refreshBearerKeys();
   };
 
@@ -2117,6 +2162,7 @@ const SettingsPage: React.FC = () => {
                           loading={loading}
                           availableServers={availableServers}
                           availableGroups={availableGroups}
+                          groupSearchFn={groupSearchFn}
                           isAdmin={isAdmin}
                           onSave={handleSaveExistingBearerKey}
                           onDelete={handleDeleteExistingBearerKey}
@@ -4275,8 +4321,23 @@ const SettingsPage: React.FC = () => {
                 <div className="flex items-center gap-3">
                   <input
                     type="number"
-                    value={routingConfig.httpPort}
-                    onChange={(e) => handleRoutingConfigChange('httpPort', parseInt(e.target.value) || 23333)}
+                    value={httpPortDraft}
+                    onChange={(e) => setHttpPortDraft(e.target.value)}
+                    onBlur={() => {
+                      // Commit on blur (not per keystroke): every commit
+                      // flips global `loading` + toasts, and `|| 23333`
+                      // bounced an intentionally-empty input back. Validate
+                      // the range explicitly — min/max attrs are hints only.
+                      const n = parseInt(httpPortDraft, 10);
+                      if (Number.isFinite(n) && n >= 1024 && n <= 65535) {
+                        if (n !== routingConfig.httpPort) {
+                          handleRoutingConfigChange('httpPort', n);
+                        }
+                      } else {
+                        setHttpPortDraft(String(routingConfig.httpPort));
+                        showToast(t('settings.httpPortInvalid', '端口需在 1024–65535 之间'), 'error');
+                      }
+                    }}
                     placeholder="23333"
                     min="1024"
                     max="65535"

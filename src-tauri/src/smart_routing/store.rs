@@ -256,7 +256,9 @@ impl SmartToolStore {
     pub async fn keyword_search(
         &self,
         query: &str,
-        limit: usize,
+        // Superseded by KEYWORD_FETCH_CAP below: the Rust-side merge_hits
+        // applies the real threshold + limit pruning deterministically.
+        _limit: usize,
         allowed: Option<&[String]>,
     ) -> Result<Vec<SmartHit>> {
         let terms: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
@@ -265,7 +267,12 @@ impl SmartToolStore {
         }
         let clauses: Vec<String> = terms
             .iter()
-            .map(|t| format!("lower(text_content) LIKE lower('%{}%')", esc(t)))
+            .map(|t| {
+                format!(
+                    "lower(text_content) LIKE lower('%{}%') ESCAPE '\\'",
+                    esc_like(t)
+                )
+            })
             .collect();
         let mut filter = clauses.join(" OR ");
         if let Some(list) = allowed {
@@ -283,10 +290,16 @@ impl SmartToolStore {
             filter = format!("({}) AND server_name IN ({})", filter, in_list);
         }
         let table = self.conn.open_table(TABLE_NAME).execute().await?;
+        // Fetch a wide candidate set (deterministic, desktop-scale) instead of
+        // `limit`: with an SQL-side cap of `limit` and no ORDER BY, which
+        // matching rows survive is scan-order dependent — merge_hits would
+        // then be deterministic over a nondeterministic subset. The Rust-side
+        // merge applies the real threshold + limit pruning.
+        const KEYWORD_FETCH_CAP: usize = 10_000;
         let mut stream = table
             .query()
             .only_if(&filter)
-            .limit(limit)
+            .limit(KEYWORD_FETCH_CAP)
             .execute()
             .await?;
         let mut hits = Vec::new();
@@ -360,6 +373,13 @@ fn collect_hits(batch: &RecordBatch, hits: &mut Vec<SmartHit>) {
 /// Create the table if absent; drop + recreate when the embedding width no
 /// longer matches the loaded model (returns `true` in that case).
 async fn ensure_table(conn: &Connection, embed_dim: usize) -> Result<bool> {
+    // dim=0 means the mv runtime isn't up yet (model not loaded) — the dim is
+    // UNKNOWN, not a mismatch. Treating it as a mismatch would DROP the whole
+    // table (every server's embeddings) and the caller's `needs_full_reindex`
+    // return is ignored by cleanup paths like remove_server_embeddings.
+    if embed_dim == 0 {
+        anyhow::bail!("smart: embedding dim unknown (model not loaded) — refusing to touch table");
+    }
     let names = conn
         .table_names()
         .execute()
@@ -419,6 +439,16 @@ fn smart_schema(embed_dim: usize) -> SchemaRef {
 
 fn esc(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// LIKE-pattern escape: `%`/`_` in a query term are wildcards by default and
+/// would make `a%b` cross-word match (inflating keyword scores against the
+/// term semantics). Use an explicit `ESCAPE '\'` clause in the LIKE.
+fn esc_like(s: &str) -> String {
+    s.replace('\'', "''")
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Per-server index summary (for the status command / settings panel).

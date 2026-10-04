@@ -146,7 +146,8 @@
     "passwordRequireLetter": "Password must contain at least one letter",
     "passwordRequireNumber": "Password must contain at least one number",
     "passwordRequireSpecial": "Password must contain at least one special character",
-    "passwordStrengthHint": "Password must be at least 8 characters and contain letters, numbers, and special characters"
+    "passwordStrengthHint": "Password must be at least 8 characters and contain letters, numbers, and special characters",
+    "user": "User"
   },
   "server": {
     "searchPlaceholder": "Search by name or description",
@@ -338,7 +339,8 @@
     "packageVersion": "Installed package version (last installed by the runner cache)",
     "smartBadge": "Smart",
     "smartMetaRoute": "Smart Routing meta tools",
-    "smartMetaTooltip": "Smart Routing meta tools: exposed ONLY via the /mcp/$smart endpoint — not available on regular /mcp or /api paths."
+    "smartMetaTooltip": "Smart Routing meta tools: exposed ONLY via the /mcp/$smart endpoint — not available on regular /mcp or /api paths.",
+    "unknownError": "Unknown error"
   },
   "status": {
     "sleeping": "Sleeping",
@@ -363,7 +365,17 @@
     "failedToFetchSettings": "Failed to fetch settings",
     "failedToUpdateRouteConfig": "Failed to update route configuration",
     "failedToUpdateSmartRoutingConfig": "Failed to update smart routing configuration",
-    "failedToUpdateBetterAuthConfig": "Failed to update Better Auth configuration"
+    "failedToUpdateBetterAuthConfig": "Failed to update Better Auth configuration",
+    "failedToUpdateSystemConfig": "Failed to update system config",
+    "failedToUpdateRoutingConfig": "Failed to update routing configuration",
+    "failedToUpdateInstallConfig": "Failed to update install configuration",
+    "failedToUpdateMCPRouterConfig": "Failed to update MCP Router configuration",
+    "failedToUpdateNameSeparator": "Failed to update name separator",
+    "failedToUpdateOAuthServerConfig": "Failed to update OAuth server configuration",
+    "failedToUpdateSessionRebuild": "Failed to update session rebuild setting",
+    "failedToUpdateSettings": "Failed to update settings",
+    "failedToReloadServer": "Failed to reload server",
+    "failedToUpdateBearerKey": "Failed to update bearer key"
   },
   "common": {
     "loading": "Loading...",
@@ -422,7 +434,8 @@
     "searchPlaceholder": "Search name or description",
     "started": "Started",
     "notStarted": "Not started",
-    "copyOpenApiUrl": "Copy OpenAPI URL"
+    "copyOpenApiUrl": "Copy OpenAPI URL",
+    "operationFailed": "Operation failed"
   },
   "pagination": {
     "rowsPerPage": "Rows per page",
@@ -873,7 +886,8 @@
       "excludeFileGroupAdd": "Exclude these files (ignored by update checks)",
       "excludeFileGroupRemove": "Re-include these files (resume update checks)",
       "refreshSourceDone": "Source update done: imported {{added}}, removed {{removed}}, updated {{updated}}",
-      "refreshSourceTitle": "Source Update"
+      "refreshSourceTitle": "Source Update",
+      "selectedCount": "{{count}} selected"
     }
   },
   "logs": {
@@ -1247,6 +1261,7 @@
     "httpPort": "HTTP Service Port",
     "httpPortDescription": "MCP HTTP service listening port, restart required after changes",
     "httpPortWarning": "After changing the port, you need to restart the application for changes to take effect",
+    "httpPortInvalid": "Port must be between 1024 and 65535",
     "nodeVersion": "Node.js Version",
     "nodeVersionDescription": "Select or install a specific Node.js version for running MCP servers",
     "pythonVersion": "Python Version",
@@ -1499,7 +1514,9 @@
     "smartReindexDone": "Smart routing index rebuilt",
     "smartReindexFailed": "Failed to rebuild smart routing index",
     "mcpStrictValidation": "Strict Protocol Validation",
-    "mcpStrictValidationDescription": "Validate request headers and params strictly per MCP spec when enabled; off by default to tolerate incomplete requests from clients lagging new specs"
+    "mcpStrictValidationDescription": "Validate request headers and params strictly per MCP spec when enabled; off by default to tolerate incomplete requests from clients lagging new specs",
+    "selectAtLeastOneGroupOrServer": "Please select at least one group or server",
+    "llmProviderApiKeyDescription": "API key for the LLM provider used by Smart Routing"
   },
   "mcpb": {
     "upload": "Upload",
@@ -1598,7 +1615,8 @@
     "statsError": "Failed to fetch user statistics",
     "deleteConfirmation": "Are you sure you want to delete user '{{username}}'? This action cannot be undone.",
     "confirmDelete": "Delete User",
-    "deleteWarning": "Are you sure you want to delete user '{{username}}'? This action cannot be undone."
+    "deleteWarning": "Are you sure you want to delete user '{{username}}'? This action cannot be undone.",
+    "fetchError": "Failed to load users"
   },
   "api": {
     "errors": {
@@ -2031,5 +2049,15 @@
     "showAll": "Show all servers",
     "loading": "Loading…",
     "empty": "No shared servers require personal credentials."
+  },
+  "accessUrl": {
+    "title": "Service Access URLs",
+    "baseUrl": "Base URL",
+    "globalRoute": "Global Route (all servers)",
+    "groupRoute": "Group Route",
+    "serverRoute": "Server Route",
+    "smartRoute": "Smart Routing Route",
+    "smartApiRoute": "Smart Routing REST API",
+    "sseRoute": "SSE Route"
   }
 }

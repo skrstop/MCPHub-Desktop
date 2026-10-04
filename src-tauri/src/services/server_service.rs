@@ -30,7 +30,7 @@ fn encode_server_type(t: &ServerType) -> &'static str {
 
 pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled
          FROM servers WHERE enabled = 1",
     )
     .fetch_all(db::pool())
@@ -40,7 +40,7 @@ pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
 
 pub async fn list_all() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled
          FROM servers ORDER BY name",
     )
     .fetch_all(db::pool())
@@ -56,7 +56,7 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
     let key = search_key.trim();
     if key.is_empty() {
         let rows = sqlx::query(
-            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled \
              FROM servers ORDER BY name",
         )
         .fetch_all(db::pool())
@@ -78,7 +78,7 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
             let counts: std::collections::HashMap<String, i64> =
                 weighted.into_iter().collect();
             let all = sqlx::query(
-                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled \
                  FROM servers ORDER BY name",
             )
             .fetch_all(db::pool())
@@ -103,9 +103,15 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
 
 /// 原 LIKE 搜索路径（降级兜底）
 async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
-    let pattern = format!("%{}%", key.to_lowercase().replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!(
+        "%{}%",
+        key.to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled \
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled \
          FROM servers \
          WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\' \
          ORDER BY name",
@@ -119,7 +125,7 @@ async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
 
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled
          FROM servers WHERE name = ?",
     )
     .bind(name)
@@ -131,6 +137,27 @@ pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
 /// Per-session client isolation and on-demand spawning are mutually exclusive:
 /// the former creates a dedicated upstream client per session, the latter
 /// keeps a single shared client that sleeps. Reject the combination up front.
+/// Server names are used verbatim as cache/tool directory suffixes
+/// (`npm-cache-{name}`, `uv-cache-{name}`, `uv-tools-{name}`) and fed to
+/// `remove_dir_all` on reinstall — a name containing `/`/`\`/`..` escapes the
+/// cache root (directory creation outside it, arbitrary-directory deletion).
+fn validate_server_name(name: &str) -> Result<()> {
+    let ok = !name.trim().is_empty()
+        && name.len() <= 128
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.chars().any(|c| c.is_control());
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "server name '{}' is invalid: must not be empty, contain path separators, '..', or control characters",
+            name
+        ))
+    }
+}
+
 fn validate_combination(cfg: &ServerConfig) -> Result<()> {
     if cfg.per_session_client.unwrap_or(false) && cfg.start_on_demand.unwrap_or(false) {
         return Err(anyhow!(
@@ -155,6 +182,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     if cfg.name.eq_ignore_ascii_case(crate::rag::service::BUILTIN_SERVER_NAME) {
         return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
     }
+    validate_server_name(&cfg.name)?;
     validate_combination(cfg)?;
     let id = Uuid::new_v4().to_string();
     let args = cfg.args.as_ref().map(serde_json::to_string).transpose()?;
@@ -163,6 +191,13 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     let options = cfg.options.as_ref().map(serde_json::to_string).transpose()?;
     let openapi = cfg.openapi.as_ref().map(serde_json::to_string).transpose()?;
     let proxy = cfg.proxy.as_ref().map(serde_json::to_string).transpose()?;
+    let enable_keep_alive = cfg.enable_keep_alive.map(|b| b as i64);
+    let keep_alive_interval = cfg.keep_alive_interval.map(|v| v as i64);
+    let passthrough_headers = cfg
+        .passthrough_headers
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
@@ -173,8 +208,8 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
 
     let mut tx = db::pool().begin().await?;
     sqlx::query(
-        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&cfg.name)
@@ -191,6 +226,9 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(start_on_demand)
     .bind(idle_timeout_ms)
     .bind(&proxy)
+    .bind(enable_keep_alive)
+    .bind(keep_alive_interval)
+    .bind(&passthrough_headers)
     .bind(enabled)
     .execute(&mut *tx)
     .await
@@ -224,6 +262,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     if cfg.name.eq_ignore_ascii_case(crate::rag::service::BUILTIN_SERVER_NAME) {
         return Err(anyhow!("server name '{}' is reserved for the builtin server", cfg.name));
     }
+    validate_server_name(&cfg.name)?;
     validate_combination(cfg)?;
     let args = cfg.args.as_ref().map(serde_json::to_string).transpose()?;
     let env = cfg.env.as_ref().map(serde_json::to_string).transpose()?;
@@ -231,6 +270,13 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let options = cfg.options.as_ref().map(serde_json::to_string).transpose()?;
     let openapi = cfg.openapi.as_ref().map(serde_json::to_string).transpose()?;
     let proxy = cfg.proxy.as_ref().map(serde_json::to_string).transpose()?;
+    let enable_keep_alive = cfg.enable_keep_alive.map(|b| b as i64);
+    let keep_alive_interval = cfg.keep_alive_interval.map(|v| v as i64);
+    let passthrough_headers = cfg
+        .passthrough_headers
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
@@ -242,7 +288,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let mut tx = db::pool().begin().await?;
     let result = sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
-         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enabled=?, updated_at=datetime('now') WHERE name=?",
+         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enable_keep_alive=?, keep_alive_interval=?, passthrough_headers=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
     .bind(&cfg.name)
     .bind(server_type)
@@ -258,6 +304,9 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(start_on_demand)
     .bind(idle_timeout_ms)
     .bind(&proxy)
+    .bind(enable_keep_alive)
+    .bind(keep_alive_interval)
+    .bind(&passthrough_headers)
     .bind(enabled)
     .bind(name)
     .execute(&mut *tx)
@@ -275,6 +324,25 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
             name,
         )
         .await?;
+        // Groups store members by server NAME — a rename must rewrite the
+        // member lists in the same transaction or every referencing group is
+        // left with a dangling member (tools silently missing from /mcp/{group}).
+        cascade_groups_rename_tx(&mut tx, name, &cfg.name).await?;
+        // Bearer keys scope by server NAME too — a rename must rewrite
+        // `allowed_servers` or every key scoped to the old name silently loses
+        // access to the server.
+        cascade_bearer_keys_rename_tx(&mut tx, name, &cfg.name).await?;
+        // Per-tool enabled/description overrides are keyed by server NAME — a
+        // rename must rewrite `server_tool_config.server_name` or previously
+        // disabled tools silently become callable again on the renamed server.
+        sqlx::query("UPDATE server_tool_config SET server_name=? WHERE server_name=?")
+            .bind(&cfg.name)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        // Drop the old name's connect-lock entry (renamed → old key orphaned).
+        let old_name = name.to_string();
+        tokio::spawn(async move { crate::mcp::pool::forget_connect_lock(&old_name).await });
     }
     crate::services::fts_service::sync_upsert_tx(
         &mut tx,
@@ -305,21 +373,168 @@ pub async fn delete(name: &str) -> Result<()> {
         name,
     )
     .await?;
+    // Groups store members by server NAME — drop the deleted server from all
+    // member lists in the same transaction (dangling members otherwise
+    // silently resolve to nothing on the /mcp/{group} endpoint).
+    cascade_groups_remove_tx(&mut tx, name).await?;
+    // Bearer keys + per-tool config are keyed by server NAME — drop stale
+    // references in the same transaction (stale allowed_servers entries would
+    // keep granting access to a dead name; stale tool-config rows would
+    // silently resurrect disabled state if the name is ever reused).
+    sqlx::query("DELETE FROM server_tool_config WHERE server_name=?")
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    cascade_bearer_keys_remove_tx(&mut tx, name).await?;
     tx.commit().await?;
+    // Connect-lock entry is keyed by NAME and never contended again — drop it
+    // or the map grows without bound over a long session (rename/delete).
+    crate::mcp::pool::forget_connect_lock(name).await;
     crate::services::subscription_hub::notify_tools_list_changed().await;
     Ok(())
 }
 
+/// Rewrite every group's `servers` member list, replacing `old_name` with
+/// `new_name` (server rename). Must run inside the caller's transaction.
+async fn cascade_groups_rename_tx(
+    tx: &mut sqlx::SqliteConnection,
+    old_name: &str,
+    new_name: &str,
+) -> Result<()> {
+    let rows = sqlx::query("SELECT id, servers FROM groups")
+        .fetch_all(&mut *tx)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let servers_str: String = row.try_get("servers")?;
+        let members: Vec<serde_json::Value> = serde_json::from_str(&servers_str).unwrap_or_default();
+        let has_old = members.iter().any(|m| m.as_str() == Some(old_name));
+        if !has_old {
+            continue;
+        }
+        let rewritten: Vec<serde_json::Value> = members
+            .into_iter()
+            .map(|m| {
+                if m.as_str() == Some(old_name) {
+                    serde_json::Value::String(new_name.to_string())
+                } else {
+                    m
+                }
+            })
+            .collect();
+        sqlx::query("UPDATE groups SET servers=? WHERE id=?")
+            .bind(serde_json::to_string(&rewritten).unwrap_or_else(|_| "[]".into()))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Remove `name` from every group's `servers` member list (server delete).
+/// Must run inside the caller's transaction.
+async fn cascade_groups_remove_tx(tx: &mut sqlx::SqliteConnection, name: &str) -> Result<()> {
+    let rows = sqlx::query("SELECT id, servers FROM groups")
+        .fetch_all(&mut *tx)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let servers_str: String = row.try_get("servers")?;
+        let members: Vec<serde_json::Value> = serde_json::from_str(&servers_str).unwrap_or_default();
+        let has_old = members.iter().any(|m| m.as_str() == Some(name));
+        if !has_old {
+            continue;
+        }
+        let rewritten: Vec<serde_json::Value> = members
+            .into_iter()
+            .filter(|m| m.as_str() != Some(name))
+            .collect();
+        sqlx::query("UPDATE groups SET servers=? WHERE id=?")
+            .bind(serde_json::to_string(&rewritten).unwrap_or_else(|_| "[]".into()))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Rewrite every bearer key's `allowed_servers`, replacing `old_name` with
+/// `new_name` (server rename). Must run inside the caller's transaction.
+async fn cascade_bearer_keys_rename_tx(
+    tx: &mut sqlx::SqliteConnection,
+    old_name: &str,
+    new_name: &str,
+) -> Result<()> {
+    let rows = sqlx::query("SELECT id, allowed_servers FROM bearer_keys")
+        .fetch_all(&mut *tx)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let servers_str: String = row.try_get("allowed_servers")?;
+        let mut servers: Vec<String> = serde_json::from_str(&servers_str).unwrap_or_default();
+        if !servers.iter().any(|s| s == old_name) {
+            continue;
+        }
+        for s in servers.iter_mut() {
+            if s == old_name {
+                *s = new_name.to_string();
+            }
+        }
+        sqlx::query("UPDATE bearer_keys SET allowed_servers=? WHERE id=?")
+            .bind(serde_json::to_string(&servers).unwrap_or_else(|_| "[]".into()))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Remove `name` from every bearer key's `allowed_servers` (server delete).
+/// Must run inside the caller's transaction.
+async fn cascade_bearer_keys_remove_tx(
+    tx: &mut sqlx::SqliteConnection,
+    name: &str,
+) -> Result<()> {
+    let rows = sqlx::query("SELECT id, allowed_servers FROM bearer_keys")
+        .fetch_all(&mut *tx)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let servers_str: String = row.try_get("allowed_servers")?;
+        let servers: Vec<String> = serde_json::from_str(&servers_str).unwrap_or_default();
+        if !servers.iter().any(|s| s == name) {
+            continue;
+        }
+        let filtered: Vec<String> = servers.into_iter().filter(|s| s != name).collect();
+        sqlx::query("UPDATE bearer_keys SET allowed_servers=? WHERE id=?")
+            .bind(serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".into()))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn toggle_enabled(name: &str) -> Result<ServerConfig> {
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE servers SET enabled = CASE WHEN enabled=1 THEN 0 ELSE 1 END, updated_at=datetime('now') WHERE name=?",
     )
     .bind(name)
     .execute(db::pool())
-    .await?;
-    get_by_name(name)
+    .await?
+    .rows_affected()
+        > 0;
+    let cfg = get_by_name(name)
         .await?
-        .ok_or_else(|| anyhow!("Server '{}' not found", name))
+        .ok_or_else(|| anyhow!("Server '{}' not found", name));
+    // Enable/disable changes the exposed tool set (tools are filtered by
+    // `enabled` on HTTP endpoints) — subscribed MCP clients must be told to
+    // re-fetch tools/list. Every other tool-set-changing path (create/update/
+    // delete/tool-config) notifies; this path was the only omission.
+    if updated {
+        crate::services::subscription_hub::notify_tools_list_changed().await;
+    }
+    cfg
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +571,17 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         .as_deref()
         .map(serde_json::from_str)
         .transpose()?;
+    let enable_keep_alive = r
+        .try_get::<Option<i64>, _>("enable_keep_alive")?
+        .map(|v| v != 0);
+    let keep_alive_interval = r
+        .try_get::<Option<i64>, _>("keep_alive_interval")?
+        .map(|v| v as u64);
+    let passthrough_headers: Option<Vec<String>> = r
+        .try_get::<Option<String>, _>("passthrough_headers")?
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     Ok(ServerConfig {
         id: r.try_get("id")?,
         name: r.try_get("name")?,
@@ -369,6 +595,9 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         options,
         openapi,
         proxy,
+        enable_keep_alive,
+        keep_alive_interval,
+        passthrough_headers,
         per_session_client: Some(r.try_get::<i64, _>("per_session_client")? != 0),
         start_on_demand: Some(r.try_get::<i64, _>("start_on_demand")? != 0),
         idle_timeout_ms: {

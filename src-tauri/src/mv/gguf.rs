@@ -56,7 +56,15 @@ pub fn read_gguf_context_length(model_dir: &Path) -> Option<u32> {
     let gguf_file = std::fs::read_dir(model_dir)
         .ok()?
         .flatten()
-        .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("gguf"))
+        // Case-insensitive to match find_gguf (MODEL.GGUF otherwise gets a
+        // default context length, review round 8).
+        .find(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+        })
         .map(|e| e.path())?;
     let mut file = std::fs::File::open(&gguf_file).ok()?;
     let content = Content::read(&mut file).ok()?;
@@ -210,10 +218,19 @@ impl Embedder for GgufEmbedder {
         // Cap to max_context (parity with embed_batch's forward_sub_batch):
         // an over-context input (e.g. a pathological single query) would build
         // a [1, seq≫context] tensor — huge attention alloc, Metal buffer
-        // overflow / OOM instead of a clean truncation.
+        // overflow / OOM instead of a clean truncation. encode_ids already
+        // appended bos/eos; truncate the BODY (drop the tail eos first, then
+        // re-push it) so the eos token survives for pooling layers —
+        // truncating after append silently drops it for long inputs and
+        // degrades long-query retrieval quality.
         let cap = self.max_context.max(1) as usize;
+        let overhead = self.add_bos as usize + self.add_eos as usize;
         if ids.len() > cap {
-            ids.truncate(cap);
+            let eos = if self.add_eos { ids.pop() } else { None };
+            ids.truncate(cap.saturating_sub(overhead).max(1));
+            if let Some(e) = eos {
+                ids.push(e);
+            }
         }
         if ids.is_empty() {
             return Ok(vec![0.0; self.embed_dim]);
@@ -249,20 +266,48 @@ impl Embedder for GgufEmbedder {
         // only the compute order differs). Rows are re-scattered to the
         // caller's order below.
         let n = all_ids.len();
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by_key(|&i| all_ids[i].len().min(cap));
-        let mut rows_sorted: Vec<Vec<f32>> = Vec::with_capacity(n);
+        // Empty-text chunks (tokenize -> 0 ids) would forward as an all-zero
+        // attention-mask row — masked softmax over a fully-masked row produces
+        // NaN embeddings that poison vector search. Short-circuit them with a
+        // zero vector before batching.
+        let mut zero_rows: Vec<usize> = Vec::new();
+        let mut live_ids: Vec<Vec<u32>> = Vec::with_capacity(n);
+        let mut live_orig: Vec<usize> = Vec::with_capacity(n);
+        for (i, ids) in all_ids.iter().enumerate() {
+            if ids.is_empty() {
+                zero_rows.push(i);
+                continue;
+            }
+            // eos-preserving truncation (parity with embed()): encode_ids
+            // appended bos/eos; truncate the BODY so the tail eos survives
+            // for pooling layers — document chunks are the main long-input
+            // path and silently dropping eos degrades retrieval quality.
+            let mut ids = ids.clone();
+            let overhead = self.add_bos as usize + self.add_eos as usize;
+            if ids.len() > cap {
+                let eos = if self.add_eos { ids.pop() } else { None };
+                ids.truncate(cap.saturating_sub(overhead).max(1));
+                if let Some(e) = eos {
+                    ids.push(e);
+                }
+            }
+            live_ids.push(ids);
+            live_orig.push(i);
+        }
+        let mut order: Vec<usize> = (0..live_ids.len()).collect();
+        order.sort_by_key(|&i| live_ids[i].len().min(cap));
+        let mut rows_sorted: Vec<Vec<f32>> = Vec::with_capacity(live_ids.len());
         let mut bucket: Vec<usize> = Vec::new();
         let t0 = std::time::Instant::now();
         for &i in &order {
-            let len = all_ids[i].len().min(cap);
+            let len = live_ids[i].len().min(cap);
             if let Some(&first) = bucket.first() {
-                let first_len = all_ids[first].len().min(cap);
+                let first_len = live_ids[first].len().min(cap);
                 // Close the bucket when the new row's length exceeds the
                 // bucket's first row by >12.5% (or >64 tokens) — beyond that
                 // the padding waste outweighs the bigger GEMM.
                 if len * 8 > first_len * 9 + 64 {
-                    let sub: Vec<Vec<u32>> = bucket.iter().map(|&j| all_ids[j].clone()).collect();
+                    let sub: Vec<Vec<u32>> = bucket.iter().map(|&j| live_ids[j].clone()).collect();
                     let rows = forward_sub_batch(&*self.arch, &self.device, cap, &sub)?;
                     rows_sorted.extend(rows);
                     bucket.clear();
@@ -271,14 +316,17 @@ impl Embedder for GgufEmbedder {
             bucket.push(i);
         }
         if !bucket.is_empty() {
-            let sub: Vec<Vec<u32>> = bucket.iter().map(|&j| all_ids[j].clone()).collect();
+            let sub: Vec<Vec<u32>> = bucket.iter().map(|&j| live_ids[j].clone()).collect();
             let rows = forward_sub_batch(&*self.arch, &self.device, cap, &sub)?;
             rows_sorted.extend(rows);
         }
         // Scatter back to the caller's order (rows_sorted is in sorted order).
         let mut result: Vec<Vec<f32>> = vec![Vec::new(); n];
         for (row, &orig_idx) in rows_sorted.into_iter().zip(order.iter()) {
-            result[orig_idx] = row;
+            result[live_orig[orig_idx]] = row;
+        }
+        for i in zero_rows {
+            result[i] = vec![0.0; self.embed_dim];
         }
         log::info!(
             "[RAG] embed_batch: {} chunks on {:?} in {}ms (length-bucketed)",

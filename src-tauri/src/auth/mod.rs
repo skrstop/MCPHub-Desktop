@@ -4,7 +4,7 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use std::sync::OnceLock;
 
-/// In-memory JWT secret (generated once at startup, stored in OS keychain on next launch)
+/// In-memory JWT secret (per-process random, generated at startup; session tokens only — no keychain persistence)
 static JWT_SECRET: OnceLock<String> = OnceLock::new();
 
 const TOKEN_EXPIRY_HOURS: i64 = 24;
@@ -14,7 +14,7 @@ pub fn init_secret(secret: String) {
 }
 
 fn secret() -> &'static str {
-    // Fallback when `init_secret` was never called (no keychain round-trip in
+    // Fallback when `init_secret` was never called (no persistence in
     // the current startup path — verified: zero call sites). A STATIC fallback
     // string would sign every token with a publicly-known secret (it ships in
     // the open-source repo), letting anyone with the source forge tokens.

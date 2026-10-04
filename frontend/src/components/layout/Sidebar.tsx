@@ -57,7 +57,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
       .catch(() => setActivityAvailable(false));
   }, []);
 
-  const userCanManageUsers = auth.user?.isAdmin && usePermissionCheck('x');
+  // Hook must be called UNCONDITIONALLY: short-circuiting it behind
+  // auth.user?.isAdmin changes hook call order between renders (auth.user is
+  // null on first render, flips to a value after the auth request resolves)
+  // → React throws "Rendered more hooks than during the previous render".
+  const hasManageUsersPermission = usePermissionCheck('x');
+  const userCanManageUsers = !!auth.user?.isAdmin && hasManageUsersPermission;
 
   const workspaceItems: MenuItem[] = [
     { path: '/', label: t('nav.dashboard'), icon: <LayoutGrid className="h-4 w-4" />, end: true },

@@ -164,7 +164,26 @@ pub fn extract_package_name(command: &str, args: &[String]) -> Option<String> {
                     break;
                 }
                 if a.starts_with('-') {
-                    // skip flags (npx short flags don't take values we care about)
+                    // `-p/--package` CONSUME a value and that value IS the
+                    // installed package — `npx -p foo@2 bar` runs `bar`, a
+                    // binary provided by foo; adopting the positional "bar"
+                    // points update checks at the wrong package (review
+                    // rounds 8/9/10). The `=`-joined forms (`-p=foo`,
+                    // `--package=foo`) are accepted by npm's nopt parser and
+                    // must be adopted directly — the token itself is not
+                    // literally "-p"/"--package" so an equality test can
+                    // never see them (review round 10: the round-9
+                    // split_once branch was dead code).
+                    if let Some(v) = a
+                        .strip_prefix("--package=")
+                        .or_else(|| a.strip_prefix("-p="))
+                    {
+                        pkg = Some(v);
+                    } else if a == "-p" || a == "--package" {
+                        if let Some(v) = iter.next() {
+                            pkg = Some(v.as_str());
+                        }
+                    }
                     continue;
                 }
                 pkg = Some(a.as_str());
@@ -185,9 +204,26 @@ pub fn extract_package_name(command: &str, args: &[String]) -> Option<String> {
                 } else if a.starts_with("--from=") {
                     from_pkg = Some(a["--from=".len()..].to_string());
                 } else if a.starts_with('-') {
-                    // skip other flags and their values heuristically only for
-                    // known value-taking flags; unknown flags may consume the
-                    // package, so we only treat the first bare positional as pkg
+                    // Known value-taking flags: skip the flag AND its value so
+                    // `uvx --python 3.12 pkg` doesn't extract "3.12" as the
+                    // package (update check would 404 forever). Unknown flags
+                    // may themselves consume the next token or not — heuristics
+                    // stay as-is for them.
+                    if matches!(
+                        a.as_str(),
+                        "--python" | "--python-version" | "--registry" | "--cache"
+                            | "--config" | "--index" | "--index-url" | "--with"
+                    ) {
+                        iter.next();
+                    }
+                    // `-p` is uv's short form of `--python` — without
+                    // consuming it, `uvx -p 3.12 pkg` adopts "3.12" as the
+                    // package name and the update check 404s forever
+                    // (review round 10, same family as the round-8
+                    // `--python` fix).
+                    if a == "-p" {
+                        iter.next();
+                    }
                     continue;
                 } else if positional.is_none() {
                     positional = Some(a.clone());
@@ -337,7 +373,10 @@ pub fn spawn_update_check(server_name: String, command: String, args: Vec<String
         }
     };
     let self_reported = running_version.filter(|v| !v.is_empty());
-    let just_reinstalled = take_reinstalled(&server_name);
+    // NOTE: `mark_reinstalled` state is consumed (take_reinstalled) only
+    // AFTER the registry fetch succeeds below — consuming it up front meant
+    // a failed/timeout fetch dropped the flag and the update badge came back
+    // on the next connect despite a successful reinstall.
     let start_msg = format!(
         "[{}] 开始检查包更新（{} {}{}）...",
         server_name,
@@ -363,6 +402,8 @@ pub fn spawn_update_check(server_name: String, command: String, args: Vec<String
         };
 
         let recorded = get_recorded_version(&server_name).await;
+        // Registry fetch succeeded — now safe to consume the reinstall flag.
+        let just_reinstalled = take_reinstalled(&server_name);
 
         if just_reinstalled {
             // User just clicked update: the package was re-downloaded, so the

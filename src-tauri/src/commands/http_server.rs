@@ -1,11 +1,26 @@
 /// HTTP server management commands
+use tauri::State;
+
+use crate::commands::auth::SessionState;
 use crate::services::{config_service, http_server};
 use serde_json::{json, Value};
 
 /// Start the embedded HTTP server on the given port.
 /// Reads the body limit from current config.
 #[tauri::command]
-pub async fn start_http_server(port: u16) -> Result<Value, String> {
+pub async fn start_http_server(
+    session: State<'_, SessionState>,
+    port: u16,
+) -> Result<Value, String> {
+    // Controls the network exposure surface: a non-admin session must not be
+    // able to open/close the embedded HTTP endpoints (skipAuth short-circuits).
+    crate::commands::config::require_admin(&session).await?;
+    // Port 0 binds an OS ephemeral port while every caller reports/tracks `0`
+    // and the loopback-hijack check validates the wrong port — apply the same
+    // 1-65535 invariant the config-driven start path already enforces (R27).
+    if port == 0 {
+        return Err("port must be 1-65535".into());
+    }
     let body_limit_bytes = config_service::get()
         .await
         .ok()
@@ -19,7 +34,8 @@ pub async fn start_http_server(port: u16) -> Result<Value, String> {
 
 /// Stop the embedded HTTP server.
 #[tauri::command]
-pub async fn stop_http_server() -> Result<Value, String> {
+pub async fn stop_http_server(session: State<'_, SessionState>) -> Result<Value, String> {
+    crate::commands::config::require_admin(&session).await?;
     http_server::stop().await;
     Ok(json!({ "success": true }))
 }
@@ -50,7 +66,13 @@ pub struct PortOccupier {
 /// empty list when nothing is listening (firewall/permission failures) or the
 /// platform probe is unavailable.
 #[tauri::command]
-pub async fn detect_port_occupier(port: u16) -> Result<Vec<PortOccupier>, String> {
+pub async fn detect_port_occupier(
+    session: State<'_, SessionState>,
+    port: u16,
+) -> Result<Vec<PortOccupier>, String> {
+    // Exposes local process names/PIDs for an arbitrary port — admin-gated in
+    // multi-user mode (review round 9).
+    crate::commands::config::require_admin(&session).await?;
     tokio::task::spawn_blocking(move || {
         let mut out = Vec::new();
         // Never list our own process: our server binds *:port (all
@@ -130,8 +152,14 @@ pub async fn detect_port_occupier(port: u16) -> Result<Vec<PortOccupier>, String
                         let port_str = format!(":{port}");
                         if local.ends_with(&port_str) {
                             if let Ok(pid) = cols[4].parse::<u32>() {
-                                let name = std::process::Command::new("tasklist")
-                                    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                                let mut cmd = std::process::Command::new("tasklist");
+                                cmd.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+                                #[cfg(windows)]
+                                {
+                                    use std::os::windows::process::CommandExt;
+                                    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                                }
+                                let name = cmd
                                     .output()
                                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                                     .map(|s| {
@@ -161,7 +189,14 @@ pub async fn detect_port_occupier(port: u16) -> Result<Vec<PortOccupier>, String
 /// "kill occupier & restart" flow). Refuses PIDs that are never killable:
 /// 0/1, our own process, and our parent.
 #[tauri::command]
-pub async fn kill_port_occupier(pid: u32) -> Result<(), String> {
+pub async fn kill_port_occupier(
+    session: State<'_, SessionState>,
+    pid: u32,
+) -> Result<(), String> {
+    // Admin-only: this kills an arbitrary PID (kill -9 / taskkill /F) — the
+    // pid<=1/self/parent guards don't stop it from killing other users'
+    // processes or system daemons.
+    crate::commands::config::require_admin(&session).await?;
     if pid <= 1 {
         return Err("refusing to kill system process".to_string());
     }

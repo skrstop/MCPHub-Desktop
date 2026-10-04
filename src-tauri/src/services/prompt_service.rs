@@ -1,5 +1,5 @@
 use crate::{db, models::prompt::{BuiltinPrompt, BuiltinPromptPayload, PromptArgument, PromptPage}};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -126,7 +126,10 @@ pub async fn search_paged(
         format!("WHERE {}", conds.join(" AND "))
     };
 
-    let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!(
+        "%{}%",
+        key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
     let count_sql = format!("SELECT COUNT(*) FROM builtin_prompts {}", where_clause);
     let mut count_q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(&*count_sql));
     if !key.is_empty() {
@@ -185,6 +188,16 @@ async fn create_inner(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
     let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
 
     let mut tx = db::pool().begin().await?;
+    // Duplicate-name rejection: FTS ref_id is `name` and get_prompt resolves
+    // by name — a second same-named row would steal the FTS row and make
+    // prompts/get ambiguous.
+    let dup = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM builtin_prompts WHERE name = ?")
+        .bind(&payload.name)
+        .fetch_one(&mut *tx)
+        .await?;
+    if dup > 0 {
+        return Err(anyhow!("Prompt name '{}' already exists", payload.name));
+    }
     sqlx::query(
         "INSERT INTO builtin_prompts (id, name, title, description, template, arguments, enabled) \
          VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -241,6 +254,21 @@ async fn update_inner(id: &str, payload: &BuiltinPromptPayload) -> Result<Option
     .fetch_optional(&mut *tx)
     .await?
     .flatten();
+
+    // Duplicate-name rejection (see create_inner): renaming onto another
+    // prompt's name would steal its FTS row and make get_prompt ambiguous.
+    if old_name.as_deref() != Some(payload.name.as_str()) {
+        let dup = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM builtin_prompts WHERE name = ? AND id != ?",
+        )
+        .bind(&payload.name)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if dup > 0 {
+            return Err(anyhow!("Prompt name '{}' already exists", payload.name));
+        }
+    }
 
     let affected = sqlx::query(
         "UPDATE builtin_prompts SET name = ?, title = ?, description = ?, template = ?, \
@@ -321,17 +349,126 @@ fn prompt_fts_text(name: &str, title: Option<&str>, description: Option<&str>) -
 }
 
 /// Render the prompt template by substituting {{arg}} placeholders with provided values.
+///
+/// Single-pass scan: each `{{name}}` token is replaced exactly once from the
+/// args map and substituted text is never re-scanned — sequential
+/// `String::replace` would let one argument's value expand other
+/// placeholders (with nondeterministic order via HashMap iteration).
 pub fn render_template(template: &str, args: &serde_json::Value) -> String {
-    let mut result = template.to_string();
-    if let Some(obj) = args.as_object() {
-        for (k, v) in obj {
-            let placeholder = format!("{{{{{}}}}}", k);
-            let replacement = match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            result = result.replace(&placeholder, &replacement);
+    let obj = args.as_object();
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        match after.find("}}") {
+            // Empty placeholder `{{}}`: keep the token literal and advance —
+            // falling through to the no-close-braces arm would emit the whole
+            // rest verbatim and kill every later substitution.
+            Some(2) => {
+                out.push_str("{{}}");
+                rest = &after[4..];
+            }
+            // `end` is the index of "}}" — name is after[2..end], so a
+            // single-char placeholder {{a}} has end == 3.
+            Some(end) if end >= 3 => {
+                let name = &after[2..end];
+                let value = obj.and_then(|o| o.get(name)).map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                });
+                match value {
+                    Some(v) => out.push_str(&v),
+                    // Unknown/missing placeholder: keep the literal token
+                    // (caller may validate required args separately).
+                    None => out.push_str(&after[..end + 2]),
+                }
+                rest = &after[end + 2..];
+            }
+            _ => {
+                // No closing braces — emit the rest verbatim.
+                out.push_str(after);
+                rest = "";
+                break;
+            }
         }
     }
-    result
+    out.push_str(rest);
+    out
+}
+
+/// Reject calls missing arguments advertised as `required` — otherwise the
+/// raw `{{placeholder}}` leaks into LLM-bound content.
+pub fn validate_required_args(
+    arguments: &[crate::models::prompt::PromptArgument],
+    args: &serde_json::Value,
+) -> Result<(), String> {
+    let obj = args.as_object();
+    let missing: Vec<&str> = arguments
+        .iter()
+        .filter(|a| a.required)
+        .map(|a| a.name.as_str())
+        .filter(|n| obj.and_then(|o| o.get(*n)).is_none())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "missing required argument(s): {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_single_pass_no_cross_expansion() {
+        // Sequential replace would expand {{b}} inside a's value — single
+        // pass must not.
+        let args = serde_json::json!({"a": "{{b}}", "b": "secret"});
+        let out = render_template("x={{a}} y={{b}}", &args);
+        assert_eq!(out, "x={{b}} y=secret");
+    }
+
+    #[test]
+    fn render_missing_arg_keeps_literal() {
+        let args = serde_json::json!({});
+        let out = render_template("hello {{name}}!", &args);
+        assert_eq!(out, "hello {{name}}!");
+    }
+
+    #[test]
+    fn render_non_object_args_returns_template() {
+        assert_eq!(render_template("a {{x}}", &serde_json::json!("str")), "a {{x}}");
+    }
+
+
+    #[test]
+    fn render_empty_placeholder_does_not_kill_rest() {
+        let args = serde_json::json!({"x": "1"});
+        let out = render_template("a {{}} b {{x}}", &args);
+        assert_eq!(out, "a {{}} b 1");
+    }
+
+    #[test]
+    fn render_unclosed_braces_verbatim() {
+        assert_eq!(render_template("a {{oops", &serde_json::json!({})), "a {{oops");
+    }
+
+    #[test]
+    fn required_args_validation() {
+        use crate::models::prompt::PromptArgument;
+        let args_def = vec![PromptArgument {
+            name: "city".into(),
+            description: None,
+            title: None,
+            required: true,
+        }];
+        assert!(validate_required_args(&args_def, &serde_json::json!({})).is_err());
+        assert!(validate_required_args(&args_def, &serde_json::json!({"city": "SF"})).is_ok());
+    }
 }

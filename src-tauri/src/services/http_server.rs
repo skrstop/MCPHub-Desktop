@@ -66,12 +66,21 @@ fn build_oauth_401(headers: &HeaderMap, reason: &str) -> Response {
     }
     let www_auth = format!("Bearer {}", www_auth_parts.join(", "));
     let b = serde_json::to_string(&body).unwrap_or_default();
-    axum::http::Response::builder()
+    // www_auth embeds a client-influenced Host value — never let a bad header
+    // value panic the worker.
+    let resp = axum::http::Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header("www-authenticate", www_auth)
-        .body(Body::from(b))
-        .unwrap()
+        .header(header::CONTENT_TYPE, "application/json");
+    let resp = match axum::http::HeaderValue::from_str(&www_auth) {
+        Ok(v) => resp.header("www-authenticate", v),
+        Err(_) => resp,
+    };
+    resp.body(Body::from(b)).unwrap_or_else(|_| {
+        axum::http::Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from(String::from("{\"error\":\"invalid_token\"}")))
+            .expect("static fallback response is valid")
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -96,17 +105,17 @@ pub fn parse_body_limit(s: &str) -> usize {
     let s = s.trim().to_lowercase();
     if let Some(num) = s.strip_suffix("mb") {
         if let Ok(n) = num.trim().parse::<usize>() {
-            return n * 1024 * 1024;
+            return n.saturating_mul(1024 * 1024);
         }
     }
     if let Some(num) = s.strip_suffix("kb") {
         if let Ok(n) = num.trim().parse::<usize>() {
-            return n * 1024;
+            return n.saturating_mul(1024);
         }
     }
     if let Some(num) = s.strip_suffix('b') {
         if let Ok(n) = num.trim().parse::<usize>() {
-            return n;
+            return n.saturating_mul(1);
         }
     }
     if let Ok(n) = s.parse::<usize>() {
@@ -116,6 +125,10 @@ pub fn parse_body_limit(s: &str) -> usize {
 }
 
 static SERVER_HANDLE: OnceLock<Arc<Mutex<Option<ServerHandle>>>> = OnceLock::new();
+/// Monotonic generation of HTTP server instances. Incremented by every
+/// successful start(); lets the watch task detect that the handle it is about
+/// to clear still belongs to ITS instance (a newer start() may have raced it).
+static HTTP_START_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn handle() -> &'static Arc<Mutex<Option<ServerHandle>>> {
     SERVER_HANDLE.get_or_init(|| Arc::new(Mutex::new(None)))
@@ -277,17 +290,21 @@ struct SmartCallRequest {
 /// `Ok(Some(key))` when auth is enabled and the token is valid,
 /// `Err(response)` when auth is enabled but the token is missing or invalid.
 pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<BearerKey>, Response> {
-    // Dynamically read config so changes take effect without restarting the HTTP server
-    let config = config_service::get().await.ok();
+    // Dynamically read config so changes take effect without restarting the HTTP server.
+    // Read failure must FAIL CLOSED: a transient DB error must not bypass bearer auth.
+    let config = match config_service::get().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[http] config read failed during bearer auth check: {e}; failing closed (401)");
+            return Err(build_oauth_401(headers, "invalid"));
+        }
+    };
     let enabled = config
-        .as_ref()
-        .and_then(|c| {
-            // UI saves under routing.enableBearerAuth; legacy path: bearerKeyEnabled
-            c.get("routing")
-                .and_then(|r| r.get("enableBearerAuth"))
-                .and_then(|v| v.as_bool())
-                .or_else(|| c.get("bearerKeyEnabled").and_then(|v| v.as_bool()))
-        })
+        .get("routing")
+        // UI saves under routing.enableBearerAuth; legacy path: bearerKeyEnabled
+        .and_then(|r| r.get("enableBearerAuth"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| config.get("bearerKeyEnabled").and_then(|v| v.as_bool()))
         .unwrap_or(false);
     if !enabled {
         return Ok(None);
@@ -295,8 +312,7 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
 
     // Use the configured header name (defaults to "authorization")
     let header_name = config
-        .as_ref()
-        .and_then(|c| c.get("routing"))
+        .get("routing")
         .and_then(|r| r.get("bearerAuthHeaderName"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase())
@@ -307,10 +323,14 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !auth.starts_with("Bearer ") {
+    if !auth.starts_with("Bearer ")
+        && !auth.get(..7).map(|p| p.eq_ignore_ascii_case("bearer ")).unwrap_or(false)
+    {
         return Err(build_oauth_401(headers, "missing"));
     }
-    let token = &auth[7..];
+    // Case-insensitive scheme per OAuth 2.0 (RFC 6750); the token starts
+    // after the first space.
+    let token = auth.split_once(' ').map(|(_, t)| t).unwrap_or(&auth[7..]);
     match bearer_key_service::find_by_token(token).await {
         Ok(Some(key)) if key.enabled => Ok(Some(key)),
         _ => Err(build_oauth_401(headers, "invalid")),
@@ -425,6 +445,17 @@ async fn list_server_tools(
     let tools = server_tool_config_service::apply_tool_filters(&server_name, tools)
         .await
         .unwrap_or_else(|_| vec![]);
+    // Smart Routing meta tools are exclusive to the $smart access points —
+    // their names/schemas must not leak via the single-server REST listing
+    // either (parity with list_group_tools and the /mcp bridge surface).
+    let tools = if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        tools
+            .into_iter()
+            .filter(|t| !crate::smart_routing::meta::is_meta_tool(&t.name))
+            .collect()
+    } else {
+        tools
+    };
     Json(json!({ "tools": tools })).into_response()
 }
 
@@ -442,26 +473,82 @@ async fn call_server_tool(
             return (StatusCode::FORBIDDEN, Json(json!({ "error": "Access denied for this server" }))).into_response();
         }
     }
-    // Disabled-tool gate (origin #1178): tools disabled via server_tool_config
-    // must not remain executable through the REST endpoint.
-    if let Ok(tools) = pool::list_tools_for(&server_name).await {
-        let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
-            .await
-            .unwrap_or_default();
-        if let Some(t) = filtered.iter().find(|t| &t.name == &req.tool) {
-            if !t.enabled {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({ "error": format!("Tool '{}' is disabled", req.tool) })),
-                )
-                    .into_response();
+    // Meta tools are exclusive to $smart — never resolvable via the plain
+    // single-server REST call path even when the target is the builtin.
+    if server_name == crate::rag::service::BUILTIN_SERVER_NAME
+        && crate::smart_routing::meta::is_meta_tool(&req.tool)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("Tool '{}' not found on server '{}'", req.tool, server_name) })),
+        )
+            .into_response();
+    }
+    // Tool existence + disabled-tool gate (origin #1178): tools disabled via
+    // server_tool_config must not remain executable through the REST endpoint,
+    // and unknown tools answer 404 instead of surfacing as a 500 from the
+    // pool call.
+    let _known_enabled = match pool::list_tools_for(&server_name).await {
+        Ok(tools) => {
+            // apply_tool_filters failure must FAIL CLOSED: an empty filter
+            // list would silently skip the disabled-tool gate (review round
+            // 10; mirrors the bearer config fail-closed policy).
+            let filtered = match server_tool_config_service::apply_tool_filters(&server_name, tools)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": format!("tool gate check failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            };
+            match filtered.iter().find(|t| &t.name == &req.tool) {
+                Some(t) if !t.enabled => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({ "error": format!("Tool '{}' is disabled", req.tool) })),
+                    )
+                        .into_response();
+                }
+                Some(_) => true,
+                // Tool absent from the pool's (possibly cached) list — covers
+                // on-demand sleeping servers too; genuinely unknown tools
+                // answer 404 via the flag below.
+                None => false,
             }
         }
-    }
+        // Pool unreachable: let the call below report the real error.
+        Err(_) => true,
+    };
     let args = req.arguments.unwrap_or(json!({}));
-    match pool::call_tool(&server_name, &req.tool, args).await {
+    match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &req.tool, args)).await {
         Ok(result) => Json(json!({ "result": result.content, "is_error": result.is_error })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            let lower = msg.to_lowercase();
+            // 404 only when the call error itself indicates an unknown tool:
+            // `!known_enabled` alone must not force 404 — the pool's tool
+            // list can be stale (on-demand sleeping server), and a real
+            // failure (upstream down, timeout during wake-up) would then be
+            // mislabeled Not Found instead of surfacing its true error.
+            let not_found = msg.contains("[tool-not-found]")
+                // Prose fallback restored: REST 404 semantics for unknown
+                // tools depend on it (rmcp_gap tests assert 404). False-
+                // positive risk (arbitrary upstream text containing both
+                // fragments → 404 instead of 500) is acceptable vs. breaking
+                // established 404 behavior.
+                || (msg.contains("Tool '") && msg.contains("' not found"))
+                || lower.contains("no such tool");
+            let status = if not_found {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({ "error": msg }))).into_response()
+        }
     }
 }
 
@@ -491,11 +578,27 @@ async fn list_group_tools(
         return (StatusCode::FORBIDDEN, Json(json!({ "error": "Access denied for this group" }))).into_response();
     }
     let mut tools: Vec<Tool> = Vec::new();
+    // Per-server tool allow-list: group members may carry `tools` filters
+    // (same semantics as the /mcp/{group} bridge surface and the spec
+    // generation) — the REST listing must not leak tools the group allow-list
+    // hides. Empty allow-list = fail-closed (deny all for that server).
+    let group_filters = mcp_scope_server_filters(&format!("/mcp/{group_name}")).await;
     for server_name in &accessible {
         if let Ok(server_tools) = pool::list_tools_for(server_name).await {
-            let filtered = server_tool_config_service::apply_tool_filters(server_name, server_tools)
+            let mut filtered = server_tool_config_service::apply_tool_filters(server_name, server_tools)
                 .await
                 .unwrap_or_else(|_| vec![]);
+            // Smart Routing meta tools are exclusive to the $smart access
+            // points (same rule as mcp_scope_server_filters) — a group that
+            // includes the builtin server must not expose them via REST.
+            if server_name.as_str() == crate::rag::service::BUILTIN_SERVER_NAME {
+                filtered.retain(|t| !crate::smart_routing::meta::is_meta_tool(&t.name));
+            }
+            if let Some(sf) = group_filters.iter().find(|f| f.name == server_name.as_str()) {
+                if let Some(allowed) = &sf.tools {
+                    filtered.retain(|t| allowed.iter().any(|a| a == &t.name));
+                }
+            }
             tools.extend(filtered);
         }
     }
@@ -526,8 +629,28 @@ async fn call_group_tool(
     let mut target_server: Option<String> = None;
     for server_name in &server_names {
         if allowed_opt.as_ref().map_or(true, |a| a.contains(server_name)) {
+            // Meta tools are exclusive to $smart — never resolvable via a
+            // REST group scope, even when the group includes the builtin.
+            if server_name.as_str() == crate::rag::service::BUILTIN_SERVER_NAME
+                && crate::smart_routing::meta::is_meta_tool(tool_name)
+            {
+                continue;
+            }
             if let Ok(tools) = pool::list_tools_for(server_name).await {
                 if tools.iter().any(|t| &t.name == tool_name) {
+                    // Enforce the group's per-server tool allow-list (parity
+                    // with /mcp/{group} resolve_target): Some(list) = allow-list
+                    // (empty = deny all), None = all tools.
+                    if let Some(sf) = extract_server_filters(&group.servers)
+                        .into_iter()
+                        .find(|f| &f.name == server_name)
+                    {
+                        if let Some(allowed) = sf.tools {
+                            if !allowed.iter().any(|t| t.as_str() == tool_name) {
+                                continue;
+                            }
+                        }
+                    }
                     target_server = Some(server_name.clone());
                     break;
                 }
@@ -541,9 +664,20 @@ async fn call_group_tool(
     // Disabled-tool gate (origin #1178): tools disabled via server_tool_config
     // must not remain executable through the REST group endpoint.
     if let Ok(tools) = pool::list_tools_for(&server_name).await {
-        let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
+        // Fail closed on filter-read failure (review round 10) — see
+        // call_server_tool for the rationale.
+        let filtered = match server_tool_config_service::apply_tool_filters(&server_name, tools)
             .await
-            .unwrap_or_default();
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("tool gate check failed: {e}") })),
+                )
+                    .into_response();
+            }
+        };
         if let Some(t) = filtered.iter().find(|t| &t.name == tool_name) {
             if !t.enabled {
                 return (
@@ -555,10 +689,30 @@ async fn call_group_tool(
         }
     }
     let args = req.arguments.unwrap_or(json!({}));
-    match pool::call_tool(&server_name, tool_name, args).await {
+    match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, tool_name, args)).await {
         Ok(result) => Json(json!({ "result": result.content, "is_error": result.is_error })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            // Same 404-on-unknown-tool semantics as call_server_tool — the
+            // group path previously answered 500 for the same error shapes
+            // (review round 10, surface consistency).
+            let msg = e.to_string();
+            let status = if tool_call_error_is_not_found(&msg) {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({ "error": msg }))).into_response()
+        }
     }
+}
+
+/// Whether a tool-call error message indicates an unknown tool (REST 404
+/// semantics). Shared by call_server_tool and call_group_tool.
+fn tool_call_error_is_not_found(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    msg.contains("[tool-not-found]")
+        || (msg.contains("Tool '") && msg.contains("' not found"))
+        || lower.contains("no such tool")
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -602,8 +756,11 @@ fn extract_filter_list(value: Option<&serde_json::Value>) -> Option<Vec<String>>
         Some(serde_json::Value::Array(arr)) => {
             let names: Vec<String> = arr.iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            if names.is_empty() { None } else { Some(names) }
+                // Empty array = fail-closed (expose nothing), matching origin
+                // mcpService (`tools !== 'all' && Array.isArray(tools)` → empty
+                // allow-list). Collapsing [] to None would expose ALL tools.
+                .collect::<Vec<_>>();
+            Some(names)
         }
         _ => None,  // Default to all
     }
@@ -769,9 +926,19 @@ struct OpenApiToolRef {
 /// Collect the tools visible under `scope` (None = global "/"), mirroring the
 /// /mcp scope rules: group tool allow-lists applied, disabled tools skipped
 /// (unless `include_disabled`), server-prefixed runtime names reduced to bare.
-async fn collect_openapi_tools(scope: Option<&str>, include_disabled: bool) -> Vec<OpenApiToolRef> {
-    let sfs = mcp_scope_server_filters(scope.unwrap_or("/")).await;
-    let name_sep = name_separator().await;
+async fn collect_openapi_tools(
+    scope: Option<&str>,
+    include_disabled: bool,
+    allowed_servers: Option<&std::collections::HashSet<String>>,
+) -> Vec<OpenApiToolRef> {
+    let mut sfs = mcp_scope_server_filters(scope.unwrap_or("/")).await;
+    // Bearer allow-list pre-filter BEFORE any tools_for_server call: the pool
+    // list cold-starts sleeping on-demand servers, so collecting tools for a
+    // server this key cannot access would wake processes it must never touch
+    // (review round 9 F-5).
+    if let Some(allowed) = allowed_servers {
+        sfs.retain(|sf| allowed.contains(&sf.name));
+    }
     let mut out = Vec::new();
     for sf in sfs {
         let ts = match tools_for_server(&sf.name).await {
@@ -783,11 +950,12 @@ async fn collect_openapi_tools(scope: Option<&str>, include_disabled: bool) -> V
             Some(allowed) => ts
                 .into_iter()
                 .filter(|t| {
-                    let bare = t
-                        .name
-                        .strip_prefix(&format!("{}{}", sf.name, name_sep))
-                        .unwrap_or(&t.name);
-                    allowed.contains(&bare.to_string())
+                    // Pool caches BARE upstream tool names (prefixing happens
+                    // at the bridge/spec boundary) — never strip a runtime
+                    // prefix here: a bare name that happens to start with
+                    // "{server}{sep}" (e.g. server "fs-a", tool "fs-a-read")
+                    // would be mis-stripped and hidden by the allow-list.
+                    allowed.contains(&t.name)
                 })
                 .collect(),
             None => ts,
@@ -799,8 +967,10 @@ async fn collect_openapi_tools(scope: Option<&str>, include_disabled: bool) -> V
             if !include_disabled && !t.enabled {
                 continue;
             }
-            let prefix = format!("{}{}", sf.name, name_sep);
-            let bare_name = t.name.strip_prefix(&prefix).unwrap_or(&t.name).to_string();
+            // Bare name straight from the pool cache (see note above: never
+            // strip a runtime prefix — bare names may legitimately start with
+            // the prefix string).
+            let bare_name = t.name.clone();
             out.push(OpenApiToolRef {
                 server: sf.name.clone(),
                 bare_name,
@@ -909,11 +1079,20 @@ fn build_openapi_spec(
             }));
         }
         let (parameters, request_body) = tool_schema_shape(&t.tool);
-        let operation_id = if seen_operation_ids.contains(&t.bare_name) {
+        // operationId uniqueness with suffix escalation: `{server}_{bare}`
+        // disambiguation can itself collide (server `fs-a` vs `fs.a`, or a
+        // bare tool literally named like the disambiguated form) — OpenAPI
+        // code generators choke on duplicates (review round 10).
+        let mut operation_id = if seen_operation_ids.contains(&t.bare_name) {
             format!("{}_{}", t.server.replace(['-', '.', '/'], "_"), t.bare_name)
         } else {
             t.bare_name.clone()
         };
+        let mut n = 2;
+        while seen_operation_ids.contains(&operation_id) {
+            operation_id = format!("{operation_id}_{n}");
+            n += 1;
+        }
         seen_operation_ids.insert(operation_id.clone());
         let path_name = format!(
             "/tools/{}/{}",
@@ -1086,14 +1265,12 @@ async fn openapi_full_spec(
         }
         _ => None,
     };
-    let mut tools = collect_openapi_tools(scope.as_deref(), opts.include_disabled).await;
+    let allowed_set = get_allowed_servers(bearer_key.as_ref()).await;
+    let mut tools = collect_openapi_tools(scope.as_deref(), opts.include_disabled, allowed_set.as_ref()).await;
     // `?servers=a,b` filter (origin parity): restrict to the listed servers.
     if let Some(servers) = q.get("servers").filter(|s| !s.is_empty()) {
         let wanted: Vec<&str> = servers.split(',').map(|s| s.trim()).collect();
         tools.retain(|t| wanted.contains(&t.server.as_str()));
-    }
-    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
-        tools.retain(|t| allowed.contains(&t.server));
     }
     openapi_spec_response(
         &headers,
@@ -1135,16 +1312,55 @@ async fn openapi_named_spec(
             format!("OpenAPI specification for {display} MCP server tools"),
         )
     };
-    let mut tools = collect_openapi_tools(Some(&scope), opts.include_disabled).await;
-    if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
-        tools.retain(|t| allowed.contains(&t.server));
-    }
+    let allowed_set = get_allowed_servers(bearer_key.as_ref()).await;
+    let tools = collect_openapi_tools(Some(&scope), opts.include_disabled, allowed_set.as_ref()).await;
     if tools.is_empty() {
+        // Distinguish 403 (this key has an allow-list and the server is not in
+        // it) from 404 (unrestricted key — empty means the server doesn't
+        // exist / is disconnected / exposes no tools), matching
+        // /rest/{server}/tools (404 for missing) and execute_openapi_impl.
+        // For GROUP scopes the allow-list contains SERVER names, never group
+        // names — a direct `contains(&scope)` is always false and mislabels
+        // an authorized-but-empty group as 403. Decide by intersecting the
+        // group's member server names (extract_server_filters handles both
+        // string[] and GroupServerConfig[] members) with the allow-list.
+        let restricted = if is_group {
+            get_allowed_servers(bearer_key.as_ref())
+                .await
+                .map(|a| {
+                    let members: Vec<String> = group
+                        .as_ref()
+                        .map(|g| {
+                            extract_server_filters(&g.servers)
+                                .into_iter()
+                                .map(|f| f.name)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    members.iter().all(|m| !a.contains(m))
+                })
+                .unwrap_or(false)
+        } else {
+            get_allowed_servers(bearer_key.as_ref())
+                .await
+                .map(|a| !a.contains(&scope))
+                .unwrap_or(false)
+        };
+        if restricted {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "Access denied",
+                    "message": format!("Server '{name}' is not exposed to this key"),
+                })),
+            )
+                .into_response();
+        }
         return (
             StatusCode::NOT_FOUND,
             Json(json!({
-                "error": "Server not found",
-                "message": format!("Server '{name}' is not connected or does not exist"),
+                "error": "Not found",
+                "message": format!("Server '{name}' not found or exposes no OpenAPI tools"),
             })),
         )
             .into_response();
@@ -1161,7 +1377,10 @@ async fn openapi_servers_list(headers: HeaderMap) -> Response {
     let mut names: Vec<String> = pool::get_all_statuses()
         .await
         .into_iter()
-        .filter(|s| s.connected)
+        // Sleeping on-demand servers are included so the discovery list
+        // matches what the spec endpoints expose (their cached tools are
+        // listed, and a fetch wakes them).
+        .filter(|s| s.connected || s.start_on_demand)
         .map(|s| s.name)
         .collect();
     if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
@@ -1194,11 +1413,11 @@ async fn openapi_stats(headers: HeaderMap) -> Response {
             })
         })
         .collect();
-    let total_tools: usize = statuses.iter().filter(|s| s.connected).map(|s| s.tool_count).sum();
+    let total_tools: usize = statuses.iter().filter(|s| s.connected || s.start_on_demand).map(|s| s.tool_count).sum();
     Json(json!({
         "success": true,
         "data": {
-            "totalServers": statuses.iter().filter(|s| s.connected).count(),
+            "totalServers": statuses.iter().filter(|s| s.connected || s.start_on_demand).count(),
             "totalTools": total_tools,
             "serverBreakdown": breakdown,
         }
@@ -1258,16 +1477,45 @@ async fn execute_openapi_impl(
                 .into_response();
         }
     }
+    // Meta tools are exclusive to $smart — never resolvable via the plain
+    // single-server REST call path even when the target is the builtin.
+    if server_name == crate::rag::service::BUILTIN_SERVER_NAME
+        && crate::smart_routing::meta::is_meta_tool(&tool_name)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("Tool '{tool_name}' not found on server '{server_name}'") })),
+        )
+            .into_response();
+    }
     // Scoped variant: verify the server is actually reachable under the scope
-    // (a group's server list, or the named server itself).
+    // (a group's server list, or the named server itself) — AND enforce the
+    // scope's tool allow-list here: /api/{group}/tools/{server}/{tool} must
+    // not reach tools the group allow-list hides (parity with the /mcp/{group}
+    // resolve_target gate and the spec-generation filter).
     if let Some(ref sc) = scope {
         let sfs = mcp_scope_server_filters(sc).await;
-        if !sfs.iter().any(|f| f.name == server_name) {
+        let sf = sfs.iter().find(|f| f.name == server_name);
+        if sf.is_none() {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": format!("Server '{server_name}' not found in scope '{sc}'") })),
             )
                 .into_response();
+        }
+        if let Some(sf) = sf {
+            // sf.tools is Some(allow-list); empty = deny all (M7 fail-closed).
+            if let Some(allowed) = &sf.tools {
+                // Pool names are bare (see collect_openapi_tools note) —
+                // compare as-is, no runtime-prefix stripping.
+                if !allowed.iter().any(|t| *t == tool_name) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({ "error": format!("Tool '{tool_name}' is not allowed by scope '{sc}'") })),
+                    )
+                        .into_response();
+                }
+            }
         }
     }
     let tools = match pool::list_tools_for(&server_name).await {
@@ -1297,9 +1545,18 @@ async fn execute_openapi_impl(
         }
     };
     // Disabled-tool gate (origin #1178 parity with /rest and /mcp).
-    let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
-        .await
-        .unwrap_or_default();
+    // Fail closed on filter-read failure (review round 10).
+    let filtered = match server_tool_config_service::apply_tool_filters(&server_name, tools).await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("tool gate check failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
     if let Some(t) = filtered.iter().find(|t| t.name == actual_name) {
         if !t.enabled {
             return (
@@ -1310,7 +1567,7 @@ async fn execute_openapi_impl(
         }
     }
     let start = std::time::Instant::now();
-    let result = pool::call_tool(&server_name, &actual_name, args.clone()).await;
+    let result = crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &actual_name, args.clone())).await;
     let duration_ms = start.elapsed().as_millis() as i64;
     match result {
         Ok(r) => {
@@ -1351,20 +1608,39 @@ async fn execute_openapi_impl(
     }
 }
 
-fn client_ip_of(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
+pub(crate) fn client_ip_of(headers: &HeaderMap) -> Option<String> {
+    // XFF/X-Real-IP are client-spoofable. Only honor them when the operator
+    // opted in via TRUST_PROXY (the env var previously only decorated the
+    // startup log). There is NO socket-peer fallback: the router is not built
+    // with `into_make_service_with_connect_info`, so without a trusted proxy
+    // header the source_ip stays None (spoofing-proof by construction).
+    // Header-based spoofing must not poison activity_log.source_ip.
+    let trust_proxy = std::env::var("TRUST_PROXY")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "true" || v == "1" || v == "yes"
         })
+        .unwrap_or(false);
+    if trust_proxy {
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(ip);
+        }
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 async fn openapi_exec_global_get(
@@ -1373,6 +1649,28 @@ async fn openapi_exec_global_get(
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let ip = client_ip_of(&headers);
+    // Bearer check FIRST: pool::list_tools_for below can COLD-START a
+    // sleeping on-demand stdio server (spawning its child process). Doing
+    // that before auth would let unauthenticated requests churn gateway
+    // child processes (resource exhaustion) even with bearer auth enabled.
+    // execute_openapi_impl re-checks; this early check is fail-closed too.
+    // Allow-list pre-check BEFORE list_tools_for: a valid-but-restricted key
+    // must not cold-start servers outside its allow-list (review round 10,
+    // same rationale as the collect_openapi_tools prefilter). execute_openapi_impl
+    // re-checks authoritatively.
+    let bearer_key_pre = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    if let Some(allowed) = get_allowed_servers(bearer_key_pre.as_ref()).await {
+        if !allowed.contains(&server) {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                axum::Json(json!({ "error": "Access denied for this server" })),
+            )
+                .into_response();
+        }
+    }
     let args = match pool::list_tools_for(&server).await {
         Ok(ts) => {
             let name_sep = name_separator().await;
@@ -1405,6 +1703,21 @@ async fn openapi_exec_scoped_get(
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let ip = client_ip_of(&headers);
+    // Same early bearer gate as openapi_exec_global_get (cold-start guard),
+    // plus the allow-list pre-check (review round 10).
+    let bearer_key_pre = match check_bearer_auth(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    if let Some(allowed) = get_allowed_servers(bearer_key_pre.as_ref()).await {
+        if !allowed.contains(&server) {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                axum::Json(json!({ "error": "Access denied for this server" })),
+            )
+                .into_response();
+        }
+    }
     let args = match pool::list_tools_for(&server).await {
         Ok(ts) => {
             let name_sep = name_separator().await;
@@ -1449,6 +1762,10 @@ fn rmcp_service(
     // and choke on the SSE keepalive frame ("data: \nid:"). Calls carrying a
     // progressToken still fall back to SSE (rmcp built-in behaviour).
     config.json_response = true;
+    // Align with the leniency middleware's parse cap (8MB floor): the SDK
+    // default is 4MiB, which would make 4–8MB POSTs fully buffer + (re)parse
+    // in the middleware only to be rejected 413 by the SDK afterwards.
+    config.max_request_body_bytes = 64 * 1024 * 1024;
     rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
         || Ok(super::rmcp_bridge::HubBridge::new()),
         Default::default(),
@@ -1465,6 +1782,19 @@ fn rmcp_service(
 /// (no CacheableResult) in the bridge gating.
 const UPGRADE_VERSION: &str = "2025-11-25";
 const PV_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+
+/// The registered protocol versions (mirrors rmcp `ProtocolVersion::KNOWN_VERSIONS`).
+const KNOWN_PROTOCOL_VERSIONS: [&str; 5] = [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    "2026-07-28",
+];
+
+fn is_known_protocol_version(v: &str) -> bool {
+    KNOWN_PROTOCOL_VERSIONS.contains(&v)
+}
 
 pub(crate) async fn is_mcp_strict_validation_enabled() -> bool {
     crate::services::config_service::get()
@@ -1486,13 +1816,48 @@ async fn mcp_leniency_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if is_mcp_strict_validation_enabled().await {
+    // Path-gated to /mcp*: this middleware rewrites JSON-RPC envelope noise
+    // (injects `jsonrpc`/`params`/`_meta` keys into the body). Applied to the
+    // whole router it used to inject a bogus `jsonrpc` key into REST tool
+    // bodies (/api/tools/... passes the body verbatim as tool arguments) and
+    // force-rewrite Accept on unrelated GETs.
+    {
+        let p = req.uri().path();
+        if p != "/mcp" && !p.starts_with("/mcp/") {
+            return next.run(req).await;
+        }
+    }
+    if req.method() == axum::http::Method::GET {
+        // Lenient GET (SSE stream open): a missing/deficient Accept header
+        // otherwise answers rmcp's spec-correct 406 — the stream open does
+        // not affect tool calls, so supply the media type the endpoint needs.
+        let strict = is_mcp_strict_validation_enabled().await;
+        if !strict {
+            let mut sse_ok = false;
+            for v in req.headers().get_all(axum::http::header::ACCEPT) {
+                if let Ok(s) = v.to_str() {
+                    if s.to_ascii_lowercase().contains("text/event-stream") {
+                        sse_ok = true;
+                    }
+                }
+            }
+            let mut req = req;
+            if !sse_ok {
+                req.headers_mut().insert(
+                    axum::http::header::ACCEPT,
+                    axum::http::HeaderValue::from_static("text/event-stream"),
+                );
+            }
+            return next.run(req).await;
+        }
         return next.run(req).await;
     }
     if req.method() != axum::http::Method::POST {
         return next.run(req).await;
     }
+    let strict = is_mcp_strict_validation_enabled().await;
     // Accept-header normalization (header-level, no body parse needed).
+    // Strict mode keeps rmcp's spec-correct 406 for bad Accept headers.
     let mut accept_ok = false;
     for v in req.headers().get_all(axum::http::header::ACCEPT) {
         if let Ok(s) = v.to_str() {
@@ -1503,41 +1868,71 @@ async fn mcp_leniency_middleware(
         }
     }
     let mut req = req;
-    if !accept_ok {
-        req.headers_mut().insert(
-            axum::http::header::ACCEPT,
-            axum::http::HeaderValue::from_static("application/json, text/event-stream"),
-        );
+    if !strict {
+        if !accept_ok {
+            req.headers_mut().insert(
+                axum::http::header::ACCEPT,
+                axum::http::HeaderValue::from_static("application/json, text/event-stream"),
+            );
+        }
+        // Missing Content-Type hits axum's 415 before any handler runs; a
+        // JSON-RPC POST without it is still unambiguously JSON — supply it.
+        if req.headers().get(axum::http::header::CONTENT_TYPE).is_none() {
+            req.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+        }
     }
 
     // Body-level normalization: parse JSON-RPC body, patch _meta / headers.
     // Session-less non-initialize requests also need the upgrade path
     // (rmcp answers 422 "expect initialize request" for them otherwise).
-    let has_session = req
-        .headers()
-        .get("mcp-session-id")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let header_ge_2026_pre = req
-        .headers()
-        .get("mcp-protocol-version")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v >= "2026-07-28")
-        .unwrap_or(false);
-    let needs_body_check = header_ge_2026_pre
-        || req.headers().get("mcp-protocol-version").is_none()
-        || !has_session;
-    if !needs_body_check {
-        return next.run(req).await;
-    }
+    // Parsing always runs (bounded) because the SEP-2663 task marker below
+    // must be surfaced in BOTH modes (strict mode only skips the fixes).
     let (mut parts, body) = req.into_parts();
-    let bytes = match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
+    // Parse bound: the router's configured jsonBodyLimit is the real cap
+    // (DefaultBodyLimit) — it may exceed 8MB, so the middleware must never
+    // reject/lower a body the router would accept. Read the same config with
+    // an 8MB floor and a sanity ceiling; on a read failure fall back to
+    // 8MB (previous behavior). The ceiling must never be BELOW the router's
+    // DefaultBodyLimit for the same config — otherwise the middleware would
+    // 413 bodies the router itself would accept (review round 9 F-4: the old
+    // hardcoded 64MB ceiling rejected user-configured limits above 64MB).
+    let parse_cap = {
+        let cfg_val = crate::services::config_service::get().await.ok();
+        let parsed = cfg_val
+            .as_ref()
+            .and_then(|c| c.get("routing").and_then(|r| r.get("jsonBodyLimit")).and_then(|v| v.as_str()))
+            .map(parse_body_limit);
+        let router_limit = handle().lock().await.as_ref().map(|h| h.body_limit_bytes).unwrap_or(8 * 1024 * 1024);
+        parsed
+            .unwrap_or(8 * 1024 * 1024)
+            .clamp(8 * 1024 * 1024, (64 * 1024 * 1024).max(router_limit))
+    };
+    let bytes = match axum::body::to_bytes(body, parse_cap).await {
         Ok(b) => b,
         Err(_) => {
-            let req = axum::extract::Request::from_parts(parts, axum::body::Body::empty());
-            return next.run(req).await;
+            // Over the limit: the body has already been consumed by this read
+            // attempt, so the router's DefaultBodyLimit can no longer produce
+            // its (accurate) 413 — answering directly instead of forwarding an
+            // empty body that would only surface as a confusing 400 JSON
+            // parse error (review round 8, 2026-10-04).
+            let res = axum::http::Response::builder()
+                .status(axum::http::StatusCode::PAYLOAD_TOO_LARGE)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Payload too large\"}}",
+                ))
+                .unwrap();
+            return res;
         }
     };
+    // Strip any client-supplied task marker BEFORE parsing: the bridge must
+    // only ever see a value derived from the request body, not one a client
+    // forged directly into a header — including the non-JSON early-return
+    // path below, which would otherwise pass the forged header through.
+    parts.headers.remove("x-mcphub-task-requested");
     let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(_) => {
@@ -1550,20 +1945,122 @@ async fn mcp_leniency_middleware(
         }
     };
     let mut changed = false;
-    let header_version = parts
+
+    // SEP-2663 task marker (BOTH modes): rmcp's typed CallToolRequestParams
+    // has no `task` field, so a client-directed `params.task` would be
+    // silently dropped and the call executed synchronously. Surface it as an
+    // internal header the bridge reads to materialize a task instead.
+    if value.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
+        if let Some(task_obj) = value.pointer("/params/task").filter(|t| t.is_object()) {
+            if let Ok(hv) = axum::http::HeaderValue::from_str(&task_obj.to_string()) {
+                parts.headers.insert("x-mcphub-task-requested", hv);
+                changed = true;
+            }
+        }
+    }
+
+    // Strict mode: no leniency fixes — rmcp enforces the spec natively. The
+    // task marker above is a lossless translation, not a validation bypass.
+    if strict {
+        return next.run(into_request(parts, &bytes, &value, changed)).await;
+    }
+
+    let header_version = {
+        // Strip invalid/unknown version headers FIRST (leniency): rmcp answers
+        // 400 "Unsupported MCP-Protocol-Version" for unknown values, yet the
+        // header adds nothing a session handshake has not already negotiated.
+        // Applies to the whole request (the early-return branch below also
+        // benefits). Invalid ENCODING is stripped here too.
+        let raw = parts.headers.get("mcp-protocol-version").cloned();
+        let invalid = raw
+            .as_ref()
+            .map(|v| {
+                v.to_str()
+                    .map(|s| !is_known_protocol_version(s))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        if invalid {
+            parts.headers.remove("mcp-protocol-version");
+            changed = true;
+            None
+        } else {
+            raw.map(|v| v.to_str().ok().map(|s| s.to_string())).flatten()
+        }
+    };
+    let has_session = parts
         .headers
-        .get("mcp-protocol-version")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .get("mcp-session-id")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
 
     let req_method = value.get("method").and_then(|m| m.as_str()).map(|s| s.to_string());
     let has_id = value.get("id").is_some();
+    // Lenient normalization of `jsonrpc` envelope noise: a missing or wrong
+    // version field has zero effect on tool-call semantics but rmcp's typed
+    // deserializer rejects the whole body (415). Normalize single objects.
+    // Batch arrays are removed since 2025-11-25 — left untouched.
+    if let Some(obj) = value.as_object_mut() {
+        let jr = obj.get("jsonrpc").and_then(|v| v.as_str());
+        if jr != Some("2.0") {
+            obj.insert("jsonrpc".to_string(), json!("2.0"));
+            changed = true;
+        }
+    }
+    // Lenient normalization of `jsonrpc` envelope noise: a missing or wrong
+    // A JSON-RPC request may legally omit `params`; rmcp answers 422 for a
+    // session-less non-initialize call though. Materialize an empty params
+    // object only when the bare-upgrade path below would otherwise fire.
+    if let Some(obj) = value.as_object_mut() {
+        let params_missing_or_not_obj = !obj.get("params").map(|p| p.is_object()).unwrap_or(false);
+        let is_initialize = obj.get("method").and_then(|m| m.as_str()) == Some("initialize");
+        if params_missing_or_not_obj && has_id && !is_initialize && !has_session {
+            obj.insert("params".to_string(), json!({}));
+            changed = true;
+        }
+    }
+    // (See bare-upgrade below for why.) Rewrite done before `params` borrows
+    // `value` mutably.
+    let id_was_null = value
+        .get("id")
+        .map(|v| v.is_null())
+        .unwrap_or(false);
+    // Rewrite BEFORE `params` borrows `value`: rmcp deserializes `id: null`
+    // as a Notification (serde Option<id> + None) and rejects notifications
+    // outside an initialized session — so a lenient request with `"id": null`
+    // would 422 no matter what _meta we inject. Rewrite null → 0 so the call
+    // is processable (lenient philosophy: don't block a usable tool call on
+    // an id the client didn't care about). Applies to any session-less
+    // non-initialize request regardless of _meta state, since rmcp treats
+    // id=null as a notification in all of them.
+    if id_was_null && !has_session {
+        let is_initialize = value.get("method").and_then(|m| m.as_str()) == Some("initialize");
+        if !is_initialize {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("id".to_string(), json!(0));
+                changed = true;
+            }
+        }
+    }
+    // Blank mcp-session-id strip — pure header op, applied to EVERY request
+    // shape (notifications without params included): rmcp takes the session
+    // branch whenever the header exists, and restore("") is always 404.
+    // Must run before the params-dependent section below so a params-less
+    // notification also lands on the stateless/session-negotiated path.
+    if let Some(empty_hdr) = parts.headers.get("mcp-session-id").cloned() {
+        if empty_hdr.is_empty() {
+            parts.headers.remove("mcp-session-id");
+            changed = true;
+        }
+    }
     if let Some(params) = value.get_mut("params").and_then(|p| p.as_object_mut()) {
         // Only materialize _meta when an injection will actually happen;
         // otherwise legacy bodies would gain a pointless empty _meta.
+        // Lexicographic `>=` alone misjudges "9999-01-01" as modern — require
+        // membership in the known version set for every gate below.
         let header_ge_2026 = header_version
             .as_deref()
-            .map(|v| !v.is_empty() && v >= "2026-07-28")
+            .map(|v| !v.is_empty() && is_known_protocol_version(v) && v >= "2026-07-28")
             .unwrap_or(false);
         let header_missing = header_version.is_none();
         let existing_meta_has_pv = params
@@ -1577,11 +2074,28 @@ async fn mcp_leniency_middleware(
         // request on the negotiated path. Use the legacy version so the
         // CacheableResult gating still treats the session as legacy.
         let is_initialize = req_method.as_deref() == Some("initialize");
-        let is_bare_request = !has_session
-            && has_id
-            && !is_initialize
-            && params.get("_meta").is_none();
+        // Bare = no session, has id, not initialize, and no negotiated version
+        // in _meta. An existing `_meta` without a protocolVersion (e.g. `{}`,
+        // or carrying only progressToken) still counts as bare — the upgrade
+        // only inserts the missing version/metadata keys.
+        let is_bare_request = !has_session && has_id && !is_initialize && !existing_meta_has_pv;
+        // Bare upgrade version: a client that DID send a known >= 2026 header
+        // but omitted _meta should keep its declared version — downgrading it
+        // to the legacy UPGRADE_VERSION would silently switch it to legacy
+        // semantics (no ttlMs/cacheScope, no SEP-2322 resultType channel).
+        let upgrade_version: String = if header_ge_2026 {
+            header_version.clone().unwrap_or_else(|| UPGRADE_VERSION.to_string())
+        } else {
+            UPGRADE_VERSION.to_string()
+        };
         if is_bare_request {
+            // `_meta` may be a non-object (e.g. a string) from a sloppy
+            // client; overwrite rather than unwrap — the bare upgrade owns
+            // the metadata shape.
+            if !params.get("_meta").map(|v| v.is_object()).unwrap_or(false) {
+                params.insert("_meta".to_string(), serde_json::json!({}));
+                changed = true;
+            }
             let m = params
                 .entry("_meta")
                 .or_insert_with(|| {
@@ -1589,9 +2103,9 @@ async fn mcp_leniency_middleware(
                     serde_json::json!({})
                 })
                 .as_object_mut()
-                .expect("entry returns object");
+                .expect("_meta guaranteed object above");
             if !existing_meta_has_pv {
-                m.insert(PV_KEY.to_string(), json!(UPGRADE_VERSION));
+                m.insert(PV_KEY.to_string(), json!(upgrade_version));
                 changed = true;
             }
             m.entry("io.modelcontextprotocol/clientInfo".to_string())
@@ -1611,26 +2125,30 @@ async fn mcp_leniency_middleware(
                     .headers
                     .get("mcp-protocol-version")
                     .and_then(|v| v.to_str().ok())
-                    .map(|v| v != UPGRADE_VERSION)
+                    .map(|v| v != upgrade_version)
                     .unwrap_or(true);
                 if mismatch {
-                    if let Ok(hv) = axum::http::HeaderValue::from_str(UPGRADE_VERSION) {
+                    if let Ok(hv) = axum::http::HeaderValue::from_str(&upgrade_version) {
                         parts.headers.insert("mcp-protocol-version", hv);
                         changed = true;
                     }
                 }
             }
         } else if !header_ge_2026 && !(header_missing && existing_meta_has_pv) {
-            return next.run(axum::extract::Request::from_parts(
-                parts,
-                axum::body::Body::from(bytes),
-            ))
-            .await;
+            return next.run(into_request(parts, &bytes, &value, changed)).await;
         }
         let meta = params.entry("_meta").or_insert_with(|| {
             changed = true;
             serde_json::json!({})
         });
+        // Non-object `_meta` (e.g. a bare string) with a 2026 header would
+        // otherwise skip every injection below (as_object_mut() == None) and
+        // hit rmcp as an unparseable request — normalize it first, same as
+        // the bare branch.
+        if !meta.is_object() {
+            *meta = serde_json::json!({});
+            changed = true;
+        }
         if let Some(m) = meta.as_object_mut() {
             // Header >= 2026 without full client metadata: inject defaults.
             if header_version.as_deref().unwrap_or("").chars().all(|c| c.is_ascii()) {
@@ -1639,6 +2157,21 @@ async fn mcp_leniency_middleware(
                     .map(|v| !v.is_empty() && v >= "2026-07-28")
                     .unwrap_or(false);
                 if needs {
+                    // rmcp's modern path validates _meta.protocolVersion too —
+                    // a session'd legacy client declaring the 2026 header with
+                    // no/empty _meta otherwise 400s ("missing protocolVersion").
+                    // Echo the header into _meta so the declaration is coherent.
+                    if !m.contains_key("io.modelcontextprotocol/protocolVersion") {
+                        if let Some(hv) = header_version.as_deref() {
+                            if is_known_protocol_version(hv) {
+                                m.insert(
+                                    "io.modelcontextprotocol/protocolVersion".to_string(),
+                                    serde_json::json!(hv),
+                                );
+                                changed = true;
+                            }
+                        }
+                    }
                     for (k, dv) in [
                         ("io.modelcontextprotocol/clientInfo",
                          serde_json::json!({"name":"unknown-client","version":"0.0.0"})),
@@ -1652,6 +2185,11 @@ async fn mcp_leniency_middleware(
                 }
             }
             // _meta.protocolVersion present but header missing -> inject header.
+            // Inject the meta value VERBATIM (even when unknown): rmcp's modern
+            // path requires header == _meta.protocolVersion and then produces
+            // the structured -32022 UnsupportedProtocolVersionError for unknown
+            // versions. Withholding the injection here would instead yield a
+            // plain 400 "requires MCP-Protocol-Version header".
             if header_version.is_none() {
                 if let Some(pv) = m
                     .get("io.modelcontextprotocol/protocolVersion")
@@ -1661,37 +2199,116 @@ async fn mcp_leniency_middleware(
                         parts.headers.insert("mcp-protocol-version", hv);
                         changed = true;
                     }
+                    // A _meta-declared >= 2026 version requires the full
+                    // modern request metadata (protocolVersion AND
+                    // clientCapabilities) — rmcp rejects with -32602
+                    // otherwise. Inject the same defaults the header-driven
+                    // path above uses.
+                    if is_known_protocol_version(pv) && pv >= "2026-07-28" {
+                        for (k, dv) in [
+                            ("io.modelcontextprotocol/clientInfo",
+                             serde_json::json!({"name":"unknown-client","version":"0.0.0"})),
+                            ("io.modelcontextprotocol/clientCapabilities", serde_json::json!({})),
+                        ] {
+                            if !m.contains_key(k) {
+                                m.insert(k.to_string(), dv);
+                                changed = true;
+                            }
+                        }
+                    }
                 }
             }
             // SEP-2243 (protocol >= 2025-06-18): Mcp-Method/Mcp-Name required —
             // derive them from the body for clients that omit them. Evaluate
             // AFTER header injection so a _meta-derived version also applies.
+            // Gate on "header exists" rather than version range: unknown
+            // header values (e.g. a _meta-derived "2099-01-01") must still
+            // carry the derived headers or rmcp's SEP-2243 check answers a
+            // plain 400 before the structured -32022 version error.
             let needs_sep2243 = parts
                 .headers
                 .get("mcp-protocol-version")
                 .and_then(|v| v.to_str().ok())
-                .map(|v| !v.is_empty() && v >= "2025-06-18")
+                .map(|v| !v.is_empty())
                 .unwrap_or(false);
             if needs_sep2243 {
                 let method = value.get("method").and_then(|m| m.as_str()).unwrap_or("");
                 if !method.is_empty() {
-                    if parts.headers.get("mcp-method").is_none() {
+                    // Lenient philosophy = "trust the body": a client may carry
+                    // a STALE/WRONG Mcp-Method from a previous request — rmcp
+                    // validates it against the body and answers 400. Overwrite
+                    // whenever it differs from the body-derived value.
+                    let method_header_wrong = parts
+                        .headers
+                        .get("mcp-method")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|existing| existing != method)
+                        .unwrap_or(true);
+                    if method_header_wrong {
                         if let Ok(hv) = axum::http::HeaderValue::from_str(method) {
                             parts.headers.insert("mcp-method", hv);
                             changed = true;
                         }
                     }
-                    if method == "tools/call" && parts.headers.get("mcp-name").is_none() {
-                        if let Some(tn) = value
+                    // SEP-2243 names (mirror rmcp mcp_headers.rs tables):
+                    // NAME_FROM_NAME = tools/call | prompts/get → params.name;
+                    // NAME_FROM_URI = resources/read|subscribe|unsubscribe → params.uri;
+                    // tasks/* → params.taskId. Without Mcp-Name the SDK rejects
+                    // these methods with 400 when the request declares >= 2026-07-28
+                    // (tower.rs validate_standard_headers gate = STANDARD_HEADERS).
+                    let name_source = if method == "tools/call" || method == "prompts/get" {
+                        value
                             .get("params")
                             .and_then(|p| p.get("name"))
                             .and_then(|n| n.as_str())
-                        {
-                            if tn.is_ascii() {
-                                if let Ok(hv) = axum::http::HeaderValue::from_str(tn) {
-                                    parts.headers.insert("mcp-name", hv);
-                                    changed = true;
-                                }
+                    } else if method == "resources/read"
+                        || method == "resources/subscribe"
+                        || method == "resources/unsubscribe"
+                    {
+                        value
+                            .get("params")
+                            .and_then(|p| p.get("uri"))
+                            .and_then(|n| n.as_str())
+                    } else if method.starts_with("tasks/") {
+                        // NOTE: an earlier draft had a duplicate `tasks/`
+                        // branch reading `params.name` first, which made this
+                        // `params.taskId` branch unreachable — tasks/get and
+                        // tasks/cancel (whose params carry taskId, not name)
+                        // then missed the Mcp-Name injection and the SDK
+                        // rejected them with 400. (Found by R-round E2E.)
+                        value
+                            .get("params")
+                            .and_then(|p| p.get("taskId"))
+                            .and_then(|n| n.as_str())
+                    } else {
+                        None
+                    };
+                    if let Some(tn) = name_source.filter(|s| !s.is_empty()) {
+                        // rmcp validates Mcp-Name against params.name; non-ASCII
+                        // values cannot travel as raw header bytes but rmcp
+                        // natively accepts the `=?base64?<b64>?=` wrapper
+                        // (see rmcp mcp_headers::encode_header_value).
+                        // Same "trust the body" rule as Mcp-Method: a stale or
+                        // wrong Mcp-Name is overwritten with the derived value.
+                        let hv = if tn.is_ascii() {
+                            axum::http::HeaderValue::from_str(tn).ok()
+                        } else {
+                            use base64::Engine as _;
+                            axum::http::HeaderValue::from_str(&format!(
+                                "=?base64?{}?=",
+                                base64::engine::general_purpose::STANDARD.encode(tn)
+                            ))
+                            .ok()
+                        };
+                        if let Some(hv) = hv {
+                            let wrong_or_missing = parts
+                                .headers
+                                .get("mcp-name")
+                                .map(|existing| existing != &hv)
+                                .unwrap_or(true);
+                            if wrong_or_missing {
+                                parts.headers.insert("mcp-name", hv);
+                                changed = true;
                             }
                         }
                     }
@@ -1700,32 +2317,33 @@ async fn mcp_leniency_middleware(
         }
     }
 
-    // Invalid-encoding version header would 400 — strip it in leniency mode.
-    if let Some(v) = parts.headers.get("mcp-protocol-version") {
-        if v.to_str().is_err() {
-            parts.headers.remove("mcp-protocol-version");
-            changed = true;
-        }
-    }
+    // (Unknown/invalid-encoding version headers were already stripped above.)
 
     if !changed {
-        let req = axum::extract::Request::from_parts(
-            parts,
-            axum::body::Body::from(bytes),
-        );
-        return next.run(req).await;
+        return next.run(into_request(parts, &bytes, &value, false)).await;
     }
-    let new_bytes = serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec());
+    next.run(into_request(parts, &bytes, &value, true)).await
+}
+
+/// Reassemble a request from parsed parts; when anything changed, the body is
+/// re-serialized (with a corrected Content-Length), otherwise the original
+/// bytes pass through untouched.
+fn into_request(
+    parts: axum::http::request::Parts,
+    bytes: &[u8],
+    value: &serde_json::Value,
+    changed: bool,
+) -> axum::extract::Request {
+    if !changed {
+        return axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes.to_vec()));
+    }
+    let new_bytes = serde_json::to_vec(value).unwrap_or_else(|_| bytes.to_vec());
     let len = new_bytes.len();
-    let req = axum::extract::Request::from_parts(
-        parts,
-        axum::body::Body::from(new_bytes),
-    );
-    let mut req = req;
+    let mut req = axum::extract::Request::from_parts(parts, axum::body::Body::from(new_bytes));
     if let Ok(l) = len.to_string().parse() {
         req.headers_mut().insert(axum::http::header::CONTENT_LENGTH, l);
     }
-    next.run(req).await
+    req
 }
 
 /// Bearer-key gate for the rmcp `/mcp` routes. The rmcp service bypasses our
@@ -1733,10 +2351,21 @@ async fn mcp_leniency_middleware(
 /// `enableBearerAuth` would not protect `initialize`/`ping`/`notifications`.
 /// Mirrors the old `dispatch_mcp` behaviour: disabled -> pass through; enabled
 /// -> missing/invalid token gets the OAuth-style 401 response.
+///
+/// Path-gated to `/mcp*` only: `Router::layer` applies to every route in the
+/// router, and all other endpoints (`/health`, `/rest/*`, `/api/*`,
+/// `/.well-known/*`) either self-gate via `check_bearer_auth` or are
+/// deliberately public (health probe, OAuth metadata). Gating them here too
+/// broke `loopback_ok()` (GET /health without a token → 401 → false-positive
+/// loopback-hijack dialogs on every startup/watch tick).
 async fn mcp_bearer_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let path = req.uri().path();
+    if path != "/mcp" && !path.starts_with("/mcp/") {
+        return next.run(req).await;
+    }
     let headers = req.headers().clone();
     match check_bearer_auth(&headers).await {
         Ok(_) => next.run(req).await,
@@ -1788,10 +2417,49 @@ fn build_router(body_limit_bytes: usize) -> Router {
         // §3.9.2).
         .route_service("/mcp", rmcp_service())
         .route_service("/mcp/{*path}", rmcp_service())
-        .layer(axum::middleware::from_fn(mcp_bearer_middleware))
+        .layer(axum::middleware::from_fn(mcp_session_cleanup_middleware))
         .layer(axum::middleware::from_fn(mcp_leniency_middleware))
+        // Bearer LAST = outermost: auth must run before leniency spends parse
+        // budget (up to 64MB) on unauthenticated requests.
+        .layer(axum::middleware::from_fn(mcp_bearer_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(body_limit_bytes))
         .layer(CorsLayer::permissive())
+}
+
+/// rmcp owns the `/mcp` DELETE (session termination) internally, so the
+/// migration lost the pre-rmcp hook that reaped per-session isolated upstream
+/// clients. This layer restores it: for a DELETE on any /mcp scope it reads
+/// `mcp-session-id` up front and, after rmcp terminates the session, reaps
+/// that session's isolated clients (`mcp/session_pool::cleanup_session` —
+/// no-op when none exist). Fire-and-forget so the response is never delayed.
+async fn mcp_session_cleanup_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_delete = req.method() == axum::http::Method::DELETE;
+    let path_is_mcp = req
+        .uri()
+        .path()
+        .split('?')
+        .next()
+        .map(|p| p == "/mcp" || p.starts_with("/mcp/"))
+        .unwrap_or(false);
+    let sid = if is_delete && path_is_mcp {
+        req.headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    let resp = next.run(req).await;
+    if let Some(sid) = sid {
+        tokio::spawn(async move {
+            crate::mcp::session_pool::cleanup_session(&sid).await;
+        });
+    }
+    resp
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1836,19 +2504,52 @@ fn spawn_loopback_check(port: u16) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if !loopback_ok(port).await {
+            // Same stale-stop guard as the persistent watch below: stop() may
+            // complete during the 500ms window (and a third party may own the
+            // port) — report_loopback_hijack would unconditionally write a
+            // fake running:true for a server that no longer exists.
+            if current_port().await != Some(port) {
+                log::info!("[http] loopback probe skipped: server stopped during probe window");
+                return;
+            }
+            // Seed the flag so the first watch tick doesn't re-report the
+            // same state change a second time (report is state-change driven).
+            LOOPBACK_HIJACK.store(true, std::sync::atomic::Ordering::SeqCst);
             report_loopback_hijack(port, true);
         }
     });
     // Persistent watch — covers a squatter binding AFTER us (the one-shot
-    // would have passed and never re-run).
+    // would have passed and never re-run). Re-reads the live port each tick
+    // so a port-config change (start() restart branch) doesn't leave the
+    // watch pinned to the old port (false hijack alerts on the stale port,
+    // silence on the real one).
     if !LOOPBACK_WATCH_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                let hijacked = !loopback_ok(port).await;
+                let Some(current) = current_port().await else {
+                    // Server intentionally stopped — watch stays alive but quiet.
+                    // Clear the flag WITHOUT calling report_loopback_hijack(false):
+                    // that helper unconditionally writes running:true, which would
+                    // resurrect a fake "running" status for a stopped server.
+                    let prev = LOOPBACK_HIJACK.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    if prev {
+                        log::info!("[http] loopback flag cleared (server stopped)");
+                    }
+                    continue;
+                };
+                let hijacked = !loopback_ok(current).await;
                 let prev = LOOPBACK_HIJACK.swap(hijacked, std::sync::atomic::Ordering::SeqCst);
                 if hijacked != prev {
-                    report_loopback_hijack(port, hijacked);
+                    // Re-check the port still belongs to a live server: stop()
+                    // may complete between current_port() and the probe, and
+                    // report_loopback_hijack writes running:true — which would
+                    // resurrect a fake "running" status for a stopped server.
+                    if current_port().await == Some(current) {
+                        report_loopback_hijack(current, hijacked);
+                    } else {
+                        LOOPBACK_HIJACK.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
             }
         });
@@ -1862,7 +2563,7 @@ fn spawn_loopback_check(port: u16) {
 fn report_loopback_hijack(port: u16, hijacked: bool) {
     let warning = if hijacked {
         Some(format!(
-            "localhost:{port} is served by ANOTHER application (loopback hijack).                      External clients via this machine's IP still reach MCPHub Desktop, but                      local clients using localhost will get wrong responses. Change the HTTP                      port in Settings → Routing, or stop the other app."
+            "localhost:{port} is served by ANOTHER application (loopback hijack). External clients via this machine's IP still reach MCPHub Desktop, but local clients using localhost will get wrong responses. Change the HTTP port in Settings → Routing, or stop the other app."
         ))
     } else {
         None
@@ -1905,6 +2606,51 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         // Port or body limit changed — stop old instance
         log::info!("HTTP server config changed, restarting...");
     }
+    // Tear the old instance down BEFORE binding the new one (restart branch;
+    // no-op on first start): the guard replacement at the bottom of start()
+    // only drops the old handle after the new bind has already succeeded, so
+    // without this the restart branch races EADDRINUSE (Linux/Windows:
+    // restart fails and status reports stopped while the old server keeps
+    // serving) or a double-listen window (macOS SO_REUSEADDR). Graceful
+    // shutdown is async — yield so the old accept loops release the port
+    // before we re-bind.
+    let old_port = guard.as_ref().map(|h| h.port);
+    if let Some(h) = guard.take() {
+        let _ = h.abort_tx.send(());
+        let _ = h.abort_tx_lb.send(());
+        let _ = h.probe_tx.send(());
+        log::info!("HTTP server old instance stopped for restart (port {})", h.port);
+    }
+    // Wait for the old instance to actually release the port. A fixed 100ms
+    // sleep is not enough: graceful shutdown waits for in-flight requests
+    // (tool calls run up to 600s), so binding immediately would EADDRINUSE
+    // while the old instance keeps serving under a "stopped" status. Poll
+    // with a probe bind until the port is free (bounded), then bind for real.
+    // Only relevant when the port is UNCHANGED — a new port has no bind
+    // conflict with the old instance. On success the probe listener is KEPT
+    // and reused as the real listener: dropping it would reopen a TOCTOU
+    // window where a third party grabs the port between probe and re-bind
+    // (review round 8, 2026-10-04).
+    let mut reused_listener: Option<TcpListener> = None;
+    if old_port == Some(port) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if std::time::Instant::now() > deadline {
+                log::warn!("[http] restart: port {port} still busy after 5s, attempting bind anyway");
+                break;
+            }
+            match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+                Ok(l) => {
+                    reused_listener = Some(l);
+                    break;
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+            }
+        }
+    }
 
     let app = build_router(body_limit_bytes);
 
@@ -1916,57 +2662,83 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     let trust_proxy = trust_proxy == "true" || trust_proxy == "1" || trust_proxy == "yes";
 
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            let err_msg = bind_failure_message(port, &e);
-            log::error!("{}", err_msg);
-            app_logger::log_to_db("error", &err_msg);
-            // Surface to the UI: emit a status event (live toast) + stash it so
-            // the frontend can fetch it on mount if it missed this (startup race).
-            set_status(HttpServerStatus {
-                running: false,
-                port,
-                error: Some(err_msg.clone()),
-                error_kind: Some(bind_failure_kind(&e).to_string()),
-                detail: Some(format!("{e}")),
-                warning: None,
-            });
-            return Err(anyhow::anyhow!(err_msg));
-        }
+    let listener = match reused_listener {
+        Some(l) => l,
+        None => match TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                let err_msg = bind_failure_message(port, &e);
+                log::error!("{}", err_msg);
+                app_logger::log_to_db("error", &err_msg);
+                // Surface to the UI: emit a status event (live toast) + stash it so
+                // the frontend can fetch it on mount if it missed this (startup race).
+                set_status(HttpServerStatus {
+                    running: false,
+                    port,
+                    error: Some(err_msg.clone()),
+                    error_kind: Some(bind_failure_kind(&e).to_string()),
+                    detail: Some(format!("{e}")),
+                    warning: None,
+                });
+                return Err(anyhow::anyhow!(err_msg));
+            }
+        },
     };
-    // Explicit loopback bind (mandatory): the wildcard 0.0.0.0 bind leaves the
+    // Explicit loopback bind (macOS only): the wildcard 0.0.0.0 bind leaves the
     // specific-address slot free, and SO_REUSEADDR (Node/Electron sets it by
     // default) lets another app bind 127.0.0.1:<port> AFTER us and silently
     // hijack every localhost client (longest-prefix match). Binding the
-    // loopback OURSELVES closes that slot: any later squatter gets EADDRINUSE
-    // at ITS bind — deterministic, no runtime detection needed. Failure to
-    // bind loopback is fatal: local clients are the primary surface (Tauri
-    // UI, local MCP clients), so start refuses rather than run exposed.
-    let loopback_addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-    let loopback_listener = match TcpListener::bind(loopback_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            let err_msg = format!(
-                "Failed to bind loopback 127.0.0.1:{} while 0.0.0.0:{} succeeded — another process is squatting on the local address. Local clients would be hijacked; refusing to start exposed. ({e})",
-                port, port
-            );
-            log::error!("[http] {err_msg}");
-            app_logger::log_to_db("error", &err_msg);
-            set_status(HttpServerStatus {
-                running: false,
-                port,
-                error: Some(err_msg.clone()),
-                error_kind: Some("loopbackOccupied".to_string()),
-                detail: Some(format!("{e}")),
-                warning: None,
-            });
-            // Release the wildcard listener we just bound before failing.
-            drop(listener);
-            return Err(anyhow::anyhow!(err_msg));
+    // loopback OURSELVES closes that slot — but wildcard+specific coexistence
+    // is a BSD/macOS peculiarity (SO_REUSEADDR semantics): on Linux the kernel
+    // rejects the second bind with EADDRINUSE while a wildcard socket is
+    // LISTENing (needs SO_REUSEPORT), and Windows std/tokio deliberately does
+    // NOT set SO_REUSEADDR (its semantics allow port hijacking). Dual-binding
+    // unconditionally would make the HTTP server fail to start on those
+    // platforms entirely, so the anti-hijack bind is macOS-only; elsewhere the
+    // loopback-watch probe below is the mitigation for the (BSD-specific)
+    // squatting scenario it was designed for.
+    #[cfg(target_os = "macos")]
+    let loopback_listener: Option<TcpListener> = {
+        let loopback_addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+        // Bounded retry: during a same-port restart the old instance's
+        // loopback listener drains in parallel with the wildcard (same 3s
+        // graceful shutdown) and may still be LISTENing when we get here — a
+        // single immediate bind would EADDRINUSE and take the whole restart
+        // down (review round 9 F-2). Mirrors the wildcard probe-wait.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match TcpListener::bind(loopback_addr).await {
+                Ok(l) => {
+                    break Some(l);
+                }
+                Err(e) => {
+                    if std::time::Instant::now() > deadline {
+                        let err_msg = format!(
+                            "Failed to bind loopback 127.0.0.1:{} while 0.0.0.0:{} succeeded — another process is squatting on the local address. Local clients would be hijacked; refusing to start exposed. ({e})",
+                            port, port
+                        );
+                        log::error!("[http] {err_msg}");
+                        app_logger::log_to_db("error", &err_msg);
+                        set_status(HttpServerStatus {
+                            running: false,
+                            port,
+                            error: Some(err_msg.clone()),
+                            error_kind: Some("loopbackOccupied".to_string()),
+                            detail: Some(format!("{e}")),
+                            warning: None,
+                        });
+                        // Release the wildcard listener we just bound before failing.
+                        drop(listener);
+                        return Err(anyhow::anyhow!(err_msg));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
         }
     };
-    let http_msg = format!("MCPHub HTTP server listening on http://0.0.0.0:{} + http://127.0.0.1:{} (body limit: {} bytes, trust_proxy: {})", port, port, body_limit_bytes, trust_proxy);
+    #[cfg(not(target_os = "macos"))]
+    let loopback_listener: Option<TcpListener> = None;
+    let http_msg = format!("MCPHub HTTP server listening on http://0.0.0.0:{}{} (body limit: {} bytes, trust_proxy: {})", port, if loopback_listener.is_some() { " + http://127.0.0.1:".to_string() + &port.to_string() } else { String::new() }, body_limit_bytes, trust_proxy);
     log::info!("{}", http_msg);
     app_logger::log_to_db("info", &http_msg);
 
@@ -2012,6 +2784,8 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
     // graceful-shutdown future and can't be probed after the fact; this probe
     // lets the serve task classify its own ending as intentional vs unexpected.
     let (probe_tx, mut abort_rx_probe) = tokio::sync::oneshot::channel::<()>();
+    let gen = HTTP_START_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let watch_port = port;
 
     tokio::spawn(async move {
         // FIX (2026-08-27): an earlier attempt to bound graceful shutdown
@@ -2026,30 +2800,105 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         // when abort_rx completes (stop()/config restart). The outcome is then
         // classified for the [http-server-watch] diagnostics trail - including
         // panics, which tokio otherwise swallows silently at the task boundary.
-        // Loopback listener shares the router (state is cheap to clone) and
-        // the shutdown signal. Its serve future is awaited alongside the
-        // wildcard one; both must end before the outcome is classified.
-        // Both listeners share the router and the shutdown signal. The
-        // loopback serve runs as a sibling task; we join it with the
-        // catch-unwrapped wildcard future and classify both outcomes.
+        //
+        // FIX (2026-10-04, review round 8): axum's graceful shutdown waits for
+        // ALL in-flight connections to end — an open SSE stream (GET /mcp
+        // server-push, subscriptions/listen) never ends on its own, so a
+        // restart with any live SSE client hung forever, then failed
+        // EADDRINUSE and left the server offline entirely. Graceful shutdown
+        // is therefore BOUNDED: once the stop signal fires, in-flight requests
+        // get a grace period, after which the serve future is dropped
+        // forcibly (connections cut). Normal (non-SSE) requests complete well
+        // within the grace.
+        const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+        // Separate Notify per listener: each graceful-shutdown future signals
+        // only its own watch select, and `notify_one` (permit-storage) is used
+        // instead of `notify_waiters` — a stop() racing the task's first poll
+        // would otherwise lose the wakeup (waiter not yet registered) and the
+        // 3s forced-abort guard would never fire (review round 9 F-3).
+        let shutdown_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let lb_shutdown_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        // Fires when the WILDCARD serve ends, so the loopback serve winds down
+        // too (review round 9 F-1: previously the watch task awaited the
+        // loopback task UNBOUNDED before classification — on Linux/Windows
+        // that await deadlocked forever and the serveDied self-heal never ran;
+        // on macOS a wildcard-only death hung the same way).
+        let (lb_kill_tx, lb_kill_rx) = tokio::sync::oneshot::channel::<()>();
         let lb_serve = tokio::spawn({
             let app = app.clone();
             async move {
                 use std::future::IntoFuture;
-                axum::serve(loopback_listener, app)
-                    .with_graceful_shutdown(async { let _ = abort_rx_lb.await; })
-                    .into_future()
-                    .await
+                if let Some(ll) = loopback_listener {
+                    let notify2 = lb_shutdown_notify.clone();
+                    let notify3 = notify2.clone();
+                    let fut = std::pin::pin!(
+                        axum::serve(ll, app)
+                            .with_graceful_shutdown(async move {
+                                tokio::select! {
+                                    _ = abort_rx_lb => {},
+                                    _ = lb_kill_rx => {},
+                                }
+                                notify3.notify_one();
+                            })
+                            .into_future()
+                    );
+                    let mut fut = fut;
+                    tokio::select! {
+                        res = &mut fut => res,
+                        _ = notify2.notified() => {
+                            match tokio::time::timeout(SHUTDOWN_GRACE, &mut fut).await {
+                                Ok(res) => res,
+                                Err(_) => {
+                                    log::warn!("[http-server-watch] loopback: grace elapsed, forcing shutdown (in-flight SSE streams cut)");
+                                    Ok(())
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No loopback listener on this platform: nothing to serve,
+                    // return immediately so the watch task's await below never
+                    // blocks (review round 9 F-1).
+                    Ok(())
+                }
             }
         });
-        let serve = axum::serve(listener, app).with_graceful_shutdown(async {
-            let _ = abort_rx.await;
+        let serve = axum::serve(listener, app).with_graceful_shutdown({
+            let notify = shutdown_notify.clone();
+            async move {
+                let _ = abort_rx.await;
+                notify.notify_one();
+            }
         });
         let serve_fut = std::future::IntoFuture::into_future(serve);
-        let wildcard_res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(serve_fut)).await;
-        let lb_res = lb_serve.await.unwrap_or(Err(std::io::Error::other("loopback serve task panicked")));
+        let mut guarded = Box::pin(futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(serve_fut)));
+        let mut forced_abort = false;
+        let wildcard_res = tokio::select! {
+            res = &mut guarded => res,
+            _ = shutdown_notify.notified() => {
+                match tokio::time::timeout(SHUTDOWN_GRACE, &mut guarded).await {
+                    Ok(res) => res,
+                    Err(_) => {
+                        forced_abort = true;
+                        Ok(Ok(()))
+                    }
+                }
+            }
+        };
+        let lb_res = {
+            // Wind the loopback serve down and wait BOUNDED: the classification
+            // and serveDied self-heal below must never depend on the loopback
+            // task (review round 9 F-1).
+            let _ = lb_kill_tx.send(());
+            match tokio::time::timeout(std::time::Duration::from_secs(5), lb_serve).await {
+                Ok(joined) => joined
+                    .unwrap_or(Err(std::io::Error::other("loopback serve task panicked"))),
+                Err(_) => Err(std::io::Error::other("loopback shutdown timed out")),
+            }
+        };
+        let forced_note = if forced_abort { " [FORCED after grace - in-flight SSE streams cut]" } else { "" };
         let outcome = format!(
-            "wildcard={}; loopback={}",
+            "wildcard={}; loopback={}{}",
             match &wildcard_res {
                 Ok(Ok(())) => "clean stop".to_string(),
                 Ok(Err(e)) => format!("accept-loop error: {e}"),
@@ -2065,7 +2914,8 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
             match &lb_res {
                 Ok(()) => "clean stop".to_string(),
                 Err(e) => format!("accept-loop error: {e}"),
-            }
+            },
+            forced_note
         );
         //   Ok(())            -> stop() explicitly fired the probe
         //   Err(Disconnected) -> ServerHandle dropped = start() replacing it
@@ -2080,6 +2930,31 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         );
         log::warn!("{}", line);
         app_logger::log_to_db("warn", &line);
+        // FIX (2026-10-04, review round 8): when the serve task died on its own
+        // (panic / accept-loop error), SERVER_HANDLE stayed Some forever, so
+        // every subsequent start()/sync_with_config hit the "already running"
+        // no-op branch — the server could never self-heal. Clear the handle
+        // (guarded by a generation counter so a NEWER start() instance that
+        // raced us is not clobbered) and mark the status stopped.
+        if !stopped_intentionally {
+            if HTTP_START_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
+                let mut g = handle().lock().await;
+                if HTTP_START_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
+                    *g = None;
+                    let msg = "HTTP serve task died unexpectedly; handle cleared so it can restart".to_string();
+                    log::error!("[http-server-watch] {msg}");
+                    app_logger::log_to_db("error", &msg);
+                    set_status(HttpServerStatus {
+                        running: false,
+                        port: watch_port,
+                        error: Some(msg),
+                        error_kind: Some("serveDied".to_string()),
+                        detail: Some(outcome),
+                        warning: None,
+                    });
+                }
+            }
+        }
         log::info!("MCPHub HTTP server stopped");
     });
 
@@ -2121,10 +2996,23 @@ pub async fn maybe_start() {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             if expose {
-                let port = config
+                let raw_port = config
                     .get("httpPort")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(23333) as u16;
+                    .unwrap_or(23333);
+                // Validate instead of cast-truncating: 70000 as u16 = 4464
+                // silently binds a different port; 0 binds ephemeral while
+                // the status/UI would report port 0.
+                if raw_port == 0 || raw_port > 65535 {
+                    let msg = format!(
+                        "Invalid httpPort {} in config — must be 1-65535; HTTP server not started",
+                        raw_port
+                    );
+                    log::error!("{}", msg);
+                    app_logger::log_to_db("error", &msg);
+                    return;
+                }
+                let port = raw_port as u16;
                 let body_limit_str = config
                     .get("routing")
                     .and_then(|r| r.get("jsonBodyLimit"))
@@ -2156,10 +3044,23 @@ pub async fn sync_with_config() {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             if expose {
-                let port = config
+                let raw_port = config
                     .get("httpPort")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(23333) as u16;
+                    .unwrap_or(23333);
+                // Validate instead of cast-truncating: 70000 as u16 = 4464
+                // silently binds a different port; 0 binds ephemeral while
+                // the status/UI would report port 0.
+                if raw_port == 0 || raw_port > 65535 {
+                    let msg = format!(
+                        "Invalid httpPort {} in config — must be 1-65535; HTTP server not started",
+                        raw_port
+                    );
+                    log::error!("{}", msg);
+                    app_logger::log_to_db("error", &msg);
+                    return;
+                }
+                let port = raw_port as u16;
                 let body_limit_str = config
                     .get("routing")
                     .and_then(|r| r.get("jsonBodyLimit"))
@@ -2413,7 +3314,18 @@ fn smart_rest_params(
     let mut m = serde_json::Map::new();
     if let Some(q) = q {
         for (k, v) in q {
-            m.insert(k, Value::String(v));
+            // Numeric query params (e.g. ?limit=5) must arrive as JSON numbers
+            // — meta.rs reads them with as_u64(), which returns None for a
+            // string and would silently fall back to the default. Only coerce
+            // KNOWN numeric keys: a bare u64 parse would turn a numeric tool
+            // name / query (e.g. ?toolName=12345) into a JSON number and break
+            // as_str() reads downstream (review round 8, 2026-10-04).
+            let val = if k == "limit" {
+                v.parse::<u64>().map(Value::from).unwrap_or_else(|_| Value::String(v))
+            } else {
+                Value::String(v)
+            };
+            m.insert(k, val);
         }
     }
     Value::Object(m)
@@ -2474,7 +3386,13 @@ async fn smart_rest_describe(
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
     match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        // Unknown toolName → client error; anything else (embeddings/DB/pool
+        // failures) is a server fault — keep the two classes apart instead of
+        // mapping every internal error to 400.
+        Err(e) if e.contains("[tool-not-found]") || e.contains("not found") => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
 
@@ -2495,19 +3413,29 @@ async fn smart_rest_call(
     let args = p.get("arguments").cloned().unwrap_or(json!({}));
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
-    let ip = client_ip_of(&headers).unwrap_or_else(|| "127.0.0.1".to_string());
+    // No trusted-proxy header ⇒ source stays None (spoofing-proof by
+    // construction, matching client_ip_of's contract); a fabricated
+    // "127.0.0.1" would poison activity-log source_ip data.
+    let ip = client_ip_of(&headers);
     let start = std::time::Instant::now();
     match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None).await {
         Ok(v) => {
+            // isError:true results are tool-level failures — don't log them
+            // as "success" (parity with execute_openapi_impl's is_error split).
+            let status = if v.get("isError").and_then(|b| b.as_bool()).unwrap_or(false) {
+                "error"
+            } else {
+                "success"
+            };
             let _ = log_service::write_activity(
                 "smart",
                 tool_name,
                 Some(start.elapsed().as_millis() as i64),
-                "success",
+                status,
                 None,
                 Some(v.clone()),
                 None,
-                Some(&ip),
+                ip.as_deref(),
             )
             .await;
             (StatusCode::OK, Json(v)).into_response()
@@ -2521,10 +3449,45 @@ async fn smart_rest_call(
                 None,
                 None,
                 Some(&e),
-                Some(&ip),
+                ip.as_deref(),
             )
             .await;
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_and_version_tests {
+    use super::*;
+
+    #[test]
+    fn parse_body_limit_units() {
+        assert_eq!(parse_body_limit("1mb"), 1024 * 1024);
+        assert_eq!(parse_body_limit("2MB"), 2 * 1024 * 1024);
+        assert_eq!(parse_body_limit("512kb"), 512 * 1024);
+        assert_eq!(parse_body_limit("4096b"), 4096);
+        assert_eq!(parse_body_limit("1048576"), 1048576);
+        assert_eq!(parse_body_limit(""), 1024 * 1024);
+        assert_eq!(parse_body_limit("garbage"), 1024 * 1024);
+        // saturating: a huge-but-parseable value must not panic in debug
+        assert_eq!(parse_body_limit("18014398509481983mb"), usize::MAX);
+        // values beyond usize::MAX fail to parse and fall back to the default
+        assert_eq!(parse_body_limit("99999999999999999999mb"), 1024 * 1024);
+    }
+
+    #[test]
+    fn known_protocol_versions_exact_set() {
+        assert!(is_known_protocol_version("2024-11-05"));
+        assert!(is_known_protocol_version("2025-03-26"));
+        assert!(is_known_protocol_version("2025-06-18"));
+        assert!(is_known_protocol_version("2025-11-25"));
+        assert!(is_known_protocol_version("2026-07-28"));
+        // Lexicographic lookalikes must NOT pass the whitelist (9999-01-01
+        // sorts after 2026-07-28 and used to be misrouted to the modern path)
+        assert!(!is_known_protocol_version("9999-01-01"));
+        assert!(!is_known_protocol_version("1999-01-01"));
+        assert!(!is_known_protocol_version("garbage"));
+        assert!(!is_known_protocol_version(""));
     }
 }

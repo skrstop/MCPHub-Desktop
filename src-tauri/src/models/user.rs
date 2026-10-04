@@ -19,7 +19,10 @@ impl Default for UserRole {
 pub struct User {
     pub id: String,
     pub username: String,
-    #[serde(skip_serializing)]
+    // default: skip_serializing drops the field on serialize; without
+    // #[serde(default)] the output couldn't deserialize back (round-trip
+    // trap — not a live path today, but a latent footgun).
+    #[serde(skip_serializing, default)]
     pub password_hash: String,
     pub role: UserRole,
     pub created_at: String,

@@ -48,7 +48,6 @@ pub fn merge_hits(
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .collect();
-    let term_count = terms.len().max(1);
 
     // Collect per-channel scores FIRST, then merge — order-independent (a hit
     // in both channels contributes vw*vs + kw*ks regardless of which channel
@@ -60,13 +59,18 @@ pub fn merge_hits(
             ((1.0 - h.distance).clamp(0.0, 1.0), h),
         );
     }
+    // Dedup terms before scoring: matched counts TERMS, so a repeated query
+    // word ("deploy deploy") double-counts — a doc matching ONE distinct term
+    // scored 1.0, identical to a full-match doc, bypassing score_threshold.
+    let distinct: std::collections::BTreeSet<String> = terms.iter().cloned().collect();
+    let distinct_count = distinct.len().max(1) as f32;
     let mut ks: HashMap<(String, String), f32> = HashMap::new();
     for h in kw_hits {
         let lower = h.text_content.to_lowercase();
-        let matched = terms.iter().filter(|t| lower.contains(t.as_str())).count();
+        let matched = distinct.iter().filter(|t| lower.contains(t.as_str())).count();
         ks.insert(
             (h.server_name.clone(), h.tool_name.clone()),
-            (matched as f32) / (term_count as f32),
+            (matched as f32) / distinct_count,
         );
     }
 
@@ -92,7 +96,16 @@ pub fn merge_hits(
     }
 
     out.retain(|r| r.score >= threshold);
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Deterministic total order: HashMap iteration order is random, so
+    // score-tied entries would otherwise make the truncate(limit) cut
+    // non-deterministic across calls. Byte-order (server, tool) tiebreak.
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.server_name.cmp(&b.server_name))
+            .then_with(|| a.tool_name.cmp(&b.tool_name))
+    });
     out.truncate(limit);
     out
 }

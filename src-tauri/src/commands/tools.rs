@@ -1,8 +1,11 @@
+use tauri::State;
+
 use crate::{
     mcp::pool,
     models::server::{Tool, ToolCallResult},
     services::{app_logger, log_service, server_tool_config_service},
 };
+use crate::commands::auth::SessionState;
 use std::collections::HashMap;
 use serde_json::Value;
 
@@ -33,10 +36,14 @@ pub async fn list_tools(server_name: Option<String>) -> Result<Vec<Tool>, String
 
 #[tauri::command]
 pub async fn call_tool(
+    session: State<'_, SessionState>,
     server_name: String,
     tool_name: String,
     arguments: Value,
 ) -> Result<ToolCallResult, String> {
+    // Executes arbitrary upstream tools; admin-gated in multi-user mode
+    // (skipAuth short-circuits).
+    crate::commands::config::require_admin(&session).await?;
     // Check if tool is enabled before calling
     let tools = pool::list_tools_for(&server_name).await.map_err(|e| e.to_string())?;
     let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)
@@ -49,7 +56,15 @@ pub async fn call_tool(
     }
 
     let start = std::time::Instant::now();
-    let result = pool::call_tool(&server_name, &tool_name, arguments.clone()).await;
+    // 600s dead-transport guard (mcp::time): the rmcp HTTP upstream has no
+    // internal call timeout; without this the UI tool-call command pends
+    // forever on a hung upstream. Same budget as the HTTP /mcp bridge path.
+    let result = crate::mcp::time::timeout_tool_call(pool::call_tool(
+        &server_name,
+        &tool_name,
+        arguments.clone(),
+    ))
+    .await;
     let duration_ms = start.elapsed().as_millis() as i64;
 
     match result {

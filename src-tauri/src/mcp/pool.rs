@@ -19,7 +19,12 @@ use tokio::sync::RwLock;
 
 /// Holds a live client + last known status + cached tools
 struct PoolEntry {
-    client: Option<McpClient>,
+    /// Arc<Mutex<>> so tool calls can run OUTSIDE the pool read lock: a slow
+    /// upstream call (up to 600s) used to pin the read lock and freeze every
+    /// concurrent reader (UI status polling, list_all_tools) behind any queued
+    /// writer (30s reconnect loop / reload). The per-client Mutex preserves
+    /// the old call-vs-disconnect serialization for the same server.
+    client: Option<std::sync::Arc<tokio::sync::Mutex<McpClient>>>,
     status: ServerStatus,
     tools: Vec<Tool>,  // cached at connect time; refreshed on reconnect
     /// Cached `per_session_client` flag from the server config. When true,
@@ -118,10 +123,16 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
                             token: oidc.token.clone(),
                         }
                     }
-                    _ => TransportOpenApiSecurity::Http {
-                        scheme: "bearer".to_string(),
-                        credentials: String::new(),
-                    },
+                    // Malformed security config (declared type but missing
+                    // payload): fall back to no auth at all — the spec's own
+                    // security schemes may still satisfy the upstream. An
+                    // empty bearer used to produce a garbage Authorization
+                    // header that MASKED the spec's scheme.
+                    _ => TransportOpenApiSecurity::ApiKey {
+                        name: String::new(),
+                        location: "header".to_string(),
+                        value: String::new(),
+                    }
                 }
             });
 
@@ -157,11 +168,39 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
 /// Connect a single server and insert into pool.
 /// Immediately inserts a "starting" placeholder so the frontend can show "connecting" status
 /// while the actual connect (process spawn, handshake) is in progress.
+/// Per-name connect lock, shared by connect_server AND disconnect_server so a
+/// disable racing an in-flight connect cannot be resurrected by the connect's
+/// final entry insert (the disconnect waits for the connect flow to finish).
+static CONNECT_LOCKS: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) async fn pool_connect_lock(name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    CONNECT_LOCKS
+        .get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .await
+        .entry(name.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     let name = cfg.name.clone();
     let per_session_client = cfg.per_session_client.unwrap_or(false);
 
     // 0. Check if already connecting (prevent re-entry from rapid disable/enable clicks)
+    // Per-server connect serialization: the `starting` re-entry guard below
+    // reads under a read lock and releases before the placeholder is inserted
+    // — two concurrent connect_server calls for the same name could both pass
+    // the guard, build clients, and the later map.insert would overwrite the
+    // first LIVE client (orphaning its stdio grandchild tree). The per-name
+    // mutex is held for the ENTIRE connect (guard-check → placeholder-insert →
+    // retries → final state): slow connects DO serialize subsequent connects
+    // for the same name. That is the correct semantics — a concurrent connect
+    // must never tear down a freshly built runtime. Do NOT "optimize" the
+    // guard to release before connect based on the old (wrong) comment.
+    let name_lock = pool_connect_lock(&name).await;
+    let _connect_guard = name_lock.lock().await;
     {
         let map = pool().read().await;
         if let Some(entry) = map.get(&name) {
@@ -177,10 +216,10 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     // Also tears down any per-session isolated clients for this server via the
     // shared `disconnect_server` path — important on reconnect so a stale
     // perSessionClient child tree is reaped before spawning a fresh shared one.
-    // `disconnect_server` also reaps any live on-demand client (so reloading an
-    // awake on-demand server kills the old process before re-inserting the
-    // sleeping placeholder below).
-    disconnect_server(&name).await.ok();
+    // `disconnect_server_inner` (we already hold the per-name lock) also reaps
+    // any live on-demand client (so reloading an awake on-demand server kills
+    // the old process before re-inserting the sleeping placeholder below).
+    disconnect_server_inner(&name).await.ok();
 
     // 1a. On-demand stdio servers skip startup connect: insert a "sleeping"
     // placeholder (client None, connected false, start_on_demand true) and
@@ -278,7 +317,39 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
 
         match connect_result {
             Ok(Ok(())) => {
-                let tools = entry_client.list_tools().await.unwrap_or_default();
+                // rmcp peer requests have no default timeout; a server that
+                // completes initialize then stalls on tools/list would leave
+                // the placeholder "starting" forever (re-entry guard skips
+                // every subsequent connect). Bound the tool discovery.
+                let tools = match tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    entry_client.list_tools(),
+                )
+                .await
+                {
+                    // Err (JSON-RPC error from the server, e.g. method not
+                    // found) degrades to an empty tool list but must not be
+                    // silent — a "connected, 0 tools" server with no error
+                    // hint is a diagnosis dead-end.
+                    Ok(Ok(t)) => t,
+                    Ok(Err(e)) => {
+                        let msg = format!("[{}] tools/list failed post-handshake (continuing with 0 tools): {}", name, e);
+                        log::warn!("{}", msg);
+                        app_logger::log_to_db("warn", &msg);
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        let msg = format!(
+                            "[{}] tools/list timed out after 60s post-handshake — treating as failure",
+                            name
+                        );
+                        log::warn!("{}", msg);
+                        app_logger::log_to_db("warn", &msg);
+                        let _ = entry_client.disconnect().await;
+                        last_error = "tools/list timed out after handshake".to_string();
+                        continue;
+                    }
+                };
                 let tools_for_index = tools.clone();
                 let tool_count = tools.len();
                 // Capture the server-reported version before moving the client
@@ -297,7 +368,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                 };
                 let mut map = pool().write().await;
                 map.insert(name.clone(), PoolEntry {
-                    client: Some(entry_client),
+                    client: Some(std::sync::Arc::new(tokio::sync::Mutex::new(entry_client))),
                     status: status.clone(),
                     tools,
                     per_session_client,
@@ -338,8 +409,21 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
             }
             Ok(Err(e)) => {
                 last_error = e.to_string();
-                // Retry on transient errors (child process exited unexpectedly)
-                if attempt < MAX_RETRIES && last_error.contains("child process exited") {
+                // Handshake failed — disconnect the half-built client like the
+                // timeout branch (and session_pool/on_demand) do: rmcp drops
+                // the transport on error which SIGKILLs only the direct child;
+                // without an explicit disconnect npx/uvx grandchildren orphan.
+                let _ = entry_client.disconnect().await;
+                // Retry on transient errors. rmcp 3.4.1 reports a child that
+                // died mid-handshake as `connection closed: …` (service/client.rs
+                // ClientInitializeError) or `Send message error …`; the legacy
+                // string "child process exited" came from the old handwritten
+                // transport and never matches post-migration, which silently
+                // disabled the whole retry mechanism.
+                let transient = last_error.contains("child process exited")
+                    || last_error.contains("connection closed")
+                    || last_error.contains("Send message error");
+                if attempt < MAX_RETRIES && transient {
                     let retry_msg = format!(
                         "[{}] Connect failed (attempt {}/{}): {} — retrying in 1s...",
                         name, attempt, MAX_RETRIES, last_error
@@ -406,7 +490,11 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         }
     }
 
-    // All retries exhausted (should not reach here for timeout, only for "child process exited")
+    // Defensive fallback: under the current control flow every path inside the
+    // loop either returns or `continue`s (gated on attempt < MAX_RETRIES), so
+    // this block is unreachable today. It stays as insurance only — if a future
+    // edit introduces a fall-through arm, this still produces a correct
+    // terminal status instead of an unhandled fall-out.
     let err_msg = format!("[{}] Connect failed after {} attempts: {}", name, MAX_RETRIES, last_error);
     log::error!("{}", err_msg);
     app_logger::log_to_db("error", &err_msg);
@@ -437,7 +525,31 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
 /// The entry is removed from the map while holding the write lock, then the
 /// actual disconnect I/O happens after the lock is released so that read
 /// operations are not blocked during the network round-trip.
+/// Drop the per-name connect lock entry for a deleted/renamed server.
+/// Without this, CONNECT_LOCKS grows without bound over a long session
+/// (one entry per name ever seen). Only call from server delete/rename —
+/// NOT from disconnect: removing while a concurrent connect holds the Arc
+/// would let a new connect mint a fresh lock and run concurrently.
+pub async fn forget_connect_lock(name: &str) {
+    if let Some(m) = CONNECT_LOCKS.get() {
+        m.lock().await.remove(name);
+    }
+}
+
 pub async fn disconnect_server(name: &str) -> Result<()> {
+    // Take the same per-name connect lock connect_server holds for its ENTIRE
+    // flow. Without it, a disable racing an in-flight connect lets the connect
+    // finish AFTER our removal and insert a connected entry back — a "disabled"
+    // server stays alive until a second disable. The helper shares the SAME
+    // lock table as connect_server (Arc equality guaranteed).
+    let _disconnect_guard = pool_connect_lock(name).await;
+    disconnect_server_inner(name).await
+}
+
+/// Lock-free core of disconnect_server — call only while ALREADY holding the
+/// per-name connect lock (connect_server calls this mid-flow; re-taking the
+/// tokio Mutex there would self-deadlock since it is not reentrant).
+pub(crate) async fn disconnect_server_inner(name: &str) -> Result<()> {
     log::info!("[{}] Disconnecting...", name);
     app_logger::log_to_db("info", &format!("[{}] Disconnecting...", name));
     // Tear down any per-session isolated upstream clients for this server too
@@ -454,8 +566,9 @@ pub async fn disconnect_server(name: &str) -> Result<()> {
         map.remove(name)
     }; // write lock released before any I/O
     if let Some(mut e) = entry {
-        if let Some(mut client) = e.client.take() {
-            client.disconnect().await?;
+        if let Some(client) = e.client.take() {
+            let mut c = client.lock().await;
+            c.disconnect().await?;
         }
     }
     log::info!("[{}] Disconnected", name);
@@ -492,8 +605,9 @@ pub async fn disconnect_all() {
     }; // write lock released before any I/O
 
     for (name, mut e) in entries {
-        if let Some(mut client) = e.client.take() {
-            if let Err(err) = client.disconnect().await {
+        if let Some(client) = e.client.take() {
+            let mut c = client.lock().await;
+            if let Err(err) = c.disconnect().await {
                 log::warn!("[{}] Error during shutdown disconnect: {}", name, err);
                 app_logger::log_to_db("warn", &format!("[{}] Error during shutdown disconnect: {}", name, err));
             } else {
@@ -569,7 +683,9 @@ pub async fn call_tool_with_meta(
     arguments: Value,
     request_meta: Option<Value>,
 ) -> Result<ToolCallResult> {
-    let _ = request_meta; // builtin/on-demand paths keep legacy behavior
+    // NOTE: `request_meta` is consumed further down by the shared-pool path
+    // (forwarded to transports via call_tool_with_meta); the builtin/on-demand
+    // early returns below take no meta — those paths simply don't carry one.
     if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
         return call_tool(server_name, tool_name, arguments).await;
     }
@@ -580,14 +696,19 @@ pub async fn call_tool_with_meta(
     if on_demand {
         return super::on_demand::call_tool_on_demand(server_name, tool_name, arguments).await;
     }
-    let map = pool().read().await;
-    let entry = map
-        .get(server_name)
-        .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
-    let client = entry.client.as_ref()
-        .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?;
+    let client_arc = {
+        let map = pool().read().await;
+        let entry = map
+            .get(server_name)
+            .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
+        entry
+            .client
+            .clone()
+            .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?
+    }; // pool read lock released before the upstream call
+    let client = client_arc.lock().await;
     let result = client.call_tool_with_meta(tool_name, arguments, request_meta).await;
-    drop(map);
+    drop(client);
     result
 }
 
@@ -624,14 +745,19 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
         return super::on_demand::call_tool_on_demand(server_name, tool_name, arguments).await;
     }
 
-    let map = pool().read().await;
-    let entry = map
-        .get(server_name)
-        .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
-    let client = entry.client.as_ref()
-        .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?;
+    let client_arc = {
+        let map = pool().read().await;
+        let entry = map
+            .get(server_name)
+            .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
+        entry
+            .client
+            .clone()
+            .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?
+    }; // pool read lock released before the upstream call
 
     log::debug!("[{}] Calling tool '{}'...", server_name, tool_name);
+    let client = client_arc.lock().await;
     let result = client.call_tool(tool_name, arguments).await;
     match &result {
         Ok(r) => {
@@ -664,6 +790,14 @@ pub(crate) async fn mark_on_demand_awake(name: &str, tools: Vec<Tool>, server_ve
     let last_connected = Some(chrono::Utc::now().to_rfc3339());
     let mut map = pool().write().await;
     if let Some(entry) = map.get_mut(name) {
+        // Identity guard: only mutate entries that are on-demand shadows.
+        // If the shadow was replaced by a live entry (server disabled ->
+        // re-enabled as a normal always-connected server while the cold
+        // spawn was in flight), stamping connected=true here would fabricate
+        // a connected status backed by no client in the pool.
+        if !entry.start_on_demand {
+            return;
+        }
         entry.tools = tools;
         entry.status.connected = true;
         entry.status.starting = false;
@@ -681,6 +815,12 @@ pub(crate) async fn mark_on_demand_awake(name: &str, tools: Vec<Tool>, server_ve
 pub(crate) async fn mark_on_demand_sleeping(name: &str) {
     let mut map = pool().write().await;
     if let Some(entry) = map.get_mut(name) {
+        // Identity guard: a live (non-on-demand) entry must never be flipped
+        // to disconnected by an on-demand idle timer firing late — that would
+        // report a connected server as down.
+        if !entry.start_on_demand {
+            return;
+        }
         entry.status.connected = false;
         entry.status.starting = false;
         entry.status.start_on_demand = true;
@@ -695,6 +835,11 @@ pub(crate) async fn mark_on_demand_sleeping(name: &str) {
 pub(crate) async fn mark_on_demand_error(name: &str, error: String) {
     let mut map = pool().write().await;
     if let Some(entry) = map.get_mut(name) {
+        // Identity guard: same rationale as awake/sleeping — never stamp an
+        // error onto a live entry that has a real client backing it.
+        if !entry.start_on_demand {
+            return;
+        }
         entry.status.connected = false;
         entry.status.starting = false;
         entry.status.start_on_demand = true;

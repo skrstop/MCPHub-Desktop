@@ -152,6 +152,15 @@ impl NomicBertMoeArch {
             // moe_every_n_layers>0 + i%every==1 -> MoE block (matches the
             // PyTorch `moe=i%every_n==1`). For nomic v2: blocks 1,3,5,7,9,11.
             let is_moe = moe_every > 0 && i % moe_every == 1;
+            if is_moe && (n_experts == 0 || top_k == 0 || top_k > n_experts) {
+                // Malformed GGUF metadata (expert_used_count > expert_count, or
+                // missing expert_count defaulting to 0) would index out of
+                // bounds in forward_moe — reject at load time instead of
+                // panicking the loader thread (review round 9).
+                anyhow::bail!(
+                    "nomic: invalid MoE metadata (expert_count={n_experts}, expert_used_count={top_k})"
+                );
+            }
             let ffn = if is_moe {
                 // candle returns logical [out, in] for linears (GGUF stores dims
                 // reversed on disk; candle un-reverses) - SAME convention as
@@ -303,6 +312,7 @@ impl NomicBertMoeArch {
             });
             // moe_normalize_expert_weights=false: keep the RAW softmax weight
             // for the top-k experts (NOT renormalized to sum to 1).
+            let top_k = top_k.min(n_experts);
             for k in 0..top_k {
                 let e = idx[k];
                 eff[i * n_experts + e] = exps[e] / sum;

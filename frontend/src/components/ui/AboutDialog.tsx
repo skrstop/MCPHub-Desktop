@@ -145,15 +145,16 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
     } catch (error) {
       console.error('Failed to check for updates:', error);
       // 确保在错误时也设置 updateInfo，避免一直显示"检查更新中..."
-      if (!updateInfo) {
-        setUpdateInfo({
-          hasUpdate: false,
-          latestVersion: '',
-          entries: [],
-          totalUpdateCount: 0,
-          source: 'error',
-        });
-      }
+      // Unconditional: the state was unconditionally set to 'checking' above;
+      // gating on the stale-closure `updateInfo` left the spinner up forever
+      // when a retry failed after a previous successful check.
+      setUpdateInfo({
+        hasUpdate: false,
+        latestVersion: '',
+        entries: [],
+        totalUpdateCount: 0,
+        source: 'error',
+      });
     } finally {
       setIsChecking(false);
     }

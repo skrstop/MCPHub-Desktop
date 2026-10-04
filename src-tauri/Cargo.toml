@@ -103,6 +103,8 @@ env_logger = "0.11"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+sha2 = "0.10"
+hex = "0.4"
 
 # OS keychain (secure credential storage)
 
@@ -128,12 +130,11 @@ rand = "0.10"
 futures-util = "0.3"
 
 # tokio sync primitives (used in MCP connection pool)
-tokio-stream = "0.1"
 
 # Archive extraction for bundled runtime installation
 flate2 = "1"
 tar = "0.4"
-rmcp-openapi = "0.31"
+rmcp-openapi = "0.32"
 
 # Official MCP SDK (replaces hand-written dispatch_mcp on /mcp; POC verified
 # in AGENTS.md §3.9.2). Macros feature required for rmcp's derive ecosystem;

@@ -191,32 +191,37 @@ export const installAppUpdate = async (
   const channel = new Channel<DownloadEvent>();
   if (onEvent) channel.onmessage = onEvent;
   let installError: Error | null = null;
+  let settled = false;
+  let settleResolve: ((ok: boolean) => void) | null = null;
+  const settle = (ok: boolean) => {
+    if (settled) return;
+    settled = true;
+    unlisten?.();
+    resolveFinished(ok);
+  };
+  let resolveFinished: (ok: boolean) => void = () => {};
+
+  // Register the terminal-event listener BEFORE starting the install: the
+  // Rust task can emit updater://install-result (immediate error: invalid
+  // rid / updater config) before an unawaited listen() registration lands —
+  // Tauri does not buffer events, so the promise would never settle and the
+  // dialog hangs in "downloading" forever.
+  const unlisten = await listen<{ installId: number; status: string; error?: string }>(
+    'updater://install-result',
+    (e) => {
+      if (e.payload.installId !== installId) return; // stale attempt
+      if (e.payload.status === 'ok') settle(true);
+      else if (e.payload.status === 'cancelled') settle(false);
+      else {
+        logUpdateEvent('error', `[update] install failed: ${e.payload.error ?? 'unknown'}`);
+        installError = new Error(e.payload.error ?? 'Install failed');
+        settle(false);
+      }
+    },
+  );
 
   const finished = new Promise<boolean>((resolve) => {
-    let settled = false;
-    let unlisten: (() => void) | undefined;
-    const settle = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      unlisten?.();
-      resolve(ok);
-    };
-    listen<{ installId: number; status: string; error?: string }>(
-      'updater://install-result',
-      (e) => {
-        if (e.payload.installId !== installId) return; // stale attempt
-        if (e.payload.status === 'ok') settle(true);
-        else if (e.payload.status === 'cancelled') settle(false);
-        else {
-          logUpdateEvent('error', `[update] install failed: ${e.payload.error ?? 'unknown'}`);
-          installError = new Error(e.payload.error ?? 'Install failed');
-          settle(false);
-        }
-      },
-    ).then((fn) => {
-      if (settled) fn();
-      else unlisten = fn;
-    });
+    resolveFinished = resolve;
   });
 
   await invoke('install_update_cancelable', {
@@ -225,6 +230,7 @@ export const installAppUpdate = async (
     onEvent: channel,
   });
   const ok = await finished;
+  unlisten?.();
   if (!ok) {
     if (installError) throw installError;
     logUpdateEvent('info', '[update] install cancelled by user');

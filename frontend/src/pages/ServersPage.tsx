@@ -35,7 +35,7 @@ const ServersPage: React.FC = () => {
     handleServerEdit,
     handleServerRemove,
     handleServerToggle,
-    handleServerVisibilityChange,
+    // Visibility is hidden on desktop (all servers public) — no handler in context.
     handleServerReload,
     handleServerReinstall,
     handleServerOAuthDisconnect,
@@ -220,6 +220,12 @@ const ServersPage: React.FC = () => {
       // per-server results trickle back via server://update-available (each
       // registry fetch can take a few seconds).
       await new Promise((resolve) => setTimeout(resolve, 1500));
+    } catch (err) {
+      // apiPost THROWS on failure (fetchInterceptor) — without this catch the
+      // rejection is unhandled and the user gets no feedback (spinner stops
+      // silently). Same message as the success:false path above.
+      console.error('Failed to check stdio updates:', err);
+      showToast(t('server.checkStdioUpdatesError') || 'Check failed', 'error');
     } finally {
       setIsCheckingUpdates(false);
     }
@@ -413,7 +419,6 @@ const ServersPage: React.FC = () => {
                 onDuplicate={handleDuplicateClick}
                 isDuplicating={duplicatingServer === server.name}
                 onToggle={handleServerToggle}
-                onVisibilityChange={handleServerVisibilityChange}
                 onRefresh={triggerRefresh}
                 onReload={handleServerReload}
                 onReinstall={handleServerReinstall}

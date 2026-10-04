@@ -88,13 +88,20 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [serversPerPage, setServersPerPage] = useState(getInitialServersPerPage);
 
   // Timer reference for polling
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track current attempt count to avoid dependency cycles
   const attemptsRef = useRef<number>(0);
+  // Monotonic effect-run generation: guards async continuations from a STALE
+  // effect invocation (deps include currentPage/serversPerPage/isInitialLoading,
+  // so the whole startup loop is torn down and recreated on those changes). A
+  // late-resolving fetch from the old run must not write state or call
+  // startNormalPolling with its outdated closures (which would kill the new
+  // run's interval and re-install polling pinned to the old page params).
+  const pollRunRef = useRef<number>(0);
   // Track last fetch time to implement smart refresh
   const lastFetchTimeRef = useRef<number>(0);
   // Minimum interval between manual refreshes (5 seconds in dev, 3 seconds in prod)
-  const MIN_REFRESH_INTERVAL = process.env.NODE_ENV === 'development' ? 5000 : 3000;
+  const MIN_REFRESH_INTERVAL = import.meta.env.DEV ? 5000 : 3000;
 
   // Clear the timer
   const clearTimer = () => {
@@ -217,7 +224,18 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     // Initialization phase request function
+    // Overlapping-tick guard: the startup interval can fire while an earlier
+    // fetchInitialData is still in flight (backend latency > interval), and a
+    // late resolving tick would re-enter startNormalPolling after another
+    // invocation already transitioned — replacing timers and clobbering fresh
+    // state with stale startup-attempt data. Bail if the phase advanced.
+    let phase = 'startup';
+    // Claim this effect run's generation — async continuations compare before
+    // touching state / timers.
+    const myRun = ++pollRunRef.current;
+    const isStaleRun = () => pollRunRef.current !== myRun;
     const fetchInitialData = async () => {
+      if (phase !== 'startup' || isStaleRun()) return;
       try {
         console.log('[ServerContext] Initial fetch - attempt', attemptsRef.current + 1);
         // Build query parameters for pagination
@@ -230,6 +248,10 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           apiGet(`/servers?${params.toString()}`),
           apiGet('/servers'), // Fetch all servers without pagination
         ]);
+
+        // A newer effect run (page/limit/refreshKey/isInitialLoading change)
+        // owns the timers and state now — this run's data is stale.
+        if (isStaleRun()) return false;
 
         // Update last fetch time
         lastFetchTimeRef.current = Date.now();
@@ -264,8 +286,12 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         }
 
         setIsInitialLoading(false);
-        // Initialization successful, start normal polling (skip immediate to avoid duplicate fetch)
-        startNormalPolling({ immediate: false });
+        // Initialization successful — do NOT start polling here. Flipping
+        // isInitialLoading re-runs this effect (it's a dep); the new run takes
+        // the !isInitialLoading branch and starts normal polling exactly once.
+        // Starting it here AND in the re-run fired two duplicate request
+        // pairs back-to-back on every successful startup.
+        phase = 'normal';
         return true;
       } catch (err) {
         // Increment attempt count, use ref to avoid triggering effect rerun
@@ -287,6 +313,7 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
         // If maximum attempt count is exceeded, give up initialization and switch to normal polling
         if (attemptsRef.current >= CONFIG.startup.maxAttempts) {
+          if (isStaleRun()) return false;
           console.log('Maximum startup attempts reached, switching to normal polling');
           setIsInitialLoading(false);
           // Clear initialization polling

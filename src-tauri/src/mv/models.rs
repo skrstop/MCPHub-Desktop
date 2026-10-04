@@ -446,14 +446,10 @@ pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
     // Download each file sequentially, accumulating cumulative progress across
     // files. Speed/ETA use a sliding window reset every emit tick.
     let mut cumulative: u64 = 0;
+    let out_names = dedup_out_names(&urls);
     for (idx, url) in urls.iter().enumerate() {
         let file_current = (idx as u32) + 1;
-        // Output filename: file 0 -> model.gguf; others keep URL basename.
-        let out_name = if idx == 0 {
-            "model.gguf".to_string()
-        } else {
-            url_basename(url)
-        };
+        let out_name = out_names[idx].clone();
         // Download to "<name>.part" and rename on success: an interrupted
         // download (network drop / process kill) must not leave a truncated
         // *.gguf that detect_format() would classify as ready.
@@ -540,12 +536,17 @@ pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
     if !target_dir.join(format!("{}.part", model_file)).exists() {
         return Err(anyhow!("{} download failed for '{}'", model_file, size));
     }
-    for url in &urls {
-        let name = if url.as_str() == urls[0] {
-            "model.gguf".to_string()
-        } else {
-            url_basename(url)
-        };
+    // Publish by INDEX, not URL equality: a download list containing the same
+    // URL twice would previously publish the second copy as "model.gguf" and
+    // overwrite the first (review round 8, 2026-10-04).
+    // Publish by INDEX, not URL equality: a download list containing the same
+    // URL twice would previously publish the second copy as "model.gguf" and
+    // overwrite the first (review round 8, 2026-10-04). Names must match the
+    // download loop exactly — recompute with the same dedup (review round 9).
+    let out_names = dedup_out_names(&urls);
+    for (idx, url) in urls.iter().enumerate() {
+        let _ = url;
+        let name = out_names[idx].clone();
         let part = target_dir.join(format!("{}.part", name));
         let finalp = target_dir.join(&name);
         let _ = std::fs::remove_file(&finalp);
@@ -595,5 +596,33 @@ fn url_basename(url: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("model_data.bin")
         .to_string()
+}
+
+/// Unique per-index output names for a multi-file model download: file 0 is
+/// always `model.gguf`; others keep their URL basename with `_N` suffixes on
+/// collision (a non-first basename literally "model.gguf" or two identical
+/// basenames would otherwise share a .part path and publish the wrong
+/// content — review round 9). SINGLE source of truth shared by the download
+/// and publish loops (review round 10: the logic was duplicated verbatim).
+fn dedup_out_names(urls: &[String]) -> Vec<String> {
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    urls.iter()
+        .enumerate()
+        .map(|(idx, url)| {
+            let base = if idx == 0 {
+                "model.gguf".to_string()
+            } else {
+                url_basename(url)
+            };
+            let mut name = base.clone();
+            let mut n = 1;
+            while !seen_names.insert(name.clone()) {
+                let stem = base.strip_suffix(".gguf").unwrap_or(&base);
+                name = format!("{stem}_{n}.gguf");
+                n += 1;
+            }
+            name
+        })
+        .collect()
 }
 

@@ -100,7 +100,10 @@ pub async fn search_paged(search_key: &str, page: u32, page_size: u32) -> Result
     let mut where_clause = String::new();
     let mut pattern = String::new();
     if !key.is_empty() {
-        pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        pattern = format!(
+            "%{}%",
+            key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        );
         where_clause = "WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\'".to_string();
     }
 
@@ -173,13 +176,14 @@ pub async fn create(payload: &GroupPayload) -> Result<Group> {
     .await?;
     tx.commit().await?;
 
-    Ok(Group {
-        id,
-        name: payload.name.clone(),
-        description: payload.description.clone(),
-        servers: payload.servers.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    })
+    // Re-read from DB instead of fabricating created_at: the column is
+    // populated by a DB default whose format/value differs from
+    // chrono::Utc::now().to_rfc3339(), so the create response must match
+    // what list_all/update return (update() already re-reads this way).
+    match find_by_name_or_id(&id).await {
+        Ok(Some(g)) => Ok(g),
+        _ => Err(anyhow!("group create: row vanished after commit")),
+    }
 }
 
 pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
@@ -187,6 +191,15 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     let fts_text = group_fts_text(&payload.name, payload.description.as_deref());
 
     let mut tx = db::pool().begin().await?;
+    // Capture the old name INSIDE the tx so the bearer-key cascade rewrites
+    // the exact stored name (review round 9: allowed_groups is keyed by group
+    // NAME; a rename without cascade silently revoked every key referencing
+    // the old name).
+    let old_name: Option<String> = sqlx::query("SELECT name FROM groups WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .and_then(|r| r.try_get("name").ok());
     let result = sqlx::query(
         "UPDATE groups SET name=?, description=?, servers=? WHERE id=?",
     )
@@ -198,6 +211,9 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     .await?;
     if result.rows_affected() == 0 {
         return Err(anyhow!("Group not found"));
+    }
+    if let Some(old) = old_name.filter(|o| o != &payload.name) {
+        cascade_bearer_groups_rename_tx(&mut tx, &old, &payload.name).await?;
     }
     // ref_id=id，改名不影响 ref_id
     crate::services::fts_service::sync_upsert_tx(
@@ -222,6 +238,17 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
 
 pub async fn delete(id: &str) -> Result<()> {
     let mut tx = db::pool().begin().await?;
+    // Cascade bearer keys BEFORE the row disappears (review round 9: same
+    // name-keyed storage as allowed_servers — a delete without cascade left
+    // dangling group names in allowed_groups).
+    let name: Option<String> = sqlx::query("SELECT name FROM groups WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .and_then(|r| r.try_get("name").ok());
+    if let Some(name) = name {
+        cascade_bearer_groups_remove_tx(&mut tx, &name).await?;
+    }
     sqlx::query("DELETE FROM groups WHERE id=?")
         .bind(id)
         .execute(&mut *tx)
@@ -242,4 +269,63 @@ fn group_fts_text(name: &str, description: Option<&str>) -> String {
         Some(d) if !d.is_empty() => format!("{name} {d}"),
         _ => name.to_string(),
     }
+}
+
+/// Rewrite `old_name` → `new_name` in every bearer key's `allowed_groups`
+/// (group rename). Mirrors server_service's allowed_servers cascade. Must run
+/// inside the caller's transaction.
+async fn cascade_bearer_groups_rename_tx(
+    tx: &mut sqlx::SqliteConnection,
+    old_name: &str,
+    new_name: &str,
+) -> Result<()> {
+    let rows = sqlx::query("SELECT id, allowed_groups FROM bearer_keys")
+        .fetch_all(&mut *tx)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let groups_str: String = row.try_get("allowed_groups")?;
+        let mut groups: Vec<String> = serde_json::from_str(&groups_str).unwrap_or_default();
+        if !groups.iter().any(|g| g == old_name) {
+            continue;
+        }
+        for g in groups.iter_mut() {
+            if g == old_name {
+                *g = new_name.to_string();
+            }
+        }
+        sqlx::query("UPDATE bearer_keys SET allowed_groups=? WHERE id=?")
+            .bind(serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into()))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Remove `name` from every bearer key's `allowed_groups` (group delete).
+/// Must run inside the caller's transaction.
+async fn cascade_bearer_groups_remove_tx(
+    tx: &mut sqlx::SqliteConnection,
+    name: &str,
+) -> Result<()> {
+    let rows = sqlx::query("SELECT id, allowed_groups FROM bearer_keys")
+        .fetch_all(&mut *tx)
+        .await?;
+    for row in rows {
+        let id: String = row.try_get("id")?;
+        let groups_str: String = row.try_get("allowed_groups")?;
+        let mut groups: Vec<String> = serde_json::from_str(&groups_str).unwrap_or_default();
+        let before = groups.len();
+        groups.retain(|g| g != name);
+        if groups.len() == before {
+            continue;
+        }
+        sqlx::query("UPDATE bearer_keys SET allowed_groups=? WHERE id=?")
+            .bind(serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into()))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(())
 }

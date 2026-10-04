@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 use std::borrow::Cow;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ContentBlock,
+    CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, CompleteRequestParams,
+    CompleteRequestMethod, CompleteResult, ContentBlock,
     CustomRequest, CustomResult, ErrorCode, GetPromptRequestParams, GetPromptResult,
     GetTaskParams, GetTaskResult, ListPromptsResult, ListResourcesResult,
     ListToolsResult, PaginatedRequestParams, Prompt,
@@ -26,6 +27,7 @@ use rmcp::service::{NotificationContext, Peer, RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
+use futures_util::FutureExt;
 
 // ─── Native list_changed notifications (2025-03/06/11 clients) ─────────────
 // rmcp sessions are owned by LocalSessionManager; the handler only sees a
@@ -34,25 +36,26 @@ use std::sync::OnceLock;
 // `notifications/tools|prompts|resources/list_changed` from the change
 // points in `subscription_hub`. Dead peers are pruned when a send fails.
 
-static NATIVE_PEERS: OnceLock<tokio::sync::RwLock<Vec<Peer<RoleServer>>>> = OnceLock::new();
+static NATIVE_PEERS: OnceLock<tokio::sync::RwLock<Vec<(std::sync::Arc<()>, Peer<RoleServer>)>>> =
+    OnceLock::new();
 
-fn native_peers() -> &'static tokio::sync::RwLock<Vec<Peer<RoleServer>>> {
+fn native_peers()
+-> &'static tokio::sync::RwLock<Vec<(std::sync::Arc<()>, Peer<RoleServer>)>> {
     NATIVE_PEERS.get_or_init(|| tokio::sync::RwLock::new(Vec::new()))
 }
 
 async fn remember_native_peer(peer: Peer<RoleServer>) {
     const MAX_NATIVE_PEERS: usize = 128;
     let mut peers = native_peers().write().await;
-    // Dedup: same underlying transport handle registers once (initialized can
-    // re-fire on reconnect with a fresh peer, so compare by pointer identity
-    // is unnecessary — a Vec of clones of the same Peer would double-send).
-    // Peer has no stable id exposed; rely on transport-level dedup instead:
-    // duplicates send the same notification twice, which clients tolerate.
+    // Identity tag: each registration gets a unique Arc<()> so pruning can
+    // remove exactly the peers that failed THIS fan-out pass (by Arc pointer
+    // identity) — immune to the index-shift race caused by concurrent
+    // cap-drain in remember_native_peer.
+    peers.push((std::sync::Arc::new(()), peer));
     // Cap: Peer exposes no stable identity (tx/id_provider are private), so
     // reconnecting clients can accumulate clones. Duplicate notifications are
     // idempotent for clients (they just re-list), but unbounded growth is a
     // leak — drop the oldest entries beyond the cap.
-    peers.push(peer);
     if peers.len() > MAX_NATIVE_PEERS {
         let excess = peers.len() - MAX_NATIVE_PEERS;
         peers.drain(0..excess);
@@ -63,13 +66,20 @@ async fn remember_native_peer(peer: Peer<RoleServer>) {
 /// 2025-style client session. Fire-and-forget: failures (session gone) just
 /// prune the peer.
 async fn fan_out_native_list_changed(kind: NativeListChanged) {
+    // Note: a client that both sent `notifications/initialized` (registered
+    // here) and opened a `subscriptions/listen` stream receives each
+    // list_changed twice — once on its session stream, once on the listen
+    // stream. Both are valid channels per rmcp; duplicates are idempotent
+    // for clients (they just re-list). Upstream rmcp treats the streams as
+    // independent and exposes no peer identity to dedupe safely.
     use std::collections::HashSet;
-    let peers = native_peers().write().await.clone();
-    if peers.is_empty() {
+    use std::sync::Arc as StdArc;
+    let snapshot = native_peers().read().await.clone();
+    if snapshot.is_empty() {
         return;
     }
-    let mut dead = Vec::new();
-    for (i, peer) in peers.iter().enumerate() {
+    let mut dead_tokens: Vec<StdArc<()>> = Vec::new();
+    for (token, peer) in snapshot.iter() {
         let res = match kind {
             NativeListChanged::Tools => peer.notify_tool_list_changed().await,
             NativeListChanged::Prompts => peer.notify_prompt_list_changed().await,
@@ -80,18 +90,16 @@ async fn fan_out_native_list_changed(kind: NativeListChanged) {
                 "[rmcp] native list_changed send failed (pruning peer)",
                 &format!("{:?}: {}", kind, e),
             );
-            dead.push(i);
+            dead_tokens.push(token.clone());
         }
     }
-    if !dead.is_empty() {
-        let dead_set: HashSet<usize> = dead.into_iter().collect();
-        let mut peers = native_peers().write().await;
-        *peers = peers
-            .drain(..)
-            .enumerate()
-            .filter(|(i, _)| !dead_set.contains(i))
-            .map(|(_, p)| p)
+    if !dead_tokens.is_empty() {
+        let dead_ptrs: HashSet<usize> = dead_tokens
+            .iter()
+            .map(|t| StdArc::as_ptr(t) as usize)
             .collect();
+        let mut peers = native_peers().write().await;
+        peers.retain(|(token, _)| !dead_ptrs.contains(&(StdArc::as_ptr(token) as usize)));
     }
 }
 
@@ -114,6 +122,124 @@ pub fn spawn_native_notify(kind: &'static str) {
         fan_out_native_list_changed(kind).await;
     });
 }
+
+// ─── Legacy resources/subscribe (2025-03/06/11 clients) ────────────────────
+// We advertise `resources.subscribe` in capabilities (needed so the 2026
+// `subscriptions/listen` resourceSubscriptions filter is not stripped), so
+// legacy clients per spec may call `resources/subscribe`. Registry of
+// (identity token, peer, uri, session fingerprint); fan-out on resource
+// content change, pruning dead peers by Arc pointer identity (same pattern as
+// NATIVE_PEERS). The fingerprint is a Weak to the peer's per-session PeerInfo
+// Arc — it lets unsubscribe match the exact session instead of "most recent
+// matching uri", which could delete ANOTHER client's registration (review
+// round 8, 2026-10-04). Weak (not a raw address) because rmcp re-runs
+// set_peer_info on a repeated initialize in the same session, REPLACING the
+// Arc: a raw address would go stale and the session could never unsubscribe
+// (review round 9, 2026-10-04). Dead Weak = re-initialized session.
+static LEGACY_RESOURCE_SUBS: OnceLock<
+    tokio::sync::RwLock<Vec<(std::sync::Arc<()>, Peer<RoleServer>, String, Option<std::sync::Weak<rmcp::model::InitializeRequestParams>>)>>,
+> = OnceLock::new();
+
+fn legacy_resource_subs() -> &'static tokio::sync::RwLock<
+    Vec<(std::sync::Arc<()>, Peer<RoleServer>, String, Option<std::sync::Weak<rmcp::model::InitializeRequestParams>>)>,
+> {
+    LEGACY_RESOURCE_SUBS.get_or_init(|| tokio::sync::RwLock::new(Vec::new()))
+}
+
+fn peer_session_fingerprint(
+    peer: &Peer<RoleServer>,
+) -> Option<std::sync::Weak<rmcp::model::InitializeRequestParams>> {
+    peer.peer_info().map(|i| std::sync::Arc::downgrade(&i))
+}
+
+const MAX_LEGACY_SUBS: usize = 256;
+// Known cap tradeoff (same as NATIVE_PEERS): drain(0..excess) evicts the
+// OLDEST entries, and dead sessions are only pruned on fan-out send failure —
+// a swarm of silent dead sessions can evict live subscribers. Accepted bound;
+// documented in the round-8 review record.
+
+pub async fn legacy_resource_subscribe(peer: Peer<RoleServer>, uri: String) {
+    let fp = peer_session_fingerprint(&peer);
+    let mut subs = legacy_resource_subs().write().await;
+    // Dedup on (uri, fingerprint): a repeated subscribe from the same session
+    // must not stack duplicate entries (duplicate notifications) (review
+    // round 10).
+    let fp_now = fp.as_ref();
+    subs.retain(|(_, _, u, f)| {
+        !(u == &uri
+            && match (f, fp_now) {
+                (Some(f), Some(fp)) => f.ptr_eq(fp) || f.strong_count() == 0,
+                (None, None) => true,
+                _ => false,
+            })
+    });
+    // Drop stale entries (dead fingerprint = the session re-initialized and
+    // its PeerInfo Arc was replaced): the Peer channel is still alive so
+    // fan-out never prunes them naturally — left alone they duplicate
+    // deliveries and the 256 cap drain can evict LIVE subscribers (review
+    // round 10).
+    subs.retain(|(_, _, _, f)| match f {
+        Some(f) => f.strong_count() > 0,
+        None => true,
+    });
+    subs.push((std::sync::Arc::new(()), peer, uri, fp));
+    if subs.len() > MAX_LEGACY_SUBS {
+        let excess = subs.len() - MAX_LEGACY_SUBS;
+        subs.drain(0..excess);
+    }
+}
+
+pub async fn legacy_resource_unsubscribe(peer: &Peer<RoleServer>, uri: &str) {
+    // Match the exact session first (PeerInfo Weak identity); then fall back
+    // to a stale fingerprint (dead Weak, same uri) — that is the SAME session
+    // after a repeated initialize replaced its PeerInfo Arc. Never fall back
+    // to "most recent matching uri" with a live foreign fingerprint: that
+    // would delete ANOTHER client's registration.
+    let fp = peer_session_fingerprint(peer);
+    let mut subs = legacy_resource_subs().write().await;
+    let pos = subs
+        .iter()
+        .rposition(|(_, _, u, f)| {
+            u == uri
+                && match (f, &fp) {
+                    (Some(f), Some(fp)) => f.ptr_eq(fp) || f.strong_count() == 0,
+                    _ => false,
+                }
+        })
+        // unsubscribed before initialize (no info on either side)
+        .or_else(|| subs.iter().rposition(|(_, _, u, f)| u == uri && f.is_none() && fp.is_none()));
+    if let Some(pos) = pos {
+        subs.remove(pos);
+    }
+}
+
+/// Fan out `notifications/resources/updated` to legacy subscribers of `uri`.
+pub async fn fan_out_legacy_resource_updated(uri: &str) {
+    use std::collections::HashSet;
+    use std::sync::Arc as StdArc;
+    let snapshot = legacy_resource_subs().read().await.clone();
+    if snapshot.is_empty() {
+        return;
+    }
+    let mut dead_tokens: Vec<StdArc<()>> = Vec::new();
+    for (token, peer, sub_uri, _) in snapshot.iter() {
+        if sub_uri != uri {
+            continue;
+        }
+        if let Err(e) = peer.notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(uri)).await {
+            dead_tokens.push(token.clone());
+            let _ = e;
+        }
+    }
+    if !dead_tokens.is_empty() {
+        let dead_ptrs: HashSet<usize> = dead_tokens
+            .iter()
+            .map(|t| StdArc::as_ptr(t) as usize)
+            .collect();
+        let mut subs = legacy_resource_subs().write().await;
+        subs.retain(|(token, _, _, _)| !dead_ptrs.contains(&(StdArc::as_ptr(token) as usize)));
+    }
+}
 use crate::smart_routing::meta::GroupToolGate;
 use super::http_server::builtin_allowed;
 
@@ -127,13 +253,15 @@ pub struct HubBridge;
 
 impl HubBridge {
     /// 2026-07-28-only per-request version (modern requests carry `_meta`
-    /// protocolVersion); false on legacy sessions.
+    /// protocolVersion); false on legacy sessions. Aligned with the SDK's own
+    /// SEP-2322 gating (service.rs `RequestContext::protocol_version`): the
+    /// per-request `_meta.protocolVersion` takes precedence over peer_info so
+    /// response shaping (resultType/ttlMs/cacheScope) can't contradict the
+    /// SDK's strip decision on the same response.
     fn is_2026_session(context: &RequestContext<RoleServer>) -> bool {
         context
-            .peer
-            .peer_info()
-            .map(|info| info.protocol_version.as_str() == "2026-07-28")
-            .unwrap_or(false)
+            .protocol_version()
+            .is_some_and(|v| v.as_str() == "2026-07-28")
     }
 
     pub fn new() -> Self {
@@ -236,13 +364,18 @@ impl HubBridge {
                     Err(_) => continue,
                 }
             };
-            let filtered = if is_builtin {
-                ts
-            } else {
+            // Filters apply to the builtin server too: the servers panel can
+            // disable rag_* tools and the HTTP /mcp path must honour it
+            // (parity with the Tauri command path and execute_tool_call).
+            let filtered =
                 crate::services::server_tool_config_service::apply_tool_filters(&sf.name, ts)
                     .await
-                    .unwrap_or_default()
-            };
+                    .unwrap_or_else(|e| {
+                        // Fail-open only for tool LISTING (visibility); log it
+                        // so a broken filter store is visible in the logs.
+                        log::warn!("[{}] apply_tool_filters failed: {}", sf.name, e);
+                        Vec::new()
+                    });
             for t in &filtered {
                 if !t.enabled {
                     continue;
@@ -378,15 +511,42 @@ fn to_call_response(result: crate::models::server::ToolCallResult) -> CallToolRe
                 .or_else(|| meta.get("resultType"))
                 .and_then(|v| v.as_str());
             if rt == Some("input_required") {
-                let input_requests: Option<BTreeMap<String, rmcp::model::InputRequest>> = meta
+                // Distinguish "key absent" from "key present but unparsable":
+                // a malformed payload collapsed to None by .ok() must NOT fall
+                // through to a request-less InputRequired (client cannot
+                // construct inputResponses — the interaction dead-ends).
+                let raw_input_requests = meta
                     .get("io.modelcontextprotocol/inputRequests")
-                    .or_else(|| meta.get("inputRequests"))
+                    .or_else(|| meta.get("inputRequests"));
+                let input_requests: Option<BTreeMap<String, rmcp::model::InputRequest>> = raw_input_requests
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
                 let request_state = meta
                     .get("io.modelcontextprotocol/requestState")
                     .or_else(|| meta.get("requestState"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                // SDK invariant (model/mrtr.rs deserializer): at least one of
+                // inputRequests/requestState MUST be present — a bare
+                // `{"resultType":"input_required"}` cannot be deserialized by
+                // strict downstream clients. The hand-written SSE transport can
+                // fold such raw upstream JSON; fall back to an errored Complete
+                // instead of an unanswerable InputRequired.
+                if raw_input_requests.is_some() && input_requests.is_none() {
+                    // Present but unparsable — same unanswerable-outcome guard
+                    // as the both-absent case.
+                    let mut out = CallToolResult::default();
+                    out.is_error = Some(true);
+                    out.content = vec![ContentBlock::text(
+                        "upstream declared input_required with an unparseable inputRequests payload",
+                    )];
+                    return CallToolResponse::Complete(out);
+                }
+                if input_requests.is_none() && request_state.is_none() {
+                    let mut out = CallToolResult::default();
+                    out.is_error = Some(true);
+                    out.content = vec![ContentBlock::text("upstream declared input_required without inputRequests/requestState")];
+                    return CallToolResponse::Complete(out);
+                }
                 return CallToolResponse::InputRequired(InputRequiredResult::new(
                     input_requests,
                     request_state,
@@ -398,7 +558,17 @@ fn to_call_response(result: crate::models::server::ToolCallResult) -> CallToolRe
     out.content = result
         .content
         .iter()
-        .filter_map(|c| serde_json::from_value::<ContentBlock>(c.clone()).ok())
+        .filter_map(|c| match serde_json::from_value::<ContentBlock>(c.clone()) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                // Never silently drop content: an unrecognized block shape
+                // (e.g. a new content type folded through the hand-written
+                // SSE transport) degrades to a text block so the payload
+                // survives to the client.
+                log::warn!("[rmcp] unmappable content block degraded to text: {e}");
+                Some(ContentBlock::text(c.to_string()))
+            }
+        })
         .collect();
     out.structured_content = result.structured_content;
     out.is_error = Some(result.is_error);
@@ -407,6 +577,298 @@ fn to_call_response(result: crate::models::server::ToolCallResult) -> CallToolRe
 }
 
 impl HubBridge {
+    /// Request-level `_meta` passthrough (MRTR inputResponses retry, OTel).
+    /// A downstream client retrying an input_required call sends
+    /// `io.modelcontextprotocol/inputResponses` (+ requestState) as typed
+    /// params fields — merge them into the upstream `_meta` so the upstream
+    /// server can resume (mirrors the dispatch `tools/call` handling).
+    fn upstream_meta_from(request: &CallToolRequestParams) -> Value {
+        let mut upstream_meta = request
+            .meta
+            .clone()
+            .map(|m| Value::Object(m.0 .0.clone()))
+            .unwrap_or_else(|| json!({}));
+        if let Some(obj) = upstream_meta.as_object_mut() {
+            if let Some(ir) = &request.input_responses {
+                obj.insert(
+                    "io.modelcontextprotocol/inputResponses".to_string(),
+                    serde_json::to_value(ir).unwrap_or_default(),
+                );
+            }
+            if let Some(rs) = &request.request_state {
+                obj.insert("io.modelcontextprotocol/requestState".to_string(), json!(rs));
+            }
+        }
+        upstream_meta
+    }
+
+    /// Shared execution path for synchronous and task-directed tool calls:
+    /// $smart meta tools, target resolution, RAG builtin, disabled checks,
+    /// per-session isolation and the shared pool.
+    async fn execute_tool_call(
+        &self,
+        scope: &str,
+        tool_name: &str,
+        args: Value,
+        bearer: Option<&crate::models::bearer_key::BearerKey>,
+        upstream_meta: Value,
+        session_id: Option<String>,
+        source_ip: Option<String>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let scope = scope.to_string();
+        let tool_name = tool_name.to_string();
+        let scope_clean = scope.trim_start_matches('/').trim().to_string();
+
+        // $smart scopes: intercept the three meta tools.
+        if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+            if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
+                return Err(Self::err(msg));
+            }
+            let allowed = {
+                let (_, _, scope_allowed) =
+                    crate::smart_routing::meta::compute_scope(&scope_clean).await;
+                match (
+                    scope_allowed,
+                    get_allowed_servers(bearer).await,
+                ) {
+                    (Some(list), Some(keys_allowed)) => {
+                        Some(list.into_iter().filter(|s| keys_allowed.contains(s)).collect::<Vec<_>>())
+                    }
+                    (Some(list), None) => Some(list),
+                    (None, Some(keys_allowed)) => Some(keys_allowed.into_iter().collect()),
+                    (None, None) => None,
+                }
+            };
+            let group_gate: Option<GroupToolGate> = if scope_clean.starts_with("$smart/") {
+                Some(
+                    mcp_scope_server_filters(&scope)
+                        .await
+                        .into_iter()
+                        .map(|sf| (sf.name, sf.tools))
+                        .collect(),
+                )
+            } else {
+                None
+            };
+            // Disabled-tool gate for the meta tools themselves (fail-closed):
+            // the servers panel can disable smart_route_* like any other
+            // builtin tool (they ride on the builtin server's tool list); a
+            // filter-store error must refuse the call, not bypass the check.
+            let meta_gate = match pool::list_tools_for(crate::rag::service::BUILTIN_SERVER_NAME).await {
+                Ok(ts) => {
+                    match crate::services::server_tool_config_service::apply_tool_filters(
+                        crate::rag::service::BUILTIN_SERVER_NAME,
+                        ts,
+                    )
+                    .await
+                    {
+                        Ok(filtered) => Ok(filtered
+                            .iter()
+                            .find(|t| t.name == tool_name)
+                            .map(|t| !t.enabled)
+                            .unwrap_or(false)),
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(anyhow::anyhow!(e.to_string())),
+            };
+            match meta_gate {
+                Ok(true) => {
+                    return Err(Self::invalid_params(format!(
+                        "Tool '{}' is disabled",
+                        tool_name
+                    )));
+                }
+                Err(e) => {
+                    log::warn!("[smart] disabled-tool check failed for '{}': {} — refusing call", tool_name, e);
+                    return Err(Self::err(format!(
+                        "Tool '{}' unavailable (tool filter check failed)",
+                        tool_name
+                    )));
+                }
+                Ok(false) => {}
+            }
+            let result: Result<Value, String> = match tool_name.as_str() {
+                "smart_route_search" => {
+                    let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let limit = args.get("limit").cloned().unwrap_or(json!(10));
+                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed).await
+                }
+                "smart_route_describe" => {
+                    let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                    crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref()).await
+                }
+                "smart_route_call" => {
+                    let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_args = args.get("arguments").cloned().unwrap_or(json!({}));
+                    crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref()).await
+                }
+                other => Err(format!(
+                    "Unknown smart routing tool '{}'. Available: smart_route_search, smart_route_describe, smart_route_call",
+                    other
+                )),
+            };
+            let value = result.map_err(Self::err)?;
+            let content = vec![ContentBlock::text(value.to_string())];
+            return Ok(CallToolResponse::Complete(
+                CallToolResult::success(content),
+            ));
+        }
+
+        let Some((sn, orig_name)) = self.resolve_target(&scope, bearer, &tool_name).await else {
+            // `[tool-not-found]` sentinel: REST callers classify 404 by this
+            // stable prefix (prose matching would false-positive on upstream
+            // error text that happens to contain the same substrings).
+            return Err(Self::invalid_params(format!(
+                "[tool-not-found] Tool '{}' not found",
+                tool_name
+            )));
+        };
+
+        // Disabled-tool check — MUST run before the RAG builtin early-return:
+        // the servers panel can disable rag_* tools like any other server and
+        // the Tauri command path enforces it; without this check the HTTP
+        // /mcp path would still list/call disabled builtin tools.
+        //
+        // ⚠️ NOT fail-open: an empty filter result (store read error) would
+        // make find() miss the tool and silently bypass the disable check —
+        // an execution-layer fail-open, not just a listing gap. On error the
+        // tool is treated as unavailable.
+        let disabled_gate = match pool::list_tools_for(&sn).await {
+            Ok(ts) => match crate::services::server_tool_config_service::apply_tool_filters(&sn, ts).await {
+                Ok(filtered) => {
+                    let disabled = filtered
+                        .iter()
+                        .find(|t| t.name == orig_name)
+                        .map(|t| !t.enabled)
+                        // Tool absent from the pool's live list: treat as
+                        // not-disabled (resolve_target may have matched a
+                        // builtin/meta path with no pool entry).
+                        .unwrap_or(false);
+                    Ok(disabled)
+                }
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(anyhow::anyhow!(e.to_string())),
+        };
+        match disabled_gate {
+            Ok(true) => {
+                return Err(Self::invalid_params(format!(
+                    "Tool '{}' is disabled",
+                    orig_name
+                )));
+            }
+            Err(e) => {
+                log::warn!("[{}] disabled-tool check failed for '{}': {} — refusing call", sn, orig_name, e);
+                return Err(Self::err(format!(
+                    "Tool '{}' unavailable (tool filter check failed)",
+                    orig_name
+                )));
+            }
+            Ok(false) => {}
+        }
+
+        // RAG builtin server: local dispatch, no pool entry.
+        if sn == crate::rag::service::BUILTIN_SERVER_NAME {
+            let Some(app) = crate::mcp::progress::get_app_handle() else {
+                return Err(Self::err("app handle unavailable".to_string()));
+            };
+            let start = std::time::Instant::now();
+            // Timeout parity: every other execution path (shared pool, meta
+            // tools) is wrapped — a hung local model call / long-held runtime
+            // lock (large reindex under the same mutex) would otherwise block
+            // the /mcp call indefinitely (task stuck `working` for background
+            // callers with no ttl).
+            let result = crate::mcp::time::timeout_tool_call(
+                crate::rag::service::call_builtin_tool(&app, &orig_name, &args),
+            )
+            .await;
+            // rmcp migration parity: /mcp tool calls must hit the activity log
+            // like the /rest and /api faces (migration dropped this — the
+            // Activity page went blind to all /mcp traffic).
+            let dur = start.elapsed().as_millis() as i64;
+            match &result {
+                Ok(r) => {
+                    let _ = crate::services::log_service::write_activity(
+                        &sn, &orig_name, Some(dur),
+                        if r.is_error { "error" } else { "success" },
+                        Some(args.clone()),
+                        serde_json::to_value(r).ok(), None, source_ip.as_deref(),
+                    ).await;
+                }
+                Err(e) => {
+                    let _ = crate::services::log_service::write_activity(
+                        &sn, &orig_name, Some(dur), "error",
+                        Some(args.clone()), None, Some(&e.to_string()), source_ip.as_deref(),
+                    ).await;
+                }
+            }
+            let result = result.map_err(|e| Self::err(e.to_string()))?;
+            return Ok(to_call_response(result));
+        }
+
+        // Per-session upstream isolation: caller passes rmcp's session id.
+        let is_isolated = session_id.is_some() && pool::is_per_session_client(&sn).await;
+
+        if is_isolated {
+            let sid = session_id.unwrap();
+            let start = std::time::Instant::now();
+            let result = crate::mcp::time::timeout_tool_call(
+                crate::mcp::session_pool::call_tool_isolated(
+                    &sid,
+                    &sn,
+                    &orig_name,
+                    args.clone(),
+                ),
+            )
+            .await;
+            let dur = start.elapsed().as_millis() as i64;
+            Self::log_call_activity(&sn, &orig_name, dur, &args, result.as_ref(), source_ip.as_deref()).await;
+            let result = result.map_err(|e| Self::err(e.to_string()))?;
+            return Ok(to_call_response(result));
+        }
+
+        let start = std::time::Instant::now();
+        let result = crate::mcp::time::timeout_tool_call(pool::call_tool_with_meta(
+            &sn,
+            &orig_name,
+            args.clone(),
+            Some(upstream_meta),
+        ))
+        .await;
+        let dur = start.elapsed().as_millis() as i64;
+        Self::log_call_activity(&sn, &orig_name, dur, &args, result.as_ref(), source_ip.as_deref()).await;
+        let result = result.map_err(|e| Self::err(e.to_string()))?;
+        Ok(to_call_response(result))
+    }
+
+    /// Activity-log parity helper (see execute_tool_call comment).
+    async fn log_call_activity(
+        server: &str,
+        tool: &str,
+        duration_ms: i64,
+        args: &Value,
+        result: Result<&crate::models::server::ToolCallResult, &anyhow::Error>,
+        source_ip: Option<&str>,
+    ) {
+        match result {
+            Ok(r) => {
+                let _ = crate::services::log_service::write_activity(
+                    server, tool, Some(duration_ms),
+                    if r.is_error { "error" } else { "success" },
+                    Some(args.clone()),
+                    serde_json::to_value(r).ok(), None, source_ip,
+                ).await;
+            }
+            Err(e) => {
+                let _ = crate::services::log_service::write_activity(
+                    server, tool, Some(duration_ms), "error",
+                    Some(args.clone()), None, Some(&e.to_string()), source_ip,
+                ).await;
+            }
+        }
+    }
+
     async fn builtin_prompt_selection(&self, scope: &str) -> Option<Vec<String>> {
         let filters = mcp_scope_server_filters(scope).await;
         match filters.iter().find(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME) {
@@ -423,11 +885,27 @@ impl HubBridge {
         }
     }
 
+    /// Bearer-key parity gate for builtin prompts/resources: aggregate_tools
+    /// filters servers by the key's allowed set (builtin included), so the
+    /// prompt/resource surfaces must hide builtin content too — otherwise a
+    /// restricted key sees no builtin tools but can still read every builtin
+    /// prompt template and resource body.
+    async fn builtin_visible_for_bearer(
+        bearer: Option<&crate::models::bearer_key::BearerKey>,
+    ) -> bool {
+        match get_allowed_servers(bearer).await {
+            None => true,
+            Some(set) => set.contains(crate::rag::service::BUILTIN_SERVER_NAME),
+        }
+    }
+
     async fn handle_custom_tasks(
         &self,
         method: &str,
         params: Option<Value>,
         stateless: bool,
+        modern: bool,
+        caller: Option<&str>,
     ) -> Option<Result<CustomResult, rmcp::ErrorData>> {
         let p = params.clone().unwrap_or_default();
         let task_id = p.get("taskId").and_then(|t| t.as_str()).unwrap_or("").to_string();
@@ -435,22 +913,13 @@ impl HubBridge {
             rmcp::ErrorData::new(ErrorCode(code), msg, None)
         };
         match method {
-            "tasks/get" => Some(Ok(CustomResult::new(if stateless {
-                match crate::services::mcp_tasks::get_ext(&task_id).await {
-                    Some(t) => t,
-                    None => return Some(Err(Self::invalid_params(format!("Task '{}' not found", task_id)))),
-                }
-            } else {
-                match crate::services::mcp_tasks::get(&task_id).await {
-                    Some(t) => json!({"task": t}),
-                    None => return Some(Err(Self::invalid_params(format!("Task '{}' not found", task_id)))),
-                }
-            }))),
+            // `tasks/get` never reaches this custom path — rmcp 3.4.1 parses
+            // it as a typed GetTaskRequest routed to ServerHandler::get_task.
             "tasks/result" => {
                 if stateless {
                     return Some(Err(rmcp::ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "tasks/result".to_string(), None)));
                 }
-                Some(match crate::services::mcp_tasks::result(&task_id).await {
+                Some(match crate::services::mcp_tasks::result(&task_id, caller, modern).await {
                     Ok(r) => Ok(CustomResult::new(r)),
                     Err((code, msg)) => Err(perr(code as i32, msg)),
                 })
@@ -459,7 +928,9 @@ impl HubBridge {
                 if stateless {
                     return Some(Err(rmcp::ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "tasks/list".to_string(), None)));
                 }
-                Some(Ok(CustomResult::new(crate::services::mcp_tasks::list_all().await)))
+                Some(Ok(CustomResult::new(
+                    crate::services::mcp_tasks::list_all(caller, modern).await,
+                )))
             }
             _ => None,
         }
@@ -475,6 +946,10 @@ impl ServerHandler for HubBridge {
             .enable_prompts_list_changed()
             .enable_resources()
             .enable_resources_list_changed()
+            // Hub pushes resource updates (subscription_hub::notify_resource_updated);
+            // without `subscribe` rmcp strips resourceSubscriptions from every
+            // subscriptions/listen honored filter (supported_by caps gate).
+            .enable_resources_subscribe()
             .build();
         // 2026-07-28: tasks live in the SEP-1724 extensions map (not a core
         // capability); the bridge serves tasks/get|result|list|cancel.
@@ -492,6 +967,31 @@ impl ServerHandler for HubBridge {
         Cow::Borrowed(ProtocolVersion::KNOWN_VERSIONS)
     }
 
+    // Discover answers static server info: cacheable for 1h and shareable
+    // across clients (rmcp's from_server_info default is ttl=0/priv — that
+    // would defeat the 2026 discovery cache contract, see doc/upgrade notes).
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::DiscoverResult, ErrorData> {
+        Ok(rmcp::model::DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        )
+        .with_ttl_ms(3_600_000)
+        .with_cache_scope(rmcp::model::CacheScope::Public))
+    }
+
+    // Capabilities don't advertise completions — per spec, unadvertised
+    // request methods answer -32601 instead of the SDK's empty-result default
+    // (which would silently pretend the feature exists).
+    async fn complete(
+        &self,
+        _request: CompleteRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CompleteResult, ErrorData> {
+        Err(ErrorData::method_not_found::<CompleteRequestMethod>())
+    }
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         remember_native_peer(context.peer).await;
     }
@@ -521,166 +1021,184 @@ impl ServerHandler for HubBridge {
     ) -> Result<CallToolResponse, ErrorData> {
         let bearer = Self::bearer_from_ctx(&context).await?;
         let scope = Self::scope_from_ctx(&context);
-        let scope_clean = scope.trim_start_matches('/').trim().to_string();
         let tool_name = request.name.to_string();
         let args = Value::Object(request.arguments.clone().unwrap_or_default());
 
-        // $smart scopes: intercept the three meta tools.
-        if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
-            if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
-                return Err(Self::err(msg));
-            }
-            let allowed = {
-                let (_, _, scope_allowed) =
-                    crate::smart_routing::meta::compute_scope(&scope_clean).await;
-                match (
-                    scope_allowed,
-                    get_allowed_servers(bearer.as_ref()).await,
-                ) {
-                    (Some(list), Some(keys_allowed)) => {
-                        Some(list.into_iter().filter(|s| keys_allowed.contains(s)).collect::<Vec<_>>())
-                    }
-                    (Some(list), None) => Some(list),
-                    (None, Some(keys_allowed)) => Some(keys_allowed.into_iter().collect()),
-                    (None, None) => None,
-                }
-            };
-            let group_gate: Option<GroupToolGate> = if scope_clean.starts_with("$smart/") {
-                Some(
-                    mcp_scope_server_filters(&scope)
-                        .await
-                        .into_iter()
-                        .map(|sf| (sf.name, sf.tools))
-                        .collect(),
-                )
-            } else {
-                None
-            };
-            let result: Result<Value, String> = match tool_name.as_str() {
-                "smart_route_search" => {
-                    let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let limit = args.get("limit").cloned().unwrap_or(json!(10));
-                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed).await
-                }
-                "smart_route_describe" => {
-                    let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-                    crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref()).await
-                }
-                "smart_route_call" => {
-                    let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-                    let tool_args = args.get("arguments").cloned().unwrap_or(json!({}));
-                    crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref()).await
-                }
-                other => Err(format!(
-                    "Unknown smart routing tool '{}'. Available: smart_route_search, smart_route_describe, smart_route_call",
-                    other
-                )),
-            };
-            let value = result.map_err(Self::err)?;
-            let content = vec![ContentBlock::text(value.to_string())];
-            return Ok(CallToolResponse::Complete(
-                CallToolResult::success(content),
-            ));
-        }
-
-        let Some((sn, orig_name)) = self.resolve_target(&scope, bearer.as_ref(), &tool_name).await else {
-            return Err(Self::invalid_params(format!(
-                "Tool '{}' not found",
-                tool_name
-            )));
-        };
-
-        // RAG builtin server: local dispatch, no pool entry.
-        if sn == crate::rag::service::BUILTIN_SERVER_NAME {
-            let Some(app) = crate::mcp::progress::get_app_handle() else {
-                return Err(Self::err("app handle unavailable".to_string()));
-            };
-            let result = crate::rag::service::call_builtin_tool(&app, &orig_name, &args)
-                .await
-                .map_err(|e| Self::err(e.to_string()))?;
-            return Ok(to_call_response(result));
-        }
-
-        // Disabled-tool check.
-        if let Ok(ts) = pool::list_tools_for(&sn).await {
-            let filtered =
-                crate::services::server_tool_config_service::apply_tool_filters(&sn, ts)
-                    .await
-                    .unwrap_or_default();
-            if let Some(t) = filtered.iter().find(|t| t.name == orig_name) {
-                if !t.enabled {
-                    return Err(Self::invalid_params(format!(
-                        "Tool '{}' is disabled",
-                        orig_name
-                    )));
-                }
-            }
-        }
-
-        // Per-session upstream isolation: reuse rmcp's session id header.
-        let session_id = context
+        // SEP-2663 client-directed task: the leniency middleware surfaces the
+        // spec-level `params.task` (dropped by rmcp's typed params) as an
+        // internal header. Materialize a task, run the real call in the
+        // background, and return the CreateTaskResult handle immediately.
+        let task_spec = context
             .extensions
             .get::<http::request::Parts>()
-            .and_then(|p| {
-                p.headers
-                    .get("mcp-session-id")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            })
-            .filter(|s| !s.is_empty());
-        let is_isolated = session_id.is_some() && pool::is_per_session_client(&sn).await;
-
-        // Request-level _meta passthrough (MRTR inputResponses retry, OTel).
-        // A downstream client retrying an input_required call sends
-        // `io.modelcontextprotocol/inputResponses` (+ requestState) as typed
-        // params fields — merge them into the upstream `_meta` so the upstream
-        // server can resume (mirrors the dispatch `tools/call` handling).
-        let mut upstream_meta = request
-            .meta
-            .map(|m| Value::Object(m.0 .0.clone()))
-            .unwrap_or_else(|| json!({}));
-        if let Some(obj) = upstream_meta.as_object_mut() {
-            if let Some(ir) = &request.input_responses {
-                obj.insert(
-                    "io.modelcontextprotocol/inputResponses".to_string(),
-                    serde_json::to_value(ir).unwrap_or_default(),
-                );
+            .and_then(|p| p.headers.get("x-mcphub-task-requested"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .filter(|t| t.is_object());
+        if let Some(task_spec) = task_spec {
+            // $smart scope: tasks/get|result|list are METHOD_NOT_FOUND there
+            // (global task store unreachable) — creating a task would hand the
+            // client a handle it can never poll, so tasking is rejected and
+            // the call does NOT fall back to synchronous execution (review
+            // round 9: prior comment wrongly claimed a plain-call fallback).
+            if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+                return Err(ErrorData::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    "tasks are not available on the $smart scope".to_string(),
+                    None,
+                ));
             }
-            if let Some(rs) = &request.request_state {
-                obj.insert(
-                    "io.modelcontextprotocol/requestState".to_string(),
-                    json!(rs),
-                );
+            let ttl = task_spec
+                .get("ttl")
+                .and_then(|v| v.as_u64())
+                .or_else(|| task_spec.get("ttlMs").and_then(|v| v.as_u64()));
+            let task_id =
+                match crate::services::mcp_tasks::create(ttl, bearer.as_ref().map(|k| k.id.clone())).await {
+                    Ok(id) => id,
+                    Err(msg) => {
+                        return Err(rmcp::ErrorData::new(
+                            rmcp::model::ErrorCode::INTERNAL_ERROR,
+                            msg,
+                            None,
+                        ));
+                    }
+                };
+            let task_id_bg = task_id.clone();
+            let created = chrono::Utc::now().to_rfc3339();
+            let this = Self;
+            let scope = scope.clone();
+            let tool_name = tool_name.clone();
+            let bearer_ref = bearer.clone();
+            let upstream_meta = Self::upstream_meta_from(&request);
+            let session_id_bg = context
+                .extensions
+                .get::<http::request::Parts>()
+                .and_then(|p| {
+                    p.headers
+                        .get("mcp-session-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                })
+                .filter(|s| !s.is_empty());
+            // Task-directed calls still go through execute_tool_call for the
+            // activity log — keep source_ip parity with the synchronous path.
+            let source_ip_bg = context
+                .extensions
+                .get::<http::request::Parts>()
+                .and_then(|p| crate::services::http_server::client_ip_of(&p.headers));
+            tokio::spawn(async move {
+                // catch_unwind: a panicking execute_tool_call must not leave
+                // the task stuck in `working` forever (with no TTL the sweeper
+                // would never reap it and the client would poll indefinitely).
+                let outcome = std::panic::AssertUnwindSafe(
+                    this.execute_tool_call(&scope, &tool_name, args, bearer_ref.as_ref(), upstream_meta, session_id_bg, source_ip_bg),
+                )
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|p| {
+                    let msg = p
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| p.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "panic in background tool call".to_string());
+                    Err(rmcp::ErrorData::new(
+                        rmcp::model::ErrorCode::INTERNAL_ERROR,
+                        format!("background task panicked: {msg}"),
+                        None,
+                    ))
+                });
+                match outcome {
+                    // InputRequired payloads are stored as the task result and
+                    // delivered in a TERMINAL completed state: the client reads
+                    // them via tasks/result, then starts a NEW tools/call with
+                    // `inputResponses` in `_meta`. There is no tasks/update
+                    // reactivation path — update_input on a terminal task
+                    // returns a clear error (see mcp_tasks::update_input).
+                    Ok(resp) => {
+                        // CallToolResponse is not Serialize; shape via the
+                        // model's own conversion into a ServerResult JSON.
+                        let shaped = match resp {
+                            CallToolResponse::Complete(cr) => {
+                                serde_json::to_value(&cr).unwrap_or_else(|_| json!({}))
+                            }
+                            CallToolResponse::InputRequired(ir) => {
+                                serde_json::to_value(&ir).unwrap_or_else(|_| json!({}))
+                            }
+                            // Non-exhaustive enum: unknown future variants have
+                            // no serializable shape — record an empty result.
+                            _ => json!({}),
+                        };
+                        crate::services::mcp_tasks::complete(&task_id_bg, shaped).await;
+                    }
+                    Err(e) => {
+                        crate::services::mcp_tasks::fail(&task_id_bg, e.message.to_string()).await;
+                    }
+                }
+            });
+            let mut task = rmcp::model::Task::new(
+                task_id.clone(),
+                rmcp::model::TaskStatus::Working,
+                created.clone(),
+                created,
+            );
+            if let Some(ttl) = ttl {
+                task = task.with_ttl_ms(ttl);
             }
+            return Ok(CallToolResponse::Task(rmcp::model::CreateTaskResult::new(task)));
         }
-
-        if is_isolated {
-            let sid = session_id.unwrap();
-            let result = crate::mcp::session_pool::call_tool_isolated(
-                &sid,
-                &sn,
-                &orig_name,
-                args,
-            )
-            .await
-            .map_err(|e| Self::err(e.to_string()))?;
-            return Ok(to_call_response(result));
-        }
-
-        let result = pool::call_tool_with_meta(&sn, &orig_name, args, Some(upstream_meta))
-            .await
-            .map_err(|e| Self::err(e.to_string()))?;
-        Ok(to_call_response(result))
+        self.execute_tool_call(
+            &scope,
+            &tool_name,
+            args,
+            bearer.as_ref(),
+            Self::upstream_meta_from(&request),
+            context
+                .extensions
+                .get::<http::request::Parts>()
+                .and_then(|p| {
+                    p.headers
+                        .get("mcp-session-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                })
+                .filter(|s| !s.is_empty()),
+            context
+                .extensions
+                .get::<http::request::Parts>()
+                .and_then(|p| crate::services::http_server::client_ip_of(&p.headers)),
+        )
+        .await
     }
 
     // ── Prompts (builtin "mcphub-desktop" server only) ──────────────────
+
+    // Legacy resources/subscribe: we advertise the capability (for the 2026
+    // resourceSubscriptions filter), so honor it for 2025 clients instead of
+    // rmcp's method_not_found default.
+    async fn subscribe(
+        &self,
+        request: rmcp::model::SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        legacy_resource_subscribe(context.peer.clone(), request.uri.to_string()).await;
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: rmcp::model::UnsubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        legacy_resource_unsubscribe(&context.peer, request.uri.as_ref()).await;
+        Ok(())
+    }
 
     async fn list_prompts(
         &self,
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, rmcp::ErrorData> {
-        let _bearer = Self::bearer_from_ctx(&context).await?;
+        let bearer = Self::bearer_from_ctx(&context).await?;
         let scope = Self::scope_from_ctx(&context);
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
             let result = ListPromptsResult::with_all_items(Vec::new());
@@ -691,6 +1209,10 @@ impl ServerHandler for HubBridge {
             } else {
                 result
             });
+        }
+        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            let result = ListPromptsResult::with_all_items(Vec::new());
+            return Ok(result);
         }
         let prompt_sel = self.builtin_prompt_selection(&scope).await;
         let prompts = crate::services::prompt_service::list_all().await.unwrap_or_default();
@@ -730,6 +1252,16 @@ impl ServerHandler for HubBridge {
     ) -> Result<GetPromptResponse, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
         let name = request.name.to_string();
+        // $smart scope: builtin prompts are not part of the smart meta-tool
+        // surface — list_prompts returns empty here, so get must not serve
+        // content the list hides (list/read gating parity).
+        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+            return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
+        }
+        let bearer = Self::bearer_from_ctx(&context).await?;
+        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
+        }
         let args: Value = Value::Object(request.arguments.clone().unwrap_or_default());
         let prompt_sel = self.builtin_prompt_selection(&scope).await;
         let prompt = crate::services::prompt_service::list_all()
@@ -741,6 +1273,10 @@ impl ServerHandler for HubBridge {
             });
         match prompt {
             Some(p) => {
+                // Required-arg validation: a missing arg would otherwise leak
+                // the literal {{placeholder}} into LLM-bound content.
+                crate::services::prompt_service::validate_required_args(&p.arguments, &args)
+                    .map_err(Self::invalid_params)?;
                 let text = crate::services::prompt_service::render_template(&p.template, &args);
                 let mut gpr = GetPromptResult::default();
                 gpr.description = p.description;
@@ -768,6 +1304,11 @@ impl ServerHandler for HubBridge {
             } else {
                 result
             });
+        }
+        let bearer = Self::bearer_from_ctx(&context).await?;
+        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            let result = ListResourcesResult::with_all_items(Vec::new());
+            return Ok(result);
         }
         let resource_sel = self.builtin_resource_selection(&scope).await;
         let resources = crate::services::resource_service::list_all().await.unwrap_or_default();
@@ -798,6 +1339,16 @@ impl ServerHandler for HubBridge {
     ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
         let uri = request.uri.clone();
+        // $smart scope: builtin resources are not part of the smart meta-tool
+        // surface — list_resources returns empty here, so read must not serve
+        // content the list hides (list/read gating parity).
+        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+            return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
+        }
+        let bearer = Self::bearer_from_ctx(&context).await?;
+        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
+        }
         let resource_sel = self.builtin_resource_selection(&scope).await;
         let resource = crate::services::resource_service::list_all()
             .await
@@ -807,13 +1358,32 @@ impl ServerHandler for HubBridge {
                     .find(|r| r.enabled && r.uri == uri && builtin_allowed(&resource_sel, &r.uri))
             });
         match resource {
-            Some(r) => Ok(ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-                uri: r.uri,
-                mime_type: Some(r.mime_type),
-                text: r.content,
-                meta: None,
-            }])
-            .into()),
+            Some(r) => {
+                let result: ReadResourceResponse = ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
+                    uri: r.uri,
+                    mime_type: Some(r.mime_type),
+                    text: r.content,
+                    meta: None,
+                }])
+                .into();
+                // CacheableResult contract (2026-07-28): resources/read is a
+                // cacheable list-shaped read like prompts/get — without
+                // ttlMs/cacheScope a 2026 client never caches the content and
+                // every read hits the hub again.
+                Ok(if Self::is_2026_session(&context) {
+                    match result {
+                        ReadResourceResponse::Complete(res) => {
+                            ReadResourceResponse::Complete(
+                                res.with_ttl_ms(30_000)
+                                    .with_cache_scope(rmcp::model::CacheScope::Private),
+                            )
+                        }
+                        other => other,
+                    }
+                } else {
+                    result
+                })
+            }
             None => Err(Self::invalid_params(format!("Resource '{}' not found", uri))),
         }
     }
@@ -826,19 +1396,54 @@ impl ServerHandler for HubBridge {
         context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
-        let stateless = crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim());
-        let _ = stateless;
-        // DetailedTask-shape gap: the hub's task store returns the wire JSON
-        // (2026 ext shape or 2025-11 snapshot). Expose it raw via the custom
-        // path; this typed handler serves the same store for rmcp-native
-        // clients and errors like the old dispatch when missing.
+        // $smart scope has its own meta-tool surface — the global task store is
+        // not reachable there (same gate as custom tasks/result|list paths).
+        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+            return Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                "tasks are not available on the $smart scope".to_string(),
+                None,
+            ));
+        }
+        // bearer_from_ctx failure (auth error, not merely "no key") must
+        // propagate as an error rather than silently downgrade to anonymous
+        // caller — anonymous sees all ownerless tasks (review round 9 F-3).
+        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         // The hub's task store produces the wire shape directly (2026 ext or
         // 2025-11 snapshot); rmcp's DetailedTask cannot express both, so the
         // typed tasks/get serves rmcp-native clients from the same store via
-        // serde round-trip when possible.
-        match crate::services::mcp_tasks::get_ext(&request.task_id).await {
-            Some(t) => serde_json::from_value::<GetTaskResult>(t)
-                .map_err(|e| Self::err(format!("task shape mismatch: {e}"))),
+        // serde round-trip when possible. Version split: legacy (2025-11)
+        // sessions must receive the legacy field names (pollInterval/ttl) —
+        // get_ext always emits 2026 names (pollIntervalMs/ttlMs), which a
+        // legacy client would read as missing fields. Same modern gate as the
+        // custom tasks/result|list paths.
+        let modern = Self::is_2026_session(&context);
+        let fetched = if modern {
+            crate::services::mcp_tasks::get_ext(&request.task_id, caller.as_deref()).await
+        } else {
+            crate::services::mcp_tasks::get(&request.task_id, caller.as_deref()).await
+        };
+        match fetched {
+            Some(mut t) => {
+                // ⚠️ Typed round-trip limitation: rmcp 3.4.1's `Task` struct has
+                // no legacy aliases (`ttl`/`pollInterval`) — a serde
+                // from_value::<GetTaskResult> round-trip silently DROPS the
+                // legacy field names and re-serializes `ttlMs: null`. Rename the
+                // legacy keys to their modern counterparts BEFORE the round-trip
+                // so the values survive (a legacy client reading typed tasks/get
+                // sees the modern names it ignores; the authoritative legacy wire
+                // shape remains tasks/result, which keeps pollInterval/ttl).
+                if let Some(map) = t.as_object_mut() {
+                    if let Some(ttl) = map.remove("ttl") {
+                        map.entry("ttlMs".to_string()).or_insert(ttl);
+                    }
+                    if let Some(pi) = map.remove("pollInterval") {
+                        map.entry("pollIntervalMs".to_string()).or_insert(pi);
+                    }
+                }
+                serde_json::from_value::<GetTaskResult>(t)
+                    .map_err(|e| Self::err(format!("task shape mismatch: {e}")))
+            }
             None => Err(Self::invalid_params(format!(
                 "Task '{}' not found",
                 request.task_id
@@ -849,11 +1454,23 @@ impl ServerHandler for HubBridge {
     async fn update_task(
         &self,
         request: UpdateTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
+        // Same $smart gate as get_task (global task store is not reachable on
+        // the $smart scope).
+        let scope = Self::scope_from_ctx(&context);
+        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+            return Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                "tasks are not available on the $smart scope".to_string(),
+                None,
+            ));
+        }
+        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         crate::services::mcp_tasks::update_input(
             &request.task_id,
             serde_json::to_value(request.input_responses).unwrap_or_default(),
+            caller.as_deref(),
         )
         .await
         .map_err(|(code, msg)| rmcp::ErrorData::new(ErrorCode(code), msg, None))
@@ -862,15 +1479,142 @@ impl ServerHandler for HubBridge {
     async fn cancel_task(
         &self,
         request: CancelTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
-        crate::services::mcp_tasks::cancel(&request.task_id)
+        // Same $smart gate as get_task (global task store is not reachable on
+        // the $smart scope).
+        let scope = Self::scope_from_ctx(&context);
+        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+            return Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                "tasks are not available on the $smart scope".to_string(),
+                None,
+            ));
+        }
+        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
+        crate::services::mcp_tasks::cancel(&request.task_id, caller.as_deref())
             .await
             .map(|_| ())
             .map_err(|(code, msg)| rmcp::ErrorData::new(ErrorCode(code), msg, None))
     }
 
-    // tasks/get (full shape), tasks/result, tasks/list ride the custom path.
+    // ─── 2026-07-28 subscriptions/listen (rmcp-native) ────────────────────
+    //
+    // The hub advertises listChanged for tools/prompts/resources in get_info
+    // and pushes resource updates via subscription_hub, so the accepted
+    // filter is simply the requested categories intersected with what this
+    // server can deliver (all four). Returning None here would leave
+    // subscriptions/listen unimplemented (rmcp default).
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &rmcp::model::SubscriptionFilter,
+    ) -> Option<rmcp::model::SubscriptionFilter> {
+        // Advertise everything this hub can deliver: the three list_changed
+        // lanes (declared in get_info) plus any requested resource URI (the
+        // hub pushes resource updates for arbitrary URIs). The intersection
+        // yields exactly the requested categories.
+        let requested_uris = requested.resource_subscriptions.clone().unwrap_or_default();
+        let advertised = rmcp::model::SubscriptionFilter::builder()
+            .tools_list_changed()
+            .prompts_list_changed()
+            .resources_list_changed()
+            .resource_subscriptions(requested_uris)
+            .build();
+        Some(advertised.intersection(requested))
+    }
+
+    async fn listen(
+        &self,
+        context: rmcp::service::SubscriptionContext,
+    ) -> Result<(), rmcp::ErrorData> {
+        use crate::services::subscription_hub::HubEvent;
+        use rmcp::model::{ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerNotification};
+        let sink = context.sink().clone();
+        // Local URI gate: the hub bus broadcasts resource updates for ALL uris
+        // to every listener, but this sink's accepted filter only carries the
+        // uris THIS subscriber requested — an out-of-filter send returns
+        // Err(NotificationNotAccepted), which must NOT terminate the stream
+        // (an unrelated client's resource update would otherwise kill this
+        // subscription). Pre-filter locally and only skip the event.
+        let accepted_uris = sink
+            .accepted()
+            .resource_subscriptions
+            .clone()
+            .unwrap_or_default();
+        // Symmetric lane pre-filter: the sink's accepted filter is the
+        // INTERSECTION of advertised and requested lanes — a client that
+        // subscribed to a single lane must not receive the others (their send
+        // would return Err(NotificationNotAccepted), which must NOT terminate
+        // the stream — it is filter rejection, not transport death).
+        let accepted_lanes = sink.accepted().clone();
+        let lane_ok = |lane: Option<bool>| lane != Some(false);
+        let mut rx = crate::services::subscription_hub::subscribe_events();
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => return Ok(()),
+                ev = rx.recv() => match ev {
+                    Ok(ev) => {
+                        // The sink offers typed helpers for the three
+                        // list_changed lanes; resource updates build the
+                        // notification directly.
+                        let result = match ev {
+                            HubEvent::ToolsListChanged => {
+                                if !lane_ok(accepted_lanes.tools_list_changed) { continue; }
+                                sink.notify_tool_list_changed().await
+                            }
+                            HubEvent::PromptsListChanged => {
+                                if !lane_ok(accepted_lanes.prompts_list_changed) { continue; }
+                                sink.notify_prompt_list_changed().await
+                            }
+                            HubEvent::ResourcesListChanged => {
+                                if !lane_ok(accepted_lanes.resources_list_changed) { continue; }
+                                sink.notify_resource_list_changed().await
+                            }
+                            HubEvent::ResourceUpdated(uri) => {
+                                if !accepted_uris.contains(&uri) {
+                                    continue;
+                                }
+                                sink.send(ServerNotification::ResourceUpdatedNotification(
+                                    ResourceUpdatedNotification::new(ResourceUpdatedNotificationParam::new(uri)),
+                                )).await
+                            }
+                            // Task status push rides the tasks extension, not the
+                            // core subscription sink (filter has no taskIds lane).
+                            HubEvent::TaskStatus(_) => continue,
+                        };
+                        // A send failure here means the stream itself is gone
+                        // (client disconnected / transport closed) — terminate
+                        // this forwarder. Filter rejections
+                        // (NotificationNotAccepted / UnsupportedNotification)
+                        // are NOT transport errors: skip the event and keep
+                        // the subscription alive.
+                        if result.is_err() {
+                            use rmcp::service::SubscriptionSendError;
+                            let e = result.unwrap_err();
+                            match e {
+                                SubscriptionSendError::NotificationNotAccepted(_)
+                                | SubscriptionSendError::UnsupportedNotification(_) => continue,
+                                _ => return Ok(()),
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Dropped notifications: the client's CacheableResult
+                        // ttl (30s) self-heals the cache, but record the loss.
+                        crate::services::app_logger::log_to_db(
+                            "warn",
+                            &format!("[rmcp] subscription listener lagged, {} notifications dropped", n),
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                }
+            }
+        }
+    }
+
+    // tasks/result, tasks/list ride the custom path (tasks/get is typed).
 
     async fn on_custom_request(
         &self,
@@ -878,8 +1622,24 @@ impl ServerHandler for HubBridge {
         _context: RequestContext<RoleServer>,
     ) -> Result<CustomResult, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&_context);
+        // Stateless gate: $smart scope only. 2026 clients DO get tasks/get|
+        // result|list|cancel (modern field names per the R158 fix); the 2026
+        // extension redesign did not delete them.
         let stateless = crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim());
-        if let Some(r) = self.handle_custom_tasks(&request.method, request.params.clone(), stateless).await {
+        // 2026-07-28 sessions speak the extension task field names
+        // (pollIntervalMs/ttlMs) in tasks/list and working-state tasks/result
+        // snapshots — legacy sessions keep the 2025-11 core names.
+        let modern = Self::is_2026_session(&_context);
+        // Auth error (not "no key") propagates rather than downgrading to
+        // anonymous caller (review round 9 F-3).
+        let caller = match Self::bearer_from_ctx(&_context).await {
+            Ok(k) => k.map(|key| key.id),
+            Err(e) => return Err(e),
+        };
+        if let Some(r) = self
+            .handle_custom_tasks(&request.method, request.params.clone(), stateless, modern, caller.as_deref())
+            .await
+        {
             return r;
         }
         Err(rmcp::ErrorData::new(ErrorCode::METHOD_NOT_FOUND, request.method.clone(), None))
@@ -947,8 +1707,27 @@ mod native_notify_tests {
         use rmcp::ServiceExt as _;
         let client_service = client.clone().serve(client_transport).await.unwrap();
         let _ = client_service.peer().peer_info().expect("client initialized");
-        // give the server side time to process notifications/initialized
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Wait for the server side to register our peer (NATIVE_PEERS) by
+        // polling instead of a fixed sleep — a slow CI machine could miss the
+        // registration window entirely and silently drop all three notifies.
+        // Registration happens on notifications/initialized, so a no-op
+        // list_changed probe arriving on the peer means we're registered.
+        let reg_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let registered = match NATIVE_PEERS.get() {
+                Some(rw) => {
+                    let peers = rw.read().await;
+                    !peers.is_empty()
+                }
+                None => false,
+            };
+            if registered
+                || tokio::time::Instant::now() >= reg_deadline
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
 
         spawn_native_notify("tools");
         spawn_native_notify("prompts");
@@ -971,9 +1750,13 @@ mod native_notify_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        assert_eq!(client.tool_changes.load(Ordering::SeqCst), 1, "tools/list_changed");
-        assert_eq!(client.prompt_changes.load(Ordering::SeqCst), 1, "prompts/list_changed");
-        assert_eq!(client.resource_changes.load(Ordering::SeqCst), 1, "resources/list_changed");
+        // >= 1 not == 1: NATIVE_PEERS is process-global and cargo runs test
+        // modules in parallel — subscription_hub's notify tests can fan out
+        // extra notifications to this probe concurrently (exact-count would
+        // flake).
+        assert!(client.tool_changes.load(Ordering::SeqCst) >= 1, "tools/list_changed");
+        assert!(client.prompt_changes.load(Ordering::SeqCst) >= 1, "prompts/list_changed");
+        assert!(client.resource_changes.load(Ordering::SeqCst) >= 1, "resources/list_changed");
         client_service.cancel().await;
     }
 }

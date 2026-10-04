@@ -161,6 +161,30 @@ pub async fn call_tool_isolated(
     };
 
     let client_arc = Arc::new(Mutex::new(client));
+    // Re-check the server is still enabled/registered before inserting: the
+    // slow path raced a disable/delete between lock acquisition and connect
+    // completion — inserting would leave an orphan isolated client that the
+    // next lifecycle cleanup will never see (it lives until the downstream
+    // session is deleted, and keeps serving calls to a dead server name).
+    match server_service::get_by_name(&server_name).await {
+        Ok(Some(cfg)) if cfg.enabled => {}
+        _ => {
+            let msg = format!(
+                "[session-pool] Server '{server_name}' disabled/removed during connect; discarding isolated client for session {session_id}"
+            );
+            log::warn!("{msg}");
+            app_logger::log_to_db("warn", &msg);
+            // Disconnect before returning: the client (and its stdio child
+            // process tree) is fully connected at this point — dropping the
+            // Arc alone orphans the npx/uvx grandchildren, since nothing else
+            // holds a reference to this isolated client (review round 8,
+            // 2026-10-04). Mirrors the handshake-failure/timeout branches.
+            let _ = client_arc.lock().await.disconnect().await;
+            return Err(anyhow::anyhow!(
+                "Server '{server_name}' is disabled or removed"
+            ));
+        }
+    }
     {
         let mut map = store().write().await;
         map.insert(key.clone(), client_arc.clone());
@@ -245,8 +269,11 @@ async fn run_call(
             // validation) also surfaces as Err here, but the client and its
             // underlying connection remain healthy — evicting on those would
             // destroy per-session state (e.g. a Playwright browser session)
-            // for a mere tool-level failure. `is_connected()` distinguishes:
-            // the transport flag drops on real transport/IO failures.
+            // for a mere tool-level failure. NOTE: `is_connected()` only
+            // flips on explicit connect/disconnect — an upstream process
+            // death or dropped SSE stream does NOT lower it, so this check
+            // is best-effort and a dead client lingers until session DELETE
+            // (documented limitation of the rmcp migration).
             let still_connected = client_arc.lock().await.is_connected();
             if still_connected {
                 log::warn!(
@@ -256,8 +283,25 @@ async fn run_call(
                 return Err(e);
             }
             let mut map = store().write().await;
-            map.remove(key);
+            // Only evict if the map still holds THIS client: a concurrent
+            // slow path may have rebuilt the entry between our fast-path read
+            // and this eviction — removing unconditionally would destroy the
+            // freshly built client.
+            let evict = map
+                .get(key)
+                .map(|c| Arc::ptr_eq(c, &client_arc))
+                .unwrap_or(false);
+            if evict {
+                map.remove(key);
+            }
             drop(map);
+            // Symmetric with on_demand eviction: disconnect the evicted client
+            // so its (stdio) process tree is reaped instead of leaking until a
+            // future cleanup_session pass.
+            {
+                let mut client = client_arc.lock().await;
+                let _ = client.disconnect().await;
+            }
             let msg = format!(
                 "[session-pool] Isolated tool '{}' call failed for session {} -> {} ({}ms), evicted client: {}",
                 tool, key.0, key.1, call_start.elapsed().as_millis(), e

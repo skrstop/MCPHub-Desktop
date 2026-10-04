@@ -317,7 +317,14 @@ pub async fn release(consumer: &str) {
             c.remove(consumer);
             c.len()
         }
-        Err(_) => 0,
+        // Poisoned lock: the consumer set is unreadable — treat the remaining
+        // count as UNKNOWN, not zero. Tearing down the shared runtime here
+        // would kill a model other consumers may still be using (fail-closed
+        // parity with ensure_started, review round 8, 2026-10-04).
+        Err(_) => {
+            mv_log("warn", format!("[mv] release({}) — consumers lock poisoned; leaving runtime state untouched", consumer));
+            return;
+        }
     };
     if remaining > 0 {
         mv_log(

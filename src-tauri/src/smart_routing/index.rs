@@ -121,12 +121,21 @@ async fn smart_enabled() -> bool {
     models::get_settings().await.enabled
 }
 
+/// Per-server serialization for the fire-and-forget lifecycle hooks: two
+/// hooks firing back-to-back for the same server (connect + update) would
+/// otherwise run `replace_server` (delete-then-insert, non-atomic) concurrently
+/// and interleave (delA / insA / insB → duplicate rows / mid-state reads).
+/// Desktop-scale: one global mutex is plenty; embedding work happens inside
+/// so hooks for the same server queue instead of racing.
+static EMBED_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Lifecycle hook: a server connected (or its tool list changed). Indexes the
 /// server's tools + server row in the background; errors are logged, never
 /// propagated (indexing must not break server connectivity).
 pub fn on_server_connected(server_name: String, tools: Vec<Tool>, description: Option<String>) {
     if tools.is_empty() {
         // origin: empty tool list removes any previous embeddings.
+        // (Locking happens inside remove_server_embeddings.)
         tokio::spawn(async move {
             if let Err(e) = remove_server_embeddings(&server_name).await {
                 log::warn!("[smart] remove embeddings for '{}': {}", server_name, e);
@@ -135,6 +144,7 @@ pub fn on_server_connected(server_name: String, tools: Vec<Tool>, description: O
         return;
     }
     tokio::spawn(async move {
+        // (Locking happens inside save_server_embeddings.)
         if let Err(e) = save_server_embeddings(&server_name, description.as_deref(), &tools).await {
             log::warn!("[smart] index server '{}': {}", server_name, e);
         }
@@ -149,6 +159,12 @@ pub fn on_server_updated(server_name: String, tools: Vec<Tool>, description: Opt
 
 /// Lifecycle hook: server deleted / renamed away / disabled — drop its rows.
 pub async fn remove_server_embeddings(server_name: &str) -> Result<()> {
+    // Lock INSIDE the function (not at hook call sites): every write path —
+    // lifecycle hooks, reindex_all's direct callers (boot restore, manual
+    // reindex, $smart_reindex meta tool), on_model_reloaded — serializes here,
+    // closing the reindex_all-bypasses-the-lock race. Callers must NOT hold
+    // EMBED_WRITE_LOCK themselves (tokio Mutex is not reentrant → deadlock).
+    let _g = EMBED_WRITE_LOCK.lock().await;
     if !smart_enabled().await {
         return Ok(());
     }
@@ -165,6 +181,8 @@ pub async fn save_server_embeddings(
     description: Option<&str>,
     tools: &[Tool],
 ) -> Result<()> {
+    // Lock INSIDE the function (see remove_server_embeddings comment).
+    let _g = EMBED_WRITE_LOCK.lock().await;
     if !smart_enabled().await {
         return Ok(());
     }
@@ -325,6 +343,11 @@ pub async fn reindex_all() -> Result<usize> {
         return Err(anyhow!("mv runtime not running"));
     }
     let servers = crate::services::server_service::list_all().await?;
+    let known_servers: std::collections::HashSet<String> = servers
+        .iter()
+        .map(|c| c.name.clone())
+        .chain(std::iter::once(crate::rag::service::BUILTIN_SERVER_NAME.to_string()))
+        .collect();
     let mut indexed = 0usize;
     for cfg in servers {
         if !cfg.enabled {
@@ -337,7 +360,13 @@ pub async fn reindex_all() -> Result<usize> {
             // (parity with the non-smart tools/list: connected ||
             // start_on_demand) — a hit will cold-start them via call_tool.
             Some((status, tools)) if status.connected || status.start_on_demand => tools,
-            _ => continue, // not connected and not on-demand — skip
+            _ => {
+                // Disconnected (and not on-demand): the non-smart listing
+                // surfaces nothing for this server — drop its stale rows so
+                // $smart search doesn't return uncallable tools.
+                let _ = remove_server_embeddings(&cfg.name).await;
+                continue;
+            }
         };
         if tools.is_empty() {
             let _ = remove_server_embeddings(&cfg.name).await;
@@ -380,6 +409,21 @@ pub async fn reindex_all() -> Result<usize> {
         let _ = remove_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME).await;
         crate::services::app_logger::log_to_db("warn", "[smart] reindex builtin: NO tools to index (rag disabled or filtered empty)");
     }
+    // Ghost cleanup: servers whose DB row is GONE but whose embeddings remain
+    // (their delete hook no-op'd while Smart Routing was disabled) would keep
+    // surfacing in global $smart searches as unresolvable hits. Reconcile the
+    // table against the known-server set (list_all + builtin).
+    match super::store::store_index_summary().await {
+        Ok(summary) => {
+            for (server, count) in summary {
+                if count > 0 && !known_servers.contains(&server) {
+                    log::info!("[smart] reindex: removing ghost rows for '{}' (config gone)", server);
+                    let _ = remove_server_embeddings(&server).await;
+                }
+            }
+        }
+        Err(e) => log::warn!("[smart] reindex ghost reconciliation: {}", e),
+    }
     Ok(indexed)
 }
 
@@ -391,15 +435,24 @@ pub async fn on_model_reloaded(model: String) {
     if !smart_enabled().await {
         return;
     }
-    let embed_dim = crate::mv::embed_dim().unwrap_or(0);
-    let Ok(store) = open_store(embed_dim).await else {
-        return;
-    };
-    // Drop rows from other models.
-    let stale_filter = format!("model != '{}'", model.replace('\'', "''"));
-    if let Err(e) = store.delete_where(&stale_filter).await {
-        log::warn!("[smart] purge stale rows after model reload: {}", e);
-        return;
+    // Purge under the global write lock: a lifecycle hook spawned before the
+    // reload may still be embedding with the OLD model inside replace_server —
+    // purging without the lock would race and leave old-model rows behind.
+    // The lock is RELEASED before reindex_all (each save/remove re-locks
+    // internally; holding it here would self-deadlock the non-reentrant
+    // tokio Mutex).
+    {
+        let _g = EMBED_WRITE_LOCK.lock().await;
+        let embed_dim = crate::mv::embed_dim().unwrap_or(0);
+        let Ok(store) = open_store(embed_dim).await else {
+            return;
+        };
+        // Drop rows from other models.
+        let stale_filter = format!("model != '{}'", model.replace('\'', "''"));
+        if let Err(e) = store.delete_where(&stale_filter).await {
+            log::warn!("[smart] purge stale rows after model reload: {}", e);
+            return;
+        }
     }
     match reindex_all().await {
         Ok(n) if n > 0 => log::info!("[smart] re-indexed {} server(s) after model reload", n),

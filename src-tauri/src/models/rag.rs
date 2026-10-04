@@ -425,7 +425,7 @@ pub struct DocSource {
     pub kind: String,
     /// Display label for the source node in the tree view: file = parent
     /// dir (or "文件选择" fallback), folder = chosen folder path, git =
-    /// `url @ branch`, tool = "工具创建".
+    /// `url @ branch`, tool = "MCP 工具".
     #[serde(default)]
     pub label: String,
     /// Source root: absolute dir for file/folder, clone dir for git.
@@ -471,7 +471,8 @@ pub struct RagFolderScan {
     /// 0 unless `truncated` is true.
     pub skipped_files: u32,
     pub groups: Vec<RagScanGroup>,
-    /// True iff the scan stopped early at the candidate cap (`SCAN_FILE_CAP`);
+    /// True iff the scan stopped early at the candidate cap
+    /// (`SCAN_FOLDER_FILE_CAP`);
     /// the summary shows a warning and suggests picking a smaller folder.
     pub truncated: bool,
 }

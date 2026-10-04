@@ -32,7 +32,7 @@ pub async fn get_public_config() -> Result<serde_json::Value, String> {
 /// Helper to verify that the current session belongs to an admin user.
 /// In no-login (skipAuth) mode the dashboard treats the user as an admin,
 /// so admin-gated read operations are allowed without a session token.
-async fn require_admin(session: &SessionState) -> Result<(), String> {
+pub(crate) async fn require_admin(session: &SessionState) -> Result<(), String> {
     if crate::commands::auth::is_skip_auth_enabled().await {
         return Ok(());
     }
@@ -48,12 +48,19 @@ async fn require_admin(session: &SessionState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn get_system_config() -> Result<serde_json::Value, String> {
+pub async fn get_system_config(session: State<'_, SessionState>) -> Result<serde_json::Value, String> {
+    // Admin-gated: returns the same payload as get_settings (contains
+    // smartRouting.llmProviderApiKey-class secrets); without this gate a
+    // non-admin session could read it directly.
+    require_admin(&session).await?;
     config_service::get().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn update_system_config(config: serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn update_system_config(session: State<'_, SessionState>, config: serde_json::Value) -> Result<serde_json::Value, String> {
+    // Admin-gated: without this gate any caller could write routing.skipAuth
+    // (disabling authentication) or permissions — a privilege escalation.
+    require_admin(&session).await?;
     // Capture the PREVIOUS smartRouting.enabled so a false→true transition can
     // pull the model + index up immediately (otherwise the user must restart
     // the app before Smart Routing works — the UI switch implies live effect).
@@ -113,8 +120,11 @@ pub async fn update_system_config(config: serde_json::Value) -> Result<serde_jso
 
 /// Returns the full settings payload expected by the frontend SettingsContext:
 /// { systemConfig: { routing, install, smartRouting, ... }, bearerKeys: [...] }
+/// Admin-gated: the payload includes bearerKeys (HTTP endpoint tokens) and
+/// smartRouting.llmProviderApiKey. In skipAuth mode require_admin short-circuits.
 #[tauri::command]
-pub async fn get_settings() -> Result<serde_json::Value, String> {
+pub async fn get_settings(session: State<'_, SessionState>) -> Result<serde_json::Value, String> {
+    require_admin(&session).await?;
     let system_config = config_service::get().await.map_err(|e| e.to_string())?;
     let bearer_keys = bearer_key_service::list_all().await.map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
@@ -123,12 +133,46 @@ pub async fn get_settings() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// Import servers/users from a mcp_settings.json string
+/// Import servers/users from a mcp_settings.json string.
+/// Admin-gated: the import can create users (including admins with known
+/// passwords) — without this gate any local IPC caller could escalate in
+/// multi-user (skipAuth=false) mode. Mirrors bearer_keys.rs require_admin.
 #[tauri::command]
-pub async fn import_settings(json: String) -> Result<settings_import::ImportSummary, String> {
+pub async fn import_settings(
+    session: State<'_, SessionState>,
+    json: String,
+) -> Result<settings_import::ImportSummary, String> {
+    require_admin(&session).await?;
     settings_import::import_from_json(&json)
         .await
         .map_err(|e| e.to_string())
+}
+
+type HeaderMapCfg = Option<std::collections::HashMap<String, String>>;
+
+fn is_sensitive_name(lower_k: &str) -> bool {
+    lower_k.contains("key")
+        || lower_k.contains("token")
+        || lower_k.contains("secret")
+        || lower_k.contains("password")
+        || lower_k.contains("auth")
+}
+
+/// Redact sensitive env vars / HTTP headers for export & copy.
+/// Headers routinely carry `Authorization` / `X-Api-Key`; exporting them
+/// verbatim would leak upstream credentials into the shared settings file.
+fn redact_map(map: HeaderMapCfg) -> HeaderMapCfg {
+    map.map(|env| {
+        env.iter()
+            .map(|(k, v)| {
+                if is_sensitive_name(&k.to_lowercase()) {
+                    (k.clone(), "***REDACTED***".to_string())
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect::<std::collections::HashMap<String, String>>()
+    })
 }
 
 /// Get a single server's config for copying (no admin auth required).
@@ -142,23 +186,51 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Server '{}' not found", server_name))?;
 
-    // Redact sensitive environment variables
-    let redacted_env = server.env.as_ref().map(|env| {
-        env.iter()
-            .map(|(k, v)| {
-                let lower_k = k.to_lowercase();
-                if lower_k.contains("key")
-                    || lower_k.contains("token")
-                    || lower_k.contains("secret")
-                    || lower_k.contains("password")
-                    || lower_k.contains("auth")
-                {
-                    (k.clone(), "***REDACTED***".to_string())
-                } else {
-                    (k.clone(), v.clone())
+    // Redact sensitive environment variables and headers for copy-out.
+    let redacted_env = redact_map(server.env.clone());
+    let redacted_headers = redact_map(server.headers.clone());
+    // Proxy credentials never leave the machine in plaintext exports.
+    let redacted_proxy = server.proxy.as_ref().map(|p| {
+        let mut v = serde_json::to_value(p).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(pw) = obj.get("password").and_then(|x| x.as_str()) {
+                if !pw.is_empty() {
+                    obj.insert("password".to_string(), serde_json::json!("***REDACTED***"));
                 }
-            })
-            .collect::<std::collections::HashMap<String, String>>()
+            }
+            if let Some(u) = obj.get("username").and_then(|x| x.as_str()) {
+                if !u.is_empty() {
+                    obj.insert("username".to_string(), serde_json::json!("***REDACTED***"));
+                }
+            }
+        }
+        v
+    });
+    // OpenAPI inline security credentials (header values, apiKey/bearer) are
+    // redacted the same way; the spec URL/schema stay intact so the copy can
+    // be re-imported and re-authenticated by the user.
+    let redacted_openapi = server.openapi.as_ref().and_then(|o| {
+        let mut v = serde_json::to_value(o).ok()?;
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(h) = obj.get_mut("headers").and_then(|x| x.as_object_mut()) {
+                if let Some(redacted) = redact_map(Some(
+                    h.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect::<std::collections::HashMap<String, String>>(),
+                )) {
+                    if let Ok(rv) = serde_json::to_value(redacted) {
+                        if let Some(rm) = rv.as_object() { *h = rm.clone(); }
+                    }
+                }
+            }
+            if let Some(sec) = obj.get_mut("security") {
+                if let Ok(s) = serde_json::to_value(&*sec) {
+                    let s = redact_secret_leaves(s);
+                    *sec = serde_json::from_value(s).unwrap_or(serde_json::Value::Null);
+                }
+            }
+        }
+        Some(v)
     });
 
     Ok(serde_json::json!({
@@ -171,9 +243,37 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
                 "env": redacted_env,
                 "url": server.url,
                 "disabled": !server.enabled,
+                "headers": redacted_headers,
+                "proxy": redacted_proxy,
+                "openapi": redacted_openapi,
+                "options": server.options,
+                "perSessionClient": server.per_session_client,
+                "startOnDemand": server.start_on_demand,
+                "idleTimeoutMs": server.idle_timeout_ms,
             }
         }
     }))
+}
+
+/// Recursively replace string leaves under sensitive-looking keys.
+fn redact_secret_leaves(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(k, val)| {
+                    if is_sensitive_name(&k.to_lowercase()) && val.is_string() {
+                        (k, serde_json::json!("***REDACTED***"))
+                    } else {
+                        (k, redact_secret_leaves(val))
+                    }
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.into_iter().map(redact_secret_leaves).collect())
+        }
+        other => other,
+    }
 }
 
 /// Export current server/group/system config as a JSON string (mcp_settings.json compatible)
@@ -190,23 +290,41 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
 
     let mut mcp_servers: HashMap<String, serde_json::Value> = HashMap::new();
     for s in &servers {
-        // Redact sensitive environment variables
-        let redacted_env = s.env.as_ref().map(|env| {
-            env.iter()
-                .map(|(k, v)| {
-                    let lower_k = k.to_lowercase();
-                    if lower_k.contains("key")
-                        || lower_k.contains("token")
-                        || lower_k.contains("secret")
-                        || lower_k.contains("password")
-                        || lower_k.contains("auth")
-                    {
-                        (k.clone(), "***REDACTED***".to_string())
-                    } else {
-                        (k.clone(), v.clone())
+        let redacted_env = redact_map(s.env.clone());
+        let redacted_headers = redact_map(s.headers.clone());
+        let redacted_proxy = s.proxy.as_ref().map(|p| {
+            let mut v = serde_json::to_value(p).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                if obj.get("password").and_then(|x| x.as_str()).is_some_and(|p| !p.is_empty()) {
+                    obj.insert("password".to_string(), serde_json::json!("***REDACTED***"));
+                }
+                if obj.get("username").and_then(|x| x.as_str()).is_some_and(|u| !u.is_empty()) {
+                    obj.insert("username".to_string(), serde_json::json!("***REDACTED***"));
+                }
+            }
+            v
+        });
+        let redacted_openapi = s.openapi.as_ref().and_then(|o| {
+            let mut v = serde_json::to_value(o).ok()?;
+            if let Some(obj) = v.as_object_mut() {
+                if let Some(h) = obj.get_mut("headers").and_then(|x| x.as_object_mut()) {
+                    if let Some(redacted) = redact_map(Some(
+                        h.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect::<std::collections::HashMap<String, String>>(),
+                    )) {
+                        if let Ok(rv) = serde_json::to_value(redacted) {
+                            if let Some(rm) = rv.as_object() { *h = rm.clone(); }
+                        }
                     }
-                })
-                .collect::<std::collections::HashMap<String, String>>()
+                }
+                if let Some(sec) = obj.get_mut("security") {
+                    if let Ok(sv) = serde_json::to_value(&*sec) {
+                        *sec = serde_json::from_value(redact_secret_leaves(sv)).unwrap_or(serde_json::Value::Null);
+                    }
+                }
+            }
+            Some(v)
         });
 
         mcp_servers.insert(
@@ -219,6 +337,13 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
                 "env": redacted_env,
                 "url": s.url,
                 "disabled": !s.enabled,
+                "headers": redacted_headers,
+                "proxy": redacted_proxy,
+                "openapi": redacted_openapi,
+                "options": s.options,
+                "perSessionClient": s.per_session_client,
+                "startOnDemand": s.start_on_demand,
+                "idleTimeoutMs": s.idle_timeout_ms,
             }),
         );
     }

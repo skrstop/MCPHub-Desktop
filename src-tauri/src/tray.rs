@@ -107,12 +107,12 @@ fn tray_strings(lang: &str) -> Option<TrayStrings> {
     let en_menu = en.get("menu").cloned().unwrap_or_default();
     let en_tray = en.get("tray").cloned().unwrap_or_default();
     Some(TrayStrings {
-        show: tray.get("show")?.as_str()?.to_string(),
-        check_for_updates: tray.get("checkForUpdates")?.as_str()?.to_string(),
+        show: s!(tray, en_tray, "show"),
+        check_for_updates: s!(tray, en_tray, "checkForUpdates"),
         about: s!(tray, en_tray, "about"),
         settings: s!(tray, en_tray, "settings"),
-        auto_start: tray.get("autoStart")?.as_str()?.to_string(),
-        quit: tray.get("quit")?.as_str()?.to_string(),
+        auto_start: s!(tray, en_tray, "autoStart"),
+        quit: s!(tray, en_tray, "quit"),
         m_edit: s!(menu, en_menu, "edit"),
         #[cfg(not(target_os = "macos"))]
         m_file: s!(menu, en_menu, "file"),
@@ -150,27 +150,22 @@ fn normalize_lang(lang: &str) -> Option<String> {
         .then_some(base)
 }
 
-/// Resolve the current menu language: explicit override first, then the
-/// frontend's persisted localStorage value, then English. Only meaningful at
-/// init — later switches come through `set_menu_language`.
-fn resolve_lang(app: &AppHandle<tauri::Wry>) -> String {
+static MENU_HANDLER_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Resolve the current menu language: explicit override first, then English.
+/// Only meaningful at init — later switches come through `set_menu_language`.
+fn resolve_lang(_app: &AppHandle<tauri::Wry>) -> String {
     if let Some(lang) = CURRENT_LANG.lock().unwrap().clone() {
         return lang;
     }
-    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
-    if let Some(win) = app.get_webview_window("main") {
-        let js = "localStorage.getItem('i18nextLng')".to_string();
-        let ok = win
-            .eval_with_callback(js, move |result: String| {
-                // result is the JSON-serialized return value: `"zh"` or `null`.
-                let parsed: Option<String> = serde_json::from_str(&result).unwrap_or(None);
-                let _ = tx.send(parsed.and_then(|s| normalize_lang(&s)));
-            })
-            .is_ok();
-        if ok {
-            return rx.recv().ok().flatten().unwrap_or_else(|| "en".into());
-        }
-    }
+    // NOTE: we intentionally do NOT probe localStorage from Rust here. At
+    // setup time the main window's navigation has not committed yet, so
+    // eval_with_callback takes wry's pending-scripts branch which DROPS the
+    // callback — rx.recv() always returns Err and the probe silently returned
+    // "en" regardless. The frontend's startup `set_menu_language` call covers
+    // this (it fires once i18n is ready and rebuilds the menus with the real
+    // persisted language); probing here would only block the main thread.
     "en".into()
 }
 
@@ -194,14 +189,23 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     // The URL can originate from UNTRUSTED content (tool output rendered as
     // markdown in the frontend, whose target=_blank links route here). On
     // Windows the `cmd /C start` path re-parses the command line, so a URL
-    // containing `&`/`|`/`>` etc. would execute injected commands. Only
-    // http(s) URLs are meaningful for a browser, and shell metacharacters /
-    // quotes are never valid inside them — reject everything else.
+    // containing `&`/`|`/`>` etc. would execute injected commands — Windows
+    // keeps the strict metacharacter ban. On macOS/Linux the URL is passed as
+    // a SINGLE argv element to `open`/`xdg-open` (no shell re-parse), so `&`,
+    // `%` and query strings are harmless — rejecting them broke every normal
+    // link with a query string or percent-encoding (review round 8,
+    // 2026-10-04). Quotes/backticks/command substitution stay banned on all
+    // platforms (defense in depth against helper-script wrappers).
     let trimmed = url.trim();
     let is_http = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+    #[cfg(target_os = "windows")]
     let has_meta = trimmed
         .chars()
         .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '"' | '\'' | '%' | '\0'));
+    #[cfg(not(target_os = "windows"))]
+    let has_meta = trimmed
+        .chars()
+        .any(|c| matches!(c, '|' | '<' | '>' | '"' | '\'' | '`' | '$' | '\0'));
     if !is_http || has_meta {
         return Err(format!("refused to open non-http URL: {url}"));
     }
@@ -212,7 +216,11 @@ pub fn open_external_url(url: String) -> Result<(), String> {
         }
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn()
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "start", "", &url]);
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            c.spawn()
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -347,10 +355,12 @@ pub fn rebuild_menus(app: &AppHandle<tauri::Wry>) -> tauri::Result<()> {
 
     // Global menu-event handler — covers the native app menu (macOS top-left
     // "Check for Updates") in addition to the tray handler registered above.
-    // Safe to register repeatedly: each call adds a listener, but
-    // rebuild_menus only runs at init / language switch, so at most a
-    // handful of identical handlers exist.
-    app.on_menu_event(|app, event| on_menu_action(app, event.id.as_ref()));
+    // Register EXACTLY ONCE: AppHandle::on_menu_event APPENDS a listener, so
+    // re-registering on every rebuild_menus (language switch) would fire the
+    // same action N times per click (duplicate update checks / dialog stacks).
+    if !MENU_HANDLER_REGISTERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        app.on_menu_event(|app, event| on_menu_action(app, event.id.as_ref()));
+    }
 
     Ok(())
 }
@@ -423,7 +433,12 @@ fn build_app_menu(
                 &PredefinedMenuItem::hide(app, Some(&s.m_hide))?,
                 &PredefinedMenuItem::hide_others(app, Some(&s.m_hide_others))?,
                 &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::quit(app, Some(&s.m_quit_app))?,
+                // Custom "quit" (NOT PredefinedMenuItem::quit): muda's
+                // predefined quit invokes terminate:/PostQuitMessage directly
+                // and never emits a MenuEvent, bypassing on_menu_action's
+                // disconnect_all — orphaning every MCP child process. The
+                // custom item routes through the same handler as the tray.
+                &MenuItem::with_id(app, "quit", &s.m_quit_app, true, None::<&str>)?,
             ],
         )?;
         let view_menu = Submenu::with_items(
@@ -445,7 +460,9 @@ fn build_app_menu(
                 &settings,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::close_window(app, Some(&s.m_close_window))?,
-                &PredefinedMenuItem::quit(app, Some(&s.m_quit_app))?,
+                // Custom "quit" — see the macOS branch comment (predefined
+                // quit bypasses on_menu_action and orphans MCP children).
+                &MenuItem::with_id(app, "quit", &s.m_quit_app, true, None::<&str>)?,
             ],
         )?;
         let help_menu = Submenu::with_id_and_items(

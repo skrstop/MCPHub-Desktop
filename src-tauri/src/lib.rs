@@ -252,20 +252,31 @@ pub fn run() {
             // installer launch) - the sender would drop and recv() return None.
             // Handle both the Err case and the task-panic case explicitly so the
             // reason lands in crash.log instead of vanishing.
-            match rx.recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    write_crash_log("fatal", &format!("Database initialization failed: {e}"));
+            // A timeout guard turns a hung init (file lock held by AV scan /
+            // network disk) into a diagnosable crash-log exit instead of a
+            // window that never appears with no trace at all.
+            const DB_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+            let recv_res = rx.recv_timeout(DB_INIT_TIMEOUT);
+            match recv_res {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    write_crash_log(
+                        "fatal",
+                        "Database initialization timed out after 120s (file lock held by another process / slow disk?).",
+                    );
                     std::process::exit(1);
                 }
-                Err(_) => {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // The db::initialize task panicked; the panic hook already
                     // wrote the backtrace to crash.log.
                     write_crash_log("fatal", "Database initialization task panicked (see panic entry above).");
                     std::process::exit(1);
                 }
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    write_crash_log("fatal", &format!("Database initialization failed: {e}"));
+                    std::process::exit(1);
+                }
             }
-
             // Initialize database log writer (+ file mirror under <app_data_dir>/logs/)
             services::app_logger::init(app.path().app_data_dir().ok());
             services::app_logger::log_to_db("info", "Application started, database initialized");
@@ -514,6 +525,7 @@ pub fn run() {
             // Registry proxy commands
             commands::registry::list_registry_servers,
             commands::registry::get_registry_server_versions,
+            commands::registry::get_registry_server_version,
             // Cloud/MCPRouter commands
             commands::cloud::list_cloud_servers,
             commands::cloud::get_cloud_server_tools,

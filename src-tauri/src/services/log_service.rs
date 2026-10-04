@@ -19,7 +19,10 @@ pub async fn add_log(level: &str, message: &str, server_name: Option<&str>) -> R
     .execute(&mut *tx)
     .await?;
     // FTS 同步（§4.3 铁律：同事务）。高频写路径，tokenize 单条消息开销 <0.1ms。
-    crate::services::fts_service::sync_upsert_tx(
+    // Insert-only fast path: `id` is a fresh UUID — the upsert variant would
+    // full-scan the UNINDEXED ref_id column on every log write (O(N) with log
+    // volume; logging slowing down logging).
+    crate::services::fts_service::sync_insert_tx(
         &mut tx,
         crate::services::fts_service::FtsTable::AppLog,
         &id,
@@ -32,8 +35,8 @@ pub async fn add_log(level: &str, message: &str, server_name: Option<&str>) -> R
 
 pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
     let page = q.page.unwrap_or(1).max(1);
-    let page_size = q.page_size.unwrap_or(50).min(200) as i64;
-    let offset = ((page - 1) as i64) * page_size;
+    let page_size = q.page_size.unwrap_or(50).clamp(1, 200) as i64;
+    let offset = (((page - 1) as i64) * page_size).max(0);
 
     // 全文搜索（F1d）：FTS5 中/英/拼音分词 + rank 排序；空关键词/空表/Err 降级原全量路径
     let search_key = q.search.as_deref().map(str::trim).unwrap_or("");
@@ -52,40 +55,58 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
                 // 回表 + level/server_name 过滤（原生 created_at DESC 序）
                 // 条件必须拼在 ORDER BY 之前（此前 ORDER BY 先入队，
                 // 再追加 AND 生成 "... ORDER BY created_at DESC AND level = ?" 非法 SQL）。
-                let mut qb = sqlx::QueryBuilder::new(
-                    "SELECT id, level, message, server_name, created_at FROM app_log WHERE id IN (",
-                );
-                let mut first = true;
-                for id in counts.keys() {
-                    qb.push(if first { "" } else { ", " });
-                    qb.push_bind(id.clone());
-                    first = false;
-                }
-                qb.push(")");
-                if let Some(level) = &q.level {
-                    qb.push(" AND level = ").push_bind(level);
-                }
-                if let Some(server) = &q.server_name {
-                    qb.push(" AND server_name = ").push_bind(server);
-                }
-                qb.push(" ORDER BY created_at DESC");
-                let rows = qb.build().fetch_all(db::pool()).await?;
-                let mut entries: Vec<LogEntry> = rows
-                    .into_iter()
-                    .map(|r| {
-                        Ok(LogEntry {
-                            id: r.try_get("id")?,
-                            level: r.try_get("level")?,
-                            message: r.try_get("message")?,
-                            server_name: r.try_get("server_name")?,
-                            created_at: r.try_get("created_at")?,
+                // 分块 bind：SQLITE_MAX_VARIABLE_NUMBER 老上限 999，
+                // 全量一次 bind 超限会报 too many parameters。
+                let ids: Vec<&String> = counts.keys().collect();
+                let mut ranked: Vec<LogEntry> = Vec::new();
+                for chunk in ids.chunks(500) {
+                    let mut qb = sqlx::QueryBuilder::new(
+                        "SELECT id, level, message, server_name, created_at FROM app_log WHERE id IN (",
+                    );
+                    let mut first = true;
+                    for id in chunk {
+                        qb.push(if first { "" } else { ", " });
+                        qb.push_bind((*id).clone());
+                        first = false;
+                    }
+                    qb.push(")");
+                    if let Some(level) = &q.level {
+                        qb.push(" AND level = ").push_bind(level);
+                    }
+                    if let Some(server) = &q.server_name {
+                        qb.push(" AND server_name = ").push_bind(server);
+                    }
+                    qb.push(" ORDER BY created_at DESC");
+                    let rows = qb.build().fetch_all(db::pool()).await?;
+                    let entries: Vec<LogEntry> = rows
+                        .into_iter()
+                        .map(|r| {
+                            Ok(LogEntry {
+                                id: r.try_get("id")?,
+                                level: r.try_get("level")?,
+                                message: r.try_get("message")?,
+                                server_name: r.try_get("server_name")?,
+                                created_at: r.try_get("created_at")?,
+                            })
                         })
-                    })
-                    .collect::<Result<_>>()?;
-                // 相关度第一优先（稳定排序：同命中数保持 created_at DESC）
-                entries.sort_by_key(|e| std::cmp::Reverse(counts.get(&e.id).copied().unwrap_or(0)));
+                        .collect::<Result<_>>()?;
+                    ranked.extend(entries);
+                }
+                // Relevance first, then created_at DESC as an explicit
+                // tiebreak. The chunked back-fill does NOT preserve a global
+                // created_at order across chunks (ids come from a HashMap,
+                // chunk-internal ORDER BY only), so the tiebreak must be in
+                // the sort key — otherwise same-score entries paginate in
+                // HashMap order (unstable across identical queries).
+                ranked.sort_by(|a, b| {
+                    let ca = counts.get(&a.id).copied().unwrap_or(0);
+                    let cb = counts.get(&b.id).copied().unwrap_or(0);
+                    cb.cmp(&ca)
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                        .then_with(|| b.id.cmp(&a.id))
+                });
                 let start = (offset.max(0)) as usize;
-                return Ok(entries
+                return Ok(ranked
                     .into_iter()
                     .skip(start)
                     .take(page_size as usize)
@@ -99,15 +120,15 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
                 .unwrap_or(false) =>
             {
                 // 空表兜底（启动对账前）：走原 LIKE
-                return like_search_logs(page_size, offset, search_key).await;
+                return like_search_logs(page_size, offset, search_key, q.level.as_ref(), q.server_name.as_ref()).await;
             }
             Ok(_) => {
                 // 零结果降级 LIKE：FTS 词前缀查不到的 CJK 内部子串仍可命中
-                return like_search_logs(page_size, offset, search_key).await;
+                return like_search_logs(page_size, offset, search_key, q.level.as_ref(), q.server_name.as_ref()).await;
             }
             Err(e) => {
                 log::warn!("[fts] search app_log failed, fallback to LIKE: {e}");
-                return like_search_logs(page_size, offset, search_key).await;
+                return like_search_logs(page_size, offset, search_key, q.level.as_ref(), q.server_name.as_ref()).await;
             }
         }
     }
@@ -134,22 +155,34 @@ pub async fn query_logs(q: &LogQuery) -> Result<Vec<LogEntry>> {
         .collect()
 }
 
-/// FTS 降级路径：message LIKE（§4.4 Err/空表兜底）
+/// FTS 降级路径：message LIKE（§4.4 Err/空表兜底）。level/server_name 过滤必须
+/// 与 FTS 路径同语义应用——降级丢弃过滤器会让「按级别筛选 + 搜索」返回混级结果。
 async fn like_search_logs(
     page_size: i64,
     offset: i64,
     search_key: &str,
+    level: Option<&String>,
+    server_name: Option<&String>,
 ) -> Result<Vec<LogEntry>> {
     let pattern = format!(
         "%{}%",
-        search_key.to_lowercase().replace('%', "\\%").replace('_', "\\_")
+        search_key.to_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
     );
-    let rows = sqlx::query(
-        "SELECT id, level, message, server_name, created_at FROM app_log
-         WHERE LOWER(message) LIKE ? ESCAPE '\\'
-         ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    )
-    .bind(&pattern)
+    // Build the query with optional filters:
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, level, message, server_name, created_at FROM app_log WHERE LOWER(message) LIKE ",
+    );
+    qb.push_bind(pattern.clone());
+    qb.push(" ESCAPE '\\'");
+    if let Some(l) = level {
+        qb.push(" AND level = ").push_bind(l.clone());
+    }
+    if let Some(srv) = server_name {
+        qb.push(" AND server_name = ").push_bind(srv.clone());
+    }
+    qb.push(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
+    let rows = qb
+    .build()
     .bind(page_size)
     .bind(offset)
     .fetch_all(db::pool())
@@ -273,8 +306,8 @@ fn row_to_activity(r: &sqlx::sqlite::SqliteRow) -> Result<ActivityEntry> {
 
 pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     let page = q.page.unwrap_or(1).max(1);
-    let page_size = q.page_size.unwrap_or(20).min(200) as i64;
-    let offset = ((page - 1) as i64) * page_size;
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 200) as i64;
+    let offset = (((page - 1) as i64) * page_size).max(0);
 
     // Build a dynamic WHERE clause
     let mut conditions: Vec<&'static str> = Vec::new();
@@ -285,7 +318,7 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
         conditions.push("status = ?");
     }
     if q.tool.is_some() {
-        conditions.push("tool LIKE ?");
+        conditions.push("tool LIKE ? ESCAPE '\\'");
     }
     if q.group_name.is_some() {
         conditions.push("group_name = ?");
@@ -304,7 +337,13 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     let mut count_q = sqlx::query(sqlx::AssertSqlSafe(&*count_sql));
     if let Some(ref s) = q.server { count_q = count_q.bind(s); }
     if let Some(ref s) = q.status { count_q = count_q.bind(s); }
-    if let Some(ref t) = q.tool { count_q = count_q.bind(format!("%{}%", t)); }
+    if let Some(ref t) = q.tool {
+        // Escape LIKE wildcards (tool names commonly contain `_`)
+        count_q = count_q.bind(format!(
+            "%{}%",
+            t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        ));
+    }
     if let Some(ref g) = q.group_name { count_q = count_q.bind(g); }
     if let Some(ref k) = q.key_name { count_q = count_q.bind(k); }
     let total: i64 = count_q.fetch_one(db::pool()).await?.try_get("cnt")?;
@@ -319,7 +358,12 @@ pub async fn query_tool_activities(q: &ActivityQuery) -> Result<ActivityPage> {
     let mut data_q = sqlx::query(sqlx::AssertSqlSafe(&*data_sql));
     if let Some(ref s) = q.server { data_q = data_q.bind(s); }
     if let Some(ref s) = q.status { data_q = data_q.bind(s); }
-    if let Some(ref t) = q.tool { data_q = data_q.bind(format!("%{}%", t)); }
+    if let Some(ref t) = q.tool {
+        data_q = data_q.bind(format!(
+            "%{}%",
+            t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        ));
+    }
     if let Some(ref g) = q.group_name { data_q = data_q.bind(g); }
     if let Some(ref k) = q.key_name { data_q = data_q.bind(k); }
     data_q = data_q.bind(page_size).bind(offset);
@@ -391,11 +435,11 @@ pub async fn get_activity_filter_options(
         (
             format!(
                 "SELECT COUNT(*) FROM (SELECT DISTINCT {col} AS v FROM activity_log \
-                 WHERE {col} IS NOT NULL AND {col} != '' AND LOWER({col}) LIKE ?)"
+                 WHERE {col} IS NOT NULL AND {col} != '' AND LOWER({col}) LIKE ? ESCAPE '\\')"
             ),
             format!(
                 "SELECT DISTINCT {col} AS v FROM activity_log \
-                 WHERE {col} IS NOT NULL AND {col} != '' AND LOWER({col}) LIKE ? \
+                 WHERE {col} IS NOT NULL AND {col} != '' AND LOWER({col}) LIKE ? ESCAPE '\\' \
                  ORDER BY v LIMIT ? OFFSET ?"
             ),
         )
@@ -406,7 +450,7 @@ pub async fn get_activity_filter_options(
             .fetch_one(db::pool())
             .await?
     } else {
-        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        let pattern = format!("%{}%", key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         sqlx::query_scalar(sqlx::AssertSqlSafe(&*count_sql))
             .bind(&pattern)
             .fetch_one(db::pool())
@@ -420,7 +464,7 @@ pub async fn get_activity_filter_options(
             .fetch_all(db::pool())
             .await?
     } else {
-        let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+        let pattern = format!("%{}%", key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         sqlx::query(sqlx::AssertSqlSafe(&*data_sql))
             .bind(&pattern)
             .bind(page_size as i64)
@@ -453,7 +497,7 @@ pub async fn get_activity_stats(
     let mut conditions: Vec<String> = Vec::new();
     if server.is_some() { conditions.push("server = ?".into()); }
     if status.is_some() { conditions.push("status = ?".into()); }
-    if tool.is_some() { conditions.push("tool LIKE ?".into()); }
+    if tool.is_some() { conditions.push("tool LIKE ? ESCAPE '\\'".into()); }
     if group_name.is_some() { conditions.push("group_name = ?".into()); }
     if key_name.is_some() { conditions.push("key_name = ?".into()); }
     let where_clause = if conditions.is_empty() {
@@ -474,7 +518,9 @@ pub async fn get_activity_stats(
     let mut q = sqlx::query(sqlx::AssertSqlSafe(&*sql));
     if let Some(s) = server { q = q.bind(s); }
     if let Some(s) = status { q = q.bind(s); }
-    if let Some(t) = tool { q = q.bind(format!("%{}%", t)); }
+    if let Some(t) = tool {
+        q = q.bind(format!("%{}%", t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+    }
     if let Some(g) = group_name { q = q.bind(g); }
     if let Some(k) = key_name { q = q.bind(k); }
     let row = q.fetch_one(db::pool()).await?;
@@ -511,6 +557,8 @@ pub async fn clear_activities() -> Result<i64> {
 /// Delete activity log entries older than `days_old` days and vacuum.
 /// Returns the number of deleted rows and the cutoff date string.
 pub async fn cleanup_by_days(days_old: i64) -> Result<(i64, String)> {
+    // Clamp：负数会把 cutoff 推到未来 → 清空全部日志；上限防极端值
+    let days_old = days_old.clamp(1, 3650);
     let cutoff = format!("datetime('now', 'localtime', '-{} days')", days_old);
     let sql = format!("DELETE FROM activity_log WHERE created_at < {}", cutoff);
     let result = sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(db::pool()).await?;
@@ -609,7 +657,11 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
     let stale_ids: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(&*ids_sql))
         .fetch_all(db::pool())
         .await
-        .unwrap_or_default();
+        // Propagate: swallowing this error would DELETE source rows while
+        // leaving their fts_app_log counterparts forever (permanent FTS
+        // orphans) — the exact §4.3 violation this two-step delete exists
+        // to prevent. A failed cleanup retries on the next cycle instead.
+        ?;
 
     let mut tx = db::pool().begin().await?;
     let app_log_sql = format!(
@@ -623,15 +675,18 @@ pub async fn cleanup_old_logs() -> Result<(i64, i64, bool, u64, u64)> {
 
     if !stale_ids.is_empty() {
         // FTS5 无范围删除：rowid IN (SELECT rowid WHERE ref_id IN (...ids...))
-        let mut qb = sqlx::QueryBuilder::new(
-            "DELETE FROM fts_app_log WHERE rowid IN (SELECT rowid FROM fts_app_log WHERE ref_id IN (",
-        );
-        let mut sep = qb.separated(", ");
-        for id in &stale_ids {
-            sep.push_bind(id);
+        // 分批删除：SQLite 变量上限 32766，极端积压下一次性 bind 可能超限
+        for chunk in stale_ids.chunks(1000) {
+            let mut qb = sqlx::QueryBuilder::new(
+                "DELETE FROM fts_app_log WHERE rowid IN (SELECT rowid FROM fts_app_log WHERE ref_id IN (",
+            );
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(id);
+            }
+            qb.push("))");
+            qb.build().execute(&mut *tx).await?;
         }
-        qb.push("))");
-        qb.build().execute(&mut *tx).await?;
     }
     tx.commit().await?;
 

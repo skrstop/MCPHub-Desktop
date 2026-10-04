@@ -11,8 +11,10 @@
 //!   ① downstream-driven retry: request `_meta` carrying
 //!   `io.modelcontextprotocol/inputResponses` + `requestState` is applied to
 //!   the upstream params verbatim (`call_tool_once`, no local retry);
-//!   ② hub-driven retry: otherwise `Peer::call_tool` natively fulfils
-//!   input requests and retries (bounded rounds).
+//!   ② hub-driven retry: `Peer::call_tool` drives the input_required
+//!   round-trips with bounded retries. NOTE: our client handler is empty, so
+//!   an upstream input request (elicitation/sampling) is DENIED and the call
+//!   converges to an error after the bounded rounds — it is not fulfilled.
 //! - **Tasks** (SEP-2663): a `CallToolResponse::Task` is polled via
 //!   `tasks/get` to a terminal state (old `finish_modern_call` behaviour).
 //! - **raw_meta passthrough** (A2/A9): upstream `_meta` travels back to the
@@ -105,18 +107,36 @@ impl RmcpHttpTransport {
             .service
             .as_ref()
             .ok_or_else(|| anyhow!("[{}] not connected", self.server_name))?;
-        let poll_interval = poll_interval_ms.clamp(200, u64::MAX);
+        let poll_interval = poll_interval_ms.clamp(200, 30_000);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut transient_failures = 0u32;
         loop {
+            tokio::time::sleep(std::time::Duration::from_millis(poll_interval)).await;
+            // Recheck deadline AFTER the sleep — a clamped 30s sleep must
+            // not overshoot the deadline check.
             if std::time::Instant::now() > deadline {
                 return Err(anyhow!("modern task '{}' poll timed out (10min)", task_id));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(poll_interval)).await;
-            let snap = service
+            // Bounded tolerance for transient network errors: a single
+            // blip must not discard a task that is still running upstream
+            // (review round 9). Three consecutive failures = real failure.
+            let snap = match service
                 .peer()
                 .get_task(GetTaskParams::new(task_id.clone()))
                 .await
-                .map_err(|e| anyhow!("tasks/get failed: {}", e))?;
+            {
+                Ok(s) => {
+                    transient_failures = 0;
+                    s
+                }
+                Err(e) => {
+                    transient_failures += 1;
+                    if transient_failures >= 3 {
+                        return Err(anyhow!("tasks/get failed: {}", e));
+                    }
+                    continue;
+                }
+            };
             match &snap.task.payload {
                 rmcp::model::TaskPayload::Working => continue,
                 rmcp::model::TaskPayload::InputRequired { input_requests } => {
@@ -125,6 +145,16 @@ impl RmcpHttpTransport {
                         obj.insert(
                             "io.modelcontextprotocol/inputRequests".to_string(),
                             serde_json::to_value(input_requests).unwrap_or(json!([])),
+                        );
+                        // GetTaskResult serializes resultType:"complete"
+                        // (flattened DetailedTask); override it so the bridge's
+                        // to_call_response MRTR gate
+                        // (resultType == "input_required") fires and the
+                        // response is promoted to InputRequired for 2026
+                        // clients — same as the direct path below.
+                        obj.insert(
+                            "io.modelcontextprotocol/resultType".to_string(),
+                            json!("input_required"),
                         );
                     }
                     return Ok(ToolCallResult {
@@ -234,10 +264,20 @@ impl McpTransport for RmcpHttpTransport {
         })?;
 
         // Detect modern (discover) vs legacy (initialize) from peer info.
-        self.modern = service.peer().peer_info().is_some();
+        // `is_some()` is always true in rmcp 3.4.1 (both lifecycles set peer
+        // info) — discriminate by the negotiated protocol version instead.
+        self.modern = service
+            .peer_info()
+            .map(|info| info.protocol_version == rmcp::model::ProtocolVersion::V_2026_07_28)
+            .unwrap_or(false);
         if let Some(info) = service.peer_info() {
-            self.server_version =
-                Some(info.server_info.as_ref().map(|i| i.version.clone()).unwrap_or_default());
+            // Empty version string → None so the update check doesn't treat
+            // "unknown" as a real recorded version.
+            self.server_version = info
+                .server_info
+                .as_ref()
+                .map(|i| i.version.clone())
+                .filter(|v| !v.is_empty());
         }
 
         let mode = if self.modern { "2026 modern (discover, stateless)" } else { "legacy initialize" };
@@ -258,7 +298,12 @@ impl McpTransport for RmcpHttpTransport {
     async fn disconnect(&mut self) -> Result<()> {
         self.connected = false;
         if let Some(service) = self.service.take() {
-            service.cancel().await.ok();
+            // Bounded like the stdio transport: a wedged service (streaming
+            // response / half-closed TCP) must not stall disconnect forever —
+            // disconnect holds the per-server connect lock, so an unbounded
+            // cancel would block every subsequent lifecycle op for this
+            // server (review round 8, 2026-10-04).
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), service.cancel()).await;
         }
         let msg = format!("[{}] HTTP transport disconnected (rmcp http)", self.server_name);
         log::info!("{}", msg);
@@ -279,9 +324,27 @@ impl McpTransport for RmcpHttpTransport {
             .service
             .as_ref()
             .ok_or_else(|| anyhow!("[{}] not connected", self.server_name))?;
-        let result = service.peer().list_tools(None).await?;
-        Ok(result
-            .tools
+        // Follow pagination cursors so servers using a small page size are not
+        // silently truncated to their first page. Guarded: a buggy/malicious
+        // server may echo the same cursor forever (or never return None) —
+        // cap pages and break on cursor repetition instead of looping
+        // unboundedly (on_demand's connect path has no outer timeout).
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let params = cursor
+                .clone()
+                .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
+            let result = service.peer().list_tools(params).await?;
+            all.extend(result.tools);
+            match result.next_cursor {
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                // None (done) or repeated/absent-progress cursor — stop.
+                _ => break,
+            }
+        }
+        Ok(all
             .into_iter()
             .map(|t| Tool {
                 name: t.name.to_string(),
@@ -338,24 +401,19 @@ impl McpTransport for RmcpHttpTransport {
             params.meta = request_meta_from_value(Some(meta.clone()));
         }
 
-        // Hub-driven path: Peer::call_tool natively fulfils input_required
-        // and retries (bounded rounds), mirrors the old A2 behaviour.
-        let result = service
+        // Hub-driven path: call_tool_once + map_call_response_once reproduces
+        // the old A1/A2 contract exactly — the SDK's Peer::call_tool (MRTR
+        // helper) errors on CallToolResponse::Task (service/client.rs:
+        // call_tool_with_mrtr_max_rounds → UnexpectedResponse), but a 2026
+        // upstream MAY answer a plain tools/call with a task (SEP-2663
+        // server's choice). map_call_response_once polls tasks to terminal
+        // and promotes InputRequired via raw_meta.
+        let response = service
             .peer()
-            .call_tool(params)
+            .call_tool_once(params)
             .await
             .map_err(|e| anyhow!("tools/call failed: {}", e))?;
-        let structured_content = result.structured_content.clone().filter(|v| !v.is_null());
-        Ok(ToolCallResult {
-            content: result
-                .content
-                .iter()
-                .filter_map(|c| serde_json::to_value(c).ok())
-                .collect(),
-            is_error: result.is_error.unwrap_or(false),
-            structured_content,
-            raw_meta: result.meta.as_ref().and_then(|m| serde_json::to_value(m).ok()),
-        })
+        self.map_call_response_once(response).await
     }
 }
 

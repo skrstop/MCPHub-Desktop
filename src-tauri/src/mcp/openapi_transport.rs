@@ -82,15 +82,37 @@ impl OpenapiTransport {
         }
 
         if let Some(ref url) = self.config.spec_url {
-            // Fetch spec from URL
+            // Fetch spec from URL (bounded: 30s total + 32MB body cap).
             log::info!("[{}] Fetching OpenAPI spec from URL: {}", self.server_name, url);
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
             let mut req = client.get(url);
 
-            // Add any configured headers
+            // Add any configured headers (values redacted: they routinely
+            // carry Authorization/apiKey and app_logger persists info/debug
+            // lines into the log database)
             for (k, v) in &self.config.headers {
-                log::debug!("[{}] Adding header: {}={}", self.server_name, k, v);
-                req = req.header(k, v);
+                // Validate name/value: RequestBuilder::header PANICS on invalid
+                // HeaderName/HeaderValue (non-ASCII, control chars) — a bad
+                // user config would crash the connect path. Same guard as
+                // build_default_headers.
+                let name = reqwest::header::HeaderName::try_from(k.as_str());
+                let value = reqwest::header::HeaderValue::try_from(v.as_str());
+                let (name, value) = match (name, value) {
+                    (Ok(n), Ok(val)) => (n, val),
+                    (Err(e), _) => {
+                        log::warn!("[{}] Skipping invalid spec-fetch header name '{}': {}", self.server_name, k, e);
+                        continue;
+                    }
+                    (_, Err(e)) => {
+                        log::warn!("[{}] Skipping invalid spec-fetch header '{}': {}", self.server_name, k, e);
+                        continue;
+                    }
+                };
+                log::debug!("[{}] Adding header: {} (len={})", self.server_name, k, v.len());
+                req = req.header(name, value);
             }
 
             let resp = req.send().await.map_err(|e| {
@@ -107,7 +129,37 @@ impl OpenapiTransport {
                     resp.status()
                 ));
             }
-            let spec: Value = resp.json().await?;
+
+            // Cap the download size: specs come from user-configured URLs —
+            // an unbounded body read is a memory-exhaustion hazard.
+            const MAX_SPEC_BYTES: usize = 32 * 1024 * 1024;
+            if let Some(len) = resp.content_length() {
+                if len as usize > MAX_SPEC_BYTES {
+                    return Err(anyhow!(
+                        "OpenAPI spec from {} exceeds the {}MB size limit ({} bytes)",
+                        url,
+                        MAX_SPEC_BYTES / (1024 * 1024),
+                        len
+                    ));
+                }
+            }
+            // Stream with a hard cap: `bytes()` buffers the WHOLE body before
+            // the length check runs — a chunked (no content-length) malicious
+            // server could allocate gigabytes inside the 30s timeout window.
+            let mut body: Vec<u8> = Vec::new();
+            let mut stream = resp;
+            while let Some(chunk) = stream.chunk().await? {
+                if body.len() + chunk.len() > MAX_SPEC_BYTES {
+                    return Err(anyhow!(
+                        "OpenAPI spec from {} exceeds the {}MB size limit (>{} bytes streamed)",
+                        url,
+                        MAX_SPEC_BYTES / (1024 * 1024),
+                        body.len() + chunk.len()
+                    ));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let spec: Value = serde_json::from_slice(&body)?;
             log::info!("[{}] OpenAPI spec fetched successfully", self.server_name);
             return Ok(spec);
         }
@@ -127,7 +179,7 @@ impl OpenapiTransport {
     /// mismatch) and `config.security` was dead config (logged, never used).
     /// Query/cookie-placed apiKey cannot ride default headers; those fall back
     /// to whatever the spec's security schemes define.
-    fn build_default_headers(&self) -> reqwest::header::HeaderMap {
+    fn build_default_headers(&self) -> anyhow::Result<reqwest::header::HeaderMap> {
         let mut map = reqwest::header::HeaderMap::new();
         let mut insert = |name: &str, value: &str| {
             if let (Ok(n), Ok(v)) = (
@@ -146,34 +198,58 @@ impl OpenapiTransport {
             insert(k, v);
         }
         if let Some(sec) = &self.config.security {
-            match sec {
-                OpenApiSecurity::ApiKey { name, location, value } => {
-                    if location.eq_ignore_ascii_case("header") {
-                        insert(name, value);
-                    } else {
-                        log::warn!(
-                            "[{}] apiKey location '{}' cannot be applied via default headers; relying on spec security schemes",
-                            self.server_name, location
-                        );
+            // Malformed config fallback (pool.rs): a security variant with all
+            // empty fields means "no usable credentials" — skip instead of
+            // emitting empty header values that would mask spec-level schemes.
+            let malformed = match sec {
+                OpenApiSecurity::ApiKey { name, value, .. } => name.is_empty() && value.is_empty(),
+                OpenApiSecurity::Http { credentials, .. } => credentials.is_empty(),
+                OpenApiSecurity::OAuth2 { token } => token.is_empty(),
+                OpenApiSecurity::OpenIdConnect { token, .. } => token.is_empty(),
+            };
+            if malformed {
+                log::warn!(
+                    "[{}] security config malformed (missing payload); skipping auth headers, relying on spec security schemes",
+                    self.server_name
+                );
+            } else {
+                match sec {
+                    OpenApiSecurity::ApiKey { name, location, value } => {
+                        if location.eq_ignore_ascii_case("header") {
+                            insert(name, value);
+                        } else {
+                            // rmcp-openapi 0.32 NEVER applies spec securitySchemes
+                            // to outgoing requests (verified in vendored source:
+                            // only default_headers + Authorization passthrough
+                            // inject credentials). The old "relying on spec
+                            // security schemes" log pointed users at a fallback
+                            // that does not exist — every call went out
+                            // unauthenticated and failed 401 downstream. Fail
+                            // loudly at connect instead of silently unauthenticated.
+                            return Err(anyhow!(
+                                "server '{}': apiKey security scheme with location '{}' is not supported (only 'header'); configure the credential as a header or add it to the tool's parameters explicitly",
+                                self.server_name, location
+                            ));
+                        }
                     }
-                }
-                OpenApiSecurity::Http { scheme, credentials } => {
-                    let v = if scheme.eq_ignore_ascii_case("basic") {
-                        format!("Basic {}", credentials)
-                    } else {
-                        format!("Bearer {}", credentials)
-                    };
-                    insert("Authorization", &v);
-                }
-                OpenApiSecurity::OAuth2 { token } => {
-                    insert("Authorization", &format!("Bearer {}", token));
-                }
-                OpenApiSecurity::OpenIdConnect { token, .. } => {
-                    insert("Authorization", &format!("Bearer {}", token));
+                    OpenApiSecurity::Http { scheme, credentials } => {
+                        let v = if scheme.eq_ignore_ascii_case("basic") {
+                            format!("Basic {}", credentials)
+                        } else {
+                            format!("Bearer {}", credentials)
+                        };
+                        insert("Authorization", &v);
+                    }
+                    OpenApiSecurity::OAuth2 { token } => {
+                        insert("Authorization", &format!("Bearer {}", token));
+                    }
+                    OpenApiSecurity::OpenIdConnect { token, .. } => {
+                        insert("Authorization", &format!("Bearer {}", token));
+                    }
                 }
             }
         }
-        map
+        Ok(map)
     }
 
     /// Extract base URL from the OpenAPI spec.
@@ -255,11 +331,17 @@ impl McpTransport for OpenapiTransport {
             self.config.spec_schema.as_ref().map(|_| "<inline>")
         );
         log::info!(
-            "[{}] OpenAPI config: version={}, headers={:?}, security={:?}",
+            "[{}] OpenAPI config: version={}, headers={}, security={}",
             self.server_name,
             self.config.version,
-            self.config.headers,
-            self.config.security
+            format!("{} header(s) [values redacted]", self.config.headers.len()),
+            self.config.security.as_ref().map_or("none".to_string(), |s| match s {
+                OpenApiSecurity::ApiKey { .. } => "apiKey",
+                OpenApiSecurity::Http { .. } => "http",
+                OpenApiSecurity::OAuth2 { .. } => "oauth2",
+                OpenApiSecurity::OpenIdConnect { .. } => "openIdConnect",
+            }
+            .to_string())
         );
 
         // 1. Fetch the spec
@@ -278,7 +360,7 @@ impl McpTransport for OpenapiTransport {
         // (apiKey-in-header / bearer / basic / oauth2 / oidc) + user headers
         // apply to every API call. Previously default_headers was forced to
         // None (version-mismatch workaround) and `config.security` was dead.
-        let default_headers = self.build_default_headers();
+        let default_headers = self.build_default_headers()?;
         log::info!(
             "[{}] outbound default headers: {} entrie(s), security applied: {}",
             self.server_name,
@@ -296,9 +378,15 @@ impl McpTransport for OpenapiTransport {
             false, // insecure
         );
 
-        // 5. Load the spec and generate tools
-        server.load_openapi_spec()
-            .map_err(|e| anyhow!("Failed to load OpenAPI spec for '{}': {}", self.server_name, e))?;
+        // 5. Load the spec and generate tools — spec snapshot/restore is
+        // CPU-bound ($ref lattice can explode); keep it off the async worker.
+        let load = tokio::task::spawn_blocking(move || {
+            server.load_openapi_spec().map(|_| server)
+        })
+        .await
+        .map_err(|e| anyhow!("OpenAPI spec load task panicked for '{}': {}", self.server_name, e))?
+        .map_err(|e| anyhow!("Failed to load OpenAPI spec for '{}': {}", self.server_name, e))?;
+        let server = load;
 
         let tool_count = server.tool_count();
         log::info!(
@@ -372,10 +460,19 @@ impl McpTransport for OpenapiTransport {
         let tool = server.tool_collection.get_tool(name)
             .ok_or_else(|| anyhow!("Tool '{}' not found in OpenAPI server '{}'", name, self.server_name))?;
 
-        // Log to database so it shows in the app's log viewer
+        // Log to database so it shows in the app's log viewer.
+        // Arguments routinely carry secrets (API keys/tokens as tool params)
+        // and app_logger PERSISTS info lines to the log DB — log key names +
+        // a size summary instead of the full JSON (same reason header values
+        // are redacted in this file).
+        let arg_keys: Vec<&str> = arguments.as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
         let start_msg = format!(
-            "[{}] OpenAPI call_tool: name={}, base_url={:?}, args={}",
-            self.server_name, name, self.base_url, arguments
+            "[{}] OpenAPI call_tool: name={}, base_url={:?}, arg_keys={:?}, arg_bytes={}",
+            self.server_name,
+            name,
+            self.base_url,
+            arg_keys,
+            arguments.to_string().len()
         );
         log::info!("{}", start_msg);
         app_logger::log_to_db("info", &start_msg);

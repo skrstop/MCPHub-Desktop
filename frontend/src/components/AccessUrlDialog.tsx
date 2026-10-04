@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Copy, Check, X } from 'lucide-react';
 import { useSettingsData } from '@/hooks/useSettingsData';
+import { useToast } from '@/contexts/ToastContext';
 
 interface AccessUrlDialogProps {
   open: boolean;
@@ -15,7 +16,9 @@ interface AccessUrlDialogProps {
  */
 const AccessUrlDialog: React.FC<AccessUrlDialogProps> = ({ open, onClose }) => {
   const { t } = useTranslation();
-  const { exposeHttp, httpPort, routingConfig } = useSettingsData();
+  const { showToast } = useToast();
+  const { routingConfig } = useSettingsData();
+  const { exposeHttp, httpPort } = routingConfig;
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const baseUrl = useMemo(() => `http://localhost:${httpPort}`, [httpPort]);
@@ -96,13 +99,21 @@ const AccessUrlDialog: React.FC<AccessUrlDialogProps> = ({ open, onClose }) => {
         document.body.appendChild(textarea);
         textarea.focus();
         textarea.select();
-        document.execCommand('copy');
+        const ok = document.execCommand('copy');
         document.body.removeChild(textarea);
+        // execCommand returns false when the copy is rejected (clipboard
+        // blocked / non-secure context edge) — don't show a false "Copied".
+        if (!ok) {
+          console.error('Copy access url failed: execCommand returned false');
+          showToast(t('common.copyFailed', 'Copy failed'), 'error');
+          return;
+        }
       }
       setCopiedKey(key);
       setTimeout(() => setCopiedKey(null), 1500);
     } catch (err) {
       console.error('Copy access url failed', err);
+      showToast(t('common.copyFailed', 'Copy failed'), 'error');
     }
   };
 

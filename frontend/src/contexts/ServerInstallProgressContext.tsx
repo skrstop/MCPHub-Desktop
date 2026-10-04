@@ -62,6 +62,13 @@ export const ServerInstallProgressProvider: React.FC<{ children: React.ReactNode
       const p = event.payload;
       if (!p || !p.server) return;
       setProgress((prev) => ({ ...prev, [p.server]: p }));
+      // A fresh non-terminal event cancels any pending terminal-clear timer:
+      // without this, `done` followed within 1.5s by a new `downloading`
+      // (reconnect/reinstall) loses the entry mid-download.
+      if (p.phase !== 'done' && p.phase !== 'error' && clearTimers.current[p.server]) {
+        clearTimeout(clearTimers.current[p.server]);
+        delete clearTimers.current[p.server];
+      }
       if (p.phase === 'done' || p.phase === 'error') {
         const name = p.server;
         if (clearTimers.current[name]) clearTimeout(clearTimers.current[name]);

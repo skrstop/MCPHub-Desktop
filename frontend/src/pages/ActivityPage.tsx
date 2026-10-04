@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { copyText } from "@/utils/clipboard";
 import { useToast } from "@/contexts/ToastContext";
 import { createPortal } from 'react-dom';
@@ -83,8 +83,14 @@ const ActivityPage: React.FC = () => {
     [t],
   );
 
+  // Out-of-order fetch guard: rapid page/filter changes issue concurrent
+  // requests; a stale response resolving last would install data for the
+  // wrong page/filter. Each fetch gets a monotonically increasing id —
+  // late responses whose id is no longer current are discarded.
+  const fetchSeqRef = useRef(0);
   // Fetch data
   const fetchData = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
     setIsLoading(true);
     setError(null);
 
@@ -98,6 +104,8 @@ const ActivityPage: React.FC = () => {
         getActivityStats(currentFilter),
       ]);
 
+      if (seq !== fetchSeqRef.current) return; // stale response
+
       if (activitiesRes?.success && Array.isArray(activitiesRes.data)) {
         setActivities(activitiesRes.data);
         if (activitiesRes.pagination) {
@@ -110,6 +118,7 @@ const ActivityPage: React.FC = () => {
       }
 
     } catch (err) {
+      if (seq !== fetchSeqRef.current) return; // stale error
       console.error('Error fetching activity data:', err);
       setError(t('activity.fetchError'));
     } finally {

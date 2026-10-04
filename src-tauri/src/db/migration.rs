@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 25;
+pub const TARGET_VERSION: i64 = 27;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -32,13 +32,21 @@ pub async fn backup_before_migration(pool: &SqlitePool, db_path: &std::path::Pat
         return Ok(());
     }
     let bak_path = db_path.with_extension("db.bak"); // mcphub.db -> mcphub.db.bak
-    // VACUUM INTO fails if the target exists — remove stale backup first.
-    let _ = std::fs::remove_file(&bak_path);
+    // Write to a temp path first and rename on success: deleting the old
+    // backup up front and failing mid-VACUUM (disk full/permissions) would
+    // destroy the ONLY rollback copy.
+    let tmp_path = db_path.with_extension("db.bak.tmp");
+    let _ = std::fs::remove_file(&tmp_path);
     let start = std::time::Instant::now();
     sqlx::query("VACUUM INTO ?1")
-        .bind(bak_path.to_string_lossy().as_ref())
+        .bind(tmp_path.to_string_lossy().as_ref())
         .execute(pool)
         .await?;
+    // Atomic swap: rename replaces an existing target on both Unix and
+    // Windows (MoveFileExW + MOVEFILE_REPLACE_EXISTING) — no pre-delete, so a
+    // crash between delete and rename can never leave the rollback copy
+    // missing (the stale .bak is replaced in place, never absent).
+    std::fs::rename(&tmp_path, &bak_path)?;
     log::info!(
         "[db] pre-migration backup: {} ({}ms)",
         bak_path.display(),
@@ -164,6 +172,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         23 => migrate_v23(pool).await,
         24 => migrate_v24(pool).await,
         25 => migrate_v25(pool).await,
+        26 => migrate_v26(pool).await,
+        27 => migrate_v27(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -171,6 +181,49 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Migration definitions
 // ---------------------------------------------------------------------------
+
+/// v25 -> v26: sse/streamable-http keep-alive + passthrough headers columns
+/// (frontend round-trip persistence; the rmcp transport manages its own
+/// connection health today, so these are stored-but-not-yet-consumed).
+async fn migrate_v26(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(pool, "servers", "enable_keep_alive", "INTEGER").await?;
+    add_column_if_missing(pool, "servers", "keep_alive_interval", "INTEGER").await?;
+    add_column_if_missing(pool, "servers", "passthrough_headers", "TEXT").await?;
+    log::info!("[db] migration v26: added keep-alive / passthrough headers columns to servers");
+    Ok(())
+}
+
+/// v26 → v27: UNIQUE indexes on builtin prompt/resource names + resource URIs.
+/// The re-name rejection in prompt/resource services is a transactional
+/// COUNT-then-INSERT over tables with no UNIQUE constraint — two concurrent
+/// creates could both pass the COUNT and insert duplicates, exactly the
+/// "stolen FTS row / ambiguous get" the check exists to prevent (review
+/// round 8, 2026-10-04). Dedup first (keep the lowest rowid), then index.
+async fn migrate_v27(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM builtin_prompts WHERE rowid NOT IN (
+             SELECT MIN(rowid) FROM builtin_prompts GROUP BY name)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM builtin_resources WHERE rowid NOT IN (
+             SELECT MIN(rowid) FROM builtin_resources GROUP BY name)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_builtin_prompts_name ON builtin_prompts(name)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_builtin_resources_name ON builtin_resources(name)")
+        .execute(pool)
+        .await?;
+    // NOTE: deliberately NOT re-adding a uri index — v23 dropped it as an
+    // explicit product decision ("resource 定位用 name 即可，uri 不再单独
+    // 索引"); duplicate URIs are not an enforced invariant.
+    log::info!("[db] migration v27: unique indexes on builtin prompts/resources names");
+    Ok(())
+}
 
 /// v0 → v1: Initial schema
 async fn migrate_v1(pool: &SqlitePool) -> Result<()> {
@@ -322,15 +375,8 @@ async fn migrate_v2(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query("ALTER TABLE system_config ADD COLUMN mcprouter_api_key TEXT")
-        .execute(pool)
-        .await
-        .ok(); // ignore if column already exists
-
-    sqlx::query("ALTER TABLE system_config ADD COLUMN mcprouter_base_url TEXT")
-        .execute(pool)
-        .await
-        .ok();
+    add_column_if_missing(pool, "system_config", "mcprouter_api_key", "TEXT").await?;
+    add_column_if_missing(pool, "system_config", "mcprouter_base_url", "TEXT").await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS templates (
@@ -367,10 +413,7 @@ async fn migrate_v2(pool: &SqlitePool) -> Result<()> {
 /// v2 → v3: Config JSON consolidation
 async fn migrate_v3(pool: &SqlitePool) -> Result<()> {
     // Add config_json column to system_config if not exists
-    sqlx::query("ALTER TABLE system_config ADD COLUMN config_json TEXT")
-        .execute(pool)
-        .await
-        .ok();
+    add_column_if_missing(pool, "system_config", "config_json", "TEXT").await?;
 
     // Migrate existing individual columns into config_json
     let row = sqlx::query("SELECT * FROM system_config WHERE id = 1")
@@ -430,28 +473,19 @@ async fn migrate_v4(pool: &SqlitePool) -> Result<()> {
 
 /// v4 → v5: Default skip_auth setting
 async fn migrate_v5(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("ALTER TABLE system_config ADD COLUMN skip_auth INTEGER DEFAULT 0")
-        .execute(pool)
-        .await
-        .ok();
+    add_column_if_missing(pool, "system_config", "skip_auth", "INTEGER DEFAULT 0").await?;
     Ok(())
 }
 
 /// v5 → v6: Add openapi column to servers table
 async fn migrate_v6(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("ALTER TABLE servers ADD COLUMN openapi TEXT")
-        .execute(pool)
-        .await
-        .ok(); // ignore if column already exists
+    add_column_if_missing(pool, "servers", "openapi", "TEXT").await?;
     Ok(())
 }
 
 /// v6 → v7: Add source_ip column to activity_log
 async fn migrate_v7(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("ALTER TABLE activity_log ADD COLUMN source_ip TEXT")
-        .execute(pool)
-        .await
-        .ok(); // ignore if column already exists
+    add_column_if_missing(pool, "activity_log", "source_ip", "TEXT").await?;
     Ok(())
 }
 
@@ -550,15 +584,25 @@ async fn migrate_v10(pool: &SqlitePool) -> Result<()> {
 /// exist for DBs that pre-date their ADD COLUMN.
 async fn migrate_v11(pool: &SqlitePool) -> Result<()> {
     for table in &["builtin_prompts", "builtin_resources"] {
-        let sql = format!("ALTER TABLE {} DROP COLUMN server_name", table);
-        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await.ok(); // ignore if column already absent
+        // Guard by pragma instead of .ok(): bare .ok() also swallows REAL
+        // failures (old SQLite without DROP COLUMN support, I/O errors) — the
+        // version would advance with server_name NOT NULL still present and
+        // every later INSERT would fail. Same pattern as add_column_if_missing.
+        let has_col = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = 'server_name'",
+            table
+        )))
+        .fetch_one(pool)
+        .await?
+        > 0;
+        if has_col {
+            let sql = format!("ALTER TABLE {} DROP COLUMN server_name", table);
+            sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await?;
+        }
     }
-    sqlx::query("ALTER TABLE builtin_prompts ADD COLUMN title TEXT")
-        .execute(pool).await.ok();
-    sqlx::query("ALTER TABLE builtin_prompts ADD COLUMN template TEXT NOT NULL DEFAULT ''")
-        .execute(pool).await.ok();
-    sqlx::query("ALTER TABLE builtin_resources ADD COLUMN content TEXT NOT NULL DEFAULT ''")
-        .execute(pool).await.ok();
+    add_column_if_missing(pool, "builtin_prompts", "title", "TEXT").await?;
+    add_column_if_missing(pool, "builtin_prompts", "template", "TEXT NOT NULL DEFAULT ''").await?;
+    add_column_if_missing(pool, "builtin_resources", "content", "TEXT NOT NULL DEFAULT ''").await?;
     Ok(())
 }
 
@@ -571,10 +615,8 @@ async fn migrate_v11(pool: &SqlitePool) -> Result<()> {
 /// arrays (prompt names / resource URIs). Columns are nullable with no default
 /// so existing rows stay NULL = all.
 async fn migrate_v12(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("ALTER TABLE groups ADD COLUMN builtin_prompts TEXT")
-        .execute(pool).await.ok(); // ignore if column already exists
-    sqlx::query("ALTER TABLE groups ADD COLUMN builtin_resources TEXT")
-        .execute(pool).await.ok();
+    add_column_if_missing(pool, "groups", "builtin_prompts", "TEXT").await?;
+    add_column_if_missing(pool, "groups", "builtin_resources", "TEXT").await?;
     Ok(())
 }
 
@@ -639,7 +681,11 @@ async fn migrate_v13(pool: &SqlitePool) -> Result<()> {
         if !config.is_object() {
             config = serde_json::json!({});
         }
-        if config.get("skills").is_none() {
+        // Type-check, not just is_none(): a non-object `skills` (string/array
+        // — reachable via config deep-merge) makes the IndexMut below PANIC,
+        // and a panic before set_version re-runs this migration every startup
+        // (permanent crash loop). Overwrite non-objects with an empty object.
+        if !config.get("skills").map_or(false, |s| s.is_object()) {
             config["skills"] = serde_json::json!({});
         }
         // Single source of truth: skill_service::default_agents() (12 known).
@@ -683,7 +729,9 @@ async fn migrate_v14(pool: &SqlitePool) -> Result<()> {
         _ => serde_json::json!({}),
     };
 
-    if config.get("skills").is_none() {
+    // Type-check, not just is_none(): non-object `skills` panics the IndexMut
+    // below (crash loop before set_version). Overwrite non-objects.
+    if !config.get("skills").map_or(false, |s| s.is_object()) {
         config["skills"] = serde_json::json!({});
     }
 
@@ -1084,6 +1132,13 @@ async fn migrate_v22(pool: &SqlitePool) -> Result<()> {
     )
     .await?;
 
+    // v21 already created idx_rag_tags_file_count with a different column list;
+    // CREATE INDEX IF NOT EXISTS with an existing same-name index is a SILENT
+    // NO-OP regardless of columns — drop and recreate so the created_at sort
+    // key actually lands.
+    sqlx::query("DROP INDEX IF EXISTS idx_rag_tags_file_count")
+        .execute(pool)
+        .await?;
     let index_statements: &[&str] = &[
         // 标签下拉排序：file_count DESC, created_at DESC（tag 兜底 tie-break）
         "CREATE INDEX IF NOT EXISTS idx_rag_tags_file_count ON rag_tags(file_count DESC, created_at DESC, tag)",
@@ -1189,28 +1244,26 @@ async fn migrate_v24(pool: &SqlitePool) -> Result<()> {
         ));
     }
 
-    let fts_tables: &[&str] = &[
-        "fts_servers",
-        "fts_groups",
-        "fts_rag_docs",
-        "fts_skills",
-        "fts_prompts",
-        "fts_resources",
-        "fts_app_log",
+    // Table names are compile-time constants — build the 7 static statements
+    // up front instead of format!.leak() (a leak here is bounded but sets a
+    // bad precedent per the §3.4.4 SQL-caching rule; review round 8).
+    let stmts: [&str; 7] = [
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_servers USING fts5(ref_id UNINDEXED, zh, py, ini)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_groups USING fts5(ref_id UNINDEXED, zh, py, ini)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_rag_docs USING fts5(ref_id UNINDEXED, zh, py, ini)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_skills USING fts5(ref_id UNINDEXED, zh, py, ini)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_prompts USING fts5(ref_id UNINDEXED, zh, py, ini)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_resources USING fts5(ref_id UNINDEXED, zh, py, ini)",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_app_log USING fts5(ref_id UNINDEXED, zh, py, ini)",
     ];
-    for table in fts_tables {
-        sqlx::query(sqlx::AssertSqlSafe(
-            format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING fts5(ref_id UNINDEXED, zh, py, ini)"
-            )
-            .leak() as &'static str,
-        ))
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow!("create FTS5 table {} failed: {}", table, e))?;
+    for sql in stmts {
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow!("create FTS5 table failed: {}", e))?;
     }
 
-    log::info!("[db] migration v24: FTS5 full-text tables created ({} tables)", fts_tables.len());
+    log::info!("[db] migration v24: FTS5 full-text tables created ({} tables)", stmts.len());
     Ok(())
 }
 
@@ -1218,12 +1271,12 @@ async fn migrate_v24(pool: &SqlitePool) -> Result<()> {
 /// existing `config_json.skills.agents` list.
 ///
 /// The catalog (`runtimes/skill/install.json`) gained the generic agent
-/// "通用 Agent" → `~/.agent/skills`. `list_agents` only falls back to the
-/// bundled catalog when the user has never configured agents, so existing
-/// installs would never see the new entry without this backfill. Behavior
-/// mirrors the "user customized" branch of v14: append missing catalog ids,
-/// leave user additions/edits (and their order) intact. Idempotent — missing
-/// ids only.
+/// entries (incl. "Common Agent": `.agents/skills`); `list_agents` only falls
+/// back to the bundled catalog when the user has never configured agents, so
+/// existing installs would never see the new entries without this backfill.
+/// Behavior mirrors the "user customized" branch of v14: append missing
+/// catalog ids, leave user additions/edits (and their order) intact.
+/// Idempotent — missing ids only.
 async fn migrate_v25(pool: &SqlitePool) -> Result<()> {
     let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
         .fetch_optional(pool)
@@ -1235,7 +1288,9 @@ async fn migrate_v25(pool: &SqlitePool) -> Result<()> {
         _ => serde_json::json!({}),
     };
 
-    if config.get("skills").is_none() {
+    // Type-check, not just is_none(): non-object `skills` panics the IndexMut
+    // below (crash loop before set_version). Overwrite non-objects.
+    if !config.get("skills").map_or(false, |s| s.is_object()) {
         config["skills"] = serde_json::json!({});
     }
 

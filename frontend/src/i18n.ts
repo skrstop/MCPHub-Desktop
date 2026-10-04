@@ -30,7 +30,7 @@ i18n
       },
     },
     fallbackLng: 'en',
-    debug: process.env.NODE_ENV === 'development',
+    debug: import.meta.env.DEV,
 
     // Common namespace used for all translations
     defaultNS: 'translation',

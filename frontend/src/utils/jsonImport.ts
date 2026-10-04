@@ -50,7 +50,7 @@ const KNOWN_KEYS = new Set<keyof ServerConfig | string>([
 /**
  * Parse server type from string, handling various formats
  */
-function parseServerType(typeStr: string | undefined): string {
+function parseServerType(typeStr: string | undefined): NonNullable<ServerConfig['type']> {
   if (!typeStr) return 'stdio';
 
   const normalized = typeStr

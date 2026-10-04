@@ -1,6 +1,10 @@
 //! Tauri command wrappers for the RAG service. Each maps 1:1 to a service
 //! function and returns `Result<T, String>` (Tauri's convention).
 
+use tauri::State;
+
+use crate::commands::auth::SessionState;
+
 use anyhow::Result;
 use tauri::AppHandle;
 
@@ -11,7 +15,11 @@ use crate::models::rag::{
 use crate::rag::service;
 
 #[tauri::command]
-pub async fn rag_toggle(app: AppHandle, enabled: bool) -> Result<RagStatus, String> {
+pub async fn rag_toggle(
+    session: State<'_, SessionState>,
+app: AppHandle, enabled: bool) -> Result<RagStatus, String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::toggle(&app, enabled).await.map_err(|e| e.to_string())
 }
 
@@ -29,13 +37,22 @@ pub fn get_ocr_status() -> crate::rag::extract::ocr::OcrStatus {
 }
 
 #[tauri::command]
-pub async fn list_rag_docs(app: AppHandle) -> Result<Vec<RagDocInfo>, String> {
+pub async fn list_rag_docs(session: State<'_, SessionState>, app: AppHandle) -> Result<Vec<RagDocInfo>, String> {
+    // Doc names/original_paths leak the index inventory — gate like
+    // rag_doc_search_paged (same data, already gated).
+    crate::commands::config::require_admin(&session).await?;
     service::list_docs(&app).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_rag_doc(app: AppHandle, id: String) -> Result<Option<RagDoc>, String> {
-    service::get_doc(&app, &id).await.map_err(|e| e.to_string())
+pub async fn get_rag_doc(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    id: String,
+) -> Result<Option<RagDoc>, String> {
+    // Doc content is a read-exfil channel (upload accepts arbitrary paths) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
+        service::get_doc(&app, &id).await.map_err(|e| e.to_string())
 }
 
 /// Paged doc-detail read for the View dialog: skip `offset` UTF-8 bytes of the
@@ -45,12 +62,14 @@ pub async fn get_rag_doc(app: AppHandle, id: String) -> Result<Option<RagDoc>, S
 /// "load more" button. Prevents loading a huge doc's whole content at once.
 #[tauri::command]
 pub async fn get_rag_doc_paged(
+    session: State<'_, SessionState>,
     app: AppHandle,
     id: String,
     offset_bytes: u64,
     limit_bytes: u64,
 ) -> Result<Option<RagDoc>, String> {
-    service::get_doc_paged(&app, &id, offset_bytes, limit_bytes)
+    crate::commands::config::require_admin(&session).await?;
+        service::get_doc_paged(&app, &id, offset_bytes, limit_bytes)
         .await
         .map_err(|e| e.to_string())
 }
@@ -58,8 +77,12 @@ pub async fn get_rag_doc_paged(
 /// Read a document's chunks (index + text, no embeddings) for the "view
 /// chunks" dialog. Requires RAG enabled (chunks live in lancedb).
 #[tauri::command]
-pub async fn get_rag_chunks(id: String) -> Result<Vec<crate::models::rag::RagChunk>, String> {
-    service::get_doc_chunks(&id).await.map_err(|e| e.to_string())
+pub async fn get_rag_chunks(
+    session: State<'_, SessionState>,
+    id: String,
+) -> Result<Vec<crate::models::rag::RagChunk>, String> {
+    crate::commands::config::require_admin(&session).await?;
+        service::get_doc_chunks(&id).await.map_err(|e| e.to_string())
 }
 
 /// Paginated chunks for the "view chunks" dialog: `offset` chunks skipped,
@@ -67,11 +90,13 @@ pub async fn get_rag_chunks(id: String) -> Result<Vec<crate::models::rag::RagChu
 /// UI can auto-load the next page on scroll-to-bottom. Requires RAG enabled.
 #[tauri::command]
 pub async fn get_rag_chunks_paged(
+    session: State<'_, SessionState>,
     id: String,
     offset: u32,
     page_size: u32,
 ) -> Result<RagChunkPage, String> {
-    service::get_doc_chunks_paged(&id, offset, page_size)
+    crate::commands::config::require_admin(&session).await?;
+        service::get_doc_chunks_paged(&id, offset, page_size)
         .await
         .map_err(|e| e.to_string())
 }
@@ -105,6 +130,7 @@ pub async fn pick_rag_folder(app: AppHandle, recursive: bool) -> Result<RagFolde
 /// `GIT_AUTH_REQUIRED:<detail>` — the frontend shows the credential form.
 #[tauri::command]
 pub async fn pick_rag_git_repo(
+    session: State<'_, SessionState>,
     app: AppHandle,
     url: String,
     branch: Option<String>,
@@ -112,6 +138,12 @@ pub async fn pick_rag_git_repo(
     password: Option<String>,
     depth: Option<u32>,
 ) -> Result<RagFolderScan, String> {
+    // Admin-gated: a successful pick persists the supplied credential into
+    // the app-global `rag/git-credentials.json` — shared mutable state that
+    // later admin-gated refreshes will consume. Ungated, any non-admin
+    // session could overwrite the admin's stored credential for the same
+    // repo (credential downgrade / auth breakage on subsequent refreshes).
+    crate::commands::config::require_admin(&session).await?;
     let scan = git_pick_inner(&app, &url, branch.as_deref(), username.as_deref(), password.as_deref(), depth.unwrap_or(1))
         .await
         .map_err(|e| e.to_string())?;
@@ -122,7 +154,11 @@ pub async fn pick_rag_git_repo(
 /// The backend abandons the clone wait and cleans the temp dir; the pending
 /// `pick_rag_git_repo` promise resolves with a `PICK_CANCELLED` error.
 #[tauri::command]
-pub async fn cancel_rag_git_pick(url: String) -> Result<bool, String> {
+pub async fn cancel_rag_git_pick(session: State<'_, SessionState>, url: String) -> Result<bool, String> {
+    // Aborting a clone is a write to shared clone state (temp-dir cleanup can
+    // race the admin's subsequent upload mapping) — admin-gate to match
+    // pick_rag_git_repo/refresh_rag_source.
+    crate::commands::config::require_admin(&session).await?;
     Ok(crate::rag::git::signal_abort_canonical(&url).await)
 }
 
@@ -179,6 +215,7 @@ async fn git_pick_inner(
 /// UI default.
 #[tauri::command]
 pub async fn upload_rag_doc(
+    session: State<'_, SessionState>,
     app: AppHandle,
     file_path: String,
     tags: Vec<String>,
@@ -188,6 +225,10 @@ pub async fn upload_rag_doc(
     // "file" at read time.
     source: Option<crate::models::rag::DocSource>,
 ) -> Result<(), String> {
+    // Arbitrary-path read channel: the file is ingested into the index and
+    // readable back via rag_search — admin-gated in multi-user mode
+    // (skipAuth short-circuits, so the default desktop flow is unaffected).
+    crate::commands::config::require_admin(&session).await?;
     // Git source: the scan/selection happened in the OS temp clone. Before
     // uploading, persist the repo into app-data (idempotent) and rewrite the
     // file path prefix temp->persistent so the doc's original_path (md5
@@ -228,13 +269,21 @@ pub async fn upload_rag_doc(
 /// is active the backend defers git-source refreshes + the auto-update tick
 /// and suppresses source-sync add imports (see service::IMPORT_SESSION).
 #[tauri::command]
-pub async fn begin_rag_import_session() -> Result<(), String> {
+pub async fn begin_rag_import_session(
+    session: State<'_, SessionState>,
+) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::begin_import_session();
     Ok(())
 }
 
 #[tauri::command]
-pub async fn end_rag_import_session() -> Result<(), String> {
+pub async fn end_rag_import_session(
+    session: State<'_, SessionState>,
+) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::end_import_session();
     Ok(())
 }
@@ -249,11 +298,15 @@ pub async fn end_rag_import_session() -> Result<(), String> {
 /// Returns the new chunk count. Requires RAG enabled.
 #[tauri::command]
 pub async fn update_rag_doc(
+    session: State<'_, SessionState>,
+
     app: AppHandle,
     id: String,
     mode: String,
     file_path: Option<String>,
 ) -> Result<u32, String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     if mode == "original" {
         service::update_doc_from_original(&app, &id)
             .await
@@ -273,7 +326,14 @@ pub async fn update_rag_doc(
 /// per-row UpdateDialog can render the right branch (lost / changed /
 /// no-change / legacy-no-path). Cheap (one md5 of the source, no embedding).
 #[tauri::command]
-pub async fn check_rag_update(app: AppHandle, id: String) -> Result<RagUpdateCheck, String> {
+pub async fn check_rag_update(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    id: String,
+) -> Result<RagUpdateCheck, String> {
+    // Read of source-path state (original_path existence / md5) — gated like
+    // list_rag_docs (review round 8, 2026-10-04).
+    crate::commands::config::require_admin(&session).await?;
     service::check_rag_update(&app, &id)
         .await
         .map_err(|e| e.to_string())
@@ -283,7 +343,11 @@ pub async fn check_rag_update(app: AppHandle, id: String) -> Result<RagUpdateChe
 /// over all docs, shown in the confirm dialog before the expensive re-index
 /// pass runs. No embedding, no progress events.
 #[tauri::command]
-pub async fn preview_batch_update(app: AppHandle) -> Result<BatchPreview, String> {
+pub async fn preview_batch_update(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+) -> Result<BatchPreview, String> {
+    crate::commands::config::require_admin(&session).await?;
     service::preview_batch_update(&app)
         .await
         .map_err(|e| e.to_string())
@@ -293,7 +357,11 @@ pub async fn preview_batch_update(app: AppHandle) -> Result<BatchPreview, String
 /// Backs the batch-update progress dialog's warning icon: the user clicks it
 /// to see WHICH repos are failing and WHY (auth vs address/network).
 #[tauri::command]
-pub async fn get_git_source_errors(app: AppHandle) -> Result<Vec<crate::models::rag::GitSourceError>, String> {
+pub async fn get_git_source_errors(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+) -> Result<Vec<crate::models::rag::GitSourceError>, String> {
+    crate::commands::config::require_admin(&session).await?;
     Ok(service::get_git_source_errors(&app).await)
 }
 
@@ -303,7 +371,11 @@ pub async fn get_git_source_errors(app: AppHandle) -> Result<Vec<crate::models::
 /// Returns immediately; work runs on a spawned task. Guarded against double
 /// triggers (a second call while one is running is a no-op).
 #[tauri::command]
-pub async fn batch_update_rag_docs(app: AppHandle) -> Result<(), String> {
+pub async fn batch_update_rag_docs(
+    session: State<'_, SessionState>,
+app: AppHandle) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::batch_update_rag_docs(app);
     Ok(())
 }
@@ -317,11 +389,19 @@ pub async fn batch_update_rag_docs(app: AppHandle) -> Result<(), String> {
 /// both. Returns (added, removed, updated) counts.
 #[tauri::command]
 pub async fn refresh_rag_source(
+    session: State<'_, SessionState>,
     app: AppHandle,
     kind: String,
     url: Option<String>,
     root: Option<String>,
 ) -> Result<(u32, u32, u32), String> {
+    // Admin-gated: this is a WRITE operation of the same class as
+    // batch_update_rag_docs — for git sources it force-refreshes the
+    // persistent clone using the admin-stored credentials, then imports/removes
+    // docs and re-indexes. Ungated, any non-admin session could trigger an
+    // authenticated pull of a private repo and read the indexed content back
+    // via search/get (the exfil channel the upload gating exists to block).
+    crate::commands::config::require_admin(&session).await?;
     service::refresh_source_update(
         &app,
         service::SourceUpdateTarget {
@@ -340,11 +420,15 @@ pub async fn refresh_rag_source(
 /// the remote state).
 #[tauri::command]
 pub async fn preview_rag_source_update(
+    session: State<'_, SessionState>,
     app: AppHandle,
     kind: String,
     url: Option<String>,
     root: Option<String>,
 ) -> Result<BatchPreview, String> {
+    // Same gate as refresh_rag_source: the git path force-refreshes with
+    // stored credentials before counting.
+    crate::commands::config::require_admin(&session).await?;
     service::preview_source_update(
         &app,
         service::SourceUpdateTarget {
@@ -358,12 +442,24 @@ pub async fn preview_rag_source_update(
 }
 
 #[tauri::command]
-pub async fn delete_rag_doc(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn delete_rag_doc(
+    session: State<'_, SessionState>,
+app: AppHandle, id: String) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::delete_doc(&app, &id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn rag_search_command(query: String, tags: Vec<String>) -> Result<Vec<RagSearchResult>, String> {
+pub async fn rag_search_command(
+    session: State<'_, SessionState>,
+    query: String,
+    tags: Vec<String>,
+) -> Result<Vec<RagSearchResult>, String> {
+    // Search results carry chunk TEXT — the same read-exfil channel the
+    // get_rag_doc/upload gates protect. Ungated here defeated all of them in
+    // multi-user mode (any non-admin could read every indexed doc).
+    crate::commands::config::require_admin(&session).await?;
     service::search(query, tags).await.map_err(|e| e.to_string())
 }
 
@@ -371,7 +467,13 @@ pub async fn rag_search_command(query: String, tags: Vec<String>) -> Result<Vec<
 /// case-insensitive substring (any match); empty returns all tags. Each tag
 /// is returned with its file count.
 #[tauri::command]
-pub async fn rag_tag_search(search_key: Vec<String>) -> Result<Vec<RagTagStat>, String> {
+pub async fn rag_tag_search(
+    session: State<'_, SessionState>,
+    search_key: Vec<String>,
+) -> Result<Vec<RagTagStat>, String> {
+    // Tag inventory leaks what's indexed — align with the other rag reads
+    // (review round 9).
+    crate::commands::config::require_admin(&session).await?;
     service::list_tags(search_key).await.map_err(|e| e.to_string())
 }
 
@@ -380,10 +482,12 @@ pub async fn rag_tag_search(search_key: Vec<String>) -> Result<Vec<RagTagStat>, 
 /// so the UI can fetch more pages on demand. `page` is 0-based.
 #[tauri::command]
 pub async fn rag_tag_search_paged(
+    session: State<'_, SessionState>,
     search_key: String,
     page: u32,
     page_size: u32,
 ) -> Result<RagTagPage, String> {
+    crate::commands::config::require_admin(&session).await?;
     service::list_tags_paged(search_key, page, page_size)
         .await
         .map_err(|e| e.to_string())
@@ -395,19 +499,25 @@ pub async fn rag_tag_search_paged(
 /// `.meta` files) + the total matching count. `page` is 0-based.
 #[tauri::command]
 pub async fn rag_doc_search_paged(
+    session: State<'_, SessionState>,
     app: AppHandle,
     search_key: String,
     tags: Vec<String>,
     page: u32,
     page_size: u32,
 ) -> Result<crate::models::rag::RagDocPage, String> {
-    service::search_docs_paged(&app, search_key, tags, page, page_size)
+    crate::commands::config::require_admin(&session).await?;
+        service::search_docs_paged(&app, search_key, tags, page, page_size)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_rag_tags(app: AppHandle, id: String, tags: Vec<String>) -> Result<(), String> {
+pub async fn set_rag_tags(
+    session: State<'_, SessionState>,
+app: AppHandle, id: String, tags: Vec<String>) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::set_doc_tags(&app, &id, tags).await.map_err(|e| e.to_string())
 }
 
@@ -415,7 +525,10 @@ pub async fn set_rag_tags(app: AppHandle, id: String, tags: Vec<String>) -> Resu
 /// paths (or directories) the update pipeline must ignore. Backs the import
 /// dialog's per-file ban toggles (initial state) and the doc-list badge.
 #[tauri::command]
-pub async fn list_rag_excluded_paths() -> Result<Vec<String>, String> {
+pub async fn list_rag_excluded_paths(session: State<'_, SessionState>) -> Result<Vec<String>, String> {
+    // Leaks admin-configured absolute filesystem paths — admin-gated in
+    // multi-user mode (same face as get_rag_git_clone_dir; review round 9).
+    crate::commands::config::require_admin(&session).await?;
     Ok(service::list_excluded_paths().await)
 }
 
@@ -424,7 +537,11 @@ pub async fn list_rag_excluded_paths() -> Result<Vec<String>, String> {
 /// the doc-list toggle sends the current list plus/minus one path. Returns
 /// the stored list (deduped/trimmed).
 #[tauri::command]
-pub async fn set_rag_excluded_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+pub async fn set_rag_excluded_paths(
+    session: State<'_, SessionState>,
+paths: Vec<String>) -> Result<Vec<String>, String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::set_excluded_paths(paths).await.map_err(|e| e.to_string())
 }
 
@@ -433,7 +550,13 @@ pub async fn set_rag_excluded_paths(paths: Vec<String>) -> Result<Vec<String>, S
 /// prefix-covers every doc of that repo), keeping git-source exclusion on the
 /// same path-based mechanism as folder exclusion.
 #[tauri::command]
-pub async fn get_rag_git_clone_dir(app: AppHandle, url: String) -> Result<String, String> {
+pub async fn get_rag_git_clone_dir(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    url: String,
+) -> Result<String, String> {
+    // Leaks the persistent clone's absolute path — admin-only (review round 8).
+    crate::commands::config::require_admin(&session).await?;
     let dir = crate::rag::git::persistent_repo_dir_for_url(&app, &url)
         .await
         .ok_or_else(|| "git source has no persistent clone yet".to_string())?;
@@ -445,10 +568,14 @@ pub async fn get_rag_git_clone_dir(app: AppHandle, url: String) -> Result<String
 /// same values the doc list already carries as sourceRoot / gitUrl.
 #[tauri::command]
 pub async fn set_rag_source_alias(
+    session: State<'_, SessionState>,
+
     kind: String,
     identity: String,
     alias: String,
 ) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::set_source_alias(kind, identity, alias)
         .await
         .map_err(|e| e.to_string())
@@ -500,7 +627,11 @@ pub async fn rag_tools() -> Result<Vec<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-pub async fn save_rag_settings(app: AppHandle, settings: RagSettings) -> Result<(), String> {
+pub async fn save_rag_settings(
+    session: State<'_, SessionState>,
+app: AppHandle, settings: RagSettings) -> Result<(), String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     // Persist + re-arm the auto-update timer so interval/toggle changes take
     // effect immediately (the running loop wakes on the generation bump).
     service::save_settings_and_rearm(&app, settings)
@@ -510,10 +641,14 @@ pub async fn save_rag_settings(app: AppHandle, settings: RagSettings) -> Result<
 
 #[tauri::command]
 pub async fn open_rag_file_location(
+    session: State<'_, SessionState>,
     app: AppHandle,
     id: String,
     target: Option<String>,
 ) -> Result<(), String> {
+    // Arbitrary-path open (opens the recorded original_path) — gated like
+    // skills' open_path_in_explorer (review round 8, 2026-10-04).
+    crate::commands::config::require_admin(&session).await?;
     service::open_file_location(&app, &id, target)
         .await
         .map_err(|e| e.to_string())
@@ -522,7 +657,13 @@ pub async fn open_rag_file_location(
 /// Open a doc's ORIGINAL source file with the OS default application
 /// ("view source file" for PDF/Office/image imports).
 #[tauri::command]
-pub async fn open_rag_doc_source_file(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn open_rag_doc_source_file(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
+    // Same arbitrary-path open surface as open_rag_file_location.
+    crate::commands::config::require_admin(&session).await?;
     service::open_doc_source(&app, &id).await.map_err(|e| e.to_string())
 }
 
@@ -533,7 +674,11 @@ pub async fn open_rag_doc_source_file(app: AppHandle, id: String) -> Result<(), 
 /// (char-level bar). Clears `needs_reindex` when done. No-op (returns 0) if no
 /// docs exist.
 #[tauri::command]
-pub async fn rag_reindex_all(app: AppHandle) -> Result<usize, String> {
+pub async fn rag_reindex_all(
+    session: State<'_, SessionState>,
+app: AppHandle) -> Result<usize, String> {
+    // RAG write: upload accepts arbitrary paths (read->index->search exfil channel) — admin-gated in multi-user mode.
+    crate::commands::config::require_admin(&session).await?;
     service::reindex_all(&app).await.map_err(|e| e.to_string())
 }
 
@@ -555,7 +700,14 @@ pub async fn rag_current_model() -> Result<Option<String>, String> {
 /// model loads). Errors if the size isn't ready. Returns the post-restart
 /// status (with `needs_reindex` if the dim changed).
 #[tauri::command]
-pub async fn rag_select_model(app: AppHandle, size: String) -> Result<crate::models::rag::RagStatus, String> {
+pub async fn rag_select_model(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    size: String,
+) -> Result<crate::models::rag::RagStatus, String> {
+    // Admin-gated: persists a GLOBAL config key (config_json.rag.model) and
+    // restarts the RAG runtime for every user.
+    crate::commands::config::require_admin(&session).await?;
     service::select_model(&app, &size).await.map_err(|e| e.to_string())
 }
 
@@ -563,6 +715,12 @@ pub async fn rag_select_model(app: AppHandle, size: String) -> Result<crate::mod
 /// with progress on `rag://model-download` into
 /// `<app_data>/rag/models/<family>/<size>/`. After success the size is ready.
 #[tauri::command]
-pub async fn rag_download_model(app: AppHandle, size: String) -> Result<(), String> {
+pub async fn rag_download_model(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    size: String,
+) -> Result<(), String> {
+    // Admin-gated: triggers an external network download into the app data dir.
+    crate::commands::config::require_admin(&session).await?;
     service::download_model(&app, &size).await.map_err(|e| e.to_string())
 }

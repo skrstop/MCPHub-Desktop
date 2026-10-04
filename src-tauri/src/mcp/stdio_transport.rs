@@ -82,7 +82,10 @@ pub(crate) fn parse_progress_pct(line: &str) -> Option<u8> {
                 i += 1;
             }
             let num_str = &line[start..i];
-            let num: u64 = num_str.parse().ok()?;
+            // 解析失败（如超长数字段溢出 u64）只跳过该段，不放弃整行扫描
+            let Ok(num) = num_str.parse::<u64>() else {
+                continue;
+            };
             // skip spaces
             let mut j = i;
             while j < bytes.len() && bytes[j] == b' ' {
@@ -104,7 +107,11 @@ pub(crate) fn parse_progress_pct(line: &str) -> Option<u8> {
                 if k > tstart {
                     if let Ok(total) = line[tstart..k].parse::<u64>() {
                         if total > 0 {
-                            return Some(((num * 100) / total).min(100) as u8);
+                            // saturating: stderr is server-controlled and may
+                            // contain huge numbers; `num * 100` must not panic
+                            // (a panic here kills the drain task and, via a
+                            // full stderr pipe, the whole stdio server).
+                            return Some((num.saturating_mul(100) / total).min(100) as u8);
                         }
                     }
                 }

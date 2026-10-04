@@ -146,7 +146,8 @@
     "passwordRequireNumber": "Le mot de passe doit contenir au moins un chiffre",
     "passwordRequireSpecial": "Le mot de passe doit contenir au moins un caractère spécial",
     "passwordStrengthHint": "Le mot de passe doit contenir au moins 8 caractères et inclure des lettres, des chiffres et des caractères spéciaux",
-    "defaultPasswordHint": "Default password: admin"
+    "defaultPasswordHint": "Default password: admin",
+    "user": "Utilisateur"
   },
   "server": {
     "searchPlaceholder": "Rechercher par nom ou description",
@@ -338,7 +339,8 @@
     "updateTo": "Update to {{version}}",
     "smartBadge": "Smart",
     "smartMetaRoute": "Méta-outils Smart Routing",
-    "smartMetaTooltip": "Méta-outils Smart Routing : exposés UNIQUEMENT via le point d'accès /mcp/$smart — indisponibles sur les chemins /mcp ou /api normaux."
+    "smartMetaTooltip": "Méta-outils Smart Routing : exposés UNIQUEMENT via le point d'accès /mcp/$smart — indisponibles sur les chemins /mcp ou /api normaux.",
+    "unknownError": "Erreur inconnue"
   },
   "status": {
     "sleeping": "En veille",
@@ -364,7 +366,16 @@
     "failedToFetchSettings": "Échec de la récupération des paramètres",
     "failedToUpdateRouteConfig": "Échec de la mise à jour de la configuration de routage",
     "failedToUpdateSmartRoutingConfig": "Échec de la mise à jour de la configuration du routage intelligent",
-    "failedToUpdateBetterAuthConfig": "Échec de la mise à jour de la configuration Better Auth"
+    "failedToUpdateBetterAuthConfig": "Échec de la mise à jour de la configuration Better Auth",
+    "failedToUpdateSystemConfig": "Échec de la mise à jour de la configuration système",
+    "failedToUpdateRoutingConfig": "Échec de la mise à jour de la configuration de routage",
+    "failedToUpdateInstallConfig": "Échec de la mise à jour de la configuration d'installation",
+    "failedToUpdateMCPRouterConfig": "Échec de la mise à jour de la configuration MCP Router",
+    "failedToUpdateNameSeparator": "Échec de la mise à jour du séparateur de noms",
+    "failedToUpdateOAuthServerConfig": "Échec de la mise à jour de la configuration du serveur OAuth",
+    "failedToUpdateSessionRebuild": "Échec de la mise à jour du paramètre de reconstruction de session",
+    "failedToUpdateSettings": "Échec de la mise à jour des paramètres",
+    "failedToUpdateBearerKey": "Échec de la mise à jour de la clé Bearer"
   },
   "common": {
     "loading": "Chargement...",
@@ -423,7 +434,8 @@
     "searchPlaceholder": "Rechercher par nom ou description",
     "started": "Démarré",
     "notStarted": "Non démarré",
-    "copyOpenApiUrl": "Copier l'URL OpenAPI"
+    "copyOpenApiUrl": "Copier l'URL OpenAPI",
+    "operationFailed": "L'opération a échoué"
   },
   "pagination": {
     "rowsPerPage": "Lignes par page",
@@ -871,7 +883,8 @@
       "excludeFileGroupAdd": "Exclure ces fichiers (ignorés par les vérifications de mise à jour)",
       "excludeFileGroupRemove": "Réinclure ces fichiers (reprendre les vérifications de mise à jour)",
       "refreshSourceDone": "Mise à jour de la source terminée : {{added}} importés, {{removed}} supprimés, {{updated}} mis à jour",
-      "refreshSourceTitle": "Mise à jour de la source"
+      "refreshSourceTitle": "Mise à jour de la source",
+      "selectedCount": "{{count}} sélectionnés"
     },
     "skills": {
       "title": "Skills"
@@ -1478,6 +1491,7 @@
     "httpPort": "HTTP Service Port",
     "httpPortDescription": "MCP HTTP service listening port, restart required after changes",
     "httpPortWarning": "After changing the port, you need to restart the application for changes to take effect",
+    "httpPortInvalid": "Port must be between 1024 and 65535",
     "nodeVersion": "Node.js Version",
     "nodeVersionDescription": "Select or install a specific Node.js version for running MCP servers",
     "pythonVersion": "Python Version",
@@ -1500,7 +1514,9 @@
     "smartReindexDone": "Index du routage intelligent reconstruit",
     "smartReindexFailed": "Échec de la reconstruction de l'index du routage intelligent",
     "mcpStrictValidation": "Validation stricte du protocole",
-    "mcpStrictValidationDescription": "Valide strictement les en-têtes et paramètres selon la spécification MCP ; désactivé par défaut pour tolérer les clients incomplets"
+    "mcpStrictValidationDescription": "Valide strictement les en-têtes et paramètres selon la spécification MCP ; désactivé par défaut pour tolérer les clients incomplets",
+    "selectAtLeastOneGroupOrServer": "Veuillez sélectionner au moins un groupe ou un serveur",
+    "llmProviderApiKeyDescription": "Clé API du fournisseur LLM utilisé par le routage intelligent"
   },
   "mcpb": {
     "upload": "Télécharger",
@@ -1599,7 +1615,8 @@
     "statsError": "Échec de la récupération des statistiques utilisateur",
     "deleteConfirmation": "Êtes-vous sûr de vouloir supprimer l'utilisateur '{{username}}' ? Cette action est irréversible.",
     "confirmDelete": "Supprimer l'utilisateur",
-    "deleteWarning": "Êtes-vous sûr de vouloir supprimer l'utilisateur '{{username}}' ? Cette action est irréversible."
+    "deleteWarning": "Êtes-vous sûr de vouloir supprimer l'utilisateur '{{username}}' ? Cette action est irréversible.",
+    "fetchError": "Échec du chargement des utilisateurs"
   },
   "api": {
     "errors": {
@@ -2032,5 +2049,15 @@
     "showAll": "Afficher tous les serveurs",
     "loading": "Chargement…",
     "empty": "Aucun serveur partagé ne nécessite d’identifiants personnels."
+  },
+  "accessUrl": {
+    "title": "URL d'accès au service",
+    "baseUrl": "URL de base",
+    "globalRoute": "Route globale (tous les serveurs)",
+    "groupRoute": "Route de groupe",
+    "serverRoute": "Route de serveur",
+    "smartRoute": "Route de routage intelligent",
+    "smartApiRoute": "API REST de routage intelligent",
+    "sseRoute": "Route SSE"
   }
 }

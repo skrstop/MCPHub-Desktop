@@ -75,6 +75,10 @@ pub async fn list_for_server(
 
 /// Upsert an override (insert or update on conflict).
 pub async fn upsert(p: &ServerToolConfigPayload) -> Result<ServerToolConfig> {
+    // Read failure degrades to None (treat as changed) rather than failing
+    // the whole write — `previous` only drives change-detection for the
+    // list_changed notification (review round 9).
+    let previous = get_config(&p.server_name, &p.item_type, &p.item_name).await.ok().flatten();
     let id = Uuid::new_v4().to_string();
     let enabled_i: i64 = if p.enabled { 1 } else { 0 };
     sqlx::query(
@@ -97,8 +101,15 @@ pub async fn upsert(p: &ServerToolConfigPayload) -> Result<ServerToolConfig> {
     let out = get_config(&p.server_name, &p.item_type, &p.item_name)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Failed to fetch after upsert"));
-    // A3: tool enable/disable changes the exposed tool list.
-    crate::services::subscription_hub::notify_tools_list_changed().await;
+    // A3: tool enable/disable changes the exposed tool list — but only notify
+    // when the write changed something (same-value overwrite would trigger a
+    // pointless client re-list; review round 8, 2026-10-04).
+    let changed = previous.as_ref().map(|prev| {
+        prev.enabled != p.enabled || prev.description != p.description
+    }).unwrap_or(true);
+    if changed {
+        crate::services::subscription_hub::notify_tools_list_changed().await;
+    }
     out
 }
 
@@ -110,37 +121,40 @@ pub async fn update_description(
     description: Option<&str>,
 ) -> Result<()> {
     // If no override exists yet, insert one (enabled by default)
-    let exists = get_config(server_name, item_type, item_name).await?.is_some();
-    if exists {
-        sqlx::query(
-            "UPDATE server_tool_config SET description=?, updated_at=datetime('now')
-             WHERE server_name=? AND item_type=? AND item_name=?",
-        )
-        .bind(description)
-        .bind(server_name)
-        .bind(item_type)
-        .bind(item_name)
-        .execute(db::pool())
-        .await?;
-    } else {
-        let id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO server_tool_config (id, server_name, item_type, item_name, enabled, description)
-             VALUES (?, ?, ?, ?, 1, ?)",
-        )
-        .bind(&id)
-        .bind(server_name)
-        .bind(item_type)
-        .bind(item_name)
-        .bind(description)
-        .execute(db::pool())
-        .await?;
+    // Read failure degrades to None (treat as changed) — see upsert (round 9).
+    let previous = get_config(server_name, item_type, item_name).await.ok().flatten();
+    // Unconditional upsert (not read-then-insert): two concurrent calls for
+    // the same (server, type, item) both see "not exists" and race the INSERT
+    // — the loser fails the UNIQUE constraint. Same handling as `upsert`.
+    sqlx::query(
+        "INSERT INTO server_tool_config (id, server_name, item_type, item_name, enabled, description)
+         VALUES (?, ?, ?, ?, 1, ?)
+         ON CONFLICT(server_name, item_type, item_name)
+         DO UPDATE SET description=excluded.description, updated_at=datetime('now')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(server_name)
+    .bind(item_type)
+    .bind(item_name)
+    .bind(description)
+    .execute(db::pool())
+    .await?;
+    // Description overrides flow through apply_tool_filters into the exposed
+    // tools/list — notify only when the value actually changed.
+    let changed = previous
+        .as_ref()
+        .map(|prev| prev.description != description.map(|d| d.to_string()))
+        .unwrap_or(true);
+    if changed {
+        crate::services::subscription_hub::notify_tools_list_changed().await;
     }
     Ok(())
 }
 
 /// Reset description to NULL (remove override).
 pub async fn reset_description(server_name: &str, item_type: &str, item_name: &str) -> Result<()> {
+    // Read failure degrades to None (treat as changed) — see upsert (round 9).
+    let previous = get_config(server_name, item_type, item_name).await.ok().flatten();
     sqlx::query(
         "UPDATE server_tool_config SET description=NULL, updated_at=datetime('now')
          WHERE server_name=? AND item_type=? AND item_name=?",
@@ -150,6 +164,15 @@ pub async fn reset_description(server_name: &str, item_type: &str, item_name: &s
     .bind(item_name)
     .execute(db::pool())
     .await?;
+    // Same exposed-list change as update_description — notify only when a row
+    // was actually reset (0 rows / already-NULL reset is a no-op).
+    let changed = previous
+        .as_ref()
+        .map(|prev| prev.description.is_some())
+        .unwrap_or(false);
+    if changed {
+        crate::services::subscription_hub::notify_tools_list_changed().await;
+    }
     Ok(())
 }
 

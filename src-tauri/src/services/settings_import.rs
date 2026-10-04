@@ -31,6 +31,21 @@ struct RawServerConfig {
     headers: Option<HashMap<String, String>>,
     description: Option<String>,
     disabled: Option<bool>,
+    options: Option<serde_json::Value>,
+    openapi: Option<serde_json::Value>,
+    proxy: Option<serde_json::Value>,
+    #[serde(alias = "per_session_client")]
+    per_session_client: Option<bool>,
+    #[serde(rename = "startOnDemand", alias = "start_on_demand")]
+    start_on_demand: Option<bool>,
+    #[serde(rename = "idleTimeoutMs", alias = "idle_timeout_ms")]
+    idle_timeout_ms: Option<u64>,
+    #[serde(rename = "enableKeepAlive", alias = "enable_keep_alive")]
+    enable_keep_alive: Option<bool>,
+    #[serde(rename = "keepAliveInterval", alias = "keep_alive_interval")]
+    keep_alive_interval: Option<u64>,
+    #[serde(rename = "passthroughHeaders", alias = "passthrough_headers")]
+    passthrough_headers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,12 +123,39 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 env: raw.env,
                 url: raw.url,
                 headers: raw.headers,
-                options: None,
-                openapi: None,
-                per_session_client: None,
-                start_on_demand: None,
-                idle_timeout_ms: None,
-                proxy: None,
+                // Connection-relevant round-trip fields: importing an export
+                // produced by this app must not silently drop these (the
+                // export face emits them since the same-day export fix).
+                // Parse failures are logged — a silently-vanished field is
+                // indistinguishable from "never configured" during debugging.
+                options: raw.options.and_then(|v| match serde_json::from_value(v) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!("[import] server '{}': invalid options ({}), dropped", name, e);
+                        None
+                    }
+                }),
+                openapi: raw.openapi.and_then(|v| match serde_json::from_value(v) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!("[import] server '{}': invalid openapi ({}), dropped", name, e);
+                        None
+                    }
+                }),
+                proxy: raw.proxy.and_then(|v| match serde_json::from_value(v) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!("[import] server '{}': invalid proxy ({}), dropped", name, e);
+                        None
+                    }
+                }),
+                // Round-trip fields (see connection-relevant comment above).
+                enable_keep_alive: raw.enable_keep_alive,
+                keep_alive_interval: raw.keep_alive_interval,
+                passthrough_headers: raw.passthrough_headers,
+                per_session_client: raw.per_session_client,
+                start_on_demand: raw.start_on_demand,
+                idle_timeout_ms: raw.idle_timeout_ms,
                 enabled: !raw.disabled.unwrap_or(false),
             };
 
@@ -161,9 +203,79 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
 }
 
 #[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportSummary {
     pub servers_imported: usize,
     pub servers_skipped: usize,
     pub users_imported: usize,
     pub users_skipped: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Export-shape round-trip: connection-relevant fields (keep-alive,
+    /// passthrough headers, on-demand, proxy, options) must survive
+    /// deserialization — an export→import cycle must not silently reset them.
+    #[test]
+    fn raw_server_config_round_trips_connection_fields() {
+        let json = r#"{
+            "mcpServers": {
+                "srv": {
+                    "type": "streamableHttp",
+                    "url": "http://127.0.0.1:9/mcp",
+                    "enableKeepAlive": true,
+                    "keepAliveInterval": 15000,
+                    "passthroughHeaders": ["X-Trace"],
+                    "startOnDemand": false,
+                    "idleTimeoutMs": 300000,
+                    "perSessionClient": true
+                }
+            }
+        }"#;
+        let settings: McpSettings = serde_json::from_str(json).expect("parse");
+        let raw = settings.mcp_servers.unwrap().remove("srv").unwrap();
+        assert_eq!(raw.enable_keep_alive, Some(true));
+        assert_eq!(raw.keep_alive_interval, Some(15000));
+        assert_eq!(raw.passthrough_headers.as_ref().map(|h| h.as_slice()),
+                   Some(&["X-Trace".to_string()][..]));
+        assert_eq!(raw.start_on_demand, Some(false));
+        assert_eq!(raw.idle_timeout_ms, Some(300000));
+        assert_eq!(raw.per_session_client, Some(true));
+    }
+
+    /// snake_case aliases (origin mcp_settings.json) also parse.
+    #[test]
+    fn raw_server_config_accepts_snake_case_aliases() {
+        let json = r#"{
+            "mcpServers": {
+                "srv": {
+                    "enable_keep_alive": true,
+                    "keep_alive_interval": 5000,
+                    "passthrough_headers": ["A"],
+                    "start_on_demand": true,
+                    "idle_timeout_ms": 1000,
+                    "per_session_client": false
+                }
+            }
+        }"#;
+        let settings: McpSettings = serde_json::from_str(json).expect("parse");
+        let raw = settings.mcp_servers.unwrap().remove("srv").unwrap();
+        assert_eq!(raw.enable_keep_alive, Some(true));
+        assert_eq!(raw.keep_alive_interval, Some(5000));
+        assert!(raw.passthrough_headers.is_some());
+        assert_eq!(raw.start_on_demand, Some(true));
+        assert_eq!(raw.idle_timeout_ms, Some(1000));
+        assert_eq!(raw.per_session_client, Some(false));
+    }
+
+    /// Unknown top-level fields (e.g. origin's "groups") must not abort import.
+    #[test]
+    fn import_tolerates_unknown_top_level_fields() {
+        let json = r#"{"mcpServers": {}, "groups": {"g1": {"servers": []}}, "users": []}"#;
+        let parsed: McpSettings = serde_json::from_str(json).expect("parse");
+        assert!(parsed.mcp_servers.unwrap().is_empty());
+        assert!(parsed.users.unwrap().is_empty());
+    }
 }

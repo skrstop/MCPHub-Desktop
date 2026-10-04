@@ -20,10 +20,20 @@ export function buildChangelogFromTauriUpdate(update: UpdateInfo): ChangelogUpda
     hasUpdate: true,
     entries: update.notes
       ? [{
+          product: 'mcphub',
           version: update.version,
+          tagName: `v${update.version}`,
+          publishedAt: new Date().toISOString(),
           title: update.version,
           summary: update.notes,
           highlights: [],
+          fixes: [],
+          breakingChanges: [],
+          upgradeNotes: [],
+          categories: ['fix'],
+          locale: 'en',
+          bodyMarkdown: update.notes,
+          isStructured: false,
           changelogUrl: releaseUrl,
           url: releaseUrl,
         }]

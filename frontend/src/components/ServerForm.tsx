@@ -87,15 +87,16 @@ const ServerForm = ({
     arguments:
       initialData && initialData.config && initialData.config.args
         ? Array.isArray(initialData.config.args)
-          ? initialData.config.args.join(' ')
+          ? initialData.config.args.map(quoteArg).join(' ')
           : String(initialData.config.args)
         : '',
     args: (initialData && initialData.config && initialData.config.args) || [],
     type: getInitialServerType(), // Initialize the type field
     env: getInitialServerEnvVars(initialData),
     headers: [],
-    passthroughHeaders:
-      initialData?.config?.passthroughHeaders?.join(', ') || '',
+    passthroughHeaders: Array.isArray(initialData?.config?.passthroughHeaders)
+      ? initialData.config.passthroughHeaders.join(', ')
+      : '',
     visibility: (initialData?.config?.visibility ?? 'public') as
       | 'private'
       | 'group'
@@ -201,7 +202,7 @@ const ServerForm = ({
 
   // Transform space-separated arguments string into array
   const handleArgsChange = (value: string) => {
-    const args = value.split(' ').filter((arg) => arg.trim() !== '');
+    const args = splitArgs(value);
     setFormData({ ...formData, arguments: value, args });
   };
 
@@ -1203,7 +1204,10 @@ const ServerForm = ({
                             id="timeout"
                             value={formData.options?.timeout || 60000}
                             onChange={(e) =>
-                              handleOptionsChange('timeout', parseInt(e.target.value) || 60000)
+                              handleOptionsChange(
+                                'timeout',
+                                Math.max(1000, parseInt(e.target.value) || 60000),
+                              )
                             }
                             className="w-full py-2 px-3 form-input"
                             placeholder="30000"
@@ -1412,7 +1416,13 @@ const ServerForm = ({
                         onChange={(e) =>
                           setFormData((prev) => ({
                             ...prev,
-                            idleTimeoutMs: Number(e.target.value),
+                            // Clearing the input yields Number('')===0 (NaN for
+                            // garbage) — both would defeat the idle shutdown
+                            // (0 shuts down immediately). Clamp like httpPort.
+                            idleTimeoutMs: (() => {
+                              const n = Number(e.target.value);
+                              return Number.isFinite(n) && n >= 10000 ? n : 300000;
+                            })(),
                           }))
                         }
                         className="hub-input w-40 text-sm"
@@ -1449,6 +1459,56 @@ const ServerForm = ({
       </form>
     </div>
   );
+};
+
+
+// Quote-aware argv round-trip: args may legitimately contain spaces (e.g.
+// `--header Content-Type: application/json`). Naive join(' ')/split(' ')
+// silently rewrites stored configs on every edit.
+const quoteArg = (arg: string): string =>
+  /[\s"]/.test(arg)
+    ? `"${arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    : arg;
+
+const splitArgs = (value: string): string[] => {
+  const out: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  let escaped = false;
+  for (const ch of value) {
+    if (escaped) {
+      cur += ch;
+      escaped = false;
+    } else if (ch === '\\') {
+      // Escape prefix ONLY inside quotes (quoteArg now escapes both \ and "):
+      // outside quotes a backslash is literal (Windows paths must survive).
+      if (inQuotes) {
+        escaped = true;
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = !inQuotes;
+      if (!inQuotes && cur) {
+        out.push(cur);
+        cur = '';
+      } else if (inQuotes && cur) {
+        // keep building quoted token
+      }
+      if (inQuotes && !cur) {
+        // opening quote of a token
+      }
+    } else if (ch === ' ' && !inQuotes) {
+      if (cur) {
+        out.push(cur);
+        cur = '';
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
 };
 
 export default ServerForm;

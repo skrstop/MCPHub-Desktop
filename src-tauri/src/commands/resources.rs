@@ -1,7 +1,9 @@
 use crate::{
+    commands::auth::SessionState,
     models::resource::{BuiltinResource, BuiltinResourcePayload, ResourcePage},
     services::resource_service,
 };
+use tauri::State;
 
 #[tauri::command]
 pub async fn list_builtin_resources() -> Result<Vec<BuiltinResource>, String> {
@@ -17,8 +19,12 @@ pub async fn get_builtin_resource(id: String) -> Result<Option<BuiltinResource>,
 
 #[tauri::command]
 pub async fn create_builtin_resource(
+    session: State<'_, SessionState>,
     payload: BuiltinResourcePayload,
 ) -> Result<BuiltinResource, String> {
+    // Write op: shared builtin resources are exposed to every MCP client —
+    // non-admin sessions must not create them (review round 8, 2026-10-04).
+    crate::commands::config::require_admin(&session).await?;
     resource_service::create(&payload)
         .await
         .map_err(|e| e.to_string())
@@ -26,9 +32,11 @@ pub async fn create_builtin_resource(
 
 #[tauri::command]
 pub async fn update_builtin_resource(
+    session: State<'_, SessionState>,
     id: String,
     payload: BuiltinResourcePayload,
 ) -> Result<BuiltinResource, String> {
+    crate::commands::config::require_admin(&session).await?;
     resource_service::update(&id, &payload)
         .await
         .map_err(|e| e.to_string())?
@@ -36,7 +44,11 @@ pub async fn update_builtin_resource(
 }
 
 #[tauri::command]
-pub async fn delete_builtin_resource(id: String) -> Result<bool, String> {
+pub async fn delete_builtin_resource(
+    session: State<'_, SessionState>,
+    id: String,
+) -> Result<bool, String> {
+    crate::commands::config::require_admin(&session).await?;
     resource_service::delete(&id)
         .await
         .map_err(|e| e.to_string())

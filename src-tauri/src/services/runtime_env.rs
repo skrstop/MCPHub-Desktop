@@ -64,7 +64,22 @@ fn runtimes_dir() -> Option<&'static PathBuf> {
 /// Get the enhanced PATH from user's login shell.
 /// GUI apps on macOS/Linux don't inherit the shell PATH, so we need to
 /// execute the user's shell to get the full PATH with tools like nvm, asdf, etc.
-fn get_enhanced_path() -> String {
+/// Cached login-shell PATH (populated by `init`). Consumers (runtime
+/// settings page) must reuse this instead of re-running the 5s shell probe
+/// on every call — a hung rc file would stall an async worker each time.
+pub fn cached_enhanced_path() -> Option<String> {
+    ENHANCED_PATH.get().cloned()
+}
+
+/// Cache-first PATH for synchronous subprocess helpers: falls back to the raw
+/// process PATH when the login-shell probe hasn't populated the cache yet, so
+/// sync callers never need to block_on the shell probe (which would panic on
+/// a tokio worker) — review round 8, 2026-10-04.
+pub fn cached_enhanced_path_or_env() -> String {
+    ENHANCED_PATH.get().cloned().unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+}
+
+pub(crate) fn get_enhanced_path() -> String {
     log::info!("[runtime_env] Getting enhanced PATH from user's login shell");
 
     let path = {
@@ -76,7 +91,10 @@ fn get_enhanced_path() -> String {
     };
 
     let display_path = if path.len() > 300 {
-        format!("{}...", &path[..300])
+        // Byte-safe truncation: slicing at a fixed byte offset panics when it
+        // lands mid-UTF-8 (paths with non-ASCII user directories are common).
+        let cut = path.char_indices().map(|(i, _)| i).take_while(|&i| i <= 300).last().unwrap_or(0);
+        format!("{}...", &path[..cut])
     } else {
         path.clone()
     };
@@ -154,7 +172,28 @@ fn get_unix_path() -> String {
             std::time::Duration::from_secs(5),
         ) {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                // User rc files often echo extra lines (nvm hints, banners).
+                // A PATH value must contain ':' separators — take the last
+                // line that looks like a PATH instead of trusting all stdout.
+                // Guards: >= 2 separators (a minimal legitimate PATH like
+                // "/usr/local/bin:/usr/bin:/bin" has 2) and every segment
+                // starts with '/'. NOTE: whitespace is NOT a rejection
+                // signal — macOS PATH entries legitimately contain spaces
+                // ("/Applications/VMware Fusion.app/Contents/Public");
+                // rejecting any line with a space silently discarded such
+                // PATHs and broke managed spawns for users with those apps.
+                let path = String::from_utf8_lossy(&output.stdout);
+                let looks_like_path = |l: &str| {
+                    l.matches(':').count() >= 2
+                        && !l.contains('=')
+                        && l.split(':').filter(|s| !s.is_empty()).all(|s| s.starts_with('/'))
+                };
+                let path = path
+                    .lines()
+                    .filter(|l| looks_like_path(l))
+                    .last()
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default();
                 if !path.is_empty() {
                     log::info!("[runtime_env] Successfully got PATH from shell (length: {})", path.len());
                     return path;
@@ -797,8 +836,19 @@ pub fn app_data_dir(name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Returns the per-server npm cache directory path WITHOUT creating it.
+/// Matches the `npm_config_cache` env override (`npm-cache-{server}`) that
+/// `env_overrides` sets for node/npx/npm spawns — reinstall/clear_cache must
+/// target THIS directory (its `_npx` holds the actual package installs), not
+/// the legacy shared `runtimes/_npx` which managed spawns never write.
+pub fn npm_server_cache_dir(server_name: &str) -> Option<PathBuf> {
+    let base = app_cache_base()?;
+    Some(base.join("mcphub-desktop").join(format!("npm-cache-{}", server_name)))
+}
+
 /// Returns the npm/npx cache directory used by the managed Node.js runtime.
-/// This is the `_npx` directory inside the runtimes dir.
+/// Legacy shared location (kept for reference; managed npx spawns point at
+/// `npm_server_cache_dir` via `npm_config_cache` instead).
 pub fn npm_cache_dir() -> Option<PathBuf> {
     let rt = runtimes_dir()?;
     Some(rt.join("_npx"))
@@ -809,4 +859,32 @@ pub fn npm_cache_dir() -> Option<PathBuf> {
 pub fn uvx_cache_dir() -> Option<PathBuf> {
     let rt = runtimes_dir()?;
     Some(rt.join("uv-cache"))
+}
+
+/// Returns the per-server uvx cache directory path WITHOUT creating it.
+/// Matches the `UV_CACHE_DIR` env override (`uv-cache-{server}`) that
+/// `env_overrides` sets for uvx servers — reinstalls must clear this
+/// directory to force a package re-download.
+pub fn uvx_server_cache_dir(server_name: &str) -> Option<PathBuf> {
+    let base = app_cache_base()?;
+    Some(base.join("mcphub-desktop").join(format!("uv-cache-{}", server_name)))
+}
+
+fn app_cache_base() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join("Library").join("Caches"));
+    #[cfg(target_os = "linux")]
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".cache"))
+        });
+    #[cfg(target_os = "windows")]
+    let base = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+    base
 }

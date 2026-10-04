@@ -146,7 +146,8 @@
     "passwordRequireNumber": "Şifre en az bir rakam içermelidir",
     "passwordRequireSpecial": "Şifre en az bir özel karakter içermelidir",
     "passwordStrengthHint": "Şifre en az 8 karakter olmalı ve harf, rakam ve özel karakter içermelidir",
-    "defaultPasswordHint": "Default password: admin"
+    "defaultPasswordHint": "Default password: admin",
+    "user": "Kullanıcı"
   },
   "server": {
     "searchPlaceholder": "Ada veya açıklamaya göre ara",
@@ -338,7 +339,8 @@
     "updateTo": "Update to {{version}}",
     "smartBadge": "Akıllı",
     "smartMetaRoute": "Akıllı Yönlendirme meta araçları",
-    "smartMetaTooltip": "Akıllı Yönlendirme meta araçları: YALNIZCA /mcp/$smart ucu üzerinden sunulur — normal /mcp veya /api yollarında mevcut değildir."
+    "smartMetaTooltip": "Akıllı Yönlendirme meta araçları: YALNIZCA /mcp/$smart ucu üzerinden sunulur — normal /mcp veya /api yollarında mevcut değildir.",
+    "unknownError": "Bilinmeyen hata"
   },
   "status": {
     "sleeping": "Uykuda",
@@ -364,7 +366,16 @@
     "failedToFetchSettings": "Ayarlar getirilemedi",
     "failedToUpdateRouteConfig": "Route yapılandırması güncellenemedi",
     "failedToUpdateSmartRoutingConfig": "Akıllı yönlendirme yapılandırması güncellenemedi",
-    "failedToUpdateBetterAuthConfig": "Better Auth yapılandırması güncellenemedi"
+    "failedToUpdateBetterAuthConfig": "Better Auth yapılandırması güncellenemedi",
+    "failedToUpdateSystemConfig": "Sistem yapılandırması güncellenemedi",
+    "failedToUpdateRoutingConfig": "Yönlendirme yapılandırması güncellenemedi",
+    "failedToUpdateInstallConfig": "Kurulum yapılandırması güncellenemedi",
+    "failedToUpdateMCPRouterConfig": "MCP Router yapılandırması güncellenemedi",
+    "failedToUpdateNameSeparator": "Ad ayırıcı güncellenemedi",
+    "failedToUpdateOAuthServerConfig": "OAuth sunucu yapılandırması güncellenemedi",
+    "failedToUpdateSessionRebuild": "Oturum yeniden oluşturma ayarı güncellenemedi",
+    "failedToUpdateSettings": "Ayarlar güncellenemedi",
+    "failedToUpdateBearerKey": "Bearer anahtarı güncellenemedi"
   },
   "common": {
     "loading": "Yükleniyor...",
@@ -423,7 +434,8 @@
     "searchPlaceholder": "İsim veya açıklamaya göre ara",
     "started": "Başlatıldı",
     "notStarted": "Başlatılmadı",
-    "copyOpenApiUrl": "OpenAPI URL'sini Kopyala"
+    "copyOpenApiUrl": "OpenAPI URL'sini Kopyala",
+    "operationFailed": "İşlem başarısız"
   },
   "pagination": {
     "rowsPerPage": "Sayfa başına satır",
@@ -871,7 +883,8 @@
       "excludeFileGroupAdd": "Bu dosyaları hariç tut (güncelleme kontrolleri yok sayar)",
       "excludeFileGroupRemove": "Bu dosyaları yeniden dahil et (güncelleme kontrolleri sürer)",
       "refreshSourceDone": "Kaynak güncellemesi tamamlandı: {{added}} içe aktarıldı, {{removed}} kaldırıldı, {{updated}} güncellendi",
-      "refreshSourceTitle": "Kaynak Güncellemesi"
+      "refreshSourceTitle": "Kaynak Güncellemesi",
+      "selectedCount": "{{count}} öğe seçildi"
     },
     "skills": {
       "title": "Skills"
@@ -1478,6 +1491,7 @@
     "httpPort": "HTTP Service Port",
     "httpPortDescription": "MCP HTTP service listening port, restart required after changes",
     "httpPortWarning": "After changing the port, you need to restart the application for changes to take effect",
+    "httpPortInvalid": "Port must be between 1024 and 65535",
     "nodeVersion": "Node.js Version",
     "nodeVersionDescription": "Select or install a specific Node.js version for running MCP servers",
     "pythonVersion": "Python Version",
@@ -1500,7 +1514,9 @@
     "smartReindexDone": "Akıllı yönlendirme indexi yeniden oluşturuldu",
     "smartReindexFailed": "Akıllı yönlendirme indexi yeniden oluşturulamadı",
     "mcpStrictValidation": "Katı Protokol Doğrulaması",
-    "mcpStrictValidationDescription": "Etkinleştirildiğinde istek başlıkları ve parametreleri MCP belirtimine göre katı doğrular; yeni belirtimleri takip etmeyen istemcileri tolere etmek için varsayılan olarak kapalıdır"
+    "mcpStrictValidationDescription": "Etkinleştirildiğinde istek başlıkları ve parametreleri MCP belirtimine göre katı doğrular; yeni belirtimleri takip etmeyen istemcileri tolere etmek için varsayılan olarak kapalıdır",
+    "selectAtLeastOneGroupOrServer": "Lütfen en az bir grup veya sunucu seçin",
+    "llmProviderApiKeyDescription": "Akıllı yönlendirmede kullanılan LLM sağlayıcısının API anahtarı"
   },
   "mcpb": {
     "upload": "Yükle",
@@ -1599,7 +1615,8 @@
     "statsError": "Kullanıcı istatistikleri getirilemedi",
     "deleteConfirmation": "'{{username}}' kullanıcısını silmek istediğinizden emin misiniz? Bu işlem geri alınamaz.",
     "confirmDelete": "Kullanıcıyı Sil",
-    "deleteWarning": "'{{username}}' kullanıcısını silmek istediğinizden emin misiniz? Bu işlem geri alınamaz."
+    "deleteWarning": "'{{username}}' kullanıcısını silmek istediğinizden emin misiniz? Bu işlem geri alınamaz.",
+    "fetchError": "Kullanıcılar yüklenemedi"
   },
   "api": {
     "errors": {
@@ -2032,5 +2049,15 @@
     "showAll": "Tüm sunucuları göster",
     "loading": "Yükleniyor…",
     "empty": "Kişisel kimlik bilgisi gerektiren paylaşılan sunucu yok."
+  },
+  "accessUrl": {
+    "title": "Hizmet Erişim URL'leri",
+    "baseUrl": "Temel URL",
+    "globalRoute": "Genel Rota (tüm sunucular)",
+    "groupRoute": "Grup Rota",
+    "serverRoute": "Sunucu Rota",
+    "smartRoute": "Akıllı Yönlendirme Rota",
+    "smartApiRoute": "Akıllı Yönlendirme REST API",
+    "sseRoute": "SSE Rota"
   }
 }

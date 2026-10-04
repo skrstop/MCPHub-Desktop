@@ -1,5 +1,5 @@
 use crate::{db, models::resource::{BuiltinResource, BuiltinResourcePayload, ResourcePage}};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -121,7 +121,10 @@ pub async fn search_paged(
         format!("WHERE {}", conds.join(" AND "))
     };
 
-    let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!(
+        "%{}%",
+        key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
     let count_sql = format!("SELECT COUNT(*) FROM builtin_resources {}", where_clause);
     let mut count_q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(&*count_sql));
     if !key.is_empty() {
@@ -169,6 +172,12 @@ pub async fn find_by_id(id: &str) -> Result<Option<BuiltinResource>> {
 }
 
 pub async fn create(payload: &BuiltinResourcePayload) -> Result<BuiltinResource> {
+    // FTS ref_id is keyed by name — a NULL/empty name indexes the row under
+    // ref_id "" which no lookup can resolve (and two NULL names steal each
+    // other's row). Mirrors the duplicate rejection below.
+    if payload.name.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        return Err(anyhow!("resource name is required"));
+    }
     let created = create_inner(payload).await?;
     // A3: content changed → notify both list-changed and the specific URI.
     crate::services::subscription_hub::notify_resources_list_changed().await;
@@ -185,6 +194,23 @@ async fn create_inner(payload: &BuiltinResourcePayload) -> Result<BuiltinResourc
     );
 
     let mut tx = db::pool().begin().await?;
+    // Duplicate rejection: FTS ref_id is `name` and get_prompt/read_resource
+    // resolve by name/uri — a second same-named/uri'd row would steal the
+    // FTS row and make lookups ambiguous.
+    let dup = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM builtin_resources WHERE name = ? OR uri = ?",
+    )
+    .bind(payload.name.as_deref().unwrap_or(""))
+    .bind(&payload.uri)
+    .fetch_one(&mut *tx)
+    .await?;
+    if dup > 0 {
+        return Err(anyhow!(
+            "Resource name '{}' or uri '{}' already exists",
+            payload.name.as_deref().unwrap_or(""),
+            payload.uri
+        ));
+    }
     sqlx::query(
         "INSERT INTO builtin_resources (id, uri, name, description, mime_type, content, enabled) \
          VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -221,6 +247,9 @@ async fn create_inner(payload: &BuiltinResourcePayload) -> Result<BuiltinResourc
 }
 
 pub async fn update(id: &str, payload: &BuiltinResourcePayload) -> Result<Option<BuiltinResource>> {
+    if payload.name.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        return Err(anyhow!("resource name is required"));
+    }
     let fts_text = resource_fts_text(
         payload.name.as_deref().unwrap_or(""),
         Some(&payload.uri),
@@ -228,14 +257,34 @@ pub async fn update(id: &str, payload: &BuiltinResourcePayload) -> Result<Option
     );
 
     let mut tx = db::pool().begin().await?;
-    // 先读旧 name（ref_id=name：改名时需删旧插新，P5）
-    let old_name: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT name FROM builtin_resources WHERE id = ?",
+    // 先读旧 name + old uri（ref_id=name：改名时需删旧插新，P5）
+    let old_row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, uri FROM builtin_resources WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
-    .await?
-    .flatten();
+    .await?;
+    let (old_name, old_uri) = match &old_row {
+        Some((n, u)) => (n.clone(), u.clone()),
+        None => (None, None),
+    };
+
+    // Duplicate rejection (see create).
+    let dup = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM builtin_resources WHERE (name = ? OR uri = ?) AND id != ?",
+    )
+    .bind(payload.name.as_deref().unwrap_or(""))
+    .bind(&payload.uri)
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if dup > 0 {
+        return Err(anyhow!(
+            "Resource name '{}' or uri '{}' already exists",
+            payload.name.as_deref().unwrap_or(""),
+            payload.uri
+        ));
+    }
 
     let affected = sqlx::query(
         "UPDATE builtin_resources SET uri = ?, name = ?, description = ?, mime_type = ?, \
@@ -277,6 +326,13 @@ pub async fn update(id: &str, payload: &BuiltinResourcePayload) -> Result<Option
     let out = find_by_id(id).await;
     if let Ok(Some(ref r)) = out {
         crate::services::subscription_hub::notify_resources_list_changed().await;
+        // URI changed: also notify subscribers of the old URI so clients
+        // watching it learn the resource moved.
+        if let Some(old) = &old_uri {
+            if old != &r.uri {
+                crate::services::subscription_hub::notify_resource_updated(old).await;
+            }
+        }
         crate::services::subscription_hub::notify_resource_updated(&r.uri).await;
     }
     out
@@ -284,13 +340,16 @@ pub async fn update(id: &str, payload: &BuiltinResourcePayload) -> Result<Option
 
 pub async fn delete(id: &str) -> Result<bool> {
     let mut tx = db::pool().begin().await?;
-    let name: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT name FROM builtin_resources WHERE id = ?",
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT name, uri FROM builtin_resources WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
-    .await?
-    .flatten();
+    .await?;
+    let (name, uri) = match row {
+        Some((n, u)) => (n, u),
+        None => (None, None),
+    };
     let affected = sqlx::query("DELETE FROM builtin_resources WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -306,6 +365,11 @@ pub async fn delete(id: &str) -> Result<bool> {
     }
     tx.commit().await?;
     if affected > 0 {
+        // Parity with update()'s URI-move notification: watchers of the
+        // deleted URI learn it is gone (review round 8, 2026-10-04).
+        if let Some(uri) = uri {
+            crate::services::subscription_hub::notify_resource_updated(&uri).await;
+        }
         crate::services::subscription_hub::notify_resources_list_changed().await;
     }
     Ok(affected > 0)

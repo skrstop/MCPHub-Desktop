@@ -209,27 +209,71 @@ impl<'a> CodeChunkStrategy<'a> {
 /// for the node itself when it fits the bound or has no children; otherwise
 /// recurse into children, materializing inter-child gaps as atoms so the
 /// ranges cover the parent exactly.
-fn push_atoms(node: tree_sitter::Node, bound: usize, out: &mut Vec<(usize, usize)>) {
-    let (s, e) = (node.start_byte(), node.end_byte());
-    if e <= s {
-        return;
+///
+/// Iterative (explicit stack) instead of recursion: a balanced-parens file
+/// ~400KB produces an AST ~200k levels deep, which overflows the 2MB thread
+/// stack (SIGABRT — uncatchable, kills the whole app). Depth is also hard-
+/// capped at 512: deeper subtrees are treated as atoms and the oversized-
+/// chunk safety valve handles them downstream.
+fn push_atoms<'a>(root: tree_sitter::Node<'a>, bound: usize, out: &mut Vec<(usize, usize)>) {
+    const MAX_DEPTH: usize = 512;
+    enum Work<'a> {
+        Node(tree_sitter::Node<'a>, usize),
+        Gap(usize, usize),
     }
-    if e - s <= bound || node.child_count() == 0 {
-        out.push((s, e));
-        return;
-    }
-    let mut covered = s;
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i as u32) else { continue };
-        if child.start_byte() > covered {
-            out.push((covered, child.start_byte()));
+    // Iterative DFS with an explicit work stack: a balanced-parens file
+    // ~400KB yields an AST ~200k levels deep — recursion overflows the 2MB
+    // thread stack (SIGABRT, uncatchable, kills the app). Depth is also
+    // hard-capped: deeper subtrees become atoms (the oversized-chunk valve
+    // handles them downstream).
+    let mut stack: Vec<Work> = vec![Work::Node(root, 0)];
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Gap(gs, ge) => out.push((gs, ge)),
+            Work::Node(node, depth) => {
+                let (s, e) = (node.start_byte(), node.end_byte());
+                if e <= s {
+                    continue;
+                }
+                if e - s <= bound || node.child_count() == 0 || depth >= MAX_DEPTH {
+                    out.push((s, e));
+                    continue;
+                }
+                // Collect children in order, then push in REVERSE so pops
+                // yield: gap1, child1, gap2, child2, ..., gapN, childN,
+                // trailing-gap — identical to the recursive emit order.
+                let mut children: Vec<tree_sitter::Node> = Vec::new();
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i as u32) {
+                        children.push(child);
+                    }
+                }
+                if let Some(t) = trailing_gap(&children, s, e) {
+                    stack.push(Work::Gap(t.0, t.1));
+                }
+                // Walk children forward computing gaps, then push in overall
+                // reverse so pops emit: gap_i, child_i, gap_{i+1}, ... , trailing.
+                let mut gap_then_child: Vec<(Option<(usize, usize)>, tree_sitter::Node)> = Vec::new();
+                let mut prev_end = s;
+                for child in &children {
+                    let gap = (child.start_byte() > prev_end).then(|| (prev_end, child.start_byte()));
+                    gap_then_child.push((gap, *child));
+                    prev_end = prev_end.max(child.end_byte());
+                }
+                for (gap, child) in gap_then_child.into_iter().rev() {
+                    stack.push(Work::Node(child, depth + 1));
+                    if let Some(g) = gap {
+                        stack.push(Work::Gap(g.0, g.1));
+                    }
+                }
+            }
         }
-        push_atoms(child, bound, out);
-        covered = covered.max(child.end_byte());
     }
-    if covered < e {
-        out.push((covered, e));
-    }
+}
+
+fn trailing_gap(children: &[tree_sitter::Node], s: usize, e: usize) -> Option<(usize, usize)> {
+    let last_end = children.last().map(|c| c.end_byte()).unwrap_or(s);
+    (last_end < e).then(|| (last_end, e))
 }
 
 impl ChunkStrategy for CodeChunkStrategy<'_> {
@@ -617,6 +661,21 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    #[test]
+    fn deep_nesting_does_not_overflow_stack() {
+        // Regression: push_atoms recursion on a balanced-parens file ~400KB
+        // produced an AST ~200k levels deep and SIGABRT'd the process
+        // (stack overflow is uncatchable). The iterative walk must survive
+        // and tile the content exactly.
+        let depth = 40_000usize; // ~80k AST levels of parens
+        let text = format!("{}{}", "(".repeat(depth), ")".repeat(depth));
+        assert!(text.len() > CODE_PARTITION_BYTES, "must engage partitioned path");
+        let chunks = chunk_document("deep.js", &text, tok(), 512, 0);
+        assert!(!chunks.is_empty());
+        let strip = |s: &str| s.split_whitespace().collect::<String>();
+        assert_eq!(strip(&chunks.concat()), strip(&text), "content lost");
     }
 
     #[test]

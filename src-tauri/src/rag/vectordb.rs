@@ -174,6 +174,11 @@ impl VectorDb {
                     _ => false,
                 },
             };
+            // Self-heal: a missing or wrong-typed embedding column means the
+            // table can never accept rows (RecordBatch schema mismatch fails
+            // every add_chunks forever) — recreate, matching the tags
+            // column's treatment. Silently keeping it left the table in a
+            // permanently broken state with no path back.
             let need_recreate = need_recreate
                 || match schema.field_with_name("embedding") {
                     Ok(f) => match f.data_type() {
@@ -188,9 +193,18 @@ impl VectorDb {
                                 false
                             }
                         }
-                        _ => false,
+                        other => {
+                            log::info!(
+                                "[RAG] rag_chunk 'embedding' has unexpected type {:?} — recreating table",
+                                other
+                            );
+                            true
+                        }
                     },
-                    Err(_) => false,
+                    Err(_) => {
+                        log::info!("[RAG] rag_chunk table missing 'embedding' column - recreating");
+                        true
+                    }
                 };
             if need_recreate {
                 let _ = conn.drop_table(TABLE_NAME, &[]).await;
@@ -250,8 +264,18 @@ impl VectorDb {
         let texts: Vec<&str> = chunks.iter().map(|c| c.chunk_text.as_str()).collect();
 
         // Embedding: flat f32 array of n*dim, wrapped in FixedSizeList.
+        // Validate lengths first — a mismatch would panic inside
+        // FixedSizeListArray::new instead of returning an error.
         let mut flat = Vec::with_capacity(n * dim);
         for c in chunks {
+            if c.embedding.len() != dim {
+                return Err(anyhow!(
+                    "add_chunks: embedding length {} != dim {} (chunk {})",
+                    c.embedding.len(),
+                    dim,
+                    c.chunk_id
+                ));
+            }
             flat.extend_from_slice(c.embedding);
         }
 
@@ -396,11 +420,17 @@ impl VectorDb {
             let embs = col::<FixedSizeListArray>(&batch, "embedding");
             for i in 0..n {
                 let cell = embs.value(i);
+                // A failed downcast means the stored schema is not what we
+                // expect — returning an empty embedding would later panic in
+                // add_chunks (FixedSizeListArray length mismatch) far from
+                // the cause. Surface it as an error.
                 let embedding = cell
                     .as_any()
                     .downcast_ref::<Float32Array>()
                     .map(|a| a.values().to_vec())
-                    .unwrap_or_default();
+                    .ok_or_else(|| {
+                        anyhow!("read_chunks: embedding cell {} is not Float32Array (schema mismatch)", i)
+                    })?;
                 out.push(ChunkRecord {
                     chunk_id: ids.value(i).to_string(),
                     doc_id: doc_ids.value(i).to_string(),
@@ -458,11 +488,22 @@ impl VectorDb {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        // Build a case-insensitive OR filter, one LIKE per term. Single-quote
-        // is escaped; %/_ are left as-is (rare in search terms).
+        // Build a case-insensitive OR filter, one LIKE per term. Escape
+        // single-quotes AND the LIKE wildcards (% _) with backslash (the
+        // default LIKE escape in DataFusion/Postgres semantics): `_` is a
+        // single-char wildcard and code identifiers (`parse_json`,
+        // `snake_case`) are the CORE content of this index — an unescaped
+        // bare `_` query would match every row (`'%_%'`), injecting pure
+        // noise hits with fabricated 0.0 distance.
+        let esc = |t: &str| {
+            t.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+                .replace('\'', "''")
+        };
         let clauses: Vec<String> = terms
             .iter()
-            .map(|t| format!("lower(chunk_text) LIKE lower('%{}%')", t.replace('\'', "''")))
+            .map(|t| format!("lower(chunk_text) LIKE lower('%{}%')", esc(t)))
             .collect();
         let filter = clauses.join(" OR ");
 
