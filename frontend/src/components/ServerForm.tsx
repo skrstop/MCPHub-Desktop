@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useAuth } from '../contexts/AuthContext';
 import { X } from 'lucide-react';
 import { Server, EnvVar, ServerFormData } from '@/types';
 import { buildServerPayload } from '../utils/serverFormPayload';
@@ -29,6 +30,7 @@ const ServerForm = ({
   mode,
 }: ServerFormProps) => {
   const { t } = useTranslation();
+  const { auth } = useAuth();
 
   // Determine the initial server type from the initialData
   const getInitialServerType = (): 'stdio' | 'sse' | 'streamable-http' | 'openapi' => {
@@ -57,6 +59,9 @@ const ServerForm = ({
     const oauth = data?.config?.oauth;
     return {
       clientId: oauth?.clientId || '',
+      ...(oauth?.allowInsecureTokenEndpoint !== undefined && {
+        allowInsecureTokenEndpoint: oauth.allowInsecureTokenEndpoint,
+      }),
       clientSecret: oauth?.clientSecret || '',
       scopes: oauth?.scopes ? oauth.scopes.join(' ') : '',
       accessToken: oauth?.accessToken || '',
@@ -102,6 +107,7 @@ const ServerForm = ({
       | 'group'
       | 'public',
     options: {
+      maxBufferSize: initialData?.config?.options?.maxBufferSize,
       timeout:
         (initialData &&
           initialData.config &&
@@ -212,8 +218,9 @@ const ServerForm = ({
   };
 
   const handleEnvVarChange = (index: number, field: 'key' | 'value', value: string) => {
-    const newEnvVars = [...envVars];
-    newEnvVars[index][field] = value;
+    // Copy the row too: mutating the shared object would break snapshot
+    // comparisons on envVars items (state-immutability discipline).
+    const newEnvVars = envVars.map((v, i) => (i === index ? { ...v, [field]: value } : v));
     setEnvVars(newEnvVars);
   };
 
@@ -228,8 +235,7 @@ const ServerForm = ({
   };
 
   const handleHeaderVarChange = (index: number, field: 'key' | 'value', value: string) => {
-    const newHeaderVars = [...headerVars];
-    newHeaderVars[index][field] = value;
+    const newHeaderVars = headerVars.map((v, i) => (i === index ? { ...v, [field]: value } : v));
     setHeaderVars(newHeaderVars);
   };
 
@@ -245,7 +251,7 @@ const ServerForm = ({
 
   const handleOAuthChange = <K extends keyof NonNullable<ServerFormData['oauth']>>(
     field: K,
-    value: string,
+    value: NonNullable<ServerFormData['oauth']>[K],
   ) => {
     setFormData((prev) => ({
       ...prev,
@@ -258,7 +264,7 @@ const ServerForm = ({
 
   // Handle options changes
   const handleOptionsChange = (
-    field: 'timeout' | 'resetTimeoutOnProgress' | 'maxTotalTimeout',
+    field: 'timeout' | 'resetTimeoutOnProgress' | 'maxTotalTimeout' | 'maxBufferSize',
     value: number | boolean | undefined,
   ) => {
     setFormData((prev) => ({
@@ -1143,6 +1149,25 @@ const ServerForm = ({
                       <p className="text-xs text-gray-500 mb-3">
                         {t('server.oauth.sectionDescription')}
                       </p>
+                      {(serverType === 'sse' || serverType === 'streamable-http') &&
+                        (auth.user?.isAdmin || formData.oauth?.allowInsecureTokenEndpoint) && (
+                          <div className="mb-3">
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={formData.oauth?.allowInsecureTokenEndpoint === true}
+                                disabled={!auth.user?.isAdmin}
+                                onChange={(e) =>
+                                  handleOAuthChange('allowInsecureTokenEndpoint', e.target.checked)
+                                }
+                              />
+                              {t('server.oauth.allowInsecureTokenEndpoint')}
+                            </label>
+                            <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                              {t('server.oauth.allowInsecureTokenEndpointHelp')}
+                            </p>
+                          </div>
+                        )}
                       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         <div>
                           <label className="block text-xs text-gray-600 mb-1">
@@ -1242,6 +1267,35 @@ const ServerForm = ({
                             {t('server.maxTotalTimeoutDescription')}
                           </p>
                         </div>
+
+                        {serverType === 'stdio' && (
+                          <div>
+                            <label
+                              className="block text-gray-600 text-sm font-medium mb-1"
+                              htmlFor="maxBufferSize"
+                            >
+                              {t('server.maxBufferSize')}
+                            </label>
+                            <input
+                              type="number"
+                              id="maxBufferSize"
+                              value={formData.options?.maxBufferSize ?? ''}
+                              onChange={(e) =>
+                                handleOptionsChange(
+                                  'maxBufferSize',
+                                  e.target.value === '' ? undefined : Number(e.target.value),
+                                )
+                              }
+                              className="w-full py-2 px-3 form-input"
+                              placeholder="10485760"
+                              min="1"
+                              step="1"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">
+                              {t('server.maxBufferSizeDescription')}
+                            </p>
+                          </div>
+                        )}
                       </div>
 
                       <div className="mt-3">
@@ -1413,16 +1467,28 @@ const ServerForm = ({
                         min={10000}
                         step={1000}
                         value={formData.idleTimeoutMs ?? 300000}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          // Free typing: store the raw number (even a
+                          // partial "6"); clamping here would snap the
+                          // first keystroke to 300000 and make manual
+                          // entry impossible. Clamp on blur instead.
+                          const n = Number(e.target.value);
                           setFormData((prev) => ({
                             ...prev,
-                            // Clearing the input yields Number('')===0 (NaN for
-                            // garbage) — both would defeat the idle shutdown
-                            // (0 shuts down immediately). Clamp like httpPort.
-                            idleTimeoutMs: (() => {
-                              const n = Number(e.target.value);
-                              return Number.isFinite(n) && n >= 10000 ? n : 300000;
-                            })(),
+                            idleTimeoutMs: e.target.value === '' || !Number.isFinite(n) ? undefined : n,
+                          }));
+                        }}
+                        onBlur={() =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            // Clearing yields undefined — restore the
+                            // default (0/NaN would defeat idle shutdown).
+                            idleTimeoutMs:
+                              prev.idleTimeoutMs === undefined ||
+                              !Number.isFinite(prev.idleTimeoutMs as number) ||
+                              (prev.idleTimeoutMs as number) < 10000
+                                ? 300000
+                                : prev.idleTimeoutMs,
                           }))
                         }
                         className="hub-input w-40 text-sm"

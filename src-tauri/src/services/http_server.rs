@@ -7,9 +7,9 @@
 /// Endpoints:
 ///   GET  /health                    — health check
 ///   GET  /servers                   — list available servers
-///   POST /mcp/{server}/call         — call a tool on a specific server
-///   GET  /mcp/{server}/tools        — list tools for a server
-///   POST /mcp/call                  — smart call: route to best server
+///   /mcp, /mcp/{scope}              — MCP Streamable HTTP (JSON-RPC via rmcp;
+///                                     scope = "" | $smart | {group} | {server})
+///   /rest/... , /api/...            — REST & OpenAPI-compatible surfaces
 use crate::{
     mcp::pool,
     models::{bearer_key::BearerKey, server::Tool},
@@ -88,6 +88,10 @@ fn build_oauth_401(headers: &HeaderMap, reason: &str) -> Response {
 // ────────────────────────────────────────────────────────────────────────────
 
 struct ServerHandle {
+    /// SDK cancellation token (rmcp_service config): cancelled in stop() so
+    /// in-flight SSE/streaming handlers terminate with the listener instead
+    /// of relying on body-drop (documented SDK shutdown mechanism).
+    sdk_cancel: tokio_util::sync::CancellationToken,
     abort_tx: tokio::sync::oneshot::Sender<()>,
     /// Shutdown sender for the loopback serve task (separate oneshot —
     /// receivers are single-consumer).
@@ -129,6 +133,98 @@ static SERVER_HANDLE: OnceLock<Arc<Mutex<Option<ServerHandle>>>> = OnceLock::new
 /// successful start(); lets the watch task detect that the handle it is about
 /// to clear still belongs to ITS instance (a newer start() may have raced it).
 static HTTP_START_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Snapshot of the active server's body_limit_bytes — the leniency middleware
+/// reads it per-request WITHOUT taking the global SERVER_HANDLE mutex (start()
+/// holds that mutex across bind-probe retries, stalling every in-flight /mcp
+/// POST for up to ~10s otherwise).
+static BODY_LIMIT_SNAPSHOT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(8 * 1024 * 1024);
+
+/// Shared LocalSessionManager so the idle reaper can enumerate/terminate
+/// sessions the SDK would otherwise keep forever (clients that never send
+/// DELETE — killed process, closed tab — leak isolated upstream clients).
+fn shared_session_manager() -> &'static std::sync::Arc<rmcp::transport::streamable_http_server::session::local::LocalSessionManager> {
+    static MGR: OnceLock<std::sync::Arc<rmcp::transport::streamable_http_server::session::local::LocalSessionManager>> = OnceLock::new();
+    MGR.get_or_init(Default::default)
+}
+
+/// Last time each mcp-session-id was seen on a request (idle-reaper input).
+/// Cap-free: entries are removed by the reaper when the session dies.
+static SESSION_LAST_SEEN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = OnceLock::new();
+
+fn session_last_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    SESSION_LAST_SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Sessions idle longer than this are reaped. The SDK worker does idle-exit
+/// after 5min (SessionConfig::keep_alive default, local.rs) but the session
+/// ENTRY stays in the manager's map and our upstream isolation state
+/// (mcp/session_pool) is never cleaned by the SDK — hence this reaper.
+const SESSION_IDLE_REAP_SECS: u64 = 30 * 60;
+
+fn spawn_session_reaper() {
+    // Idempotent: start() runs on every restart (port/limit change) — without
+    // this guard each restart spawns another 60s loop (unbounded over a
+    // long-lived process).
+    static REAPER_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REAPER_STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let now = std::time::Instant::now();
+            let expired: Vec<String> = {
+                let map = session_last_seen().lock().unwrap_or_else(|p| p.into_inner());
+                map.iter()
+                    .filter(|(_, t)| now.duration_since(**t).as_secs() >= SESSION_IDLE_REAP_SECS)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            };
+            if expired.is_empty() {
+                continue;
+            }
+            let mgr = shared_session_manager();
+            for sid in expired {
+                // Only reap sessions the SDK still holds (an unknown sid was
+                // already terminated — just drop the timestamp).
+                let alive = mgr.sessions.read().await.keys().any(|k| k.as_ref() == sid.as_str());
+                if alive {
+                    // Reap via the pub sessions map (same steps as the SDK's
+                    // SessionManager::close_session — remove + handle.close).
+                    // Arc<LocalSessionManager> does NOT implement the
+                    // SessionManager trait (SDK impl is on the bare type), so
+                    // trait close_session is unreachable from a shared Arc.
+                    let handle = {
+                        let mut sessions = mgr.sessions.write().await;
+                        // Re-check last-seen under the same write lock: a
+                        // request between the expired snapshot and here must
+                        // keep the session alive (touch/reap race).
+                        let fresh = session_last_seen()
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .get(&sid)
+                            .map(|t| now.duration_since(*t).as_secs() < SESSION_IDLE_REAP_SECS)
+                            .unwrap_or(true); // no stamp = unknown activity, keep
+                        if fresh {
+                            None
+                        } else {
+                            sessions.remove(sid.as_str())
+                        }
+                    };
+                    if let Some(handle) = handle {
+                        if let Err(e) = handle.close().await {
+                            log::debug!("[session-reaper] close {sid}: {e}");
+                        }
+                    }
+                    crate::mcp::session_pool::cleanup_session(&sid).await;
+                    log::info!("[session-reaper] reaped idle session {sid}");
+                }
+                session_last_seen().lock().unwrap_or_else(|p| p.into_inner()).remove(&sid);
+            }
+        }
+    });
+}
 
 fn handle() -> &'static Arc<Mutex<Option<ServerHandle>>> {
     SERVER_HANDLE.get_or_init(|| Arc::new(Mutex::new(None)))
@@ -525,7 +621,21 @@ async fn call_server_tool(
     };
     let args = req.arguments.unwrap_or(json!({}));
     match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &req.tool, args)).await {
-        Ok(result) => Json(json!({ "result": result.content, "is_error": result.is_error })).into_response(),
+        Ok(result) => {
+            // Omit structuredContent/_meta when absent — `_meta: null` is not
+            // a spec-valid shape (MCP requires object when present).
+            let mut body = json!({
+                "result": result.content,
+                "is_error": result.is_error,
+            });
+            if let Some(sc) = result.structured_content {
+                body["structuredContent"] = sc;
+            }
+            if let Some(m) = result.raw_meta {
+                body["_meta"] = m;
+            }
+            Json(body).into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             let lower = msg.to_lowercase();
@@ -690,7 +800,19 @@ async fn call_group_tool(
     }
     let args = req.arguments.unwrap_or(json!({}));
     match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, tool_name, args)).await {
-        Ok(result) => Json(json!({ "result": result.content, "is_error": result.is_error })).into_response(),
+        Ok(result) => {
+            let mut body = json!({
+                "result": result.content,
+                "is_error": result.is_error,
+            });
+            if let Some(sc) = result.structured_content {
+                body["structuredContent"] = sc;
+            }
+            if let Some(m) = result.raw_meta {
+                body["_meta"] = m;
+            }
+            Json(body).into_response()
+        }
         Err(e) => {
             // Same 404-on-unknown-tool semantics as call_server_tool — the
             // group path previously answered 500 for the same error shapes
@@ -789,7 +911,7 @@ async fn tools_for_server(nm: &str) -> Option<Vec<crate::models::server::Tool>> 
 }
 
 pub(crate) async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
-    let scope = scope.trim_start_matches('/').trim();
+    let scope = scope.trim_start_matches('/').trim().trim_end_matches('/');
     // The RAG builtin server filter, appended to global scope (and exposed on
     // its own single-server scope) when RAG is enabled. Treated like any server
     // by the tools/list aggregation.
@@ -1325,21 +1447,22 @@ async fn openapi_named_spec(
         // group's member server names (extract_server_filters handles both
         // string[] and GroupServerConfig[] members) with the allow-list.
         let restricted = if is_group {
-            get_allowed_servers(bearer_key.as_ref())
-                .await
-                .map(|a| {
-                    let members: Vec<String> = group
-                        .as_ref()
-                        .map(|g| {
-                            extract_server_filters(&g.servers)
-                                .into_iter()
-                                .map(|f| f.name)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    members.iter().all(|m| !a.contains(m))
-                })
-                .unwrap_or(false)
+            // Empty-member group: `all()` on an empty iterator is vacuously
+            // true — a legitimate (if empty) group must not read as 403.
+            let restricted = match get_allowed_servers(bearer_key.as_ref()).await {
+                Some(a) => match group.as_ref().map(|g| {
+                    extract_server_filters(&g.servers)
+                        .into_iter()
+                        .map(|f| f.name)
+                        .collect::<Vec<String>>()
+                }) {
+                    Some(members) if members.is_empty() => false,
+                    Some(members) => members.iter().all(|m| !a.contains(m)),
+                    None => false,
+                },
+                None => false,
+            };
+            restricted
         } else {
             get_allowed_servers(bearer_key.as_ref())
                 .await
@@ -1386,6 +1509,17 @@ async fn openapi_servers_list(headers: HeaderMap) -> Response {
     if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
         names.retain(|n| allowed.contains(n));
     }
+    // The spec endpoints include the RAG builtin server's tools — the
+    // discovery lists must match or clients can't see what they can call.
+    if crate::rag::service::is_enabled() {
+        let builtin_ok = get_allowed_servers(bearer_key.as_ref())
+            .await
+            .map(|a| a.contains(crate::rag::service::BUILTIN_SERVER_NAME))
+            .unwrap_or(true);
+        if builtin_ok && !names.iter().any(|n| n == crate::rag::service::BUILTIN_SERVER_NAME) {
+            names.push(crate::rag::service::BUILTIN_SERVER_NAME.to_string());
+        }
+    }
     names.sort();
     Json(json!({ "success": true, "data": names })).into_response()
 }
@@ -1400,7 +1534,8 @@ async fn openapi_stats(headers: HeaderMap) -> Response {
     if let Some(allowed) = get_allowed_servers(bearer_key.as_ref()).await {
         statuses.retain(|s| allowed.contains(&s.name));
     }
-    let breakdown: Vec<serde_json::Value> = statuses
+    let mut total_tools: usize = statuses.iter().filter(|s| s.connected || s.start_on_demand).map(|s| s.tool_count).sum();
+    let mut breakdown: Vec<serde_json::Value> = statuses
         .iter()
         .map(|s| {
             json!({
@@ -1413,7 +1548,22 @@ async fn openapi_stats(headers: HeaderMap) -> Response {
             })
         })
         .collect();
-    let total_tools: usize = statuses.iter().filter(|s| s.connected || s.start_on_demand).map(|s| s.tool_count).sum();
+    // Spec endpoints expose the RAG builtin server — keep stats in sync.
+    if crate::rag::service::is_enabled() {
+        let builtin_ok = get_allowed_servers(bearer_key.as_ref())
+            .await
+            .map(|a| a.contains(crate::rag::service::BUILTIN_SERVER_NAME))
+            .unwrap_or(true);
+        if builtin_ok {
+            let n = crate::rag::service::builtin_server_tools().await.len();
+            total_tools += n;
+            breakdown.push(json!({
+                "name": crate::rag::service::BUILTIN_SERVER_NAME,
+                "toolCount": n,
+                "status": "connected",
+            }));
+        }
+    }
     Json(json!({
         "success": true,
         "data": {
@@ -1585,7 +1735,17 @@ async fn execute_openapi_impl(
                 source_ip,
             )
             .await;
-            Json(json!({ "content": r.content, "isError": r.is_error })).into_response()
+            let mut body = json!({
+                "content": r.content,
+                "isError": r.is_error,
+            });
+            if let Some(sc) = r.structured_content {
+                body["structuredContent"] = sc;
+            }
+            if let Some(m) = r.raw_meta {
+                body["_meta"] = m;
+            }
+            Json(body).into_response()
         }
         Err(e) => {
             let _ = log_service::write_activity(
@@ -1752,6 +1912,7 @@ async fn openapi_exec_scoped_post(
 /// One `LocalSessionManager` per mount is intentional: sessions do not span
 /// scopes (each `/mcp/{scope}` path is an independent endpoint for clients).
 fn rmcp_service(
+    sdk_cancel: tokio_util::sync::CancellationToken,
 ) -> rmcp::transport::streamable_http_server::tower::StreamableHttpService<
     super::rmcp_bridge::HubBridge,
     rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
@@ -1762,13 +1923,26 @@ fn rmcp_service(
     // and choke on the SSE keepalive frame ("data: \nid:"). Calls carrying a
     // progressToken still fall back to SSE (rmcp built-in behaviour).
     config.json_response = true;
+    // The hub binds 0.0.0.0 and serves LAN/remote MCP clients (bearer keys
+    // gate access). The SDK's default allowed_hosts (loopback only) 403s any
+    // non-loopback Host header — empirically verified — which breaks every
+    // remote client before authentication. Host validation is a browser
+    // DNS-rebinding defence; MCP clients are not browsers and the endpoint is
+    // authenticated, so disable it (parity with origin's Express, which never
+    // validated Host).
+    let mut config = config.disable_allowed_hosts();
     // Align with the leniency middleware's parse cap (8MB floor): the SDK
     // default is 4MiB, which would make 4–8MB POSTs fully buffer + (re)parse
-    // in the middleware only to be rejected 413 by the SDK afterwards.
-    config.max_request_body_bytes = 64 * 1024 * 1024;
+    // in the middleware only to be rejected 413 by the SDK afterwards. Read
+    // the SAME snapshot the leniency middleware uses so a user-configured
+    // limit above 64MB is not buffered by the middleware then 413'd here.
+    config.max_request_body_bytes =
+        std::sync::atomic::AtomicUsize::load(&BODY_LIMIT_SNAPSHOT, std::sync::atomic::Ordering::Relaxed)
+            .max(64 * 1024 * 1024);
+    config.cancellation_token = sdk_cancel;
     rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
         || Ok(super::rmcp_bridge::HubBridge::new()),
-        Default::default(),
+        shared_session_manager().clone(),
         config,
     )
 }
@@ -1905,7 +2079,8 @@ async fn mcp_leniency_middleware(
             .as_ref()
             .and_then(|c| c.get("routing").and_then(|r| r.get("jsonBodyLimit")).and_then(|v| v.as_str()))
             .map(parse_body_limit);
-        let router_limit = handle().lock().await.as_ref().map(|h| h.body_limit_bytes).unwrap_or(8 * 1024 * 1024);
+        let router_limit =
+            std::sync::atomic::AtomicUsize::load(&BODY_LIMIT_SNAPSHOT, std::sync::atomic::Ordering::Relaxed);
         parsed
             .unwrap_or(8 * 1024 * 1024)
             .clamp(8 * 1024 * 1024, (64 * 1024 * 1024).max(router_limit))
@@ -2346,6 +2521,29 @@ fn into_request(
     req
 }
 
+/// Pre-extraction bearer gate for POST bodies on `/rest*` and `/api*`. Axum
+/// runs Json extractors (buffering up to 64MB) BEFORE the handler body, so
+/// the in-handler `check_bearer_auth` ran after the memory was spent — N
+/// unauthenticated POSTs could buffer N×64MB. Gate POSTs at the middleware
+/// layer like `/mcp*`; GETs keep their in-handler pre-checks.
+async fn rest_post_bearer_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.method() != axum::http::Method::POST {
+        return next.run(req).await;
+    }
+    let path = req.uri().path();
+    if !path.starts_with("/rest/") && !path.starts_with("/api/") {
+        return next.run(req).await;
+    }
+    let headers = req.headers().clone();
+    match check_bearer_auth(&headers).await {
+        Ok(_) => next.run(req).await,
+        Err(resp) => resp,
+    }
+}
+
 /// Bearer-key gate for the rmcp `/mcp` routes. The rmcp service bypasses our
 /// per-request dispatch, so auth must be enforced here — otherwise
 /// `enableBearerAuth` would not protect `initialize`/`ping`/`notifications`.
@@ -2373,7 +2571,93 @@ async fn mcp_bearer_middleware(
     }
 }
 
-fn build_router(body_limit_bytes: usize) -> Router {
+/// Restores the two pre-rmcp exposure switches that the SDK migration dropped
+/// (`routing.enableGlobalRoute` / `routing.enableGroupNameRoute`): root `/mcp`
+/// (and `$smart`) answers 404 when the global route is disabled, group-name
+/// scopes answer 404 when group routes are disabled. Semantics copied from the
+/// retired `dispatch_mcp` (commit 47fcde8^) — 404 body included.
+async fn mcp_route_gate_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().split('?').next().unwrap_or("");
+    let mcp_path = path == "/mcp" || path.starts_with("/mcp/");
+    if mcp_path {
+        // strip_prefix (not trim_start_matches) so "/mcp/mcp" is not double-
+        // stripped — mirrors rmcp_bridge::scope_from_ctx exactly. Decode the
+        // whole remainder first: "%24smart" / "$smart%2Fgroup" must classify
+        // the same as their decoded forms (R118).
+        let remainder = path.strip_prefix("/mcp").unwrap_or("").trim_start_matches('/');
+        let mut scope_clean = percent_encoding::percent_decode_str(remainder.trim())
+            .decode_utf8_lossy()
+            .into_owned();
+        // Trailing slashes must be trimmed here too: bridge scope_from_ctx
+        // normalizes `$smart/` -> `$smart` and serves the full global surface,
+        // so an untrimmed `$smart/` would skip the enableGlobalRoute check.
+        scope_clean = scope_clean.trim_end_matches('/').to_string();
+        let is_global_scope = scope_clean.is_empty() || scope_clean == "$smart";
+        // Read failure must FAIL CLOSED (404) like check_bearer_auth — a
+        // transient DB error must not re-expose scopes the operator disabled.
+        let config = match config_service::get().await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("[http] config read failed during route gate: {e}; failing closed (404)");
+                None
+            }
+        };
+        if config.is_none() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Route gate unavailable"})),
+            )
+                .into_response();
+        }
+        let routing_flag = |key: &str, default: bool| -> bool {
+            config
+                .as_ref()
+                .and_then(|c| c.get("routing"))
+                .and_then(|r| r.get(key))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default)
+        };
+        if is_global_scope {
+            if !routing_flag("enableGlobalRoute", true) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "Global route is disabled"})),
+                )
+                    .into_response();
+            }
+        } else {
+            // scope_clean is already percent-decoded above (R118 alignment).
+            // Trim trailing slashes to match mcp_scope_server_filters — the
+            // bridge tolerates `GroupA/`, and an untrimmed name here would
+            // skip the enableGroupNameRoute check for that form.
+            let decoded_name = scope_clean
+                .strip_prefix("$smart/")
+                .unwrap_or(&scope_clean)
+                .trim()
+                .trim_end_matches('/')
+                .to_string();
+            // Only the *name* match is gated by enableGroupNameRoute (matches
+            // origin getGroupByIdOrName semantics); id access stays available.
+            let is_group_by_name = group_service::list_all()
+                .await
+                .map(|gs| gs.iter().any(|g| g.name == decoded_name))
+                .unwrap_or(false);
+            if is_group_by_name && !routing_flag("enableGroupNameRoute", true) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "Group name route is disabled"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(req).await
+}
+
+fn build_router(body_limit_bytes: usize, sdk_cancel: tokio_util::sync::CancellationToken) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/.well-known/oauth-protected-resource", get(oauth_protected_resource))
@@ -2415,10 +2699,14 @@ fn build_router(body_limit_bytes: usize) -> Router {
         // event + POST /mcp/message) is retired — rmcp deliberately does not
         // implement it and our logs show no real client traffic (AGENTS.md
         // §3.9.2).
-        .route_service("/mcp", rmcp_service())
-        .route_service("/mcp/{*path}", rmcp_service())
+        .route_service("/mcp", rmcp_service(sdk_cancel.clone()))
+        .route_service("/mcp/{*path}", rmcp_service(sdk_cancel.clone()))
+        .layer(axum::middleware::from_fn(mcp_route_gate_middleware))
         .layer(axum::middleware::from_fn(mcp_session_cleanup_middleware))
         .layer(axum::middleware::from_fn(mcp_leniency_middleware))
+        // REST/OpenAPI POST bodies must be auth-gated BEFORE Json extraction
+        // buffers them (up to 64MB each) — same rationale as /mcp below.
+        .layer(axum::middleware::from_fn(rest_post_bearer_middleware))
         // Bearer LAST = outermost: auth must run before leniency spends parse
         // budget (up to 64MB) on unauthenticated requests.
         .layer(axum::middleware::from_fn(mcp_bearer_middleware))
@@ -2444,6 +2732,13 @@ async fn mcp_session_cleanup_middleware(
         .next()
         .map(|p| p == "/mcp" || p.starts_with("/mcp/"))
         .unwrap_or(false);
+    // Idle-reaper input: ANY /mcp request carrying a session id refreshes its
+    // last-seen stamp (not just DELETE — an active session must never age out).
+    if path_is_mcp {
+        if let Some(sid_seen) = req.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()) {
+            session_last_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(sid_seen.to_string(), std::time::Instant::now());
+        }
+    }
     let sid = if is_delete && path_is_mcp {
         req.headers()
             .get("mcp-session-id")
@@ -2589,6 +2884,13 @@ fn report_loopback_hijack(port: u16, hijacked: bool) {
 /// If a server is already running on the same port and limit — nothing to do.
 /// Otherwise the old instance is stopped and a new one started.
 pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
+    // Publish the limit before binding so the leniency middleware's per-request
+    // snapshot read is current from the first request.
+    std::sync::atomic::AtomicUsize::store(
+        &BODY_LIMIT_SNAPSHOT,
+        body_limit_bytes,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut guard = handle().lock().await;
 
     // Already running with the same port and body limit — nothing to do
@@ -2619,6 +2921,7 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         let _ = h.abort_tx.send(());
         let _ = h.abort_tx_lb.send(());
         let _ = h.probe_tx.send(());
+        h.sdk_cancel.cancel();
         log::info!("HTTP server old instance stopped for restart (port {})", h.port);
     }
     // Wait for the old instance to actually release the port. A fixed 100ms
@@ -2652,10 +2955,13 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         }
     }
 
-    let app = build_router(body_limit_bytes);
+    let sdk_cancel = tokio_util::sync::CancellationToken::new();
+    let app = build_router(body_limit_bytes, sdk_cancel.clone());
 
     // Start the tasks TTL sweeper (drops expired 2025-11-25 tasks).
     mcp_tasks::spawn_ttl_sweeper();
+    // Start the idle-session reaper (SDK keeps sessions forever otherwise).
+    spawn_session_reaper();
 
     // Check TRUST_PROXY environment variable
     let trust_proxy = std::env::var("TRUST_PROXY").unwrap_or_default().to_lowercase();
@@ -2958,7 +3264,7 @@ pub async fn start(port: u16, body_limit_bytes: usize) -> anyhow::Result<()> {
         log::info!("MCPHub HTTP server stopped");
     });
 
-    *guard = Some(ServerHandle { abort_tx, abort_tx_lb, probe_tx, port, body_limit_bytes });
+    *guard = Some(ServerHandle { sdk_cancel, abort_tx, abort_tx_lb, probe_tx, port, body_limit_bytes });
     Ok(())
 }
 
@@ -2969,6 +3275,7 @@ pub async fn stop() {
         let _ = h.abort_tx.send(());
         let _ = h.abort_tx_lb.send(());
         let _ = h.probe_tx.send(());
+        h.sdk_cancel.cancel();
         log::info!("MCPHub HTTP server shutdown requested");
         set_status(HttpServerStatus {
             running: false,
@@ -3089,7 +3396,7 @@ mod openapi_tests {
     /// surfaces as a test failure instead of an app-startup panic.
     #[test]
     fn router_builds_with_openapi_routes() {
-        let _ = build_router(1024 * 1024);
+        let _ = build_router(1024 * 1024, Default::default());
     }
 
     #[test]
@@ -3110,6 +3417,11 @@ mod openapi_tests {
             enabled: true,
             annotations: None,
             output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            description_overridden: false,
         };
         let mut q = std::collections::HashMap::new();
         q.insert("n".to_string(), "1.5".to_string());
@@ -3158,6 +3470,11 @@ mod openapi_tests {
             enabled: true,
             annotations: None,
             output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            description_overridden: false,
         };
         // Pure number/boolean params → GET query parameters.
         let simple = mk(json!({
@@ -3196,6 +3513,11 @@ mod openapi_tests {
             enabled: true,
             annotations: None,
             output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            description_overridden: false,
         };
         let tools = vec![
             OpenApiToolRef { server: "fs-a".into(), bare_name: "read".into(), tool: mk_tool("fs-a-read") },
@@ -3291,7 +3613,7 @@ async fn smart_openapi_spec(headers: HeaderMap) -> Response {
                         },
                         "required": ["toolName"]
                     }}}},
-                    "responses": {"200": {"description": "Tool execution result (content/isError)"}}
+                    "responses": {"200": {"description": "Tool execution result (content/isError/structuredContent/_meta)"}}
                 }
             }
         },
@@ -3361,7 +3683,9 @@ async fn smart_rest_search(
     let limit = p.get("limit").cloned().unwrap_or(json!(10));
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
-    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed).await {
+    // Root $smart scope has no group tool whitelist — gate applies only to
+    // /$smart/{group} (bridge handles that path).
+    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed, None).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
@@ -3386,12 +3710,8 @@ async fn smart_rest_describe(
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
     match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        // Unknown toolName → client error; anything else (embeddings/DB/pool
-        // failures) is a server fault — keep the two classes apart instead of
-        // mapping every internal error to 400.
-        Err(e) if e.contains("[tool-not-found]") || e.contains("not found") => {
-            (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response()
-        }
+        // handle_describe_tool returns Ok with an error body for unknown
+        // tools (origin parity) — Err here is always a server fault.
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
@@ -3413,6 +3733,11 @@ async fn smart_rest_call(
     let args = p.get("arguments").cloned().unwrap_or(json!({}));
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
+    // NOTE (no pin gate here, deliberately): the REST lane's search results
+    // are NOT narrowed to pinned tools (REST /api/$smart/search returns the
+    // full $smart scope), so /call must stay consistent with that surface.
+    // The MCP $smart lane (tools/list + smart_route_call) has its own
+    // list/call pin parity inside the bridge.
     // No trusted-proxy header ⇒ source stays None (spoofing-proof by
     // construction, matching client_ip_of's contract); a fabricated
     // "127.0.0.1" would poison activity-log source_ip data.
@@ -3452,7 +3777,30 @@ async fn smart_rest_call(
                 ip.as_deref(),
             )
             .await;
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response()
+            // Not-found semantics parity with /rest and describe: unknown
+            // toolName is a client error, not a server fault. The real Err
+            // strings from handle_call_tool: "Tool not available: {name}"
+            // (unknown/unresolvable), "Tool '{name}' is excluded by the
+            // group's tool filter" (group gate), "Tool '{name}' is disabled"
+            // (disabled gate), "toolName parameter is required" (empty
+            // toolName), upstream "[tool-not-found]" / "not found" (pool).
+            // Client-error classification. Prefix/bracket-marker based — a
+            // bare contains("not found") would misfile an UPSTREAM tool error
+            // whose text happens to contain it (e.g. "config not found") as a
+            // client mistake (400) instead of a server-side execution failure
+            // (500).
+            let status = if e.starts_with("[tool-not-found]")
+                || e.starts_with("Tool not available")
+                || (e.starts_with("Tool '")
+                    && (e.contains("' is excluded by") || e.contains("' is disabled")))
+                || e.starts_with("toolName parameter is required")
+                || e.starts_with("Unknown smart routing tool")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({"error": e}))).into_response()
         }
     }
 }

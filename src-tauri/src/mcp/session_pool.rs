@@ -250,6 +250,12 @@ async fn run_call(
     arguments: Value,
 ) -> Result<ToolCallResult> {
     let call_start = std::time::Instant::now();
+    // Known limitation (deliberate): the isolated path uses plain `call_tool`
+    // — request-level `_meta` (MRTR inputResponses retry, OTel trace) is NOT
+    // forwarded upstream here, unlike the shared `pool::call_tool_with_meta`
+    // path. Per-session clients are short-lived and session-scoped, so the
+    // retry/trace surfaces matter less; extending `call_tool_isolated` with a
+    // meta parameter is the follow-up if parity is ever required.
     let result = {
         let client = client_arc.lock().await;
         client.call_tool(tool, arguments).await

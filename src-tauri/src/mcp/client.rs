@@ -20,6 +20,13 @@ pub trait McpTransport: Send + Sync {
     }
     /// Retrieve the list of tools from the remote server
     async fn list_tools(&self) -> Result<Vec<Tool>>;
+    /// List tools plus the upstream-advertised list TTL (2026-07-28
+    /// CacheableResult). Only a positive, non-paged upstream TTL counts as
+    /// freshness (origin #1277: paged lists record none). Default: no TTL.
+    async fn list_tools_with_ttl(&self) -> Result<(Vec<Tool>, Option<u64>)> {
+        let tools = self.list_tools().await?;
+        Ok((tools, None))
+    }
     /// Invoke a tool by name with the given arguments
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
         self.call_tool_with_meta(name, arguments, None).await
@@ -72,6 +79,10 @@ impl McpClient {
 
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
         self.transport.list_tools().await
+    }
+
+    pub async fn list_tools_with_ttl(&self) -> Result<(Vec<Tool>, Option<u64>)> {
+        self.transport.list_tools_with_ttl().await
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {

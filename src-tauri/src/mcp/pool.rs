@@ -321,9 +321,9 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                 // completes initialize then stalls on tools/list would leave
                 // the placeholder "starting" forever (re-entry guard skips
                 // every subsequent connect). Bound the tool discovery.
-                let tools = match tokio::time::timeout(
+                let (tools, _tools_ttl) = match tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    entry_client.list_tools(),
+                    entry_client.list_tools_with_ttl(),
                 )
                 .await
                 {
@@ -331,12 +331,16 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     // found) degrades to an empty tool list but must not be
                     // silent — a "connected, 0 tools" server with no error
                     // hint is a diagnosis dead-end.
-                    Ok(Ok(t)) => t,
+                    Ok(Ok((t, ttl))) => {
+                        crate::services::list_freshness::record(&name, "tools", ttl);
+                        (t, ttl)
+                    }
                     Ok(Err(e)) => {
                         let msg = format!("[{}] tools/list failed post-handshake (continuing with 0 tools): {}", name, e);
                         log::warn!("{}", msg);
                         app_logger::log_to_db("warn", &msg);
-                        Vec::new()
+                        crate::services::list_freshness::record(&name, "tools", None);
+                        (Vec::new(), None)
                     }
                     Err(_) => {
                         let msg = format!(
@@ -565,6 +569,7 @@ pub(crate) async fn disconnect_server_inner(name: &str) -> Result<()> {
         let mut map = pool().write().await;
         map.remove(name)
     }; // write lock released before any I/O
+    crate::services::list_freshness::invalidate_server(name);
     if let Some(mut e) = entry {
         if let Some(client) = e.client.take() {
             let mut c = client.lock().await;

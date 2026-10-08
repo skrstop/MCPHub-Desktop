@@ -59,9 +59,6 @@ pub async fn compute_scope_with(
     scope_clean: &str,
     bearer_allowed: Option<Vec<String>>,
 ) -> (String, String, Option<Vec<String>>) {
-    let settings = models::get_settings().await;
-    let mode = settings.progressive_disclosure; // placeholder, unused below
-    let _ = mode;
     let description_mode = crate::services::config_service::get()
         .await
         .ok()
@@ -158,8 +155,29 @@ pub async fn format_servers_list(allowed: &[String], full: bool) -> String {
     }
 }
 
+/// Origin #1234 `describeFullSchemaTopN`: sentence telling the model which
+/// search_tools hits come without an inputSchema (without the leading blank
+/// line). Shared by the meta-tool description and the result guideline so the
+/// N=0 / N=1 wordings stay in sync.
+fn describe_full_schema_top_n(full_schema_top_n: u32) -> String {
+    match full_schema_top_n {
+        0 => "Results do not include the inputSchema; use smart_route_describe to get it before calling a tool.".to_string(),
+        1 => "Only the first result includes the full inputSchema; use smart_route_describe to get it for any other result before calling it.".to_string(),
+        n => format!("Only the first {n} results include the full inputSchema; use smart_route_describe to get it for any other result before calling it."),
+    }
+}
+
 /// Build the meta tool definitions (origin `buildSmartRoutingMetaTools`).
-pub fn build_meta_tools(scope_description: &str, servers_list: &str, progressive: bool) -> Vec<Value> {
+/// `full_schema_top_n` (origin #1234) only applies to standard mode: when
+/// set, search_tools says which hits lack a schema and describe_tool is
+/// listed so the model can fetch it. None keeps the standard mode's two
+/// tools as they were.
+pub fn build_meta_tools(
+    scope_description: &str,
+    servers_list: &str,
+    progressive: bool,
+    full_schema_top_n: Option<u32>,
+) -> Vec<Value> {
     if progressive {
         vec![
             json!({
@@ -202,10 +220,16 @@ pub fn build_meta_tools(scope_description: &str, servers_list: &str, progressive
             }),
         ]
     } else {
-        vec![
+        // Standard mode: search_tools returns the full schema for the top N
+        // hits when full_schema_top_n is set; describe_tool is listed so the
+        // model can fetch schemas for the trimmed results (origin #1234).
+        let schema_note = full_schema_top_n
+            .map(|n| format!("\n\n{}", describe_full_schema_top_n(n)))
+            .unwrap_or_default();
+        let mut tools = vec![
             json!({
                 "name": "smart_route_search",
-                "description": format!("STEP 1 of 2: Use this tool FIRST to discover and search for relevant tools across {scope_description}. This tool and smart_route_call work together as a two-step process: 1) smart_route_search to find what you need, 2) smart_route_call to execute it.\n\nFor optimal results, use specific queries matching your exact needs. Call this tool multiple times with different queries for different parts of complex tasks. Example queries: \"image generation tools\", \"code review tools\", \"data analysis\", \"translation capabilities\", etc. Results are sorted by relevance using vector similarity.\n\nAfter finding relevant tools, you MUST use the smart_route_call to actually execute them. The smart_route_search only finds tools - it doesn't execute them.\n\nAvailable servers: {servers_list}"),
+                "description": format!("STEP 1 of 2: Use this tool FIRST to discover and search for relevant tools across {scope_description}. This tool and smart_route_call work together as a two-step process: 1) smart_route_search to find what you need, 2) smart_route_call to execute it.\n\nFor optimal results, use specific queries matching your exact needs. Call this tool multiple times with different queries for different parts of complex tasks. Example queries: \"image generation tools\", \"code review tools\", \"data analysis\", \"translation capabilities\", etc. Results are sorted by relevance using vector similarity.\n\nAfter finding relevant tools, you MUST use the smart_route_call to actually execute them. The smart_route_search only finds tools - it doesn't execute them.{schema_note}\n\nAvailable servers: {servers_list}"),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -216,20 +240,35 @@ pub fn build_meta_tools(scope_description: &str, servers_list: &str, progressive
                 },
                 "annotations": {"title": "Search Tools", "readOnlyHint": true}
             }),
-            json!({
-                "name": "smart_route_call",
-                "description": "STEP 2 of 2: Use this tool AFTER smart_route_search to actually execute/invoke any tool you found. This is the execution step - smart_route_search finds tools, smart_route_call runs them.\n\nWorkflow: smart_route_search → examine results → smart_route_call with the chosen tool name and required arguments.\n\nIMPORTANT: Always check the tool's inputSchema from smart_route_search results before invoking to ensure you provide the correct arguments. The search results will show you exactly what parameters each tool expects.",
+        ];
+        if full_schema_top_n.is_some() {
+            tools.push(json!({
+                "name": "smart_route_describe",
+                "description": "Use this tool to get the full parameter schema of a smart_route_search result that was returned without an inputSchema, before invoking it with smart_route_call.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "toolName": {"type": "string", "description": "The exact name of the tool to invoke (from smart_route_search results)"},
-                        "arguments": {"type": "object", "additionalProperties": true, "description": "The arguments to pass to the tool based on its inputSchema (optional if tool requires no arguments)"}
+                        "toolName": {"type": "string", "description": "The exact name of the tool to describe (from smart_route_search results)"}
                     },
                     "required": ["toolName"]
                 },
-                "annotations": {"title": "Call Tool", "openWorldHint": true}
-            }),
-        ]
+                "annotations": {"title": "Describe Tool", "readOnlyHint": true}
+            }));
+        }
+        tools.push(json!({
+            "name": "smart_route_call",
+            "description": "STEP 2 of 2: Use this tool AFTER smart_route_search to actually execute/invoke any tool you found. This is the execution step - smart_route_search finds tools, smart_route_call runs them.\n\nWorkflow: smart_route_search → examine results → smart_route_call with the chosen tool name and required arguments.\n\nIMPORTANT: Always check the tool's inputSchema from smart_route_search results before invoking to ensure you provide the correct arguments. The search results will show you exactly what parameters each tool expects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "toolName": {"type": "string", "description": "The exact name of the tool to invoke (from smart_route_search results)"},
+                    "arguments": {"type": "object", "additionalProperties": true, "description": "The arguments to pass to the tool based on its inputSchema (optional if tool requires no arguments)"}
+                },
+                "required": ["toolName"]
+            },
+            "annotations": {"title": "Call Tool", "openWorldHint": true}
+        }));
+        tools
     }
 }
 
@@ -239,12 +278,89 @@ fn text_response(payload: Value) -> Value {
     json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default()}]})
 }
 
+/// Origin #1286 `buildModelFacingTool` fields extension: given the tool's
+/// metadata object (as indexed) and the configured field whitelist, return the
+/// extra JSON fields to include next to name/description/inputSchema/serverName.
+/// Unknown/absent fields are skipped; metadata is the indexed copy, so only
+/// fields the index captured can appear.
+fn optional_tool_fields(metadata: Option<&serde_json::Value>, fields: &[String]) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    if fields.is_empty() {
+        return out;
+    }
+    let Some(meta) = metadata else { return out };
+    for f in fields {
+        let key = match f.as_str() {
+            "title" => "title",
+            "annotations" => "annotations",
+            "outputSchema" => "outputSchema",
+            "execution" => "execution",
+            "icons" => "icons",
+            "_meta" => "_meta",
+            _ => continue,
+        };
+        if let Some(v) = meta.get(key) {
+            if !v.is_null() {
+                out.push((key.to_string(), v.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Same field selection for the describe_tool path, sourced from the live
+/// `Tool` definition. The desktop Tool model carries only annotations and
+/// output_schema of the optional fields (no title/execution/icons/_meta from
+/// upstream) — those silently drop out, matching origin's `!== undefined`
+/// filter.
+fn attach_optional_fields_from_tool(
+    mut entry: serde_json::Value,
+    t: &crate::models::server::Tool,
+    fields: &[String],
+) -> serde_json::Value {
+    if fields.is_empty() {
+        return entry;
+    }
+    let meta = serde_json::json!({
+        "annotations": t.annotations,
+        "outputSchema": t.output_schema,
+        "title": t.title,
+        "execution": t.execution,
+        "icons": t.icons,
+        "_meta": t.meta,
+    });
+    if let Some(obj) = entry.as_object_mut() {
+        for (k, v) in optional_tool_fields(Some(&meta), fields) {
+            obj.insert(k, v);
+        }
+    }
+    entry
+}
+
+/// Optional-field (key, value) pairs sourced from a live `Tool` — used by the
+/// search path (hits map to pool-cached tool definitions).
+fn attach_optional_pairs(
+    t: &crate::models::server::Tool,
+    fields: &[String],
+) -> Vec<(String, serde_json::Value)> {
+    let meta = serde_json::json!({
+        "annotations": t.annotations,
+        "outputSchema": t.output_schema,
+        "title": t.title,
+        "execution": t.execution,
+        "icons": t.icons,
+        "_meta": t.meta,
+    });
+    optional_tool_fields(Some(&meta), fields)
+}
+
 /// Handle `smart_route_search` (meta). `limit` defaults to 10 (origin), clamped
 /// [1, settings.max_results] on top of the settings-driven scoring.
 pub async fn handle_search_tools(
     query: &str,
     limit: Value,
     allowed: Option<Vec<String>>,
+    group_gate: Option<&GroupToolGate>,
 ) -> Result<Value, String> {
     if query.is_empty() {
         return Err("Query parameter is required and must be a string".to_string());
@@ -255,23 +371,82 @@ pub async fn handle_search_tools(
         .unwrap_or(10)
         .clamp(1, settings.max_results.max(1) as u64) as u32;
 
-    let results = search::search(query, Some(limit_n), allowed)
+    // When a group gate is applied, over-fetch (up to settings.max_results)
+    // before filtering so excluded tools don't crowd the limited window.
+    let search_limit = if group_gate.is_some() {
+        settings.max_results.max(1)
+    } else {
+        limit_n
+    };
+    let results = search::search(query, Some(search_limit), allowed.clone())
         .await
         .map_err(|e| e.to_string())?;
     let progressive = settings.progressive_disclosure;
     let name_sep = tool_name_separator().await;
+    // Origin #1286: default (title, annotations) when unset; empty list = core four only.
+    let tool_fields: Vec<String> = settings
+        .tool_definition_fields
+        .clone()
+        .unwrap_or_else(|| vec!["title".to_string(), "annotations".to_string()]);
 
     // Tools-only view (server rows have an empty tool_name — skip them).
+    // Group allow-list parity with describe/call: a tool excluded by the
+    // group's servers[].tools whitelist must not surface in search results
+    // either (info-leak + broken workflow otherwise).
+    let full_schema_top_n = if progressive {
+        None
+    } else {
+        settings.full_schema_top_n
+    };
+    // Origin #1286: optional fields attach from the LIVE tool definitions (the
+    // index metadata only carries name/description/inputSchema, so title/
+    // annotations/outputSchema would never appear if sourced from the index).
+    // Fetch the cached tool list once per distinct server among the hits.
+    let tool_fields_live = !tool_fields.is_empty();
+    let mut live_tools: std::collections::HashMap<String, Vec<crate::models::server::Tool>> =
+        std::collections::HashMap::new();
+    if tool_fields_live {
+        for sn in results
+            .iter()
+            .filter(|r| !r.tool_name.is_empty())
+            .filter(|r| group_tool_allowed(group_gate, &r.server_name, &r.tool_name))
+            .map(|r| r.server_name.clone())
+            .collect::<std::collections::HashSet<_>>()
+        {
+            if let Ok(ts) = crate::mcp::pool::list_tools_for(&sn).await {
+                live_tools.insert(sn, ts);
+            }
+        }
+    }
+    let mut hit_index: u32 = 0;
     let tools: Vec<Value> = results
         .iter()
         .filter(|r| !r.tool_name.is_empty())
+        .filter(|r| group_tool_allowed(group_gate, &r.server_name, &r.tool_name))
         .map(|r| {
-            if progressive {
+            let idx = hit_index;
+            hit_index += 1;
+            let full_schema =
+                full_schema_top_n.is_none() || idx < full_schema_top_n.unwrap_or(0);
+            if progressive || !full_schema {
+                // Origin #1234: past the first fullSchemaTopN hits (standard
+                // mode), keep only what is needed to pick a tool — describe_tool
+                // fetches the schema.
+                // Progressive mode: origin returns name/description/serverName
+                // only (no optional fields) — matching the meta tool's own
+                // "names and descriptions only" description.
+                let from_live = live_tools.get(&r.server_name).and_then(|ts| {
+                    ts.iter().find(|t| t.name == r.tool_name)
+                });
+                let live_desc = from_live
+                    .and_then(|t| t.description.as_deref())
+                    .filter(|d| !d.is_empty());
                 json!({
                     "name": display_tool_name(&name_sep, &r.server_name, &r.tool_name),
-                    "description": r.metadata.as_ref()
-                        .and_then(|m| m.get("description"))
-                        .and_then(|d| d.as_str())
+                    "description": live_desc
+                        .or(r.metadata.as_ref()
+                            .and_then(|m| m.get("description"))
+                            .and_then(|d| d.as_str()))
                         .unwrap_or(""),
                     "serverName": r.server_name,
                     // Relevance score in [0,1] — lets external clients rank /
@@ -279,7 +454,7 @@ pub async fn handle_search_tools(
                     "score": (r.score * 1000.0).round() / 1000.0,
                 })
             } else {
-                json!({
+                let mut entry = json!({
                     "name": display_tool_name(&name_sep, &r.server_name, &r.tool_name),
                     "description": r.metadata.as_ref()
                         .and_then(|m| m.get("description"))
@@ -291,25 +466,69 @@ pub async fn handle_search_tools(
                         .unwrap_or(json!({})),
                     "serverName": r.server_name,
                     "score": (r.score * 1000.0).round() / 1000.0,
-                })
+                });
+                if let Some(obj) = entry.as_object_mut() {
+                    let from_live = live_tools.get(&r.server_name).and_then(|ts| {
+                        ts.iter().find(|t| t.name == r.tool_name)
+                    });
+                    // Origin re-reads the live (post-override) description on
+                    // every request; the indexed snapshot can go stale after a
+                    // description-override edit (toolsetHash excludes
+                    // description, so no reindex is triggered).
+                    if let Some(t) = from_live {
+                        if let Some(d) = t.description.as_deref() {
+                            if !d.is_empty() {
+                                obj.insert("description".to_string(), json!(d));
+                            }
+                        }
+                    }
+                    let pairs = match from_live {
+                        Some(t) => attach_optional_pairs(t, &tool_fields),
+                        None => optional_tool_fields(r.metadata.as_ref(), &tool_fields),
+                    };
+                    for (k, v) in pairs {
+                        obj.insert(k, v);
+                    }
+                }
+                entry
             }
         })
         .collect();
-
-    let (guideline, next_steps) = if progressive {
-        if !tools.is_empty() {
-            ("Found relevant tools. Use smart_route_describe to get the full parameter schema before calling. If these tools don't match exactly what you need, try another search with more specific keywords.",
-             "Use smart_route_describe with the toolName to get the full inputSchema, then use smart_route_call to execute.")
-        } else {
-            ("No tools found. Try broadening your search or using different keywords.",
-             "Consider searching for related capabilities or more general terms.")
-        }
-    } else if !tools.is_empty() {
-        ("Found relevant tools. If these tools don't match exactly what you need, try another search with more specific keywords.",
-         "To use a tool, call smart_route_call with the toolName and required arguments.")
+    // Re-apply the caller's limit after gate filtering (over-fetch above).
+    let tools = if tools.len() > limit_n as usize {
+        tools.into_iter().take(limit_n as usize).collect()
     } else {
-        ("No tools found. Try broadening your search or using different keywords.",
-         "Consider searching for related capabilities or more general terms.")
+        tools
+    };
+
+    // Origin #1234: zero results must say what was searched (threshold +
+    // server names), so the model can conclude the capability is not here
+    // instead of retrying the same search with other words.
+    let (guideline, next_steps): (String, String) = if tools.is_empty() {
+        no_match_message(allowed.as_deref(), group_gate, settings.score_threshold).await
+    } else if progressive {
+        ("Found relevant tools. Use smart_route_describe to get the full parameter schema before calling. If these tools don't match exactly what you need, try another search with more specific keywords.".to_string(),
+         "Use smart_route_describe with the toolName to get the full inputSchema, then use smart_route_call to execute.".to_string())
+    } else {
+        // Standard mode with fullSchemaTopN trimming: point the model at
+        // describe_tool for hits without a schema (origin #1234 parity).
+        let trimmed = settings.full_schema_top_n.is_some()
+            && tools.len() > settings.full_schema_top_n.unwrap_or(0) as usize;
+        (
+            if trimmed {
+                format!(
+                    "Found relevant tools, most relevant first. {}. If these tools don't match exactly what you need, try another search with more specific keywords.",
+                    describe_full_schema_top_n(settings.full_schema_top_n.unwrap_or(0))
+                )
+            } else {
+                "Found relevant tools. If these tools don't match exactly what you need, try another search with more specific keywords.".to_string()
+            },
+            if trimmed {
+                "To use a tool, call smart_route_call with the toolName and required arguments; call smart_route_describe first for a result without an inputSchema.".to_string()
+            } else {
+                "To use a tool, call smart_route_call with the toolName and required arguments.".to_string()
+            },
+        )
     };
 
     Ok(text_response(json!({
@@ -329,6 +548,51 @@ pub async fn handle_search_tools(
 /// `mcp_scope_server_filters` by the HTTP layer for `$smart/{group}` scopes;
 /// `None` (the whole map) = no group tool restriction in this scope.
 pub type GroupToolGate = std::collections::HashMap<String, Option<Vec<String>>>;
+
+/// Origin #1234 zero-result message: name the searched scope so the model can
+/// conclude the capability is not available here instead of retrying the same
+/// search. When no connected server was searchable at all, say that instead.
+async fn no_match_message(
+    allowed: Option<&[String]>,
+    group_gate: Option<&GroupToolGate>,
+    threshold: f32,
+) -> (String, String) {
+    // The servers actually searched = the scope's allowed list (connected /
+    // on-demand / builtin), further restricted by the bearer allow-list.
+    let mut names: Vec<String> = crate::mcp::pool::get_all_statuses()
+        .await
+        .into_iter()
+        .filter(|s| s.connected || s.start_on_demand)
+        .map(|s| s.name)
+        .collect();
+    if crate::rag::service::is_enabled() {
+        names.push(crate::rag::service::BUILTIN_SERVER_NAME.to_string());
+    }
+    if let Some(list) = allowed {
+        names.retain(|n| list.contains(n));
+    }
+    if let Some(gate) = group_gate {
+        names.retain(|n| gate.contains_key(n));
+    }
+    if names.is_empty() {
+        return (
+            "No tools found: no connected server is available to search.".to_string(),
+            "Tell the user that no tools are currently available.".to_string(),
+        );
+    }
+    names.sort();
+    names.dedup();
+    // Snapshot passed in by the caller — the same settings actually applied to
+    // the query (re-reading here could race a concurrent settings change).
+    let threshold_fmt = (threshold * 100.0).round() / 100.0;
+    (
+        format!(
+            "No tool matched the query with a similarity of at least {threshold_fmt}. Searched servers: {}. If none of them covers the task, it is not available here.",
+            names.join(", ")
+        ),
+        "Try different keywords for the same task, or tell the user that no available tool covers it.".to_string(),
+    )
+}
 
 /// Check the group tool whitelist for (server, tool). `Some(map)` gates;
 /// missing server entry / `None` whitelist / containing the tool all pass.
@@ -429,6 +693,10 @@ pub async fn handle_describe_tool(
     if tool_name.is_empty() {
         return Err("toolName parameter is required and must be a string".to_string());
     }
+    let tool_fields: Vec<String> = models::get_settings()
+        .await
+        .tool_definition_fields
+        .unwrap_or_else(|| vec!["title".to_string(), "annotations".to_string()]);
     if let Some((server, orig)) = resolve_tool(tool_name, allowed.as_deref()).await {
         if !group_tool_allowed(group_tools, &server, &orig) {
             return Ok(text_response(json!({
@@ -453,6 +721,9 @@ pub async fn handle_describe_tool(
                     "inputSchema": t.input_schema,
                     "serverName": server,
                 });
+                // Origin #1286: describe_tool carries the same optional fields
+                // as a search_tools hit (from the live tool definition).
+                let tool_info = attach_optional_fields_from_tool(tool_info, t, &tool_fields);
                 return Ok(text_response(json!({
                     "tool": tool_info,
                     "metadata": {"message": format!("Full schema for tool '{tool_name}'. Use smart_route_call with the toolName and arguments based on the inputSchema.")}
@@ -524,6 +795,9 @@ pub async fn handle_call_tool(
     if let Some(sc) = &result.structured_content {
         resp["structuredContent"] = sc.clone();
     }
+    if let Some(meta) = &result.raw_meta {
+        resp["_meta"] = meta.clone();
+    }
     Ok(resp)
 }
 
@@ -551,14 +825,20 @@ mod tests {
 
     #[test]
     fn meta_tools_shape_progressive_vs_flat() {
-        let p = build_meta_tools("all servers", "a, b", true);
+        let p = build_meta_tools("all servers", "a, b", true, None);
         assert_eq!(p.len(), 3, "progressive = search/describe/call");
         let names: Vec<&str> = p.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect();
         assert_eq!(names, vec!["smart_route_search", "smart_route_describe", "smart_route_call"]);
         // Progressive search description should NOT inline the schemas hint.
         assert!(names.iter().all(|n| !n.is_empty()));
-        let f = build_meta_tools("all servers", "a, b", false);
-        assert_eq!(f.len(), 2, "flat = search/call");
+        let f = build_meta_tools("all servers", "a, b", false, None);
+        assert_eq!(f.len(), 2, "flat = search/call (no describe without fullSchemaTopN)");
+        // fullSchemaTopN set → describe_tool is listed in standard mode too (#1234).
+        let ft = build_meta_tools("all servers", "a, b", false, Some(3));
+        assert_eq!(ft.len(), 3, "flat + fullSchemaTopN = search/describe/call");
+        assert!(ft.iter().any(|t| t.get("name").and_then(|n| n.as_str()) == Some("smart_route_describe")));
+        assert!(ft[0].get("description").and_then(|v| v.as_str()).unwrap().contains("first 3 results"),
+            "schema note mentions the top N");
         // Only smart_route_search carries the scope + servers list (origin parity:
         // describe/call descriptions are scope-independent workflow text).
         for tools in [&f, &p] {
@@ -595,9 +875,10 @@ pub async fn builtin_meta_tools() -> Vec<crate::models::server::Tool> {
     if !models::get_settings().await.enabled {
         return Vec::new();
     }
-    let progressive = models::get_settings().await.progressive_disclosure;
+    let settings = models::get_settings().await;
     let scope_desc = "all MCP servers managed by MCPHub Desktop";
-    build_meta_tools(scope_desc, "", progressive)
+    let full_n = if settings.progressive_disclosure { None } else { settings.full_schema_top_n };
+    build_meta_tools(scope_desc, "", settings.progressive_disclosure, full_n)
         .into_iter()
         .map(|v| crate::models::server::Tool {
             name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
@@ -607,6 +888,11 @@ pub async fn builtin_meta_tools() -> Vec<crate::models::server::Tool> {
             enabled: true,
             annotations: None,
             output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            description_overridden: false,
         })
         .collect()
 }
@@ -632,7 +918,7 @@ pub async fn call_meta_tool_builtin(
         "smart_route_search" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").cloned().unwrap_or(json!(10));
-            handle_search_tools(q, limit, None).await
+            handle_search_tools(q, limit, None, None).await
         }
         "smart_route_describe" => {
             let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");

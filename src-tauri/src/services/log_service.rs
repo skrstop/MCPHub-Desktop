@@ -5,6 +5,19 @@ use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn add_log(level: &str, message: &str, server_name: Option<&str>) -> Result<()> {
+    // log_event is unauthenticated — cap the message so a rogue frontend
+    // cannot bloat app_log + fts_app_log with unbounded writes (same policy
+    // as app_logger's 4000-char cap).
+    const MAX_MESSAGE_CHARS: usize = 4000;
+    let message = if message.chars().count() > MAX_MESSAGE_CHARS {
+        let mut end = MAX_MESSAGE_CHARS;
+        while !message.is_char_boundary(end) {
+            end += 1;
+        }
+        &message[..end]
+    } else {
+        message
+    };
     let id = Uuid::new_v4().to_string();
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut tx = db::pool().begin().await?;

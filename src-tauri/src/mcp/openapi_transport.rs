@@ -445,6 +445,11 @@ impl McpTransport for OpenapiTransport {
                     // so they carry no MCP annotations / outputSchema.
                     annotations: None,
                     output_schema: None,
+                    title: None,
+                    execution: None,
+                    icons: None,
+                    meta: None,
+                    description_overridden: false,
                 }
             })
             .collect();
@@ -497,15 +502,16 @@ impl McpTransport for OpenapiTransport {
 
         let is_error = result.is_error.unwrap_or(false);
 
-        // Log the full response including content for debugging
-        let content_summary = if content.len() <= 3 {
-            format!("{:?}", content)
-        } else {
-            format!("{:?}... ({} items)", &content[..3], content.len())
-        };
+        // Log shape only (count + per-item size), not content — payloads
+        // routinely carry secrets and log_to_db persists to the log DB
+        // (same policy as the args logging above).
+        let sizes: Vec<usize> = content
+            .iter()
+            .map(|c| serde_json::to_string(c).map(|s| s.len()).unwrap_or(0))
+            .collect();
         let ok_msg = format!(
-            "[{}] OpenAPI call_tool OK: name={}, is_error={}, content={}",
-            self.server_name, name, is_error, content_summary
+            "[{}] OpenAPI call_tool OK: name={}, is_error={}, content_items={}, bytes={:?}",
+            self.server_name, name, is_error, content.len(), sizes
         );
         if is_error {
             log::warn!("{}", ok_msg);

@@ -212,6 +212,25 @@ pub async fn call_tool_on_demand(
     };
 
     let client_arc = Arc::new(Mutex::new(client));
+    // Mirror session_pool round-8: a disable/delete may land between the
+    // shadow check above and connect completion (connect can take minutes for
+    // slow npx/uvx installs) — inserting would keep a live process serving a
+    // disabled server until the idle timer recycles it.
+    match server_service::get_by_name(server_name).await {
+        Ok(Some(c)) if c.enabled => {}
+        _ => {
+            let msg = format!(
+                "[on-demand] Server '{}' disabled/removed during cold start; discarding fresh client (tool '{}')",
+                server_name, tool
+            );
+            log::warn!("{}", msg);
+            app_logger::log_to_db("warn", &msg);
+            let _ = client_arc.lock().await.disconnect().await;
+            pool::mark_on_demand_error(server_name, "server is disabled or removed".to_string())
+                .await;
+            return Err(anyhow!("Server '{}' is disabled or removed", server_name));
+        }
+    }
     {
         let mut map = store().write().await;
         map.insert(
@@ -299,10 +318,15 @@ async fn run_call(
             // call's clear is ptr_eq-guarded), and the new generation's idle
             // timer would then never tear it down (process leak).
             if !Arc::ptr_eq(&entry.client, client_arc) {
-                return Err(anyhow::anyhow!(
-                    "[on-demand] '{}' entry was rebuilt during call setup; retry",
-                    server_name
-                ));
+                // The entry was lifecycle-torn-down and cold-start-rebuilt
+                // while we were setting up. The comment above explains why we
+                // must NOT touch the new generation here — but surfacing this
+                // avoidable race to the downstream client is worse than
+                // transparently re-entering the cold-start path against the
+                // rebuilt entry (bounded: rebuild is rare, and the recursive
+                // call re-runs the full generation checks).
+                log::debug!("[on-demand] '{}' entry rebuilt during call setup; retrying", server_name);
+                return Box::pin(call_tool_on_demand(server_name, tool, arguments)).await;
             }
             entry.last_used = Instant::now();
             entry.in_flight += 1;
@@ -441,10 +465,14 @@ async fn build_and_connect(
             // still held — queuing every subsequent first-call forever.
             // Same guard as pool::connect_server; timeout counts as failure so
             // the half-built client is reaped.
-            let tools = match timeout(TOOLS_LIST_TIMEOUT, client.list_tools()).await {
-                Ok(Ok(ts)) => ts,
+            let tools = match timeout(TOOLS_LIST_TIMEOUT, client.list_tools_with_ttl()).await {
+                Ok(Ok((ts, ttl))) => {
+                    crate::services::list_freshness::record(&cfg.name, "tools", ttl);
+                    ts
+                }
                 Ok(Err(e)) => {
                     log::warn!("[on-demand] '{}' tools/list failed: {}", cfg.name, e);
+                    crate::services::list_freshness::record(&cfg.name, "tools", None);
                     Vec::new()
                 }
                 Err(_) => {
@@ -492,11 +520,38 @@ async fn build_and_connect(
 /// resets `last_used` before the timer fires, the shutdown is skipped.
 /// Non-async timer spawner: keeps the schedule/shutdown future types from
 /// forming a recursive opaque-type cycle (shutdown re-arms through this).
-fn spawn_idle_timer(server_name: String, idle_ms: u64, snapshot: Instant) {
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(idle_ms)).await;
-        shutdown_on_demand_idle(&server_name, snapshot).await;
-    });
+/// Re-arm path used by `shutdown_on_demand_idle`'s "newer call arrived"
+/// branch: spawn the timer AND register its handle in the entry's
+/// `idle_handle` slot, so a later `schedule_idle` can abort it via the
+/// normal handle swap. An unregistered fire-and-forget re-arm would dodge
+/// that mechanism for the rest of the entry's life.
+#[allow(clippy::type_complexity)]
+fn spawn_idle_timer_registered(
+    server_name: String,
+    idle_ms: u64,
+    snapshot: Instant,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    // Returned as a type-erased boxed future: an `async fn` here would create
+    // a compile-time type cycle with `shutdown_on_demand_idle` (shutdown →
+    // re-arm → shutdown) that also fails the `Send` bound inference.
+    Box::pin(async move {
+        let map_key = server_name.clone();
+        let new_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(idle_ms)).await;
+            shutdown_on_demand_idle(&server_name, snapshot).await;
+        });
+        let old = match store().write().await.get_mut(&map_key) {
+            Some(entry) => entry.idle_handle.lock().await.replace(new_handle),
+            None => {
+                // Entry evicted between snapshot and now: abort the orphan
+                new_handle.abort();
+                None
+            }
+        };
+        if let Some(old) = old {
+            old.abort();
+        }
+    })
 }
 
 async fn schedule_idle(server_name: &str, idle_ms: u64) {
@@ -567,10 +622,10 @@ pub async fn shutdown_on_demand_idle(server_name: &str, snapshot: Instant) {
                     "[on-demand] Idle shutdown for '{}' skipped (newer call); re-arming timer",
                     server_name
                 );
-                // Re-arm via the non-async free helper: awaiting schedule_idle
+                // Re-arm via the registered helper: awaiting schedule_idle
                 // here would form a recursive future (schedule → spawned timer
                 // → this fn → schedule) whose opaque type never computes.
-                spawn_idle_timer(server_name.to_string(), idle_ms, last_used);
+                spawn_idle_timer_registered(server_name.to_string(), idle_ms, last_used).await;
             }
             return;
         }

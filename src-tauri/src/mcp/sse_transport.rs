@@ -57,6 +57,24 @@ impl SseTransport {
         base_url: impl Into<String>,
         headers: HashMap<String, String>,
     ) -> Self {
+        // Drop header pairs that reqwest would panic on in
+        // RequestBuilder::header (invalid name/value chars). Mirrors the
+        // defensive validation openapi_transport applies before building
+        // requests; failing closed to "header absent" beats a connect panic.
+        let server_name_early = server_name.into();
+        let headers: HashMap<String, String> = headers
+            .into_iter()
+            .filter(|(k, v)| {
+                let ok = reqwest::header::HeaderName::try_from(k.as_str()).is_ok()
+                    && reqwest::header::HeaderValue::try_from(v.as_str()).is_ok();
+                if !ok {
+                    // Silent drops hide config mistakes (e.g. a broken auth
+                    // header then surfaces as upstream 401) — log them.
+                    log::warn!("[{}] dropping invalid SSE header '{}'", server_name_early, k);
+                }
+                ok
+            })
+            .collect();
         let builder = Client::builder()
             // Per-read stall guard: a server that accepts the connection but
             // never sends bytes used to hang call_tool/list_tools forever
@@ -73,7 +91,7 @@ impl SseTransport {
             .cloned()
             .unwrap_or_default();
         Self {
-            server_name: server_name.into(),
+            server_name: server_name_early,
             base_url: base_url.into(),
             headers,
             client,
@@ -734,8 +752,14 @@ impl McpTransport for SseTransport {
                                             continue;
                                         }
 
-                                        // Empty / unknown line = event boundary:
-                                        // flush any accumulated data lines.
+                                        // SSE spec: only an empty line terminates
+                                        // an event. Unknown extension field lines
+                                        // must be ignored WITHOUT flushing — a
+                                        // server splitting JSON across data: lines
+                                        // may interleave custom fields.
+                                        if !line.trim().is_empty() {
+                                            continue;
+                                        }
                                         if data_acc.is_empty() {
                                             continue;
                                         }
@@ -854,11 +878,31 @@ impl McpTransport for SseTransport {
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {
-        let result = self.post_request("tools/list", json!({})).await?;
-        let tools = result["tools"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
+        // Follow pagination cursors so servers using a small page size are not
+        // silently truncated to their first page (parity with the rmcp stdio/
+        // http transports). Guarded: cap pages and break on cursor repetition.
+        let mut raw_tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let mut body = json!({});
+            if let Some(c) = &cursor {
+                body["cursor"] = json!(c);
+            }
+            let result = self.post_request("tools/list", body).await?;
+            raw_tools.extend(
+                result["tools"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            match result.get("nextCursor").and_then(|v| v.as_str()) {
+                Some(next) if seen_cursors.insert(next.to_string()) => cursor = Some(next.to_string()),
+                // None (done) or repeated cursor — stop.
+                _ => break,
+            }
+        }
+        let tools = raw_tools
             .into_iter()
             .map(|t| Tool {
                 name: t["name"].as_str().unwrap_or("").to_string(),
@@ -868,6 +912,11 @@ impl McpTransport for SseTransport {
                 enabled: true,
                 annotations: t.get("annotations").cloned().filter(|v| !v.is_null()),
                 output_schema: t.get("outputSchema").cloned().filter(|v| !v.is_null()),
+                title: t.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                execution: t.get("execution").cloned().filter(|v| !v.is_null()),
+                icons: t.get("icons").cloned().filter(|v| !v.is_null()),
+                meta: t.get("_meta").cloned().filter(|v| !v.is_null()),
+                description_overridden: false,
             })
             .collect();
         Ok(tools)

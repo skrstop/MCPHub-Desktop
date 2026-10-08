@@ -11,7 +11,11 @@
   G11 宽松/严格 × 2025-03-26 组合
 要求服务器「本机公网ip查询」已连接。
 """
-import http.client, json, urllib.parse, re, sys, threading, time
+import http.client, json, urllib.parse, re, sys, threading, time, os
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(os.path.abspath(__file__)))
+from pin_helper import pin, unpin
+import os
 
 HOST, PORT = "localhost", 23333
 IP_SERVER = "本机公网ip查询"
@@ -274,6 +278,13 @@ def g11():
 
 
 def main():
+    pin("本机公网ip查询", "getPublicIp")
+    try:
+        _run()
+    finally:
+        unpin("本机公网ip查询", "getPublicIp")
+
+def _run():
     g1()
     g2()
     g3()

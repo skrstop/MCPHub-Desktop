@@ -7469,7 +7469,7 @@ dependencies = [
 
 [[package]]
 name = "mcphub"
-version = "1.0.40003"
+version = "1.1.1003"
 dependencies = [
  "ahash",
  "anyhow",
@@ -7530,6 +7530,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokenizers 0.23.1",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http 0.7.1",
  "tree-sitter",

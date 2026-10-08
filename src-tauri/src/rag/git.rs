@@ -619,7 +619,7 @@ pub(crate) fn clone_blocking(
     let prep = if let Some(b) = branch.filter(|b| !b.trim().is_empty()) {
         // ref_name selects which branch to fetch & check out (NOT the remote name).
         prep.with_ref_name(Some(b.trim()))
-            .map_err(|e| anyhow!("branch: {e}"))?
+            .map_err(|e| anyhow!("branch: {}", scrub_credentials(&e.to_string())))?
     } else {
         prep
     };
@@ -751,7 +751,7 @@ export DISPLAY=dummy:0
 #    output) as connection errors - filter those benign lines, forward the rest.
 # 2) No TTY: auto-accept new host keys instead of hanging on the confirm prompt.
 OPTS='-o StrictHostKeyChecking=accept-new -o NumberOfPasswordPrompts=1'
-{batch_line}{askpass_line}export MCPHUB_SSH_DEBUG_LOG="${{TEMPDIR:-/tmp}}/mcphub-ssh-debug.log"
+{batch_line}{askpass_line}export MCPHUB_SSH_DEBUG_LOG="{wrapper_dir}/ssh-debug.log"
 : >> "$MCPHUB_SSH_DEBUG_LOG" 2>/dev/null || MCPHUB_SSH_DEBUG_LOG=/dev/null
 case "$(uname -s)" in
   Darwin) UNBUF='-l' ;;
@@ -759,7 +759,8 @@ case "$(uname -s)" in
 esac
 {{ (command -v setsid >/dev/null 2>&1 && setsid ssh $OPTS "$@" || ssh $OPTS "$@") 2>&1 1>&3 | tee "$MCPHUB_SSH_DEBUG_LOG" | sed $UNBUF -e '/Connection to .* succeeded/d' >&2; }} 3>&1
 echo "SSH EXIT: $?" >> "$MCPHUB_SSH_DEBUG_LOG" 2>/dev/null
-"#
+"#,
+        wrapper_dir = dir.display(),
     );
     std::fs::write(&command, script)?;
     #[cfg(unix)]
@@ -1205,7 +1206,13 @@ pub async fn refresh_persistent(
     };
     let hash = repo_hash(url);
     let main_dir = persistent_repo_dir(app, &hash)?;
-    let new_dir = persistent_root(app)?.join(format!("{hash}.new"));
+    // Per-attempt unique dir: a clone that hits the async timeout is ABANDONED
+    // but its blocking thread keeps writing into `new_dir` — reusing the same
+    // path would let the next attempt's `remove_dir_all(dest)` race that
+    // writer and corrupt the swap. Unique dirs make orphan output inert; the
+    // sweeper above already removes `.persist-new-*` leftovers.
+    let attempt = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let new_dir = persistent_root(app)?.join(format!("{hash}.persist-new-{attempt}"));
     let old_dir = persistent_root(app)?.join(format!("{hash}.old"));
     let clone_url = build_clone_url(url, username, password);
     let commit = match clone_async(

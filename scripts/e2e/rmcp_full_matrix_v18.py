@@ -16,6 +16,9 @@ ping 门控（2026 -32601 / legacy 空 result）、2026 tasks 扩展门控（tas
 SEP-2243 头、严格模式缺陷拒绝（4xx 明确）、2024 退役端点、通知不挂。
 """
 import http.client, json, sqlite3, os, re, sys, time, ipaddress, urllib.parse, base64
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(os.path.abspath(__file__)))
+from pin_helper import pin, unpin
 
 def mcp_name_header(tool_name):
     """SEP-2243/RFC2047 encoded-word for non-latin1 tool names; verbatim otherwise."""
@@ -167,8 +170,11 @@ def discover_and_cache(tag, with_session_hdr=None):
     res = (obj or {}).get("result") or {}
     tools = res.get("tools") or []
     has_ip = any(IP_SERVER in t.get("name", "") for t in tools)
-    check(f"{tag} tools/list 2026 会话带 ttlMs=30000/private",
-          st == 200 and res.get("ttlMs") == 30000 and res.get("cacheScope") == "private",
+    # Origin #1277 parity (R118 round): positive TTL requires upstream
+    # freshness records — bounded ≤5000, gateway/builtin → 0. Scope stays private.
+    check(f"{tag} tools/list 2026 会话带 ttlMs≤5000/private",
+          st == 200 and isinstance(res.get("ttlMs"), (int, float)) and res.get("ttlMs") <= 5000
+          and res.get("cacheScope") == "private",
           f"ttl={res.get('ttlMs')} scope={res.get('cacheScope')}")
     check(f"{tag} tools/list 含公网IP服务器", has_ip, f"tools={len(tools)}")
 
@@ -205,7 +211,7 @@ def channels(version, mode):
         check(f"{tag}$smart smart_route_search 200 + 结果", st == 200 and (obj or {}).get("result") is not None, f"st={st}")
         shdrs["Mcp-Name"] = "smart_route_call"
         body = {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"smart_route_call",
-                "arguments":{"toolName":"getPublicIp","arguments":{}},"_meta": meta}}
+                "arguments":{"toolName": IP_TOOL,"arguments":{}},"_meta": meta}}
         st, obj, d, _, _ = post("/mcp/$smart", body, shdrs)
         ip = valid_ip(d)
         check(f"{tag}$smart smart_route_call 公网IP", st == 200 and ip is not None, f"st={st} ip={ip}")
@@ -221,7 +227,7 @@ def channels(version, mode):
         if sid:
             post("/mcp/$smart", {"jsonrpc":"2.0","method":"notifications/initialized"}, {"Mcp-Session-Id": sid})
             st, obj, d, _, _ = post("/mcp/$smart", {"jsonrpc":"2.0","id":2,"method":"tools/call",
-                "params":{"name":"smart_route_call","arguments":{"toolName":"getPublicIp","arguments":{}}}},
+                "params":{"name":"smart_route_call","arguments":{"toolName": IP_TOOL,"arguments":{}}}},
                 {"Mcp-Session-Id": sid})
             ip = valid_ip(d)
             check(f"{tag}$smart smart_route_call 公网IP", st == 200 and ip is not None, f"st={st} ip={ip}")
@@ -364,6 +370,7 @@ def notifications_and_edges(mode):
 def main():
     print(f"== 全矩阵 v18：{len(VERSIONS)} 版本 × 全通道 × 宽松/严格 ==")
     orig_strict = get_strict()
+    pin("本机公网ip查询", "getPublicIp")
     try:
         # ── 宽松模式（默认）──
         set_strict(False); time.sleep(0.4)
@@ -382,8 +389,10 @@ def main():
         leniency_paths("严格")
         retire_2024("严格")
         notifications_and_edges("严格")
+
     finally:
         set_strict(orig_strict); time.sleep(0.3)
+        unpin("本机公网ip查询", "getPublicIp")
     print(f"\n== {len(PASS)}/{len(PASS)+len(FAIL)} passed ==")
     if FAILED:
         print("FAILED:", ", ".join(FAILED[:20]))

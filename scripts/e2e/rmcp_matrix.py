@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 # 版本 × 通道 × 公网IP 全矩阵回归
-import json, http.client, urllib.parse, sys
+import json, http.client, urllib.parse, sys, re
 
 HOST, PORT = "localhost", 23333
 PASS, FAIL = [], []
+import ipaddress as _ipa
+def _valid_pub(t):
+    for m in re.findall(r"\d{1,3}(?:\.\d{1,3}){3}", t):
+        try:
+            ip = _ipa.ip_address(m)
+            if not ip.is_private and not ip.is_loopback and not ip.is_reserved:
+                return True
+        except ValueError:
+            pass
+    return False
+
 def check(name, ok, detail=""):
     (PASS if ok else FAIL).append(name)
     print(("PASS" if ok else "FAIL"), "|", name, ("| " + str(detail)[:100] if detail and not ok else ""))
@@ -61,7 +72,7 @@ def legacy_flow(v, path, tool, sep=True):
     st, _, obj, ct = req("POST", path, {"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":tname,"arguments":{}}}, {"Mcp-Session-Id": sid, "MCP-Protocol-Version": v})
     txt = "".join(str(c.get("text","")) for c in (obj.get("result",{}).get("content") or [])) if obj else ""
-    check(f"[{v}] {path} 公网IP 真实调用", st==200 and obj and obj.get("result",{}).get("isError") is False and len(txt)>0, txt[:80])
+    check(f"[{v}] {path} 公网IP 真实调用", st==200 and obj and obj.get("result",{}).get("isError") is False and _valid_pub(txt), txt[:80])
     req("DELETE", path, None, {"Mcp-Session-Id": sid})
     return ok_neg
 
@@ -93,7 +104,7 @@ for path, tool in channels_legacy:
     if all(ord(ch) < 128 for ch in tool):
         st, _, obj, ct = modern_call(path, tool)
         txt = "".join(str(c.get("text","")) for c in (obj.get("result",{}).get("content") or [])) if obj else ""
-        check(f"[2026] {path} modern 公网IP 调用({tool})", st==200 and obj and obj.get("result",{}).get("isError") is False, txt[:80])
+        check(f"[2026] {path} modern 公网IP 调用({tool})", st==200 and obj and obj.get("result",{}).get("isError") is False and _valid_pub(txt), txt[:80])
     else:
         print(f"SKIP | [2026] {path} modern 调用 {tool}（中文工具名 latin-1 header 限制，已知边界）")
 

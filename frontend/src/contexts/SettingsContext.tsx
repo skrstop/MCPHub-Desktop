@@ -52,6 +52,10 @@ interface SmartRoutingConfig {
   embeddingMaxTokens?: number;
   embeddingQueryPrefix?: string;
   embeddingDocumentPrefix?: string;
+  similarityThreshold?: number;
+  fullSchemaTopN?: number;
+  // Unset = server default (title, annotations). Origin #1286.
+  toolDefinitionFields?: string[];
   /** Desktop local mode: tool description verbosity for the meta-tool catalog */
   serverDescriptionMode?: 'names' | 'full';
   /** Desktop hybrid retrieval settings (RAG-style, replacing origin's three-tier thresholds) */
@@ -117,6 +121,7 @@ interface BetterAuthConfig {
   baseUrl: string;
   basePath: string;
   trustedOrigins: string[];
+  disablePasswordLogin: boolean;
   providers: {
     google: BetterAuthProviderToggle;
     github: BetterAuthProviderToggle;
@@ -242,6 +247,7 @@ const getDefaultBetterAuthConfig = (): BetterAuthConfig => ({
   baseUrl: '',
   basePath: '/api/auth/better',
   trustedOrigins: [],
+  disablePasswordLogin: false,
   providers: {
     google: {
       enabled: true,
@@ -281,6 +287,7 @@ const normalizeBetterAuthConfig = (
     baseUrl: config?.baseUrl?.trim() || defaults.baseUrl,
     basePath: config?.basePath?.trim() || defaults.basePath,
     trustedOrigins: normalizeStringArray(config?.trustedOrigins, defaults.trustedOrigins),
+    disablePasswordLogin: config?.disablePasswordLogin ?? defaults.disablePasswordLogin,
     providers: {
       google: {
         enabled: config?.providers?.google?.enabled ?? defaults.providers.google.enabled,
@@ -398,6 +405,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     embeddingMaxTokens: undefined,
     embeddingQueryPrefix: '',
     embeddingDocumentPrefix: '',
+    similarityThreshold: undefined,
+    fullSchemaTopN: undefined,
     serverDescriptionMode: 'names' as 'names' | 'full',
     vectorWeight: 0.5,
     keywordWeight: 0.5,
@@ -510,6 +519,9 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           embeddingQueryPrefix: data.data.systemConfig.smartRouting.embeddingQueryPrefix || '',
           embeddingDocumentPrefix:
             data.data.systemConfig.smartRouting.embeddingDocumentPrefix || '',
+          similarityThreshold: data.data.systemConfig.smartRouting.similarityThreshold,
+          fullSchemaTopN: data.data.systemConfig.smartRouting.fullSchemaTopN,
+          toolDefinitionFields: data.data.systemConfig.smartRouting.toolDefinitionFields,
           serverDescriptionMode:
             data.data.systemConfig.smartRouting.serverDescriptionMode === 'full'
               ? 'full'
@@ -620,10 +632,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setRoutingConfig({
-          ...routingConfig,
+        setRoutingConfig((prev) => ({
+          ...prev,
           [key]: value,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -654,10 +666,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setInstallConfig({
-          ...installConfig,
+        setInstallConfig((prev) => ({
+          ...prev,
           [key]: value,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -724,10 +736,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setSmartRoutingConfig({
-          ...smartRoutingConfig,
+        setSmartRoutingConfig((prev) => ({
+          ...prev,
           [key]: value,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -756,10 +768,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setSmartRoutingConfig({
-          ...smartRoutingConfig,
+        setSmartRoutingConfig((prev) => ({
+          ...prev,
           ...updates,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -793,10 +805,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setToolResultCompressionConfig({
-          ...toolResultCompressionConfig,
+        setToolResultCompressionConfig((prev) => ({
+          ...prev,
           [key]: value,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -831,10 +843,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setToolResultCompressionConfig({
-          ...toolResultCompressionConfig,
+        setToolResultCompressionConfig((prev) => ({
+          ...prev,
           ...updates,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -870,10 +882,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setRoutingConfig({
-          ...routingConfig,
+        setRoutingConfig((prev) => ({
+          ...prev,
           ...updates,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -904,10 +916,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setMCPRouterConfig({
-          ...mcpRouterConfig,
+        setMCPRouterConfig((prev) => ({
+          ...prev,
           [key]: value,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -936,10 +948,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setMCPRouterConfig({
-          ...mcpRouterConfig,
+        setMCPRouterConfig((prev) => ({
+          ...prev,
           ...updates,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -970,10 +982,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setOAuthServerConfig({
-          ...oauthServerConfig,
+        setOAuthServerConfig((prev) => ({
+          ...prev,
           [key]: value,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {
@@ -1002,10 +1014,10 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
       });
 
       if (data.success) {
-        setOAuthServerConfig({
-          ...oauthServerConfig,
+        setOAuthServerConfig((prev) => ({
+          ...prev,
           ...updates,
-        });
+        }));
         showToast(t('settings.systemConfigUpdated'));
         return true;
       } else {

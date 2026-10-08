@@ -28,7 +28,7 @@ const AddGroupForm = ({ onAdd, onCancel }: AddGroupFormProps) => {
 
   useEffect(() => {
     // Filter available servers (enabled only)
-    setAvailableServers(allServers.filter((server) => server.enabled !== false));
+    setAvailableServers(allServers);
   }, [allServers]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {

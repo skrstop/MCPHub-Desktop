@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # B10 审计缺口：宽松严格不成对形态 —— 6 个形态 × (宽松放行 / 严格拒绝) 成对用例
 # 每对先宽松跑放行断言，再切严格跑拒绝断言，finally 还原 strictValidation 原值。
+import re
 import json, http.client, sqlite3, os, sys, time
 
 HOST, PORT = "localhost", 23333
@@ -78,7 +79,15 @@ def assert_ip(name, st, obj):
         res = obj.get("result", {})
         is_err = res.get("isError")
         txt = "".join(str(c.get("text","")) for c in res.get("content",[]))
-        ip_found = any(ch.isdigit() for ch in txt) and "." in txt
+        import ipaddress as _ip
+        ip_found = False
+        for m in re.findall(r"\d{1,3}(?:\.\d{1,3}){3}", txt):
+            try:
+                a = _ip.ip_address(m)
+                if a.version == 4 and not (a.is_private or a.is_loopback or a.is_reserved):
+                    ip_found = True; break
+            except ValueError:
+                pass
     check(name, st == 200 and obj and is_err is False and ip_found,
           f"st={st} isError={is_err} txt={txt[:60]}")
 

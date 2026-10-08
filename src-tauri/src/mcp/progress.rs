@@ -183,6 +183,14 @@ pub fn extract_package_name(command: &str, args: &[String]) -> Option<String> {
                         if let Some(v) = iter.next() {
                             pkg = Some(v.as_str());
                         }
+                    } else if matches!(
+                        a.as_str(),
+                        "--registry" | "--cache" | "--userconfig" | "--call" | "-c" | "--shell"
+                    ) {
+                        // Known value-taking flags: skip their value so it is
+                        // not mistaken for the package name (uvx branch keeps
+                        // the same list-driven asymmetry note).
+                        let _ = iter.next();
                     }
                     continue;
                 }

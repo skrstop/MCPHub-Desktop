@@ -173,7 +173,8 @@ def get_sse_matrix():
             r.fp.raw._sock.settimeout(3)
             chunk = r.read1(2048) or b""
         except Exception: pass
-        check(f"{tag} GET 流有输出（注释/keep-alive）", True, f"chunk={chunk[:40]!r}")
+        got_frame = bool(chunk) and any(l.startswith("data:") or l.startswith(":") or l.startswith("event:") for l in chunk.decode("utf-8","replace").split("\n"))
+        check(f"{tag} GET 流有输出（注释/keep-alive）", got_frame, f"chunk={chunk[:40]!r}")
         c.close()
         # 会话仍可用（POST 一次 ping/tools）
         st2, obj2, d2, _ = req("POST", "/mcp", {"jsonrpc":"2.0","id":5,"method":"ping","params":{}},
@@ -235,7 +236,7 @@ def cache_hints():
         meta = res.get("_meta") or {}
         # 2025-11-25 起可能有 ttlMs；legacy 更早版本不注入（SEP-2549 门控）
         if v in ("2025-11-25",):
-            ok = ("ttlMs" in res or "ttlMs" in meta) or True  # rmcp 3.4.1 可能以 _meta 形状
+            ok = "ttlMs" in res or "ttlMs" in meta  # rmcp 3.4.1 完整形状：顶层或 _meta
             check(f"{tag} tools/list 200 且形状完整", st2 == 200 and ("tools" in res), f"st={st2}")
         else:
             has_hint = "ttlMs" not in res and "ttlMs" not in meta

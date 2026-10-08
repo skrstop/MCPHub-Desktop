@@ -480,6 +480,44 @@ function parseEmbeddingDimensionsForUpdate(
   return parsed !== currentValue ? parsed : undefined;
 }
 
+/**
+ * Parses an optional search setting (similarity threshold, full-schema top N).
+ * Empty clears it back to the default (null), a value `parse` accepts is sent
+ * as a number, and anything else or an unchanged value sends nothing.
+ */
+function parseOptionalSearchSettingForUpdate(
+  rawValue: string,
+  currentValue: number | null | undefined,
+  parse: (value: number) => boolean,
+): number | null | undefined {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return currentValue == null ? undefined : null;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || !parse(parsed)) {
+    return undefined;
+  }
+
+  return parsed !== currentValue ? parsed : undefined;
+}
+
+const isSimilarityThreshold = (value: number) => value >= 0 && value <= 1;
+const isFullSchemaTopN = (value: number) => Number.isInteger(value) && value >= 0;
+// Mirrors TOOL_DEFINITION_FIELDS / DEFAULT_TOOL_DEFINITION_FIELDS in
+// origin src/constants/smartRoutingDefaults.ts (origin #1286; the desktop
+// smart_routing backend consumes the same key).
+const TOOL_DEFINITION_FIELDS = [
+  'title',
+  'annotations',
+  'outputSchema',
+  'execution',
+  'icons',
+  '_meta',
+] as const;
+const DEFAULT_TOOL_DEFINITION_FIELDS: readonly string[] = ['title', 'annotations'];
+
 function parseBasePacingDelayForUpdate(
   rawValue: string,
   currentValue: number | null | undefined,
@@ -582,6 +620,11 @@ const SettingsPage: React.FC = () => {
     embeddingMaxTokens: string;
     embeddingQueryPrefix: string;
     embeddingDocumentPrefix: string;
+    // Empty string = default (query heuristic / every hit in full)
+    similarityThreshold: string;
+    fullSchemaTopN: string;
+    // Origin #1286: undefined = server default (title, annotations)
+    toolDefinitionFields?: string[];
     // Desktop local mode: hybrid retrieval settings (temp strings parsed on save)
     vectorWeight: string;
     keywordWeight: string;
@@ -606,6 +649,9 @@ const SettingsPage: React.FC = () => {
     embeddingMaxTokens: '',
     embeddingQueryPrefix: '',
     embeddingDocumentPrefix: '',
+    similarityThreshold: '',
+    fullSchemaTopN: '',
+    toolDefinitionFields: undefined,
     vectorWeight: '0.5',
     keywordWeight: '0.5',
     maxResults: '20',
@@ -799,6 +845,15 @@ const SettingsPage: React.FC = () => {
             : '',
         embeddingQueryPrefix: smartRoutingConfig.embeddingQueryPrefix || '',
         embeddingDocumentPrefix: smartRoutingConfig.embeddingDocumentPrefix || '',
+        similarityThreshold:
+          smartRoutingConfig.similarityThreshold != null
+            ? String(smartRoutingConfig.similarityThreshold)
+            : '',
+        fullSchemaTopN:
+          smartRoutingConfig.fullSchemaTopN != null
+            ? String(smartRoutingConfig.fullSchemaTopN)
+            : '',
+        toolDefinitionFields: smartRoutingConfig.toolDefinitionFields,
         vectorWeight:
           smartRoutingConfig.vectorWeight != null ? String(smartRoutingConfig.vectorWeight) : '0.5',
         keywordWeight:
@@ -1110,11 +1165,14 @@ const SettingsPage: React.FC = () => {
       | 'embeddingMaxTokens'
       | 'embeddingQueryPrefix'
       | 'embeddingDocumentPrefix'
+      | 'similarityThreshold'
+      | 'fullSchemaTopN'
+      | 'toolDefinitionFields'
       | 'vectorWeight'
       | 'keywordWeight'
       | 'maxResults'
       | 'scoreThreshold',
-    value: string,
+    value: string | string[],
   ) => {
     smartRoutingDirtyRef.current = true;
     setTempSmartRoutingConfig({
@@ -1332,6 +1390,29 @@ const SettingsPage: React.FC = () => {
     await updateNameSeparator(tempNameSeparator);
   };
 
+  // Labels of the search settings the API would reject. Saving stops on any of
+  // them instead of silently leaving the stored value in place.
+  const getInvalidSearchSettingLabels = (): string[] => {
+    const invalid: string[] = [];
+    const threshold = tempSmartRoutingConfig.similarityThreshold.trim();
+    if (threshold && !isSimilarityThreshold(Number(threshold))) {
+      invalid.push(t('settings.similarityThreshold'));
+    }
+    const topN = tempSmartRoutingConfig.fullSchemaTopN.trim();
+    if (topN && !isFullSchemaTopN(Number(topN))) {
+      invalid.push(t('settings.fullSchemaTopN'));
+    }
+    return invalid;
+  };
+
+  const reportInvalidSearchSettings = (): boolean => {
+    const invalid = getInvalidSearchSettingLabels();
+    if (invalid.length > 0) {
+      showToast(t('settings.invalidSearchSettings', { fields: invalid.join(', ') }), 'error');
+    }
+    return invalid.length > 0;
+  };
+
   const [srReindexing, setSrReindexing] = useState(false);
   const handleSmartRoutingReindex = async () => {
     if (srReindexing) return;
@@ -1415,6 +1496,9 @@ const SettingsPage: React.FC = () => {
       }
 
       // Prepare updates object with unsaved changes and enabled status
+      if (reportInvalidSearchSettings()) {
+        return;
+      }
       const updates: any = { enabled: value };
 
       // Check for unsaved changes and include them in the batch update
@@ -1503,6 +1587,31 @@ const SettingsPage: React.FC = () => {
       if (parsedDimensions !== undefined) {
         updates.embeddingDimensions = parsedDimensions;
       }
+      const parsedThreshold = parseOptionalSearchSettingForUpdate(
+        tempSmartRoutingConfig.similarityThreshold,
+        smartRoutingConfig.similarityThreshold,
+        isSimilarityThreshold,
+      );
+      if (parsedThreshold !== undefined) {
+        updates.similarityThreshold = parsedThreshold;
+      }
+      const parsedTopN = parseOptionalSearchSettingForUpdate(
+        tempSmartRoutingConfig.fullSchemaTopN,
+        smartRoutingConfig.fullSchemaTopN,
+        isFullSchemaTopN,
+      );
+      if (parsedTopN !== undefined) {
+        updates.fullSchemaTopN = parsedTopN;
+      }
+      const origFields =
+        smartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
+      const tempFields = tempSmartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
+      if (
+        origFields.length !== tempFields.length ||
+        origFields.some((f) => !tempFields.includes(f))
+      ) {
+        updates.toolDefinitionFields = [...tempFields];
+      }
 
       // Desktop-only hybrid retrieval settings (temp string → number)
       const parsedVectorWeight = parseFloat(tempSmartRoutingConfig.vectorWeight);
@@ -1537,6 +1646,9 @@ const SettingsPage: React.FC = () => {
   };
 
   const handleSaveSmartRoutingConfig = async () => {
+    if (reportInvalidSearchSettings()) {
+      return;
+    }
     const updates: any = {};
 
     if (tempSmartRoutingConfig.dbUrl !== smartRoutingConfig.dbUrl) {
@@ -1619,6 +1731,34 @@ const SettingsPage: React.FC = () => {
     );
     if (parsedEmbeddingDimensions !== undefined) {
       updates.embeddingDimensions = parsedEmbeddingDimensions;
+    }
+    const parsedSimilarityThreshold = parseOptionalSearchSettingForUpdate(
+      tempSmartRoutingConfig.similarityThreshold,
+      smartRoutingConfig.similarityThreshold,
+      isSimilarityThreshold,
+    );
+    if (parsedSimilarityThreshold !== undefined) {
+      updates.similarityThreshold = parsedSimilarityThreshold;
+    }
+    const parsedFullSchemaTopN = parseOptionalSearchSettingForUpdate(
+      tempSmartRoutingConfig.fullSchemaTopN,
+      smartRoutingConfig.fullSchemaTopN,
+      isFullSchemaTopN,
+    );
+    if (parsedFullSchemaTopN !== undefined) {
+      updates.fullSchemaTopN = parsedFullSchemaTopN;
+    }
+    {
+      const origFields =
+        smartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
+      const tempFields =
+        tempSmartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
+      if (
+        origFields.length !== tempFields.length ||
+        origFields.some((f) => !tempFields.includes(f))
+      ) {
+        updates.toolDefinitionFields = [...tempFields];
+      }
     }
 
     // Desktop-only hybrid retrieval settings (temp string → number)
@@ -3136,6 +3276,93 @@ const SettingsPage: React.FC = () => {
               </div>
               )}
 
+              {/* Search-results settings: origin backend search_tools tuning; desktop
+                  smart_routing uses its own hybrid retrieval sliders, keys not consumed */}
+              {!isTauri() && (
+                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="mb-2">
+                    <h3 className="font-medium text-gray-700">{t('settings.searchResults')}</h3>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {t('settings.searchResultsDescription')}
+                    </p>
+                  </div>
+                  <label htmlFor="similarityThreshold" className="block text-xs text-gray-600 mt-2">
+                    {t('settings.similarityThreshold')}
+                  </label>
+                  <input
+                    id="similarityThreshold"
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={tempSmartRoutingConfig.similarityThreshold}
+                    onChange={(e) =>
+                      handleSmartRoutingConfigChange('similarityThreshold', e.target.value)
+                    }
+                    placeholder={t('settings.similarityThresholdPlaceholder')}
+                    className="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                    disabled={loading}
+                  />
+                  {renderEnvOverrideWarning('similarityThreshold')}
+                  <label htmlFor="fullSchemaTopN" className="block text-xs text-gray-600 mt-3">
+                    {t('settings.fullSchemaTopN')}
+                  </label>
+                  <input
+                    id="fullSchemaTopN"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={tempSmartRoutingConfig.fullSchemaTopN}
+                    onChange={(e) =>
+                      handleSmartRoutingConfigChange('fullSchemaTopN', e.target.value)
+                    }
+                    placeholder={t('settings.fullSchemaTopNPlaceholder')}
+                    className="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                    disabled={loading}
+                  />
+                  {renderEnvOverrideWarning('fullSchemaTopN')}
+                </div>
+              )}
+
+              {/* Origin #1286: configurable optional tool fields in $smart
+                  search/describe results. Consumed by the desktop smart_routing
+                  backend too, so this is NOT web-only. */}
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md mt-3">
+                <p className="block text-xs text-gray-600">
+                  {t('settings.toolDefinitionFields')}
+                </p>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                  {TOOL_DEFINITION_FIELDS.map((field) => {
+                    const selected =
+                      tempSmartRoutingConfig.toolDefinitionFields ??
+                      DEFAULT_TOOL_DEFINITION_FIELDS;
+                    return (
+                      <label key={field} className="flex items-center gap-1 text-sm font-mono">
+                        <input
+                          type="checkbox"
+                          className="hub-checkbox sm"
+                          checked={selected.includes(field)}
+                          onChange={(e) =>
+                            handleSmartRoutingConfigChange(
+                              'toolDefinitionFields',
+                              TOOL_DEFINITION_FIELDS.filter((name) =>
+                                name === field ? e.target.checked : selected.includes(name),
+                              ),
+                            )
+                          }
+                          disabled={loading}
+                        />
+                        {field}
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  {t('settings.toolDefinitionFieldsDescription')}
+                </p>
+                {renderEnvOverrideWarning('toolDefinitionFields')}
+              </div>
+
               {/* Desktop: tool description verbosity for the meta-tool catalog */}
               {isTauri() && (
                 <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
@@ -3858,6 +4085,24 @@ const SettingsPage: React.FC = () => {
                   disabled={loading}
                   checked={betterAuthConfig.enabled}
                   onCheckedChange={(checked) => handleBetterAuthToggle({ enabled: checked })}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div>
+                  <h3 className="font-medium text-gray-700">
+                    {t('settings.disablePasswordLogin')}
+                  </h3>
+                  <p className="text-sm text-gray-500">
+                    {t('settings.disablePasswordLoginDescription')}
+                  </p>
+                </div>
+                <Switch
+                  disabled={loading}
+                  checked={betterAuthConfig.disablePasswordLogin}
+                  onCheckedChange={(checked) =>
+                    handleBetterAuthToggle({ disablePasswordLogin: checked })
+                  }
                 />
               </div>
 

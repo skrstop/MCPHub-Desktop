@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 27;
+pub const TARGET_VERSION: i64 = 29;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -99,7 +99,11 @@ async fn get_current_version(pool: &SqlitePool) -> Result<i64> {
         // Map old migration count to new schema version
         // Old migrations: 0001_initial, 0002_schema_fix, 0003_config_json, 0004_default_admin, 0005_default_skip_auth
         // New system: v1=initial, v2=schema_fix, v3=config_json, v4=default_admin, v5=skip_auth
-        let new_version = std::cmp::min(old_count, TARGET_VERSION);
+        // Legacy numbering DIVERGES after 5 (0007/0008 are partial/inert vs
+        // inline v9/v10/v11 structural repairs) — a row_count > 5 must NOT
+        // skip the inline repairs. Cap the mapping at 5 so v6..v29 (all
+        // add_column_if_missing / guarded, idempotent) re-run on top.
+        let new_version = std::cmp::min(old_count, 5);
         if new_version > 0 {
             set_version(pool, new_version).await?;
             log::info!("[db] initialized schema_version to v{} (from old system)", new_version);
@@ -174,6 +178,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         25 => migrate_v25(pool).await,
         26 => migrate_v26(pool).await,
         27 => migrate_v27(pool).await,
+        28 => migrate_v28(pool).await,
+        29 => migrate_v29(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -222,6 +228,74 @@ async fn migrate_v27(pool: &SqlitePool) -> Result<()> {
     // explicit product decision ("resource 定位用 name 即可，uri 不再单独
     // 索引"); duplicate URIs are not an enforced invariant.
     log::info!("[db] migration v27: unique indexes on builtin prompts/resources names");
+    Ok(())
+}
+
+/// v27 → v28: per-item pin flag on server_tool_config. Server-level pinned
+/// tools feed the $smart endpoints (root $smart lists them across all servers;
+/// $smart/{group} unions them with per-member group pins).
+async fn migrate_v28(pool: &SqlitePool) -> Result<()> {
+    // Idempotent: the version-rewind test re-runs v23..v28 on a schema that
+    // already has the column.
+    let has_pinned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('server_tool_config') WHERE name='pinned'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_pinned == 0 {
+        sqlx::query("ALTER TABLE server_tool_config ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    log::info!("[db] migration v28: server_tool_config.pinned column");
+    Ok(())
+}
+
+/// v28 → v29: Repair the `bearer_keys` schema on fresh installs.
+///
+/// `migrate_v1` historically created a legacy shape (`key_hash`/`user_id`/
+/// `expires_at`) that predates the token-based model; the correct columns
+/// (`token`/`enabled`/`access_type`/`allowed_groups`/`allowed_servers`) only
+/// existed in the retired sqlx::migrate! path. Dev DBs got fixed by that old
+/// runtime migration; a truly fresh install upgrading straight to v29 never
+/// did — every bearer CRUD (and the cascade rename/delete selects) failed
+/// with "no such column: token". Rebuild the table when the `token` column
+/// is missing.
+async fn migrate_v29(pool: &SqlitePool) -> Result<()> {
+    let has_token: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('bearer_keys') WHERE name='token'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_token == 0 {
+        // Legacy table (or empty). Its rows are unusable under the token
+        // model (key_hash is never consumed), so drop and recreate.
+        sqlx::query("DROP TABLE IF EXISTS bearer_keys")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE TABLE bearer_keys (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                token           TEXT NOT NULL,
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                access_type     TEXT NOT NULL DEFAULT '',
+                allowed_groups  TEXT NOT NULL DEFAULT '[]',
+                allowed_servers TEXT NOT NULL DEFAULT '[]',
+                created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )",
+        )
+        .execute(pool)
+        .await?;
+        // Recreate the query indexes earlier migrations built against the
+        // legacy table — the DROP above removed them (v23's created_at index
+        // and, under its column guard, nothing for user_id since the token
+        // shape has no such column).
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_bearer_keys_created_at ON bearer_keys(created_at DESC)")
+            .execute(pool)
+            .await?;
+        log::warn!("[db] migration v29: rebuilt bearer_keys with token schema (fresh-install repair)");
+    }
     Ok(())
 }
 
@@ -1368,6 +1442,46 @@ async fn create_index_if_column_exists(
 mod tests {
     use super::*;
 
+    /// v29（全新安装修复）：fresh DB 直升 TARGET_VERSION 后 bearer_keys 必须是
+    /// token 形态，且 bearer CRUD 端到端可用（round 11 发现的盲区——存量开发机
+    /// 走遗留 sqlx 路径所以全绿，全新库此前必失败）。
+    #[tokio::test]
+    async fn fresh_db_bearer_keys_token_schema() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('bearer_keys')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        for c in ["token", "enabled", "access_type", "allowed_groups", "allowed_servers"] {
+            assert!(cols.iter().any(|x| x == c), "missing col {} in {:?}", c, cols);
+        }
+
+        // bearer_key_service::create/find route through db::pool() (global,
+        // requires the AppHandle-backed initialize) — exercise the same SQL
+        // shape directly instead.
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) \
+             VALUES ('id1', 't', 'mcphub_test', 1, '', '[]', '[]')",
+        )
+        .execute(&pool)
+        .await
+        .expect("bearer_keys token-shape insert must succeed");
+        let hit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bearer_keys WHERE token = 'mcphub_test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(hit, 1);
+    }
+
     /// v21 迁移在全新库上应建出三张 RAG 表 + 全部查询索引，且版本号推进到
     /// TARGET_VERSION；重跑（run_pending 二次调用）应为幂等 no-op。
     #[tokio::test]
@@ -1440,7 +1554,7 @@ mod tests {
             "idx_builtin_prompts_description",
             "idx_builtin_resources_description",
             "idx_skills_description",
-            "idx_bearer_keys_user_id",
+            "idx_bearer_keys_created_at",
             "idx_activity_log_key_id",
             "idx_activity_log_source_ip",
         ] {
@@ -1452,6 +1566,23 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(n, 1, "index {} should exist", idx);
+        }
+        // bearer_keys 在 v29 起为 token 形态（无 user_id 列），该索引只在
+        // 列存在（legacy 形态）时才应有。
+        let has_uid: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('bearer_keys') WHERE name='user_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if has_uid > 0 {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_bearer_keys_user_id'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 1, "idx_bearer_keys_user_id should exist when user_id column exists");
         }
 
         // v23：uri 索引应已删除（v21 建过，v23 DROP）

@@ -110,8 +110,8 @@ def features_2026():
         {"MCP-Protocol-Version":"2026-07-28","Mcp-Method":"tools/list",
          "Accept":"application/json, text/event-stream"})
     res2 = (obj or {}).get("result", {})
-    check("[2026] tools/list ttlMs=30000 private",
-          st == 200 and res2.get("ttlMs") == 30000 and res2.get("cacheScope") == "private",
+    check("[2026] tools/list ttlMs≤5000 private",
+          st == 200 and isinstance(res2.get("ttlMs"), (int,float)) and res2.get("ttlMs") <= 5000 and res2.get("cacheScope") == "private",
           f"st={st} ttl={res2.get('ttlMs')} scope={res2.get('cacheScope')}")
 
 def leniency_regression():

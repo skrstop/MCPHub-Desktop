@@ -124,7 +124,10 @@ check("E1 legacy ping 空 result", st==200 and obj and obj.get("result") == {}, 
 for m in ["tools/list","prompts/list","resources/list"]:
     st, obj, _, _ = req("POST", "/mcp", {"jsonrpc":"2.0","id":7,"method":m,"params":META2026})
     res = (obj or {}).get("result", {})
-    check(f"E2 {m} CacheableResult", res.get("resultType")=="complete" and res.get("ttlMs")==30000
+    # Origin #1277 parity: TTL bounded ≤5000 (upstream-freshness dependent,
+    # 0 for builtin/gateway lists); scope stays private for 2026 sessions.
+    check(f"E2 {m} CacheableResult(有界TTL)", res.get("resultType")=="complete"
+          and isinstance(res.get("ttlMs"), (int,float)) and res.get("ttlMs")<=5000
           and res.get("cacheScope")=="private", f"{ {k:res.get(k) for k in ['resultType','ttlMs','cacheScope']} }")
 st, obj, _, _ = req("POST", "/mcp", {"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}})
 res_d = (obj or {}).get("result", {})

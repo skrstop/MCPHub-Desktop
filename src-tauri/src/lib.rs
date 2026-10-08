@@ -533,6 +533,8 @@ pub fn run() {
             commands::server_tool_config::toggle_server_item,
             commands::server_tool_config::update_server_item_description,
             commands::server_tool_config::reset_server_item_description,
+            commands::server_tool_config::set_server_tool_pinned,
+            commands::server_tool_config::list_server_tool_pins,
             commands::server_tool_config::list_server_item_configs,
             // HTTP server management
             commands::http_server::start_http_server,

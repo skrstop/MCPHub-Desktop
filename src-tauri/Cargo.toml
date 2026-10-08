@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.0.40003"
+version = "1.1.1003"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -111,6 +111,7 @@ hex = "0.4"
 # HTTP server (expose MCP endpoints when expose_http = true)
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
+tokio-util = "0.7"
 percent-encoding = "2"
 tower-http = { version = "0.7", features = ["cors"] }
 

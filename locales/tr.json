@@ -214,6 +214,7 @@
     "enabled": "Etkin",
     "enable": "Etkinleştir",
     "disable": "Devre Dışı Bırak",
+    "disabled": "Devre dışı",
     "reload": "Yeniden Yükle",
     "reloadSuccess": "Sunucu başarıyla yeniden yüklendi",
     "reloadError": "Sunucu {{serverName}} yeniden yüklenemedi",
@@ -322,7 +323,9 @@
       "scopesPlaceholder": "scope1 scope2",
       "resource": "Kaynak / Hedef Kitle",
       "accessToken": "Erişim Tokeni",
-      "refreshToken": "Yenileme Tokeni"
+      "refreshToken": "Yenileme Tokeni",
+      "allowInsecureTokenEndpoint": "HTTP OAuth token uç noktalarına izin ver",
+      "allowInsecureTokenEndpointHelp": "Yalnızca yönetici. Varsayılan olarak devre dışı. Bu üst sunucu için kimlik bilgilerini ve token'ları TLS olmadan gönderir. Yalnızca güvenilir bir ağda etkinleştirin; HTTPS önerilir. Etkinleştirildiğinde yalnızca yöneticiler bu sunucunun tüm yapılandırmasını düzenleyebilir; yönetici olmayan sahip düzenleyemez."
     },
     "duplicate": "Çoğalt",
     "nameInvalid": "Sunucu adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir (boşluk veya özel karakter içeremez)",
@@ -340,7 +343,13 @@
     "smartBadge": "Akıllı",
     "smartMetaRoute": "Akıllı Yönlendirme meta araçları",
     "smartMetaTooltip": "Akıllı Yönlendirme meta araçları: YALNIZCA /mcp/$smart ucu üzerinden sunulur — normal /mcp veya /api yollarında mevcut değildir.",
-    "unknownError": "Bilinmeyen hata"
+    "unknownError": "Bilinmeyen hata",
+    "addArgument": "Argüman ekle",
+    "argumentsHint": "Her alan bir argümandır. Boşluklar ve tırnaklar korunur; boş bir alan boş bir argüman iletir.",
+    "argumentLabel": "Argüman {{index}}",
+    "removeArgument": "Argüman {{index}} kaldır",
+    "maxBufferSize": "Stdio arabellek sınırı (bayt)",
+    "maxBufferSizeDescription": "Stdio okuma arabelleğinin en büyük boyutu. SDK varsayılanı (10 MiB) için boş bırakın. Daha yüksek sınırlar daha fazla bellek kullanımına izin verir."
   },
   "status": {
     "sleeping": "Uykuda",
@@ -375,7 +384,8 @@
     "failedToUpdateOAuthServerConfig": "OAuth sunucu yapılandırması güncellenemedi",
     "failedToUpdateSessionRebuild": "Oturum yeniden oluşturma ayarı güncellenemedi",
     "failedToUpdateSettings": "Ayarlar güncellenemedi",
-    "failedToUpdateBearerKey": "Bearer anahtarı güncellenemedi"
+    "failedToUpdateBearerKey": "Bearer anahtarı güncellenemedi",
+    "password_login_disabled": "Şifreyle giriş devre dışı. SSO ile giriş yapın veya API erişimi için bir Bearer anahtarı kullanın."
   },
   "common": {
     "loading": "Yükleniyor...",
@@ -965,7 +975,12 @@
     "legacyVisibility": "Eski grup — görünürlük seçin",
     "legacyVisibilityHint": "Görünürlüğü açıkça seçene kadar bu grup önceki erişim kurallarını korur.",
     "visibilityDescription": "Grup erişimi, her sunucuya erişim de gerektirir. Grubu paylaşmak özel sunucuları paylaşmaz. Grubu yalnızca sahibi ve yöneticiler yönetebilir.",
-    "shareAfterCreate": "Kullanıcıları seçmeden önce grubu kaydedin."
+    "shareAfterCreate": "Kullanıcıları seçmeden önce grubu kaydedin.",
+    "pinTool": "Sabitle: bu aracı grubun Akıllı Yönlendirme uç noktasında search_tools'un yanında her zaman listele",
+    "pinToolLabel": "Akıllı Yönlendirme uç noktasına sabitle",
+    "unpinTool": "Sabitlemeyi kaldır: bu araca yalnızca search_tools ile ulaş",
+    "pinToolSuccess": "{{name}} sablendi",
+    "unpinToolSuccess": "{{name}} sablonu kaldırıldı"
   },
   "market": {
     "title": "Yerel Kurulum",
@@ -1516,7 +1531,18 @@
     "mcpStrictValidation": "Katı Protokol Doğrulaması",
     "mcpStrictValidationDescription": "Etkinleştirildiğinde istek başlıkları ve parametreleri MCP belirtimine göre katı doğrular; yeni belirtimleri takip etmeyen istemcileri tolere etmek için varsayılan olarak kapalıdır",
     "selectAtLeastOneGroupOrServer": "Lütfen en az bir grup veya sunucu seçin",
-    "llmProviderApiKeyDescription": "Akıllı yönlendirmede kullanılan LLM sağlayıcısının API anahtarı"
+    "llmProviderApiKeyDescription": "Akıllı yönlendirmede kullanılan LLM sağlayıcısının API anahtarı",
+    "searchResults": "Arama Sonuçları",
+    "searchResultsDescription": "search_tools eşleşmeleri nasıl filtreler ve döndürür. Her sonuç benzerlik puanını içerir. Varsayılanlar için iki alanı da boş bırakın.",
+    "similarityThreshold": "Benzerlik eşiği (0-1)",
+    "similarityThresholdPlaceholder": "Boş = sorgu uzunluğuna göre (0.2 / 0.3 / 0.4)",
+    "fullSchemaTopN": "İlk N sonuç için tam şemalar",
+    "fullSchemaTopNPlaceholder": "Boş = tüm sonuçlar; diğerleri describe_tool kullanır",
+    "invalidSearchSettings": "{{fields}} için geçersiz değer. Benzerlik eşiği 0 ile 1 arasında, N ise 0 veya daha büyük bir tam sayı olmalıdır.",
+    "toolDefinitionFields": "Sonuçlardaki araç alanları",
+    "toolDefinitionFieldsDescription": "search_tools ve describe_tool sonuçlarının ad, açıklama ve inputSchema dışında içerdiği isteğe bağlı alanlar. Varsayılan: title ve annotations. Diğerleri çoğunlukla istemciler içindir ve büyük olabilir (simgeler base64 görsellerdir).",
+    "disablePasswordLogin": "Şifreyle girişi devre dışı bırak",
+    "disablePasswordLoginDescription": "Yalnızca SSO sağlayıcılarıyla girişe izin ver: kullanıcı adı/şifre formu ve POST /api/auth/login kapatılır. En az bir sağlayıcı etkin olduğunda ve uygulama başlangıcında zaten etkin olduğunda geçerlidir. BETTER_AUTH_DISABLE_PASSWORD_LOGIN bu ayarı geçersiz kılar; kimlik sağlayıcısı kullanılamıyorsa false yapmak geri dönüş yoludur."
   },
   "mcpb": {
     "upload": "Yükle",

@@ -11,9 +11,23 @@ HOST, PORT = "localhost", 23333
 IP_TOOL = "本机公网ip查询-getPublicIp"
 SCOPE = urllib.parse.quote("本机公网ip查询")
 
+def _try_json(d):
+    try:
+        import json as _j
+        return _j.loads(d[d.index("{"):]) if d and "{" in d else None
+    except Exception:
+        return None
+
 def get_ip(d):
-    m = re.search(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", d)
-    return m.group(0) if m else None
+    import ipaddress
+    for m in re.findall(r"\d{1,3}(?:\.\d{1,3}){3}", d):
+        try:
+            ip = ipaddress.ip_address(m)
+            if not ip.is_private and not ip.is_loopback and not ip.is_reserved:
+                return m
+        except ValueError:
+            pass
+    return None
 
 def post(path, body, headers=None):
     c = http.client.HTTPConnection(HOST, PORT, timeout=60)
@@ -42,8 +56,10 @@ def main():
         st, d, _ = post("/mcp", {"jsonrpc":"2.0","id":2,"method":"tools/call",
             "params":{"name":IP_TOOL,"arguments":{}}}, {"Mcp-Session-Id": sid})
         ip = get_ip(d); total += 1
+        o = _try_json(d)
+        is_err = bool(o and isinstance(o, dict) and (o.get("result", {}) or {}).get("isError"))
         t = f"legacy {v} tools/call 公网IP"
-        if st == 200 and ip:
+        if st == 200 and ip and not is_err:
             ok += 1; print(f"PASS | {t} ip={ip}")
         else:
             failed.append(t); print(f"FAIL | {t} st={st}")

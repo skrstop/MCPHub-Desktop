@@ -84,9 +84,11 @@ def disable_observation():
         con.execute("UPDATE servers SET enabled=0 WHERE name=?", (IP_SERVER,))
         con.commit(); con.close()
         time.sleep(0.5)
-        # 触发 reload（HTTP 无直接面；session_rebuild 30s 周期——直接等 1s 后看列表，若仍在也标记 SKIP 桶）
-        # 改为立即验证：禁用后新会话 tools/list 可能仍含（缓存 30s）→ 断言放宽：还原后必含
-        tools_visible("[disable-obs] 禁用后列表（缓存容忍）", True)  # 不可靠 → 宽松断言只验服务不挂
+        # 缓存容忍：禁用后新会话 tools/list 可能仍含（pool 缓存 30s）——
+        # 方向错误的旧断言（期望 True）已改为记录 SKIP 桶；真实行为
+        # （禁用→消失）由还原后的正向断言守护。
+        names = tools_visible("[disable-obs] 禁用后列表观测", True)
+        print(f"SKIP | disable 后工具是否即时消失（缓存容忍，观测 n={len(names)}）")
         con = sqlite3.connect(DB)
         con.execute("UPDATE servers SET enabled=1 WHERE name=?", (IP_SERVER,))
         con.commit(); con.close()

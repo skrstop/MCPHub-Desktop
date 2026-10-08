@@ -44,6 +44,18 @@ pub async fn log_event(level: String, message: String) -> Result<(), String> {
         "info" | "warn" | "error" | "debug" => level,
         _ => "info".to_string(),
     };
+    // Cap the message: the endpoint is unauthenticated by design (frontend
+    // telemetry) — an unbounded string would bloat app_log (VACUUM-only
+    // shrink) until the 15-day cleanup.
+    let message = if message.len() > 4096 {
+        let mut end = 4096;
+        while !message.is_char_boundary(end) {
+            end += 1;
+        }
+        message[..end].to_string()
+    } else {
+        message
+    };
     crate::services::app_logger::log_to_db(&level, &message);
     Ok(())
 }

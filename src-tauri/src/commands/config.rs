@@ -250,6 +250,9 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
                 "perSessionClient": server.per_session_client,
                 "startOnDemand": server.start_on_demand,
                 "idleTimeoutMs": server.idle_timeout_ms,
+                "enableKeepAlive": server.enable_keep_alive,
+                "keepAliveInterval": server.keep_alive_interval,
+                "passthroughHeaders": server.passthrough_headers,
             }
         }
     }))
@@ -344,6 +347,9 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
                 "perSessionClient": s.per_session_client,
                 "startOnDemand": s.start_on_demand,
                 "idleTimeoutMs": s.idle_timeout_ms,
+                "enableKeepAlive": s.enable_keep_alive,
+                "keepAliveInterval": s.keep_alive_interval,
+                "passthroughHeaders": s.passthrough_headers,
             }),
         );
     }
@@ -370,14 +376,24 @@ pub async fn save_settings_json(
     app: AppHandle,
     content: String,
     file_name: Option<String>,
+    session: tauri::State<'_, crate::commands::auth::SessionState>,
 ) -> Result<String, String> {
+    crate::commands::config::require_admin(&session).await?;
     let default_name = file_name.unwrap_or_else(|| "mcp_settings.json".to_string());
-    let file_path = app
-        .dialog()
-        .file()
-        .add_filter("JSON", &["json"])
-        .set_file_name(default_name)
-        .blocking_save_file();
+    // blocking_save_file parks the worker until the user answers the native
+    // modal (potentially forever) — run it on the blocking pool so the async
+    // runtime worker is never stalled.
+    let app2 = app.clone();
+    let file_path = tokio::task::spawn_blocking(move || {
+        app2
+            .dialog()
+            .file()
+            .add_filter("JSON", &["json"])
+            .set_file_name(default_name)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("dialog task failed: {e}"))?;
 
     let Some(file_path) = file_path else {
         // User cancelled the save dialog — surface as a non-fatal "no file" result.

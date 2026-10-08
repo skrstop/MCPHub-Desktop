@@ -123,9 +123,15 @@ for v in VERSIONS:
     sid = hd.get("mcp-session-id")
     if v == "2026-07-28":
         # 2026 无状态：直接调
+        # Real 2026 markers: without them this request upgrades as a bare
+        # legacy call — the "2026" label never exercised the stateless path.
         st, _, raw = req("POST", "/mcp", {
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-            "params": {"name": "本机公网ip查询-getPublicIp", "arguments": {}}}, timeout=90)
+            "params": {"name": "本机公网ip查询-getPublicIp", "arguments": {},
+                       "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                 "io.modelcontextprotocol/clientInfo": {"name": "r100", "version": "1"},
+                                 "io.modelcontextprotocol/clientCapabilities": {}}}},
+            headers={"MCP-Protocol-Version": "2026-07-28"}, timeout=90)
         obj = sse_last(raw, 5)
         r = obj.get("result", {}) if obj else {}
         check("L1 宽松[2026] 公网IP 真实调用", st == 200 and r.get("isError") is False

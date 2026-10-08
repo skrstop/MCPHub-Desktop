@@ -514,13 +514,28 @@ struct SourceSyncAdd {
 }
 
 /// Prefix helper: does `path` live inside `root`? String-prefix with an
-/// explicit separator so `/a/b` doesn't match `/a/bc/...`.
+/// explicit separator so `/a/b` doesn't match `/a/bc/...`. Both sides are
+/// normalized to forward slashes first — Windows scan paths and stored
+/// exclusion entries use `\`, and a raw prefix `C:\dir/` would never match
+/// (directory exclusions silently no-op otherwise). Case-insensitive compare
+/// ONLY on case-preserving filesystems (macOS APFS / Windows NTFS) — on Linux
+/// ext4 two paths differing in case are distinct directories and must not
+/// over-match.
 fn path_under_root(path: &str, root: &str) -> bool {
+    let norm = |s: &str| s.replace('\\', "/");
+    let root = norm(root);
     let root = root.trim_end_matches('/');
     if root.is_empty() {
         return false;
     }
-    path == root || path.starts_with(&format!("{root}/"))
+    let path = norm(path);
+    let case_fold = cfg!(windows) || cfg!(target_os = "macos");
+    if case_fold {
+        path.eq_ignore_ascii_case(root)
+            || path.to_ascii_lowercase().starts_with(&format!("{root}/").to_ascii_lowercase())
+    } else {
+        path == root || path.starts_with(&format!("{root}/"))
+    }
 }
 
 // ── exclusion registry: paths the update pipeline must ignore ───────────────
@@ -1475,7 +1490,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_create",
-            "description": "Create a new RAG document from UTF-8 text content and index it for semantic search. The file is stored as {docName}.{docType} (e.g. readme.md). Returns the created docId. Overwrites any existing document with the same filename.",
+            "description": "Create a new RAG document from UTF-8 text content and index it for semantic search. The file is stored as {docName}.{docType} (e.g. readme.md). Returns the created docId. Documents with duplicate names coexist (a new docId is created); use rag_file_update to modify an existing document.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1541,6 +1556,11 @@ pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
             enabled: true,
             annotations: None,
             output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            description_overridden: false,
         })
         .collect()
 }
@@ -2553,7 +2573,15 @@ async fn get_doc_inner(
     let (content, content_available) = if is_symlink {
         if let Some(op) = meta.original_path.as_deref() {
             if !op.is_empty() && Path::new(op).exists() {
-                (std::fs::read_to_string(op).unwrap_or_default(), true)
+                // Same cap as every write path: a symlink doc can point at an
+                // arbitrarily large file — never buffer it whole.
+                match std::fs::metadata(op) {
+                    Ok(m) if m.len() <= MAX_UPLOAD_BYTES as u64 => {
+                        (std::fs::read_to_string(op).unwrap_or_default(), true)
+                    }
+                    Ok(_) => (String::new(), false),
+                    Err(_) => (String::new(), false),
+                }
             } else {
                 (String::new(), false)
             }
@@ -4699,10 +4727,10 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
                 // import session is active, defer the clone/credential
                 // cleanup — an unreferenced clone is harmless and will be
                 // collected by the next refcount-zero delete.
-                if import_session_active() {
+                if import_session_active() || BATCH_UPDATE_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
                     rag_log(
                         "info",
-                        format!("git: import session active — deferring clone/credential cleanup for {git_url}"),
+                        format!("git: import session/batch update active — deferring clone/credential cleanup for {git_url}"),
                     );
                 } else {
                     // Clone + credential are stored under the CANONICAL url's

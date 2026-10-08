@@ -307,7 +307,14 @@ pub async fn list_node_versions() -> Result<Vec<RuntimeVersion>, String> {
     }
 
     for ver in versions {
-        let installed = node_version_installed(&ver);
+        // Bundled-binary probe is a sync subprocess — keep it off the async
+        // worker like every other subprocess call in this file.
+        let installed = {
+            let ver = ver.clone();
+            tokio::task::spawn_blocking(move || node_version_installed(&ver))
+                .await
+                .unwrap_or(false)
+        };
         let healthy = if installed { verify_node_version(&ver).await } else { true };
         let is_bundled = bundled_ver.as_deref() == Some(&ver);
         // If system has no runtime and user has "system" selected, activate the first installed (bundled) version
@@ -663,7 +670,16 @@ pub async fn install_node_version(
     );
 
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-    if let Err(e) = extract_node_archive(&buf, &dest) {
+    // Extraction of a ~30-80MB tarball is CPU/IO-bound — run off the async
+    // worker like the removal path below (review round 2026-10-05).
+    let dest_for_extract = dest.clone();
+    let buf_for_extract = buf;
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        extract_node_archive(&buf_for_extract, &dest_for_extract)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    {
         // 解压失败 → 清理残留，避免下次被错误识别为「已安装」
         log::warn!("[runtime] Node.js {version} 解压失败，清理目录 {dest:?}");
         // Large directory deletion (~80MB runtimes) can take seconds — keep
@@ -773,7 +789,12 @@ pub async fn install_python_version(
     // 预清理：移除阻塞 uv 创建 minor 软链的残留真实目录
     // 注意 uv 装新 patch 时会重建「所有已安装 minor 系列」的软链，
     // 不仅仅是当前 version 对应那个；因此必须全量扫描清理。
-    cleanup_all_uv_python_minor_links(&python_dir);
+    // spawn_blocking: 残留目录可达 ~100MB，同步删除会阻塞 async worker。
+    let _ = tokio::task::spawn_blocking({
+        let python_dir = python_dir.clone();
+        move || cleanup_all_uv_python_minor_links(&python_dir)
+    })
+    .await;
 
     log::info!("[runtime] Installing Python {version} via uv...");
 
@@ -1252,9 +1273,24 @@ fn extract_node_archive(bytes: &[u8], dest: &Path) -> Result<(), String> {
                 } else {
                     out.parent().unwrap_or(dest).join(target)
                 };
+                // A dangling target bypasses canonicalize — check its raw
+                // components instead: a relative target containing `..` can
+                // sit outside `dest` until a LATER archive entry writes a
+                // regular file through it (two-step escape).
+                if target
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
+                {
+                    return Err(format!(
+                        "archive link target escapes destination: {} -> {}",
+                        path.display(),
+                        target.display()
+                    ));
+                }
                 let Ok(canon) = target.canonicalize() else {
-                    // Dangling link target: creating the link is still safe
-                    // (nothing writes through it during this archive).
+                    // Dangling link target with safe (Normal-only) components:
+                    // creating the link is still safe (nothing writes through
+                    // it during this archive).
                     let _ = std::fs::remove_file(&out);
                     entry.unpack(&out).map_err(|e| e.to_string())?;
                     continue;

@@ -37,6 +37,8 @@ const LoginPage: React.FC = () => {
   const [socialLoading, setSocialLoading] = useState<SocialProvider | null>(null);
   const [socialError, setSocialError] = useState<string | null>(null);
   const [betterAuthBasePath, setBetterAuthBasePath] = useState<string | undefined>(undefined);
+  // Set from the public config: only SSO sign-in is offered
+  const [passwordLoginDisabled, setPasswordLoginDisabled] = useState(false);
   const [socialProviders, setSocialProviders] = useState({
     google: false,
     github: false,
@@ -121,6 +123,7 @@ const LoginPage: React.FC = () => {
         return;
       }
       setBetterAuthBasePath(betterAuth.basePath);
+      setPasswordLoginDisabled(betterAuth.disablePasswordLogin === true);
       setOidcProviderId(betterAuth.providers?.oidc?.providerId || 'oidc');
       setSocialProviders({
         google: betterAuth.providers?.google?.enabled === true,
@@ -275,6 +278,7 @@ const LoginPage: React.FC = () => {
               boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
             }}
           >
+            {!passwordLoginDisabled && (
             <form className="space-y-3" onSubmit={handleSubmit}>
               <div>
                 <label
@@ -344,6 +348,7 @@ const LoginPage: React.FC = () => {
                 {loading ? t('auth.loggingIn') : t('auth.login')}
               </button>
             </form>
+            )}
 
             <p
               className="text-center mt-3"

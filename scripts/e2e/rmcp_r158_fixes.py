@@ -72,13 +72,14 @@ st, obj, _, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "resou
     "params": {"_meta": {PV: "2026-07-28", **CLIENT_META}}}, headers=H26)
 uris = [r.get("uri") for r in (obj or {}).get("result", {}).get("resources", [])]
 res = (obj or {}).get("result", {})
-check("D1 [M-108-1] resources/list 2026 带 ttlMs", res.get("ttlMs") == 30000, f"ttlMs={res.get('ttlMs')}")
+# Origin #1277 parity: builtin lists → ttlMs 0 (gateway-generated, no upstream freshness)
+check("D1 [M-108-1] resources/list 2026 带 ttlMs(0,有界)", res.get("ttlMs") == 0, f"ttlMs={res.get('ttlMs')}")
 check("D2 [M-108-1] resources/list 2026 cacheScope=private", res.get("cacheScope") == "private", f"{res.get('cacheScope')}")
 if uris:
     st, obj, _, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "resources/read",
         "params": {"uri": uris[0], "_meta": {PV: "2026-07-28", **CLIENT_META}}}, headers=H26)
     rres = (obj or {}).get("result", {})
-    check("D3 [M-108-1] resources/read 2026 带 ttlMs=30000", rres.get("ttlMs") == 30000,
+    check("D3 [M-108-1] resources/read 2026 带 ttlMs(0,有界)", rres.get("ttlMs") == 0,
           f"status={st} ttlMs={rres.get('ttlMs')}")
     check("D4 [M-108-1] resources/read 2026 cacheScope=private", rres.get("cacheScope") == "private",
           f"{rres.get('cacheScope')}")

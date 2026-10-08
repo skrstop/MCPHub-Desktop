@@ -89,7 +89,6 @@ const ServersPage: React.FC = () => {
   const searchActive = search.trim() !== '' || filter !== 'all';
   const [serverPageItems, setServerPageItems] = useState<Server[]>([]);
   const [serverPageTotal, setServerPageTotal] = useState(0);
-  const [serverPageLoading, setServerPageLoading] = useState(false);
   const serverReqId = useRef(0);
 
   useEffect(() => {
@@ -100,7 +99,6 @@ const ServersPage: React.FC = () => {
       return;
     }
     const id = ++serverReqId.current;
-    setServerPageLoading(true);
     const timer = setTimeout(async () => {
       try {
         const res: ApiResponse<ServerPage> = await apiPost('/servers/search', {
@@ -117,8 +115,6 @@ const ServersPage: React.FC = () => {
         if (id !== serverReqId.current) return;
         setServerPageItems([]);
         setServerPageTotal(0);
-      } finally {
-        if (id === serverReqId.current) setServerPageLoading(false);
       }
     }, 250);
     return () => clearTimeout(timer);

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IGroupServerConfig, Prompt, Resource, Server, ServerCost, Tool } from '@/types';
-import { Wrench, MessageSquare, FileText, Search, X } from 'lucide-react';
+import { Wrench, MessageSquare, FileText, Search, X, Pin } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { formatTokens } from '@/utils/contextCost';
@@ -106,7 +106,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
   serverCosts = [],
 }) => {
   const { t } = useTranslation();
-  const { nameSeparator } = useSettingsData();
+  const { nameSeparator, smartRoutingConfig } = useSettingsData();
   const [activeTab, setActiveTab] = useState<CapabilityKey>('tools');
   const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
 
@@ -138,9 +138,18 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
   }, [value]);
 
   // Get available servers (enabled only)
+  // Enabled servers plus — crucially — DISABLED servers that are still group
+  // members: hiding them entirely would make stale memberships unmanageable
+  // (the user could never see or uncheck them). Disabled members render with
+  // a "disabled" tag and zero items until the server is re-enabled.
   const availableServers = React.useMemo(
-    () => servers.filter((server) => server.enabled !== false),
-    [servers],
+    () =>
+      servers.filter(
+        (server) =>
+          server.enabled !== false ||
+          value.some((c) => (typeof c === 'string' ? c : c.name) === server.name),
+      ),
+    [servers, value],
   );
 
   const toggleServer = (serverName: string) => {
@@ -177,6 +186,11 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
       ...baseConfig,
       [capability]: selection,
     };
+    // A deselected tool drops its pin, so selecting it again does not silently re-pin it
+    if (capability === 'tools' && Array.isArray(selection) && nextConfig.pinnedTools) {
+      nextConfig.pinnedTools = nextConfig.pinnedTools.filter((name) => selection.includes(name));
+      if (nextConfig.pinnedTools.length === 0) delete nextConfig.pinnedTools;
+    }
 
     if (!hasAnyCapabilitySelection(nextConfig)) {
       const newValue = normalizedValue.filter((config) => config.name !== serverName);
@@ -202,6 +216,22 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
     } else {
       delete nextConfig.alias;
     }
+
+    onChange(normalizedValue.map((config) => (config.name === serverName ? nextConfig : config)));
+  };
+
+  const togglePinnedTool = (serverName: string, toolName: string) => {
+    const existingServer = normalizedValue.find((config) => config.name === serverName);
+    if (!existingServer) return;
+
+    const pinnedTools = existingServer.pinnedTools ?? [];
+    const nextConfig: IGroupServerConfig = {
+      ...existingServer,
+      pinnedTools: pinnedTools.includes(toolName)
+        ? pinnedTools.filter((name) => name !== toolName)
+        : [...pinnedTools, toolName],
+    };
+    if (nextConfig.pinnedTools!.length === 0) delete nextConfig.pinnedTools;
 
     onChange(normalizedValue.map((config) => (config.name === serverName ? nextConfig : config)));
   };
@@ -564,6 +594,15 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                       {t('server.builtinBadge')}
                     </span>
                   )}
+                  {server.enabled === false && (
+                    <span
+                      className="hub-tag flex-shrink-0"
+                      style={{ background: 'var(--hub-bg-2)', color: 'var(--hub-ink-3)' }}
+                      title={t('server.disabled')}
+                    >
+                      {t('server.disabled')}
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center space-x-3">
@@ -677,6 +716,9 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                 key,
                                 item.value,
                               );
+                              const isPinned = Boolean(
+                                serverConfig?.pinnedTools?.includes(item.value),
+                              );
                               const descriptionInfo =
                                 key === 'tools'
                                   ? getToolDescriptionInfo(
@@ -695,51 +737,75 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                 : item.description;
 
                               return (
-                                <label
-                                  key={item.key}
-                                  className="flex min-w-0 items-center gap-2 text-sm"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isChecked}
-                                    onChange={() =>
-                                      toggleCapabilityItem(server.name, key, item.value)
-                                    }
-                                    className="hub-checkbox sm"
-                                  />
-                                  <span className="text-gray-700 break-all whitespace-nowrap flex-shrink-0">
-                                    {item.value}
-                                  </span>
-                                  {(item.description ||
-                                    descriptionInfo?.hasDescriptionOverride) && (
-                                    <span className="min-w-0 flex items-center gap-1 text-gray-400 text-xs truncate">
-                                      <span
-                                        className="truncate"
-                                        title={descriptionTitle || undefined}
-                                      >
-                                        {descriptionInfo
-                                          ? descriptionInfo.currentDescription
-                                          : item.description}
-                                      </span>
-                                      {descriptionInfo?.hasDescriptionOverride && (
+                                <div key={item.key} className="flex min-w-0 items-center gap-2">
+                                  <label className="flex min-w-0 flex-1 items-center gap-2 text-sm">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() =>
+                                        toggleCapabilityItem(server.name, key, item.value)
+                                      }
+                                      className="hub-checkbox sm"
+                                    />
+                                    <span className="text-gray-700 break-all whitespace-nowrap flex-shrink-0">
+                                      {item.value}
+                                    </span>
+                                    {(item.description ||
+                                      descriptionInfo?.hasDescriptionOverride) && (
+                                      <span className="min-w-0 flex items-center gap-1 text-gray-400 text-xs truncate">
                                         <span
-                                          className="inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300"
+                                          className="truncate"
                                           title={descriptionTitle || undefined}
                                         >
-                                          {t('tool.descriptionModifiedBadge')}
+                                          {descriptionInfo
+                                            ? descriptionInfo.currentDescription
+                                            : item.description}
                                         </span>
-                                      )}
-                                    </span>
-                                  )}
-                                  {costMap.get(item.key) != null && (
-                                    <span
-                                      className="text-xs text-gray-400 hub-mono whitespace-nowrap ml-auto flex-shrink-0"
-                                      title={t('cost.estimate')}
-                                    >
-                                      Σ {formatTokens(costMap.get(item.key)!)}
-                                    </span>
-                                  )}
-                                </label>
+                                        {descriptionInfo?.hasDescriptionOverride && (
+                                          <span
+                                            className="inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300"
+                                            title={descriptionTitle || undefined}
+                                          >
+                                            {t('tool.descriptionModifiedBadge')}
+                                          </span>
+                                        )}
+                                      </span>
+                                    )}
+                                    {costMap.get(item.key) != null && (
+                                      <span
+                                        className="text-xs text-gray-400 hub-mono whitespace-nowrap ml-auto flex-shrink-0"
+                                        title={t('cost.estimate')}
+                                      >
+                                        Σ {formatTokens(costMap.get(item.key)!)}
+                                      </span>
+                                    )}
+                                  </label>
+                                  {/* Shown while Smart Routing is on, and for an existing pin even
+                                      when it is off, so a pin is never left invisible.
+                                      Desktop: $smart/{group} lists pinned tools next to the meta
+                                      tools and lets them be called directly (rmcp_bridge parity
+                                      with origin getPinnedSmartRoutingTools). */}
+                                  {key === 'tools' &&
+                                    isChecked &&
+                                    server.config?.type !== 'builtin' &&
+                                    (smartRoutingConfig.enabled || isPinned) && (
+                                      <button
+                                        type="button"
+                                        onClick={() => togglePinnedTool(server.name, item.value)}
+                                        title={t(isPinned ? 'groups.unpinTool' : 'groups.pinTool')}
+                                        aria-label={t('groups.pinToolLabel')}
+                                        aria-pressed={isPinned}
+                                        className={cn(
+                                          'flex-shrink-0 transition-colors',
+                                          isPinned
+                                            ? 'text-blue-600'
+                                            : 'text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400',
+                                        )}
+                                      >
+                                        <Pin size={12} fill={isPinned ? 'currentColor' : 'none'} />
+                                      </button>
+                                    )}
+                                </div>
                               );
                             }}
                           </PaginatedItems>

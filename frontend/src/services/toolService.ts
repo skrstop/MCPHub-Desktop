@@ -1,4 +1,4 @@
-import { apiDelete, apiPost, apiPut } from '../utils/fetchInterceptor';
+import { apiDelete, apiGet, apiPost, apiPut } from '../utils/fetchInterceptor';
 
 export interface ToolCallRequest {
   toolName: string;
@@ -103,6 +103,60 @@ export const toggleTool = async (
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
     };
+  }
+};
+
+
+/**
+ * Set the server-level $smart pin for a tool (desktop extension: pinned
+ * tools appear on the $smart / $smart/{group} endpoints next to the meta
+ * tools and can be called directly).
+ */
+export const pinTool = async (
+  serverName: string,
+  toolName: string,
+  pinned: boolean,
+): Promise<{ success: boolean; error?: string }> => {
+  try {
+    const response = await apiPost<any>(
+      `/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/pin`,
+      { pinned },
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('mcphub_token')}`,
+        },
+      },
+    );
+    return {
+      success: response.success,
+      error: response.success ? undefined : response.message,
+    };
+  } catch (error) {
+    console.error('Error pinning tool', { serverName, toolName, pinned, error });
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+    };
+  }
+};
+
+/**
+ * List server-level pinned tool names.
+ */
+export const listToolPins = async (serverName: string): Promise<string[]> => {
+  try {
+    const response = await apiGet<any>(
+      `/servers/${encodeURIComponent(serverName)}/tools/pins`,
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('mcphub_token')}`,
+        },
+      },
+    );
+    return Array.isArray(response?.data) ? response.data : [];
+  } catch (error) {
+    console.error('Error listing tool pins', { serverName, error });
+    return [];
   }
 };
 

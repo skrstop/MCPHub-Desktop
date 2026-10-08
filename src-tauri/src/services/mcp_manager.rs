@@ -129,6 +129,17 @@ pub async fn reload_server(server_name: &str) -> Result<()> {
         if cfg.enabled {
             tokio::spawn(async move {
                 pool::connect_server(&cfg).await;
+                // Post-connect enabled recheck (toggle/rebuild family): a
+                // disable landing during the connect window must not leave a
+                // live process serving a disabled server (fail-closed on
+                // read error, same as toggle's settle recheck).
+                match server_service::get_by_name(&cfg.name).await {
+                    Ok(Some(c)) if c.enabled => {}
+                    _ => {
+                        log::warn!("[{}] disabled/removed during reload connect — disconnecting", cfg.name);
+                        let _ = pool::disconnect_server(&cfg.name).await;
+                    }
+                }
             });
         }
     }
@@ -203,7 +214,10 @@ pub async fn toggle_server(server_name: &str) -> Result<bool> {
                 let still_enabled = {
                     match crate::services::server_service::get_by_name(&name_for_recheck).await {
                         Ok(c) => c.map(|s| s.enabled).unwrap_or(false),
-                        Err(_) => true,
+                        // Fail-closed parity with the enable branch and
+                        // session_rebuild: a DB read error during the settle
+                        // window must not leave a disabled server connected.
+                        Err(_) => false,
                     }
                 };
                 if !still_enabled {

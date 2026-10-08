@@ -336,6 +336,11 @@ mod tests {
             enabled: true,
             annotations: None,
             output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            description_overridden: false,
         }
     }
 
@@ -351,6 +356,13 @@ mod tests {
         a2.description = Some("totally different dynamic content".into());
         let h3 = super::super::index::build_toolset_hash(&[a2, tool("t2", serde_json::json!({"type":"object"}))]);
         assert_eq!(h1, h3, "upstream description churn must not invalidate the cache");
+        // A USER description override MUST change the hash (origin #1198:
+        // override edits trigger a re-embed).
+        let mut a3 = a.clone();
+        a3.description = Some("user override text".into());
+        a3.description_overridden = true;
+        let h5 = super::super::index::build_toolset_hash(&[a3, tool("t2", serde_json::json!({"type":"object"}))]);
+        assert_ne!(h1, h5, "description override edit must invalidate the cache");
         // A schema change MUST change the hash.
         let h4 = super::super::index::build_toolset_hash(&[
             a,

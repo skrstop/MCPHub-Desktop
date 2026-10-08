@@ -44,11 +44,13 @@ pub fn stable_hash_serialize(value: &Value) -> String {
     }
 }
 
-/// toolSetHash (origin `buildToolSetHash` parity, sans description override):
+/// toolSetHash (origin `buildToolSetHash` parity, #1198):
 /// - tools sorted by name;
-/// - normalized shape `{name, inputSchema, description: null}` — raw upstream
-///   descriptions are EXCLUDED (origin #1198: dynamic content in upstream
-///   descriptions must not invalidate the cache);
+/// - normalized shape `{name, inputSchema, description}` — raw upstream
+///   descriptions are EXCLUDED (dynamic content must not invalidate the
+///   cache), but USER description overrides are INCLUDED (origin: "whose
+///   change MUST invalidate the cache so the new text gets re-embedded") —
+///   `description_overridden` is set by apply_tool_filters;
 /// - scrypt(N=2048, r=8, p=1, 32 bytes) → hex.
 pub fn build_toolset_hash(tools: &[Tool]) -> String {
     let mut normalized: Vec<Value> = tools
@@ -57,7 +59,11 @@ pub fn build_toolset_hash(tools: &[Tool]) -> String {
             json!({
                 "name": t.name,
                 "inputSchema": t.input_schema,
-                "description": Value::Null,
+                "description": if t.description_overridden {
+                    Value::String(t.description.clone().unwrap_or_default())
+                } else {
+                    Value::Null
+                },
             })
         })
         .collect();
@@ -412,11 +418,25 @@ pub async fn reindex_all() -> Result<usize> {
     // Ghost cleanup: servers whose DB row is GONE but whose embeddings remain
     // (their delete hook no-op'd while Smart Routing was disabled) would keep
     // surfacing in global $smart searches as unresolvable hits. Reconcile the
-    // table against the known-server set (list_all + builtin).
+    // table against the known-server set (list_all + builtin). The set is
+    // RE-FETCHED here: the embedding loop above can take minutes, and a server
+    // added (+auto-connected → hook-indexed) in that window is absent from the
+    // loop-start snapshot — reconciling against it would delete freshly
+    // indexed rows for a live server.
+    let known_now = match crate::services::server_service::list_all().await {
+        Ok(servers) => servers
+            .iter()
+            .map(|c| c.name.clone())
+            .chain(std::iter::once(crate::rag::service::BUILTIN_SERVER_NAME.to_string()))
+            .collect::<std::collections::HashSet<String>>(),
+        // Read failure: fall back to the loop-start snapshot (stale set is
+        // still better than skipping reconciliation entirely).
+        Err(_) => known_servers.clone(),
+    };
     match super::store::store_index_summary().await {
         Ok(summary) => {
             for (server, count) in summary {
-                if count > 0 && !known_servers.contains(&server) {
+                if count > 0 && !known_now.contains(&server) {
                     log::info!("[smart] reindex: removing ghost rows for '{}' (config gone)", server);
                     let _ = remove_server_embeddings(&server).await;
                 }

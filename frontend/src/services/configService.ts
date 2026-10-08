@@ -45,6 +45,8 @@ export interface SystemConfig {
       enabled?: boolean;
       basePath?: string;
       trustedOrigins?: string[];
+      // Effective value: only true while an SSO provider is enabled
+      disablePasswordLogin?: boolean;
       providers?: {
         google?: {
           enabled?: boolean;
@@ -70,6 +72,7 @@ interface BetterAuthConfig {
   baseUrl?: string;
   basePath?: string;
   trustedOrigins?: string[];
+  disablePasswordLogin?: boolean;
   providers?: {
     google?: {
       enabled?: boolean;

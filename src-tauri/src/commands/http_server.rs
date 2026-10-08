@@ -210,30 +210,37 @@ pub async fn kill_port_occupier(
             return Err("refusing to kill parent process".to_string());
         }
     }
-    #[cfg(unix)]
-    {
-        let status = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("failed to kill process {pid}"));
+    // kill/taskkill can stall seconds on a busy box — off the async executor.
+    let pid_b = pid;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("kill")
+                .args(["-9", &pid_b.to_string()])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("failed to kill process {pid_b}"));
+            }
         }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut c = std::process::Command::new("taskkill");
-        c.args(["/F", "/PID", &pid.to_string()]);
         #[cfg(windows)]
         {
-            c.creation_flags(0x0800_0000);
+            use std::os::windows::process::CommandExt;
+            let mut c = std::process::Command::new("taskkill");
+            c.args(["/F", "/PID", &pid_b.to_string()]);
+            #[cfg(windows)]
+            {
+                c.creation_flags(0x0800_0000);
+            }
+            let status = c.status().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("failed to kill process {pid_b}"));
+            }
         }
-        let status = c.status().map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("failed to kill process {pid}"));
-        }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("kill task failed: {e}"))??;
     crate::services::app_logger::log_to_db("warn", &format!("[http] killed port occupier pid={pid}"));
     Ok(())
 }

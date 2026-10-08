@@ -339,6 +339,9 @@ pub(crate) fn valid_dir_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains('/')
         && !name.contains('\\')
+        // Windows drive-relative form ("C:foo"): Path::join with a drive
+        // prefix replaces the base entirely, escaping the library dir.
+        && !name.contains(':')
         && name != "."
         && name != ".."
 }
@@ -870,6 +873,8 @@ pub async fn import_skills(app: &AppHandle, items: Vec<ImportItem>) -> Result<Im
         if dir_name.is_empty()
             || dir_name.contains('/')
             || dir_name.contains('\\')
+            // Windows drive-relative form — same escape as valid_dir_name.
+            || dir_name.contains(':')
             || dir_name == "."
             || dir_name == ".."
         {
@@ -1729,6 +1734,11 @@ pub async fn open_skill_library(app: &AppHandle, id: &str) -> Result<()> {
         return Err(anyhow::anyhow!("skill not found: {}", id));
     };
     let dir_name: String = r.try_get("dir_name")?;
+    // Defense-in-depth parity with uninstall/delete/reconcile: dir_name comes
+    // from the DB — a tampered row must not open arbitrary directories.
+    if !valid_dir_name(&dir_name) {
+        return Err(anyhow::anyhow!("invalid skill directory name"));
+    }
     let p = library_dir(app)?.join(&dir_name);
     if !p.exists() {
         return Err(anyhow::anyhow!("library copy not found: {}", p.display()));

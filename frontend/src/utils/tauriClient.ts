@@ -127,6 +127,35 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     };
 
   // Per-server tool/prompt/resource toggle & description overrides.
+  // Server-level $smart pin: POST /servers/:s/tools/:t/pin
+  if (
+    segs[0] === 'servers' &&
+    segs.length === 5 &&
+    segs[2] === 'tools' &&
+    segs[4] === 'pin' &&
+    m === 'POST'
+  ) {
+    const b = body as { pinned?: boolean } | null;
+    return {
+      command: 'set_server_tool_pinned',
+      args: {
+        serverName: decodeURIComponent(segs[1]),
+        itemType: 'tool',
+        itemName: decodeURIComponent(segs[3]),
+        pinned: b?.pinned ?? true,
+      },
+    };
+  }
+  // List server-level pinned tools: GET /servers/:s/tools/pins
+  if (
+    segs[0] === 'servers' &&
+    segs.length === 4 &&
+    segs[2] === 'tools' &&
+    segs[3] === 'pins' &&
+    m === 'GET'
+  ) {
+    return { command: 'list_server_tool_pins', args: { serverName: decodeURIComponent(segs[1]) } };
+  }
   if (
     segs[0] === 'servers' &&
     segs.length >= 5 &&
@@ -1117,6 +1146,8 @@ export function transformTauriResponse(command: string, result: unknown): unknow
     'get_market_server',
     'get_rag_doc',
     'get_rag_doc_paged',
+    'get_rag_chunks',
+    'get_rag_chunks_paged',
     'get_builtin_prompt',
     'get_builtin_resource',
   ];
@@ -1341,9 +1372,22 @@ export function transformTauriResponse(command: string, result: unknown): unknow
         }
       }
       const detail = errorTexts.length > 0 ? errorTexts.join('\n') : 'Unknown error';
-      return { success: false, content: contentArr, message: detail };
+      // Keep structuredContent/_meta so callers can detect MRTR
+      // input_required flows and render structured results later.
+      return {
+        success: false,
+        content: contentArr,
+        message: detail,
+        structuredContent: (r as Record<string, unknown>).structuredContent ?? null,
+        _meta: (r as Record<string, unknown>).rawMeta ?? null,
+      };
     }
-    return { success: true, content: r?.content ?? [] };
+    return {
+      success: true,
+      content: r?.content ?? [],
+      structuredContent: (r as Record<string, unknown>).structuredContent ?? null,
+      _meta: (r as Record<string, unknown>).rawMeta ?? null,
+    };
   }
 
   // ── list_tools: keep as plain array (consumers iterate or use .data)

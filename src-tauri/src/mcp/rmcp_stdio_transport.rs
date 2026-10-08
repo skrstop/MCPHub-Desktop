@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -42,6 +42,29 @@ struct BridgeClientHandler;
 
 impl rmcp::ClientHandler for BridgeClientHandler {}
 
+/// Downstream-driven MRTR retry fields (hub wire convention: inside `_meta`).
+/// Mirrors rmcp_http_transport::downstream_mrtr_retry.
+fn downstream_mrtr_retry(
+    meta: &Value,
+) -> Option<(std::collections::BTreeMap<String, Value>, Option<String>)> {
+    let obj = meta.as_object()?;
+    let ir = obj
+        .get("io.modelcontextprotocol/inputResponses")
+        .or_else(|| obj.get("inputResponses"))?;
+    let rs = obj
+        .get("io.modelcontextprotocol/requestState")
+        .or_else(|| obj.get("requestState"))
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+    ir.as_object().map(|m| {
+        (
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<std::collections::BTreeMap<String, Value>>(),
+            rs,
+        )
+    })
+}
+
 fn request_meta_from_value(meta: Option<Value>) -> Option<RequestMetaObject> {
     meta.and_then(|m| serde_json::from_value(m).ok())
 }
@@ -59,6 +82,13 @@ pub struct RmcpStdioTransport {
     stderr_tail: Arc<Mutex<String>>,
     server_version: Option<String>,
     intentional_disconnect: Arc<AtomicBool>,
+    /// Bumped on every connect so an old drain task (pipe closing late after
+    /// an intentional kill + reconnect reset) can tell it is stale and skip
+    /// the "child stderr closed" warn.
+    drain_generation: Arc<AtomicU64>,
+    /// Upstream-advertised TTL from the most recent list_tools fetch
+    /// (only positive single-page TTLs recorded — origin #1277 freshness).
+    last_list_ttl: std::sync::Mutex<Option<u64>>,
 }
 
 impl RmcpStdioTransport {
@@ -74,6 +104,8 @@ impl RmcpStdioTransport {
             stderr_tail: Arc::new(Mutex::new(String::new())),
             server_version: None,
             intentional_disconnect: Arc::new(AtomicBool::new(false)),
+            drain_generation: Arc::new(AtomicU64::new(0)),
+            last_list_ttl: std::sync::Mutex::new(None),
         }
     }
 
@@ -88,6 +120,8 @@ impl RmcpStdioTransport {
         let server_name = self.server_name.clone();
         let stderr_tail = self.stderr_tail.clone();
         let intentional = self.intentional_disconnect.clone();
+        let generation = self.drain_generation.clone();
+        let my_gen = generation.load(Ordering::SeqCst);
         tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             let mut last_emit: Option<std::time::Instant> = None;
@@ -143,7 +177,10 @@ impl RmcpStdioTransport {
                     }
                 }
             }
-            if !intentional.load(Ordering::SeqCst) {
+            // Suppress the warn for an intentional kill (flag set before the
+            // tree is killed) or a stale drain (a reconnect already bumped the
+            // generation — the fresh process owns the diagnostics now).
+            if !intentional.load(Ordering::SeqCst) && generation.load(Ordering::SeqCst) == my_gen {
                 app_logger::log_to_db("warn", &format!("[{}] child stderr closed (process exited?)", server_name));
             }
         });
@@ -154,8 +191,19 @@ impl RmcpStdioTransport {
 impl McpTransport for RmcpStdioTransport {
     async fn connect(&mut self) -> Result<()> {
         let connect_start = std::time::Instant::now();
-        // 重连时清掉上一进程的 stderr 尾迹，防止陈旧行混入本次握手失败报错
-        self.stderr_tail.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        // Fresh tail per connect: the previous process's drain task may still
+        // be flushing buffered lines into the shared Arc — swapping in a new
+        // Arc keeps this connection's tail (and handshake-failure error)
+        // free of stale lines (also makes a reused-instance reconnect sane).
+        *self.stderr_tail.lock().unwrap_or_else(|p| p.into_inner()) = String::new();
+        // Swap in a fresh Arc so a still-flushing previous drain task cannot
+        // interleave stale lines into this connection's tail.
+        self.stderr_tail = Arc::new(Mutex::new(String::new()));
+        // A prior disconnect() on this instance must not suppress this
+        // connection's crash diagnostics. Bump the drain generation so a
+        // still-draining previous task (pipe closing late) knows it is stale.
+        self.intentional_disconnect.store(false, Ordering::SeqCst);
+        self.drain_generation.fetch_add(1, Ordering::SeqCst);
 
         // Resolve command to bundled binary if available (node, npx, uv, uvx, python…)
         let (resolved_cmd, resolved_args) = runtime_env::resolve_command(&self.command, &self.args);
@@ -363,18 +411,25 @@ impl McpTransport for RmcpStdioTransport {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen_cursors = std::collections::HashSet::new();
+        let mut last_ttl: Option<u64> = None;
         for _ in 0..100 {
             let params = cursor
                 .clone()
                 .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
             let result = service.peer().list_tools(params).await?;
+            // Freshness only from a positive TTL on the final (non-paged) result.
+            last_ttl = result.ttl_ms.filter(|t| *t > 0).map(|t| t as u64);
             all.extend(result.tools);
             match result.next_cursor {
-                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                Some(next) if seen_cursors.insert(next.clone()) => {
+                    cursor = Some(next);
+                    last_ttl = None; // paged lists carry no freshness (origin #1277)
+                }
                 // None (done) or repeated/absent-progress cursor — stop.
                 _ => break,
             }
         }
+        *self.last_list_ttl.lock().unwrap() = last_ttl;
         Ok(all
             .into_iter()
             .map(|t| Tool {
@@ -393,8 +448,28 @@ impl McpTransport for RmcpStdioTransport {
                     .as_ref()
                     .map(|s| Value::Object(s.as_ref().clone()))
                     .filter(|v| !v.is_null()),
+                title: t.title.clone().filter(|s| !s.is_empty()),
+                // rmcp 3.4.1 Tool has no execution field (added in a later SDK)
+                execution: None,
+                icons: t
+                    .icons
+                    .as_ref()
+                    .and_then(|i| serde_json::to_value(i).ok())
+                    .filter(|v| !v.is_null()),
+                meta: t
+                    .meta
+                    .as_ref()
+                    .and_then(|m| serde_json::to_value(m).ok())
+                    .filter(|v| !v.is_null()),
+                description_overridden: false,
             })
             .collect())
+    }
+
+    async fn list_tools_with_ttl(&self) -> Result<(Vec<Tool>, Option<u64>)> {
+        let tools = self.list_tools().await?;
+        let ttl = *self.last_list_ttl.lock().unwrap();
+        Ok((tools, ttl))
     }
 
     async fn call_tool_with_meta(
@@ -414,7 +489,26 @@ impl McpTransport for RmcpStdioTransport {
                 .cloned()
                 .unwrap_or_default(),
         );
-        params.meta = request_meta_from_value(request_meta);
+        // Downstream-driven MRTR retry: inputResponses/requestState travel in
+        // _meta on the hub wire but rmcp servers read the typed params fields —
+        // lift them out (mirrors rmcp_http_transport).
+        let mut meta_for_wire = request_meta.clone();
+        if let Some(meta) = &request_meta {
+            if let Some((input_responses, request_state)) = downstream_mrtr_retry(meta) {
+                params.input_responses = Some(input_responses);
+                params.request_state = request_state;
+                if let Some(obj) = meta_for_wire.as_mut().and_then(|v| v.as_object_mut()) {
+                    // Remove both spellings: the helper accepts the bare
+                    // fallbacks too — leaving them on the wire would make an
+                    // upstream rmcp server see the retry payload twice.
+                    obj.remove("io.modelcontextprotocol/inputResponses");
+                    obj.remove("io.modelcontextprotocol/requestState");
+                    obj.remove("inputResponses");
+                    obj.remove("requestState");
+                }
+            }
+        }
+        params.meta = request_meta_from_value(meta_for_wire);
         // Use call_tool_once + explicit response mapping (mirrors the HTTP
         // transport contract): Peer::call_tool hard-errors on
         // CallToolResponse::Task (service/client.rs UnexpectedResponse), but a

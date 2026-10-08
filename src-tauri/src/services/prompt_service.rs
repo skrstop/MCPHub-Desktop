@@ -183,6 +183,11 @@ pub async fn create(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
 }
 
 async fn create_inner(payload: &BuiltinPromptPayload) -> Result<BuiltinPrompt> {
+    // Empty name would create an unreachable FTS row (ref_id "") and let
+    // prompts/get resolve the empty name — parity with resource_service.
+    if payload.name.trim().is_empty() {
+        return Err(anyhow::anyhow!("prompt name cannot be empty"));
+    }
     let id = Uuid::new_v4().to_string();
     let args_json = serde_json::to_string(&payload.arguments)?;
     let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
@@ -242,6 +247,11 @@ pub async fn update(id: &str, payload: &BuiltinPromptPayload) -> Result<Option<B
 }
 
 async fn update_inner(id: &str, payload: &BuiltinPromptPayload) -> Result<Option<BuiltinPrompt>> {
+    // Parity with create_inner / resource_service update: an empty name would
+    // leave an FTS row whose ref_id can never be resolved by prompts/get.
+    if payload.name.trim().is_empty() {
+        anyhow::bail!("Prompt name must not be empty");
+    }
     let args_json = serde_json::to_string(&payload.arguments)?;
     let fts_text = prompt_fts_text(&payload.name, payload.title.as_deref(), payload.description.as_deref());
 

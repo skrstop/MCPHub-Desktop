@@ -74,7 +74,7 @@ def strict_unaffected():
         r = c.getresponse(); r.read(); c.close()
         check("[strict] /mcp 缺 Accept → 4xx 拒绝", 400 <= r.status < 500, f"st={r.status}")
     finally:
-        set_strict(False); time.sleep(0.4)
+        set_strict(set_strict(False)); time.sleep(0.4)
     # 宽松恢复：同请求放行（结果可解析）
     st, d = raw("POST", "/mcp", json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize",
         "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"m22","version":"1"}}}),

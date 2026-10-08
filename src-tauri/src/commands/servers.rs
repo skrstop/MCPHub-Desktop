@@ -28,9 +28,13 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
             vec![],
         ));
         // Apply tool enabled/description configs
-        let tools = server_tool_config_service::apply_tool_filters(&cfg.name, tools)
-            .await
-            .unwrap_or_default();
+        let tools = match server_tool_config_service::apply_tool_filters(&cfg.name, tools).await {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("[servers] apply_tool_filters({}) failed: {}", cfg.name, e);
+                Vec::new()
+            }
+        };
         result.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() });
     }
     // Append the "mcphub-desktop" builtin server (virtual, no DB row), which
@@ -154,9 +158,13 @@ pub async fn search_servers(
             },
             vec![],
         ));
-        let tools = server_tool_config_service::apply_tool_filters(&cfg.name, tools)
-            .await
-            .unwrap_or_default();
+        let tools = match server_tool_config_service::apply_tool_filters(&cfg.name, tools).await {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("[servers] apply_tool_filters({}) failed: {}", cfg.name, e);
+                Vec::new()
+            }
+        };
         infos.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() });
     }
 
@@ -238,9 +246,13 @@ pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
             vec![],
         ));
         // Apply tool enabled/description configs
-        let tools = server_tool_config_service::apply_tool_filters(&name, tools)
-            .await
-            .unwrap_or_default();
+        let tools = match server_tool_config_service::apply_tool_filters(&name, tools).await {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("[servers] apply_tool_filters({}) failed: {}", name, e);
+                Vec::new()
+            }
+        };
         Ok(Some(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() }))
     } else {
         Ok(None)

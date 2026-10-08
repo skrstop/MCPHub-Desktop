@@ -12,6 +12,21 @@ interface EditGroupFormProps {
   onCancel: () => void;
 }
 
+// Drop legacy members whose every capability selection is empty — the panel
+// would render them as phantom entries and the card as "0 tools".
+function sanitizeGroupMembers(
+  servers: NonNullable<Group['servers']>,
+): NonNullable<Group['servers']> {
+  return servers.filter(
+    (s) =>
+      typeof s === 'string' ||
+      ['tools', 'prompts', 'resources'].some((k) => {
+        const sel = (s as IGroupServerConfig)[k as keyof IGroupServerConfig];
+        return sel === 'all' || (Array.isArray(sel) && sel.length > 0);
+      }),
+  ) as NonNullable<Group['servers']>;
+}
+
 const EditGroupForm = ({ group, onEdit, onCancel }: EditGroupFormProps) => {
   const { t } = useTranslation();
   const { updateGroup } = useGroupData();
@@ -21,15 +36,15 @@ const EditGroupForm = ({ group, onEdit, onCancel }: EditGroupFormProps) => {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const [formData, setFormData] = useState<GroupFormData>({
+  const [formData, setFormData] = useState<GroupFormData>(() => ({
     name: group.name,
     description: group.description || '',
-    servers: group.servers || [],
-  });
+    servers: sanitizeGroupMembers(group.servers || []),
+  }));
 
   useEffect(() => {
     // Filter available servers (enabled only)
-    setAvailableServers(allServers.filter((server) => server.enabled !== false));
+    setAvailableServers(allServers);
   }, [allServers]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -55,7 +70,13 @@ const EditGroupForm = ({ group, onEdit, onCancel }: EditGroupFormProps) => {
       const result = await updateGroup(group.id, {
         name: formData.name,
         description: formData.description,
-        servers: formData.servers,
+        // Drop members whose every capability selection is empty: a member
+        // contributing nothing would otherwise linger on the group card as
+        // "0 tools" (legacy data path; the panel already auto-removes these
+        // on interaction).
+        servers: sanitizeGroupMembers(
+          formData.servers as NonNullable<Group['servers']>,
+        ),
       });
 
       if (!result || !result.success) {

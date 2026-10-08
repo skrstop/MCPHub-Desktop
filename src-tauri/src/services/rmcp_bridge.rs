@@ -264,6 +264,15 @@ impl HubBridge {
             .is_some_and(|v| v.as_str() == "2026-07-28")
     }
 
+    /// 2024-11-05 legacy sessions: the spec predates annotations/outputSchema,
+    /// so the retired dispatch stripped them from tools/list — restore that
+    /// contract (e2e TC-06).
+    fn is_2024_session(context: &RequestContext<RoleServer>) -> bool {
+        context
+            .protocol_version()
+            .is_some_and(|v| v.as_str() == "2024-11-05")
+    }
+
     pub fn new() -> Self {
         Self
     }
@@ -282,6 +291,12 @@ impl HubBridge {
             // with non-ASCII chars (e.g. 本机公网ip查询) arrive as %XX sequences
             // and would never match the pool — decode before scope matching.
             .map(|rest| percent_encoding::percent_decode_str(&rest).decode_utf8_lossy().into_owned())
+            // Single normalization point: trailing slashes must be trimmed
+            // here or `$smart/{group}/` reaches pinned_tools_for_scope with a
+            // trailing-slash group name (list_all lookup fails → group-level
+            // pins silently vanish, while server-level pins via
+            // mcp_scope_server_filters — which trims — still work).
+            .map(|rest| rest.trim_end_matches('/').to_string())
             .unwrap_or_default()
     }
 
@@ -317,18 +332,164 @@ impl HubBridge {
         bearer: Option<&crate::models::bearer_key::BearerKey>,
     ) -> Vec<ServerFilter> {
         let mut filters = mcp_scope_server_filters(scope).await;
+        // A group listing the same server twice must not duplicate tools/pins.
+        let mut seen = std::collections::HashSet::new();
+        filters.retain(|s| seen.insert(s.name.clone()));
         if let Some(allowed) = get_allowed_servers(bearer).await {
             filters.retain(|s| allowed.contains(&s.name));
         }
         filters
     }
 
+    /// Per-member pinned tool names for a `$smart/{group}` scope (origin
+    /// `getPinnedSmartRoutingTools` selection rules at the name level): each
+    /// member's `pinnedTools`, narrowed to its tools selection ("all" / absent
+    /// selection = everything allowed).
+    /// Pinned `(server, [tool])` pairs visible in this $smart scope — the
+    /// single source for both the listing parity gate and the resolve
+    /// fallback. Group scope: member pins ∪ server-level pins per visible
+    /// member; root scope: server-level pins across bearer-visible servers.
+    async fn smart_pinned_servers(
+        &self,
+        scope: &str,
+        bearer: Option<&crate::models::bearer_key::BearerKey>,
+    ) -> Vec<(String, Vec<String>)> {
+        let scope_clean = scope.trim_start_matches('/').trim();
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        let member_pins: std::collections::HashMap<String, Vec<String>> =
+            if scope_clean.starts_with("$smart/") {
+                Self::pinned_tools_for_scope(scope_clean)
+                    .await
+                    .into_iter()
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+        for sf in self.scope_filters(scope, bearer).await {
+            let mut pins = member_pins.get(&sf.name).cloned().unwrap_or_default();
+            match crate::services::server_tool_config_service::list_pinned_tools(&sf.name).await {
+                Ok(extra) => {
+                    for p in extra {
+                        if !pins.contains(&p) {
+                            pins.push(p);
+                        }
+                    }
+                }
+                Err(e) => log::warn!("[smart] list_pinned_tools({}) failed: {}", sf.name, e),
+            }
+            if !pins.is_empty() {
+                out.push((sf.name.clone(), pins));
+            }
+        }
+        out
+    }
+
+    /// Resolve a pinned direct-call name on a $smart scope under the same
+    /// parity rules as the listing: prefixed form when multiple servers are
+    /// visible, bare name only in single-server scopes, meta-named pins never
+    /// callable. Unlike `resolve_target`, this does NOT consult the pool's
+    /// tool cache — a pin on a sleeping (never-woken) on-demand server still
+    /// resolves, and the subsequent `pool::call_tool` path cold-starts it.
+    pub(crate) async fn resolve_pinned_target(
+        &self,
+        scope: &str,
+        bearer: Option<&crate::models::bearer_key::BearerKey>,
+        tool_name: &str,
+    ) -> Option<(String, String)> {
+        let pinned = self.smart_pinned_servers(scope, bearer).await;
+        let server_filters = self.scope_filters(scope, bearer).await;
+        let name_sep = name_separator().await;
+        let use_prefix = server_filters.len() > 1;
+        for (server, pins) in &pinned {
+            for p in pins {
+                // A pin named like a meta tool is never listed — its prefixed
+                // form must not be callable either (parity).
+                if crate::smart_routing::meta::is_meta_tool(p) {
+                    continue;
+                }
+                let hit = if use_prefix {
+                    format!("{}{}{}", server, name_sep, p) == tool_name
+                } else {
+                    *p == tool_name
+                };
+                if !hit {
+                    continue;
+                }
+                // Group selection whitelist parity: the listing narrows every
+                // pin (server-level ones included) to the member's `tools`
+                // selection; the call side must refuse the same set.
+                if let Some(sf) = server_filters.iter().find(|f| f.name == *server) {
+                    if let Some(ref allowed) = sf.tools {
+                        if !allowed.contains(p) {
+                            continue;
+                        }
+                    }
+                }
+                return Some((server.clone(), p.clone()));
+            }
+        }
+        None
+    }
+
+    async fn pinned_tools_for_scope(scope: &str) -> Vec<(String, Vec<String>)> {
+        let clean = scope.trim_start_matches('/').trim();
+        let Some(group_name) = clean.strip_prefix("$smart/") else {
+            return Vec::new();
+        };
+        let Ok(groups) = crate::services::group_service::list_all().await else {
+            return Vec::new();
+        };
+        let Some(g) = groups
+            .iter()
+            .find(|g| g.name == group_name || g.id == group_name)
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for member in &g.servers {
+            let Some(name) = member.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let selection: Option<Vec<String>> = member.get("tools").and_then(|v| v.as_array()).map(
+                |a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                },
+            );
+            let pinned: Vec<String> = member
+                .get("pinnedTools")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .filter(|t| match &selection {
+                            Some(sel) => sel.contains(t),
+                            None => true,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !pinned.is_empty() {
+                out.push((name.to_string(), pinned));
+            }
+        }
+        out
+    }
+
     /// Aggregate visible tools for this scope. Mirrors the dispatch
     /// `tools/list` semantics: bearer filter, group allow-list, disabled skip,
     /// server-prefix when multiple servers are in scope, RAG builtin, smart
     /// meta tools on $smart scopes.
-    async fn aggregate_tools(&self, scope: &str, bearer: Option<&crate::models::bearer_key::BearerKey>) -> Result<Vec<rmcp::model::Tool>, ErrorData> {
-        // $smart scopes expose ONLY the meta tools.
+    async fn aggregate_tools(
+        &self,
+        scope: &str,
+        bearer: Option<&crate::models::bearer_key::BearerKey>,
+        strip_2024: bool,
+    ) -> Result<Vec<rmcp::model::Tool>, ErrorData> {
+        // $smart scopes expose the meta tools plus — on group scopes only —
+        // each member's pinned tools (origin parity). The root $smart scope
+        // stays meta-only.
         if crate::smart_routing::meta::is_smart_scope(scope) {
             if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
                 return Err(Self::err(msg));
@@ -339,12 +500,166 @@ impl HubBridge {
                 .map(|set| set.into_iter().collect::<Vec<_>>());
             let (scope_description, servers_list, _) =
                 crate::smart_routing::meta::compute_scope_with(scope, bearer_list).await;
+            let full_n = if settings.progressive_disclosure {
+                None
+            } else {
+                settings.full_schema_top_n
+            };
             let meta = crate::smart_routing::meta::build_meta_tools(
                 &scope_description,
                 &servers_list,
                 settings.progressive_disclosure,
+                full_n,
             );
-            return to_rmcp_tools(&meta);
+            let mut tools = to_rmcp_tools(&meta)?;
+            let scope_clean = scope.trim_start_matches('/').trim();
+            if scope_clean.starts_with("$smart/") {
+                let server_filters = self.scope_filters(scope, bearer).await;
+                let name_sep = name_separator().await;
+                let use_prefix = server_filters.len() > 1;
+                let member_pins: std::collections::HashMap<String, Vec<String>> =
+                    Self::pinned_tools_for_scope(scope)
+                        .await
+                        .into_iter()
+                        .collect();
+                // Iterate ALL visible members (not just ones with group pins):
+                // server-level pins must surface even when the group member
+                // entry carries none.
+                for sf in &server_filters {
+                    let mut pinned_names = member_pins
+                        .get(&sf.name)
+                        .cloned()
+                        .unwrap_or_default();
+                    match crate::services::server_tool_config_service::list_pinned_tools(&sf.name)
+                        .await
+                    {
+                        Ok(pins) => {
+                            for p in pins {
+                                if !pinned_names.contains(&p) {
+                                    pinned_names.push(p);
+                                }
+                            }
+                        }
+                        Err(e) => log::warn!("[smart] list_pinned_tools({}) failed: {}", sf.name, e),
+                    }
+                    if pinned_names.is_empty() {
+                        continue;
+                    }
+                    let Ok(ts) = pool::list_tools_for(&sf.name).await else {
+                        continue;
+                    };
+                    let filtered = crate::services::server_tool_config_service::apply_tool_filters(
+                        &sf.name, ts,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!("[{}] apply_tool_filters failed: {}", sf.name, e);
+                        Vec::new()
+                    });
+                    for t in &filtered {
+                        if !t.enabled || !pinned_names.contains(&t.name) {
+                            continue;
+                        }
+                        if let Some(ref allowed) = sf.tools {
+                            if !allowed.contains(&t.name) {
+                                continue;
+                            }
+                        }
+                        // A pin named like a meta tool would be intercepted by
+                        // it on call — never list it (origin parity).
+                        if crate::smart_routing::meta::is_meta_tool(&t.name) {
+                            continue;
+                        }
+                        let exposed_name = if use_prefix {
+                            format!("{}{}{}", sf.name, name_sep, t.name)
+                        } else {
+                            t.name.clone()
+                        };
+                        let mut entry = json!({
+                            "name": exposed_name,
+                            "description": t.description.as_deref().unwrap_or(""),
+                            "inputSchema": t.input_schema,
+                        });
+                        if !strip_2024 {
+                            if let Some(a) = &t.annotations {
+                                entry["annotations"] = a.clone();
+                            }
+                            if let Some(s) = &t.output_schema {
+                                entry["outputSchema"] = s.clone();
+                            }
+                        }
+                        tools.push(
+                            to_rmcp_tools(std::slice::from_ref(&entry))
+                                .map(|mut v| v.pop().unwrap())?,
+                        );
+                    }
+                }
+            } else if scope_clean == "$smart" {
+                // Root smart scope with server-level pins: the desktop-only
+                // "server smart" surface — meta tools plus every visible
+                // server's own pinned tools (origin only pins at group level).
+                let server_filters = self.scope_filters(scope, bearer).await;
+                let name_sep = name_separator().await;
+                let use_prefix = server_filters.len() > 1;
+                for sf in &server_filters {
+                    let Ok(pins) =
+                        crate::services::server_tool_config_service::list_pinned_tools(&sf.name)
+                            .await
+                    else {
+                        continue;
+                    };
+                    if pins.is_empty() {
+                        continue;
+                    }
+                    let Ok(ts) = pool::list_tools_for(&sf.name).await else {
+                        continue;
+                    };
+                    let filtered = crate::services::server_tool_config_service::apply_tool_filters(
+                        &sf.name, ts,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!("[{}] apply_tool_filters failed: {}", sf.name, e);
+                        Vec::new()
+                    });
+                    for t in &filtered {
+                        if !t.enabled || !pins.contains(&t.name) {
+                            continue;
+                        }
+                        if let Some(ref allowed) = sf.tools {
+                            if !allowed.contains(&t.name) {
+                                continue;
+                            }
+                        }
+                        if crate::smart_routing::meta::is_meta_tool(&t.name) {
+                            continue;
+                        }
+                        let exposed_name = if use_prefix {
+                            format!("{}{}{}", sf.name, name_sep, t.name)
+                        } else {
+                            t.name.clone()
+                        };
+                        let mut entry = json!({
+                            "name": exposed_name,
+                            "description": t.description.as_deref().unwrap_or(""),
+                            "inputSchema": t.input_schema,
+                        });
+                        if !strip_2024 {
+                            if let Some(a) = &t.annotations {
+                                entry["annotations"] = a.clone();
+                            }
+                            if let Some(s) = &t.output_schema {
+                                entry["outputSchema"] = s.clone();
+                            }
+                        }
+                        tools.push(
+                            to_rmcp_tools(std::slice::from_ref(&entry))
+                                .map(|mut v| v.pop().unwrap())?,
+                        );
+                    }
+                }
+            }
+            return Ok(tools);
         }
 
         let server_filters = self.scope_filters(scope, bearer).await;
@@ -395,11 +710,13 @@ impl HubBridge {
                     "description": t.description.as_deref().unwrap_or(""),
                     "inputSchema": t.input_schema,
                 });
-                if let Some(a) = &t.annotations {
-                    entry["annotations"] = a.clone();
-                }
-                if let Some(s) = &t.output_schema {
-                    entry["outputSchema"] = s.clone();
+                if !strip_2024 {
+                    if let Some(a) = &t.annotations {
+                        entry["annotations"] = a.clone();
+                    }
+                    if let Some(s) = &t.output_schema {
+                        entry["outputSchema"] = s.clone();
+                    }
                 }
                 tools.push(entry);
             }
@@ -429,7 +746,16 @@ impl HubBridge {
         }
 
         if use_prefix {
-            for sf in &server_filters {
+            // Longest prefix first: `web` must not shadow `web-search` when
+            // separator-stripping `web-search-x` (server order is pool order,
+            // not length order — first-match otherwise hijacks the target).
+            let mut ordered: Vec<&ServerFilter> = server_filters.iter().collect();
+            ordered.sort_by(|a, b| {
+                let la = a.name.len() + name_sep.len();
+                let lb = b.name.len() + name_sep.len();
+                lb.cmp(&la)
+            });
+            for sf in ordered {
                 let prefix = format!("{}{}", sf.name, name_sep);
                 if let Some(orig_name) = tool_name.strip_prefix(&prefix) {
                     if let Some(ref allowed_tools) = sf.tools {
@@ -502,7 +828,11 @@ fn to_rmcp_tools(entries: &[Value]) -> Result<Vec<rmcp::model::Tool>, ErrorData>
 
 /// Convert a `ToolCallResult` into an rmcp response (MRTR aware: an upstream
 /// `input_required` `_meta` becomes `CallToolResponse::InputRequired`).
-fn to_call_response(result: crate::models::server::ToolCallResult) -> CallToolResponse {
+fn to_call_response(
+    result: crate::models::server::ToolCallResult,
+    strip_2024: bool,
+    sep_2322: bool,
+) -> CallToolResponse {
     // MRTR: upstream asked for client-side input before completing.
     if !result.is_error {
         if let Some(meta) = &result.raw_meta {
@@ -547,10 +877,40 @@ fn to_call_response(result: crate::models::server::ToolCallResult) -> CallToolRe
                     out.content = vec![ContentBlock::text("upstream declared input_required without inputRequests/requestState")];
                     return CallToolResponse::Complete(out);
                 }
-                return CallToolResponse::InputRequired(InputRequiredResult::new(
-                    input_requests,
-                    request_state,
-                ));
+                // SEP-2322 gating (SDK handler/server.rs:245): the SDK folds an
+                // InputRequiredResult returned to a pre-2026 peer into an
+                // opaque INVALID_REQUEST, losing the upstream semantics AND the
+                // tool content. Preserve visibility with an errored Complete.
+                if !sep_2322 {
+                    let mut out = CallToolResult::default();
+                    out.is_error = Some(true);
+                    out.content = vec![ContentBlock::text(
+                        "upstream requested client input (input_required) — the negotiated protocol version does not support task input; re-negotiate 2026-07-28 or call without requiring input",
+                    )];
+                    out.meta = result.raw_meta.as_ref().and_then(|m| serde_json::from_value(m.clone()).ok());
+                    return CallToolResponse::Complete(out);
+                }
+                let mut ir = InputRequiredResult::new(input_requests, request_state);
+                // Preserve unconsumed raw_meta keys (OTel trace, progress
+                // receipts, SEP extensions) instead of dropping them.
+                if let Some(obj) = result.raw_meta.as_ref().and_then(|m| m.as_object()) {
+                    let leftover: serde_json::Map<String, Value> = obj
+                        .iter()
+                        .filter(|(k, _)| {
+                            !k.ends_with("/resultType")
+                                && k.as_str() != "resultType"
+                                && !k.ends_with("/inputRequests")
+                                && k.as_str() != "inputRequests"
+                                && !k.ends_with("/requestState")
+                                && k.as_str() != "requestState"
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if !leftover.is_empty() {
+                        ir.meta = Some(rmcp::model::MetaObject(rmcp::model::JsonObject::from_iter(leftover)));
+                    }
+                }
+                return CallToolResponse::InputRequired(ir);
             }
         }
     }
@@ -570,7 +930,13 @@ fn to_call_response(result: crate::models::server::ToolCallResult) -> CallToolRe
             }
         })
         .collect();
-    out.structured_content = result.structured_content;
+    // structuredContent postdates the 2024-11-05 spec (e2e TC-07): strip for
+    // legacy sessions, exactly as the retired dispatch did.
+    out.structured_content = if strip_2024 {
+        None
+    } else {
+        result.structured_content
+    };
     out.is_error = Some(result.is_error);
     out.meta = result.raw_meta.and_then(|m| serde_json::from_value(m).ok());
     CallToolResponse::Complete(out)
@@ -614,13 +980,49 @@ impl HubBridge {
         upstream_meta: Value,
         session_id: Option<String>,
         source_ip: Option<String>,
+        strip_2024: bool,
+        sep_2322: bool,
     ) -> Result<CallToolResponse, ErrorData> {
         let scope = scope.to_string();
         let tool_name = tool_name.to_string();
         let scope_clean = scope.trim_start_matches('/').trim().to_string();
 
-        // $smart scopes: intercept the three meta tools.
-        if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+        // $smart scopes: intercept the three meta tools. A non-meta name on a
+        // smart scope is a pinned tool called directly — fall through to the
+        // normal call path below ($smart resolves to all pool servers,
+        // $smart/{group} to the group's members, so resolve_target / bearer /
+        // disabled gates all apply unchanged). This mirrors origin, where a
+        // raw tool name on a smart session routes through the normal path.
+        let smart_group_direct = scope_clean == "$smart"
+            || scope_clean.starts_with("$smart/");
+        let smart_group_direct =
+            smart_group_direct && !crate::smart_routing::meta::is_meta_tool(&tool_name);
+        // List/call gate symmetry: SR disabled / runtime not ready refuses the
+        // whole $smart surface (tools/list and the meta branch both gate on
+        // not_ready) — a remembered pin name must not stay callable when the
+        // listing is down.
+        if smart_group_direct {
+            if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
+                return Err(Self::err(msg));
+            }
+        }
+        // Direct calls on a $smart scope must target a pinned tool visible in
+        // that scope — the listing only exposes pinned tools, so the call side
+        // enforces the same set (list/call parity). Allowed set = group-member
+        // pins ∪ server-level pins (group scope), or server-level pins across
+        // all bearer-visible servers (root scope).
+        if smart_group_direct {
+            if Self::resolve_pinned_target(self, &scope, bearer, &tool_name)
+                .await
+                .is_none()
+            {
+                return Err(Self::invalid_params(format!(
+                    "Tool '{}' is not a pinned tool of this $smart scope",
+                    tool_name
+                )));
+            }
+        }
+        if crate::smart_routing::meta::is_smart_scope(&scope_clean) && !smart_group_direct {
             if let Some(msg) = crate::smart_routing::meta::not_ready_message().await {
                 return Err(Self::err(msg));
             }
@@ -672,6 +1074,10 @@ impl HubBridge {
                 }
                 Err(e) => Err(anyhow::anyhow!(e.to_string())),
             };
+            // Timer BEFORE the meta dispatch so activity duration covers the
+            // actual upstream work (self-review: measuring after the await
+            // recorded ~0ms for every smart call).
+            let started = std::time::Instant::now();
             match meta_gate {
                 Ok(true) => {
                     return Err(Self::invalid_params(format!(
@@ -692,7 +1098,7 @@ impl HubBridge {
                 "smart_route_search" => {
                     let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     let limit = args.get("limit").cloned().unwrap_or(json!(10));
-                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed).await
+                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed, group_gate.as_ref()).await
                 }
                 "smart_route_describe" => {
                     let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
@@ -700,6 +1106,20 @@ impl HubBridge {
                 }
                 "smart_route_call" => {
                     let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+                    // Pin parity for the meta lane too: the listing only
+                    // exposes pinned tools, so routing a toolName through
+                    // smart_route_call must not reach an unpinned tool (the
+                    // raw-name direct-call lane is already gated above; this
+                    // is the same gate applied to the meta wrapper).
+                    if Self::resolve_pinned_target(self, &scope, bearer, tn)
+                        .await
+                        .is_none()
+                    {
+                        return Err(Self::invalid_params(format!(
+                            "Tool '{}' is not a pinned tool of this $smart scope",
+                            tn
+                        )));
+                    }
                     let tool_args = args.get("arguments").cloned().unwrap_or(json!({}));
                     crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref()).await
                 }
@@ -708,14 +1128,67 @@ impl HubBridge {
                     other
                 )),
             };
-            let value = result.map_err(Self::err)?;
-            let content = vec![ContentBlock::text(value.to_string())];
-            return Ok(CallToolResponse::Complete(
-                CallToolResult::success(content),
-            ));
+            let value = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = crate::services::log_service::write_activity(
+                        "smart",
+                        tool_name.as_str(),
+                        Some(started.elapsed().as_millis() as i64),
+                        "error",
+                        Some(args.clone()),
+                        None,
+                        Some(e.as_str()),
+                        source_ip.as_deref(),
+                    )
+                    .await;
+                    return Err(Self::err(e));
+                }
+            };
+            // Meta hop must preserve the same result semantics as the direct
+            // path: upstream isError and MRTR input_required (raw_meta) are
+            // re-assembled into a ToolCallResult so to_call_response maps them
+            // (flattening both into a bare Complete text was a parity break —
+            // clients could not see failures or answer input requests).
+            let tcr = crate::models::server::ToolCallResult {
+                content: value
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                is_error: value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
+                structured_content: value.get("structuredContent").cloned(),
+                raw_meta: value.get("_meta").cloned(),
+            };
+            let _ = crate::services::log_service::write_activity(
+                "smart",
+                tool_name.as_str(),
+                Some(started.elapsed().as_millis() as i64),
+                if tcr.is_error { "error" } else { "success" },
+                Some(args.clone()),
+                serde_json::to_value(&tcr).ok(),
+                None,
+                source_ip.as_deref(),
+            )
+            .await;
+            return Ok(to_call_response(tcr, strip_2024, sep_2322));
         }
 
-        let Some((sn, orig_name)) = self.resolve_target(&scope, bearer, &tool_name).await else {
+        let resolved = match self.resolve_target(&scope, bearer, &tool_name).await {
+            Some(hit) => Some(hit),
+            None => {
+                // Pool-cache miss fallback: on a $smart scope the tool may be
+                // a pin on a sleeping (never-woken) on-demand server whose
+                // cached tool list is empty — resolve from the pin registry
+                // and let the pool::call_tool path below cold-start it.
+                if smart_group_direct {
+                    self.resolve_pinned_target(&scope, bearer, &tool_name).await
+                } else {
+                    None
+                }
+            }
+        };
+        let Some((sn, orig_name)) = resolved else {
             // `[tool-not-found]` sentinel: REST callers classify 404 by this
             // stable prefix (prose matching would false-positive on upstream
             // error text that happens to contain the same substrings).
@@ -737,15 +1210,27 @@ impl HubBridge {
         let disabled_gate = match pool::list_tools_for(&sn).await {
             Ok(ts) => match crate::services::server_tool_config_service::apply_tool_filters(&sn, ts).await {
                 Ok(filtered) => {
-                    let disabled = filtered
-                        .iter()
-                        .find(|t| t.name == orig_name)
-                        .map(|t| !t.enabled)
-                        // Tool absent from the pool's live list: treat as
-                        // not-disabled (resolve_target may have matched a
-                        // builtin/meta path with no pool entry).
-                        .unwrap_or(false);
-                    Ok(disabled)
+                    let disabled = match filtered.iter().find(|t| t.name == orig_name) {
+                        Some(t) => Ok(!t.enabled),
+                        None => {
+                            // Absent from the pool cache: benign for
+                            // builtin/meta resolution paths, but a smart pin
+                            // fallback can resolve a NEVER-WOKEN on-demand
+                            // server whose cache is empty — a disabled config
+                            // row there would bypass the gate. Consult the
+                            // config store directly (fail-closed on error).
+                            match crate::services::server_tool_config_service::get_config(
+                                &sn, "tool", &orig_name,
+                            )
+                            .await
+                            {
+                                Ok(Some(cfg)) => Ok(!cfg.enabled),
+                                Ok(None) => Ok(false),
+                                Err(e) => Err(anyhow::anyhow!(e.to_string())),
+                            }
+                        }
+                    };
+                    disabled
                 }
                 Err(e) => Err(e),
             },
@@ -804,7 +1289,7 @@ impl HubBridge {
                 }
             }
             let result = result.map_err(|e| Self::err(e.to_string()))?;
-            return Ok(to_call_response(result));
+            return Ok(to_call_response(result, strip_2024, sep_2322));
         }
 
         // Per-session upstream isolation: caller passes rmcp's session id.
@@ -825,7 +1310,7 @@ impl HubBridge {
             let dur = start.elapsed().as_millis() as i64;
             Self::log_call_activity(&sn, &orig_name, dur, &args, result.as_ref(), source_ip.as_deref()).await;
             let result = result.map_err(|e| Self::err(e.to_string()))?;
-            return Ok(to_call_response(result));
+            return Ok(to_call_response(result, strip_2024, sep_2322));
         }
 
         let start = std::time::Instant::now();
@@ -839,7 +1324,7 @@ impl HubBridge {
         let dur = start.elapsed().as_millis() as i64;
         Self::log_call_activity(&sn, &orig_name, dur, &args, result.as_ref(), source_ip.as_deref()).await;
         let result = result.map_err(|e| Self::err(e.to_string()))?;
-        Ok(to_call_response(result))
+        Ok(to_call_response(result, strip_2024, sep_2322))
     }
 
     /// Activity-log parity helper (see execute_tool_call comment).
@@ -1001,13 +1486,37 @@ impl ServerHandler for HubBridge {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        let started = std::time::Instant::now();
         let bearer = Self::bearer_from_ctx(&context).await?;
         let scope = Self::scope_from_ctx(&context);
-        let tools = self.aggregate_tools(&scope, bearer.as_ref()).await?;
+        let scope_clean = scope.trim_start_matches('/').trim().to_string();
+        let tools = self
+            .aggregate_tools(&scope, bearer.as_ref(), Self::is_2024_session(&context))
+            .await?;
         let result = ListToolsResult::with_all_items(tools);
         Ok(if Self::is_2026_session(&context) {
+            // Origin #1277 parity: a positive list TTL requires recorded
+            // freshness from every participating upstream, capped at 5s minus
+            // projection elapsed. $smart (gateway-generated meta tools) and
+            // builtin-only scopes never advertise a positive TTL.
+            let ttl = if crate::smart_routing::meta::is_smart_scope(&scope_clean) {
+                0
+            } else {
+                let upstreams: Vec<String> = self
+                    .scope_filters(&scope, bearer.as_ref())
+                    .await
+                    .into_iter()
+                    .filter(|sf| sf.name != crate::rag::service::BUILTIN_SERVER_NAME)
+                    .map(|sf| sf.name)
+                    .collect();
+                crate::services::list_freshness::remaining(
+                    &upstreams,
+                    "tools",
+                    started.elapsed().as_millis() as u64,
+                )
+            };
             result
-                .with_ttl_ms(30_000)
+                .with_ttl_ms(ttl)
                 .with_cache_scope(rmcp::model::CacheScope::Private)
         } else {
             result
@@ -1022,6 +1531,7 @@ impl ServerHandler for HubBridge {
         let bearer = Self::bearer_from_ctx(&context).await?;
         let scope = Self::scope_from_ctx(&context);
         let tool_name = request.name.to_string();
+        let strip_2024 = Self::is_2024_session(&context);
         let args = Value::Object(request.arguments.clone().unwrap_or_default());
 
         // SEP-2663 client-directed task: the leniency middleware surfaces the
@@ -1086,12 +1596,14 @@ impl ServerHandler for HubBridge {
                 .extensions
                 .get::<http::request::Parts>()
                 .and_then(|p| crate::services::http_server::client_ip_of(&p.headers));
+            let strip_2024_bg = strip_2024;
+            let sep_2322_bg = Self::is_2026_session(&context);
             tokio::spawn(async move {
                 // catch_unwind: a panicking execute_tool_call must not leave
                 // the task stuck in `working` forever (with no TTL the sweeper
                 // would never reap it and the client would poll indefinitely).
                 let outcome = std::panic::AssertUnwindSafe(
-                    this.execute_tool_call(&scope, &tool_name, args, bearer_ref.as_ref(), upstream_meta, session_id_bg, source_ip_bg),
+                    this.execute_tool_call(&scope, &tool_name, args, bearer_ref.as_ref(), upstream_meta, session_id_bg, source_ip_bg, strip_2024_bg, sep_2322_bg),
                 )
                 .catch_unwind()
                 .await
@@ -1166,6 +1678,8 @@ impl ServerHandler for HubBridge {
                 .extensions
                 .get::<http::request::Parts>()
                 .and_then(|p| crate::services::http_server::client_ip_of(&p.headers)),
+            strip_2024,
+            Self::is_2026_session(&context),
         )
         .await
     }
@@ -1202,9 +1716,11 @@ impl ServerHandler for HubBridge {
         let scope = Self::scope_from_ctx(&context);
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
             let result = ListPromptsResult::with_all_items(Vec::new());
+            // Origin #1277 parity: gateway-generated lists (prompts/resources/
+            // $smart meta) never advertise a positive TTL — ttlMs 0.
             return Ok(if Self::is_2026_session(&context) {
                 result
-                    .with_ttl_ms(30_000)
+                    .with_ttl_ms(0)
                     .with_cache_scope(rmcp::model::CacheScope::Private)
             } else {
                 result
@@ -1238,7 +1754,7 @@ impl ServerHandler for HubBridge {
         let result = ListPromptsResult::with_all_items(list);
         Ok(if Self::is_2026_session(&context) {
             result
-                .with_ttl_ms(30_000)
+                .with_ttl_ms(0)
                 .with_cache_scope(rmcp::model::CacheScope::Private)
         } else {
             result
@@ -1252,14 +1768,17 @@ impl ServerHandler for HubBridge {
     ) -> Result<GetPromptResponse, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
         let name = request.name.to_string();
+        // Bearer auth must be evaluated before any scope shortcut so an
+        // invalid key surfaces 401 rather than a silent "not found" (auth
+        // errors must not degrade to anonymous — round-9 F-3 parity).
+        let bearer = Self::bearer_from_ctx(&context).await?;
+        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
+        }
         // $smart scope: builtin prompts are not part of the smart meta-tool
         // surface — list_prompts returns empty here, so get must not serve
         // content the list hides (list/read gating parity).
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
-            return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
-        }
-        let bearer = Self::bearer_from_ctx(&context).await?;
-        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
             return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
         }
         let args: Value = Value::Object(request.arguments.clone().unwrap_or_default());
@@ -1295,20 +1814,22 @@ impl ServerHandler for HubBridge {
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
-        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
-            let result = ListResourcesResult::with_all_items(Vec::new());
-            return Ok(if Self::is_2026_session(&context) {
-                result
-                    .with_ttl_ms(30_000)
-                    .with_cache_scope(rmcp::model::CacheScope::Private)
-            } else {
-                result
-            });
-        }
+        // Bearer auth must be evaluated before any scope shortcut so an
+        // invalid key surfaces 401 rather than a silent empty list.
         let bearer = Self::bearer_from_ctx(&context).await?;
         if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
             let result = ListResourcesResult::with_all_items(Vec::new());
             return Ok(result);
+        }
+        if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
+            let result = ListResourcesResult::with_all_items(Vec::new());
+            return Ok(if Self::is_2026_session(&context) {
+                result
+                    .with_ttl_ms(0)
+                    .with_cache_scope(rmcp::model::CacheScope::Private)
+            } else {
+                result
+            });
         }
         let resource_sel = self.builtin_resource_selection(&scope).await;
         let resources = crate::services::resource_service::list_all().await.unwrap_or_default();
@@ -1325,7 +1846,7 @@ impl ServerHandler for HubBridge {
         let result = ListResourcesResult::with_all_items(list);
         Ok(if Self::is_2026_session(&context) {
             result
-                .with_ttl_ms(30_000)
+                .with_ttl_ms(0)
                 .with_cache_scope(rmcp::model::CacheScope::Private)
         } else {
             result
@@ -1339,14 +1860,16 @@ impl ServerHandler for HubBridge {
     ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
         let uri = request.uri.clone();
+        // Bearer auth must be evaluated before any scope shortcut so an
+        // invalid key surfaces 401 rather than a silent "not found".
+        let bearer = Self::bearer_from_ctx(&context).await?;
+        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
+        }
         // $smart scope: builtin resources are not part of the smart meta-tool
         // surface — list_resources returns empty here, so read must not serve
         // content the list hides (list/read gating parity).
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
-            return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
-        }
-        let bearer = Self::bearer_from_ctx(&context).await?;
-        if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
             return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
         }
         let resource_sel = self.builtin_resource_selection(&scope).await;
@@ -1374,7 +1897,7 @@ impl ServerHandler for HubBridge {
                     match result {
                         ReadResourceResponse::Complete(res) => {
                             ReadResourceResponse::Complete(
-                                res.with_ttl_ms(30_000)
+                                res.with_ttl_ms(0)
                                     .with_cache_scope(rmcp::model::CacheScope::Private),
                             )
                         }
@@ -1396,6 +1919,9 @@ impl ServerHandler for HubBridge {
         context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, rmcp::ErrorData> {
         let scope = Self::scope_from_ctx(&context);
+        // Auth-first (round-9 F-3 parity): evaluate bearer before any scope
+        // shortcut so auth errors never degrade to a scope-gate message.
+        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         // $smart scope has its own meta-tool surface — the global task store is
         // not reachable there (same gate as custom tasks/result|list paths).
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
@@ -1405,10 +1931,6 @@ impl ServerHandler for HubBridge {
                 None,
             ));
         }
-        // bearer_from_ctx failure (auth error, not merely "no key") must
-        // propagate as an error rather than silently downgrade to anonymous
-        // caller — anonymous sees all ownerless tasks (review round 9 F-3).
-        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         // The hub's task store produces the wire shape directly (2026 ext or
         // 2025-11 snapshot); rmcp's DetailedTask cannot express both, so the
         // typed tasks/get serves rmcp-native clients from the same store via
@@ -1457,8 +1979,9 @@ impl ServerHandler for HubBridge {
         context: RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         // Same $smart gate as get_task (global task store is not reachable on
-        // the $smart scope).
+        // the $smart scope). Auth-first: bearer before scope shortcut.
         let scope = Self::scope_from_ctx(&context);
+        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
             return Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
@@ -1466,7 +1989,6 @@ impl ServerHandler for HubBridge {
                 None,
             ));
         }
-        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         crate::services::mcp_tasks::update_input(
             &request.task_id,
             serde_json::to_value(request.input_responses).unwrap_or_default(),
@@ -1482,8 +2004,9 @@ impl ServerHandler for HubBridge {
         context: RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         // Same $smart gate as get_task (global task store is not reachable on
-        // the $smart scope).
+        // the $smart scope). Auth-first: bearer before scope shortcut.
         let scope = Self::scope_from_ctx(&context);
+        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
             return Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
@@ -1491,7 +2014,6 @@ impl ServerHandler for HubBridge {
                 None,
             ));
         }
-        let caller = Self::bearer_from_ctx(&context).await?.map(|k| k.id);
         crate::services::mcp_tasks::cancel(&request.task_id, caller.as_deref())
             .await
             .map(|_| ())

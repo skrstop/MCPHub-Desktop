@@ -214,6 +214,7 @@
     "enabled": "Enabled",
     "enable": "Enable",
     "disable": "Disable",
+    "disabled": "Disabled",
     "reload": "Reload",
     "reloadSuccess": "Server reloaded successfully",
     "reloadError": "Failed to reload server {{serverName}}",
@@ -326,7 +327,9 @@
       "scopesPlaceholder": "scope1 scope2",
       "resource": "Resource / Audience",
       "accessToken": "Access Token",
-      "refreshToken": "Refresh Token"
+      "refreshToken": "Refresh Token",
+      "allowInsecureTokenEndpoint": "Allow HTTP OAuth token endpoints",
+      "allowInsecureTokenEndpointHelp": "Admin only. Disabled by default. Sends credentials and tokens without TLS for this upstream. Enable only on a trusted network; HTTPS is recommended. Once enabled, only administrators can edit this entire server configuration; a non-admin owner cannot edit it."
     },
     "duplicate": "Duplicate",
     "nameInvalid": "Server name can only contain letters, numbers, dots, underscores, and hyphens (no spaces or special characters)",
@@ -340,7 +343,13 @@
     "smartBadge": "Smart",
     "smartMetaRoute": "Smart Routing meta tools",
     "smartMetaTooltip": "Smart Routing meta tools: exposed ONLY via the /mcp/$smart endpoint — not available on regular /mcp or /api paths.",
-    "unknownError": "Unknown error"
+    "unknownError": "Unknown error",
+    "addArgument": "Add argument",
+    "argumentsHint": "Each field is one argument. Spaces and quotes are preserved; an empty field passes an empty argument.",
+    "argumentLabel": "Argument {{index}}",
+    "removeArgument": "Remove argument {{index}}",
+    "maxBufferSize": "Stdio buffer limit (bytes)",
+    "maxBufferSizeDescription": "Maximum stdio read buffer size. Leave blank for the SDK default (10 MiB). Larger limits allow higher memory use."
   },
   "status": {
     "sleeping": "Sleeping",
@@ -375,7 +384,8 @@
     "failedToUpdateSessionRebuild": "Failed to update session rebuild setting",
     "failedToUpdateSettings": "Failed to update settings",
     "failedToReloadServer": "Failed to reload server",
-    "failedToUpdateBearerKey": "Failed to update bearer key"
+    "failedToUpdateBearerKey": "Failed to update bearer key",
+    "password_login_disabled": "Password login is disabled. Sign in with SSO, or use a bearer key for API access."
   },
   "common": {
     "loading": "Loading...",
@@ -965,7 +975,12 @@
     "legacyVisibility": "Legacy — choose visibility",
     "legacyVisibilityHint": "This group keeps its previous endpoint access until you explicitly choose visibility.",
     "visibilityDescription": "Group access also requires access to each server. Sharing a group does not share private servers. Only the owner and admins can manage the group.",
-    "shareAfterCreate": "Save the group before selecting users."
+    "shareAfterCreate": "Save the group before selecting users.",
+    "pinTool": "Pin: always list this tool on the group's Smart Routing endpoint, next to search_tools",
+    "pinToolLabel": "Pin to the Smart Routing endpoint",
+    "unpinTool": "Unpin: reach this tool through search_tools only",
+    "pinToolSuccess": "Pinned {{name}}",
+    "unpinToolSuccess": "Unpinned {{name}}"
   },
   "market": {
     "title": "Local Installation",
@@ -1516,7 +1531,18 @@
     "mcpStrictValidation": "Strict Protocol Validation",
     "mcpStrictValidationDescription": "Validate request headers and params strictly per MCP spec when enabled; off by default to tolerate incomplete requests from clients lagging new specs",
     "selectAtLeastOneGroupOrServer": "Please select at least one group or server",
-    "llmProviderApiKeyDescription": "API key for the LLM provider used by Smart Routing"
+    "llmProviderApiKeyDescription": "API key for the LLM provider used by Smart Routing",
+    "searchResults": "Search Results",
+    "searchResultsDescription": "How search_tools filters and returns matches. Every hit carries its similarity score. Leave both empty for the defaults.",
+    "similarityThreshold": "Similarity threshold (0-1)",
+    "similarityThresholdPlaceholder": "Empty = by query length (0.2 / 0.3 / 0.4)",
+    "fullSchemaTopN": "Full schemas for the top N results",
+    "fullSchemaTopNPlaceholder": "Empty = all results; lower ones get describe_tool",
+    "invalidSearchSettings": "Invalid value for {{fields}}. The similarity threshold must be between 0 and 1, and top N a whole number of 0 or more.",
+    "toolDefinitionFields": "Tool fields in results",
+    "toolDefinitionFieldsDescription": "Optional fields that search_tools and describe_tool results carry next to the name, description and inputSchema. Default: title and annotations. The others are mostly for clients and can be large (icons are base64 images).",
+    "disablePasswordLogin": "Disable password login",
+    "disablePasswordLoginDescription": "Only allow sign-in through the SSO providers: the username/password form and POST /api/auth/login are turned off. Takes effect only while at least one provider is enabled and was already enabled when the application started. BETTER_AUTH_DISABLE_PASSWORD_LOGIN overrides this setting, and setting it to false is the way back in if the identity provider is unavailable."
   },
   "mcpb": {
     "upload": "Upload",

@@ -100,11 +100,14 @@ def modern_channel(ch_name, base, prefix):
     check(f"{tag} 未知版本 -32022", e.get("code") == -32022 and "requested" in json.dumps(e), str(e)[:80])
 
 def set_strict(on):
+    """Returns the PREVIOUS strictValidation value for faithful restore."""
     con = sqlite3.connect(DB)
     cfg = json.loads(con.execute("SELECT config_json FROM system_config WHERE rowid=1").fetchone()[0] or "{}")
+    old = cfg.get("mcp", {}).get("strictValidation", False)
     cfg.setdefault("mcp", {})["strictValidation"] = on
     con.execute("UPDATE system_config SET config_json=?, updated_at=datetime('now') WHERE rowid=1", (json.dumps(cfg, ensure_ascii=False),))
     con.commit(); con.close()
+    return old
 
 # ════ 阶段 1: 宽松模式（默认）全版本×全通道 ════
 print("== 阶段1: 宽松模式 5版本×4通道 ==")
@@ -118,7 +121,7 @@ for v in VERSIONS:
 
 # ════ 阶段 2: 严格模式：规范请求全通过 + 缺陷请求全拒绝 ════
 print("== 阶段2: 严格模式 ==")
-set_strict(True)
+_orig_strict = set_strict(True)
 try:
     time.sleep(0.3)
     for v in VERSIONS:
@@ -146,7 +149,7 @@ try:
         "params": {"_meta": {PV: "2026-07-28"}}})
     check("[严格] 2026 缺 client 元数据拒绝", st in (400, 406, 422), f"st={st}")
 finally:
-    set_strict(False)
+    set_strict(_orig_strict)
 
 print(f"\n== {len(PASS)}/{len(PASS)+len(FAIL)} passed ==")
 if FAIL:

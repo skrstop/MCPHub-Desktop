@@ -245,12 +245,20 @@ try:
     stc3, oc3 = call(sid, "本机公网ip查询-getPublicIp", rid=34, meta={"ttl": 60000})
     tid3 = ((oc3 or {}).get("result", {}).get("taskId"))
     if tid3:
+        # tasks/result has NO outer status field (rmcp semantics): the terminal
+        # payload IS the result (resultType/content present) or an error frame.
         for _ in range(30):
             stq, _, oq, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 35, "method": "tasks/result",
                                                  "params": {"taskId": tid3, "mcp-session-id": sid}},
                                 headers={"Mcp-Session-Id": sid})
-            if oq and "result" in oq and oq["result"].get("status") in ("completed", "failed"): break
+            res = (oq or {}).get("result") or {}
+            if oq and (("result" in oq and (res.get("resultType") in ("complete", "failed", "cancelled")
+                                            or "content" in res or "error" in res))
+                       or "error" in oq):
+                break
             time.sleep(0.5)
+        else:
+            check("C5 [2025-11] 任务在时限内到终态", False, "poll timeout (task stuck working?)")
         stx, _, ox, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 36, "method": "tasks/cancel",
                                              "params": {"taskId": tid3, "mcp-session-id": sid}},
                             headers={"Mcp-Session-Id": sid})

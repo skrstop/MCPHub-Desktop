@@ -92,7 +92,13 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
   const groupOpenApiEndpoint = `${baseUrl}/api/${encodeURIComponent(group.name)}`;
 
   const serverNames = getServerNames(group.servers);
-  const groupServers = servers.filter((s) => serverNames.includes(s.name));
+  // Disabled member servers are hidden from the routing diagram — they
+  // contribute nothing (no live tools, not callable) and would otherwise
+  // render as confusing "0/0 tools" rows. Their membership is preserved
+  // in the group config (re-enabling the server restores the row).
+  const groupServers = servers.filter(
+    (s) => serverNames.includes(s.name) && s.enabled !== false,
+  );
 
   const tally = (server: Server) => {
     const cfg = getServerConfig(group, server.name);

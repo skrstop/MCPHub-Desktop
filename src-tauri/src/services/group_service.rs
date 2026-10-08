@@ -166,7 +166,14 @@ pub async fn create(payload: &GroupPayload) -> Result<Group> {
     .bind(&payload.description)
     .bind(&servers_json)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE constraint failed") {
+            anyhow!("Group name '{}' is already in use", payload.name)
+        } else {
+            e.into()
+        }
+    })?;
     crate::services::fts_service::sync_upsert_tx(
         &mut tx,
         crate::services::fts_service::FtsTable::Groups,
@@ -175,6 +182,8 @@ pub async fn create(payload: &GroupPayload) -> Result<Group> {
     )
     .await?;
     tx.commit().await?;
+    // New group scope exists — notify tools-list subscribers (R119 parity).
+    crate::services::subscription_hub::notify_tools_list_changed().await;
 
     // Re-read from DB instead of fabricating created_at: the column is
     // populated by a DB default whose format/value differs from
@@ -208,7 +217,14 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     .bind(&servers_json)
     .bind(id)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE constraint failed") {
+            anyhow!("Group name '{}' is already in use", payload.name)
+        } else {
+            e.into()
+        }
+    })?;
     if result.rows_affected() == 0 {
         return Err(anyhow!("Group not found"));
     }
@@ -224,6 +240,10 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     )
     .await?;
     tx.commit().await?;
+    // Group membership/name changes reshape the /mcp/{group} and
+    // $smart/{group} exposed tool set — tell subscribers the list changed
+    // (R119: same parity as server rename/delete notification).
+    crate::services::subscription_hub::notify_tools_list_changed().await;
 
     let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
         "SELECT {SELECT_COLS} FROM groups WHERE id=?"
@@ -260,6 +280,8 @@ pub async fn delete(id: &str) -> Result<()> {
     )
     .await?;
     tx.commit().await?;
+    // Exposed tool set of the group scope disappeared — notify subscribers.
+    crate::services::subscription_hub::notify_tools_list_changed().await;
     Ok(())
 }
 

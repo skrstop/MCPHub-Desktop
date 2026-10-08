@@ -19,7 +19,10 @@ async fn require_admin(session: &State<'_, SessionState>) -> Result<(), String> 
 }
 /// List configured AI agents and their skills install paths.
 #[tauri::command]
-pub async fn list_skill_agents() -> Result<Vec<SkillAgent>, String> {
+pub async fn list_skill_agents(session: State<'_, SessionState>) -> Result<Vec<SkillAgent>, String> {
+    // Returns every agent's skills_path (home-directory layout) — gated like
+    // the other skills enumeration commands in multi-user mode.
+    require_admin(&session).await?;
     skill_service::list_agents().await.map_err(|e| e.to_string())
 }
 
@@ -49,14 +52,21 @@ pub async fn delete_skill_agent(session: State<'_, SessionState>, id: String) ->
 /// Scan all configured agents' skills paths for importable skills
 /// (symlinks/shortcuts skipped; SKILL.md frontmatter parsed for name/desc).
 #[tauri::command]
-pub async fn scan_skills_for_import(app: AppHandle) -> Result<Vec<ScannedSkill>, String> {
+pub async fn scan_skills_for_import(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+) -> Result<Vec<ScannedSkill>, String> {
+    // Enumerates agent skill dirs' contents incl. full paths — same gate as
+    // scan_folder_for_skills (arbitrary-path enumeration).
+    require_admin(&session).await?;
     skill_service::scan_for_import(&app).await.map_err(|e| e.to_string())
 }
 
 /// List all skills in the library (status='ok' only, ordered by dir_name,
 /// each with its status='ok' exports).
 #[tauri::command]
-pub async fn list_skills(app: AppHandle) -> Result<Vec<Skill>, String> {
+pub async fn list_skills(app: AppHandle, session: State<'_, SessionState>) -> Result<Vec<Skill>, String> {
+    require_admin(&session).await?;
     skill_service::list_library(&app).await.map_err(|e| e.to_string())
 }
 
@@ -69,7 +79,9 @@ pub async fn search_skills(
     search_key: String,
     page: u32,
     page_size: u32,
+    session: State<'_, SessionState>,
 ) -> Result<SkillPage, String> {
+    require_admin(&session).await?;
     skill_service::search_library_paged(&app, &search_key, page, page_size)
         .await
         .map_err(|e| e.to_string())
@@ -78,7 +90,8 @@ pub async fn search_skills(
 /// Get a single skill (with its exports) by id. Errors if not found or its
 /// library copy is gone (frontend always calls with an id from the list).
 #[tauri::command]
-pub async fn get_skill(app: AppHandle, id: String) -> Result<Skill, String> {
+pub async fn get_skill(app: AppHandle, id: String, session: State<'_, SessionState>) -> Result<Skill, String> {
+    require_admin(&session).await?;
     skill_service::get_skill(&app, &id)
         .await
         .map_err(|e| e.to_string())?
@@ -157,7 +170,13 @@ pub async fn open_path_in_explorer(session: State<'_, SessionState>, path: Strin
 
 /// Open a skill's library folder in the OS file manager.
 #[tauri::command]
-pub async fn open_skill_library_dir(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn open_skill_library_dir(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
+    // OS file-manager launch — same gate as open_path_in_explorer.
+    require_admin(&session).await?;
     skill_service::open_skill_library(&app, &id)
         .await
         .map_err(|e| e.to_string())
@@ -165,7 +184,12 @@ pub async fn open_skill_library_dir(app: AppHandle, id: String) -> Result<(), St
 
 /// Open the OS folder picker; returns the chosen absolute path or null.
 #[tauri::command]
-pub async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_directory(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    // Native dialog side effect — gated with the write commands it feeds.
+    require_admin(&session).await?;
     skill_service::pick_directory(&app)
         .await
         .map_err(|e| e.to_string())

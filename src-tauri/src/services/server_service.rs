@@ -147,12 +147,13 @@ fn validate_server_name(name: &str) -> Result<()> {
         && !name.contains("..")
         && !name.contains('/')
         && !name.contains('\\')
+        && !name.starts_with('$')
         && !name.chars().any(|c| c.is_control());
     if ok {
         Ok(())
     } else {
         Err(anyhow!(
-            "server name '{}' is invalid: must not be empty, contain path separators, '..', or control characters",
+            "server name '{}' is invalid: must not be empty, contain path separators, '..', '$' prefix (reserved for $smart scopes), or control characters",
             name
         ))
     }
@@ -253,6 +254,10 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
 
     let out = get_by_name(&cfg.name).await?.ok_or_else(|| anyhow!("Insert failed"));
     crate::services::subscription_hub::notify_tools_list_changed().await;
+    // Prompts/resources exposure changes with server create/rename/delete/toggle
+    // too — without the trio fan-out connected clients cache stale lists (R119).
+    crate::services::subscription_hub::notify_prompts_list_changed().await;
+    crate::services::subscription_hub::notify_resources_list_changed().await;
     out
 }
 
@@ -310,7 +315,16 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(enabled)
     .bind(name)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| {
+        // Rename onto an existing server name hits the UNIQUE index — surface
+        // the same friendly message `create` uses instead of raw SQL text.
+        if e.to_string().contains("UNIQUE constraint failed") {
+            anyhow!("Server name '{}' is already in use", cfg.name)
+        } else {
+            anyhow!(e.to_string())
+        }
+    })?;
 
     if result.rows_affected() == 0 {
         return Err(anyhow!("Server '{}' not found", name));
@@ -358,6 +372,10 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     // description-only edits are rare enough that a spurious notification is
     // harmless — keep the notification unconditional for simplicity.
     crate::services::subscription_hub::notify_tools_list_changed().await;
+    // Prompts/resources exposure changes with server create/rename/delete/toggle
+    // too — without the trio fan-out connected clients cache stale lists (R119).
+    crate::services::subscription_hub::notify_prompts_list_changed().await;
+    crate::services::subscription_hub::notify_resources_list_changed().await;
     out
 }
 
@@ -391,11 +409,24 @@ pub async fn delete(name: &str) -> Result<()> {
     // or the map grows without bound over a long session (rename/delete).
     crate::mcp::pool::forget_connect_lock(name).await;
     crate::services::subscription_hub::notify_tools_list_changed().await;
+    // Prompts/resources exposure changes with server create/rename/delete/toggle
+    // too — without the trio fan-out connected clients cache stale lists (R119).
+    crate::services::subscription_hub::notify_prompts_list_changed().await;
+    crate::services::subscription_hub::notify_resources_list_changed().await;
     Ok(())
 }
 
 /// Rewrite every group's `servers` member list, replacing `old_name` with
 /// `new_name` (server rename). Must run inside the caller's transaction.
+/// Member name of a group `servers[]` entry: legacy plain string or the
+/// object form `{name, ...}`.
+fn group_member_name(m: &serde_json::Value) -> Option<&str> {
+    match m {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        v => v.get("name").and_then(|n| n.as_str()),
+    }
+}
+
 async fn cascade_groups_rename_tx(
     tx: &mut sqlx::SqliteConnection,
     old_name: &str,
@@ -408,7 +439,9 @@ async fn cascade_groups_rename_tx(
         let id: String = row.try_get("id")?;
         let servers_str: String = row.try_get("servers")?;
         let members: Vec<serde_json::Value> = serde_json::from_str(&servers_str).unwrap_or_default();
-        let has_old = members.iter().any(|m| m.as_str() == Some(old_name));
+        // Members may be plain strings (legacy) or objects {name, tools?, pinnedTools?...}.
+
+        let has_old = members.iter().any(|m| group_member_name(m) == Some(old_name));
         if !has_old {
             continue;
         }
@@ -417,6 +450,13 @@ async fn cascade_groups_rename_tx(
             .map(|m| {
                 if m.as_str() == Some(old_name) {
                     serde_json::Value::String(new_name.to_string())
+                } else if m.get("name").and_then(|v| v.as_str()) == Some(old_name) {
+                    // Object member: rewrite only `name`, keep alias/tools/pinnedTools.
+                    let mut obj = m;
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert("name".into(), serde_json::Value::String(new_name.to_string()));
+                    }
+                    obj
                 } else {
                     m
                 }
@@ -441,13 +481,15 @@ async fn cascade_groups_remove_tx(tx: &mut sqlx::SqliteConnection, name: &str) -
         let id: String = row.try_get("id")?;
         let servers_str: String = row.try_get("servers")?;
         let members: Vec<serde_json::Value> = serde_json::from_str(&servers_str).unwrap_or_default();
-        let has_old = members.iter().any(|m| m.as_str() == Some(name));
+        // Members may be plain strings (legacy) or objects {name, ...}.
+
+        let has_old = members.iter().any(|m| group_member_name(m) == Some(name));
         if !has_old {
             continue;
         }
         let rewritten: Vec<serde_json::Value> = members
             .into_iter()
-            .filter(|m| m.as_str() != Some(name))
+            .filter(|m| group_member_name(m) != Some(name))
             .collect();
         sqlx::query("UPDATE groups SET servers=? WHERE id=?")
             .bind(serde_json::to_string(&rewritten).unwrap_or_else(|_| "[]".into()))
@@ -533,6 +575,10 @@ pub async fn toggle_enabled(name: &str) -> Result<ServerConfig> {
     // delete/tool-config) notifies; this path was the only omission.
     if updated {
         crate::services::subscription_hub::notify_tools_list_changed().await;
+    // Prompts/resources exposure changes with server create/rename/delete/toggle
+    // too — without the trio fan-out connected clients cache stale lists (R119).
+    crate::services::subscription_hub::notify_prompts_list_changed().await;
+    crate::services::subscription_hub::notify_resources_list_changed().await;
     }
     cfg
 }

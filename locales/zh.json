@@ -214,6 +214,7 @@
     "enabled": "已启用",
     "enable": "启用",
     "disable": "禁用",
+    "disabled": "已禁用",
     "reload": "重载",
     "reloadSuccess": "服务器重载成功",
     "reloadError": "重载服务器 {{serverName}} 失败",
@@ -326,7 +327,9 @@
       "scopesPlaceholder": "scope1 scope2",
       "resource": "资源 / 受众",
       "accessToken": "访问令牌",
-      "refreshToken": "刷新令牌"
+      "refreshToken": "刷新令牌",
+      "allowInsecureTokenEndpoint": "允许 HTTP OAuth 令牌端点",
+      "allowInsecureTokenEndpointHelp": "仅管理员可用，默认关闭。为该上游服务器以非 TLS 方式发送凭据与令牌。仅应在可信网络中启用；推荐使用 HTTPS。启用后，只有管理员可以编辑该服务器的全部配置；非管理员的所有者无法编辑。"
     },
     "duplicate": "创建副本",
     "nameInvalid": "服务器名称只能包含字母、数字、点、下划线和连字符（不能包含空格或特殊字符）",
@@ -340,7 +343,13 @@
     "smartBadge": "Smart",
     "smartMetaRoute": "Smart Routing 元工具",
     "smartMetaTooltip": "Smart Routing 元工具：仅通过 /mcp/$smart 接入点暴露，不在普通 /mcp、/api 路径中提供。",
-    "unknownError": "未知错误"
+    "unknownError": "未知错误",
+    "addArgument": "添加参数",
+    "argumentsHint": "每个输入框对应一个参数，保留空格和引号；空输入框会传递空字符串参数。",
+    "argumentLabel": "参数 {{index}}",
+    "removeArgument": "移除参数 {{index}}",
+    "maxBufferSize": "Stdio 缓冲区上限（字节）",
+    "maxBufferSizeDescription": "Stdio 读取缓冲区的最大大小。留空使用 SDK 默认值（10 MiB）。提高上限会允许使用更多内存。"
   },
   "status": {
     "sleeping": "休眠",
@@ -375,7 +384,8 @@
     "failedToUpdateOAuthServerConfig": "更新 OAuth 服务器配置失败",
     "failedToUpdateSessionRebuild": "更新会话重建设置失败",
     "failedToUpdateSettings": "更新设置失败",
-    "failedToUpdateBearerKey": "更新 Bearer Key 失败"
+    "failedToUpdateBearerKey": "更新 Bearer Key 失败",
+    "password_login_disabled": "密码登录已禁用。请使用 SSO 登录，或使用 Bearer Key 进行 API 访问。"
   },
   "common": {
     "loading": "加载中...",
@@ -965,7 +975,12 @@
     "legacyVisibility": "历史组 — 请设置可见性",
     "legacyVisibilityHint": "在您明确选择可见性之前，该组保留原有的端点访问规则。",
     "visibilityDescription": "访问组内服务器还需具备对应服务器的权限。共享组不会共享私有服务器。仅所有者和管理员可管理此组。",
-    "shareAfterCreate": "请先保存组，再选择共享用户。"
+    "shareAfterCreate": "请先保存组，再选择共享用户。",
+    "pinTool": "固定：始终在此分组的智能路由端点中与 search_tools 一同列出此工具",
+    "pinToolLabel": "固定到智能路由端点",
+    "unpinTool": "取消固定：仅通过 search_tools 访问此工具",
+    "pinToolSuccess": "已固定 {{name}}",
+    "unpinToolSuccess": "已取消固定 {{name}}"
   },
   "market": {
     "title": "本地安装",
@@ -1516,7 +1531,18 @@
     "smartReindexFailed": "重建智能路由索引失败",
     "mcpStrictValidation": "严格协议校验",
     "mcpStrictValidationDescription": "开启后按 MCP 规范严格校验请求头与参数；默认关闭，宽容不完整请求以兼容未跟进新规范的客户端",
-    "selectAtLeastOneGroupOrServer": "请至少选择一个分组或服务器"
+    "selectAtLeastOneGroupOrServer": "请至少选择一个分组或服务器",
+    "searchResults": "搜索结果",
+    "searchResultsDescription": "search_tools 如何过滤和返回匹配结果。每个结果都附带相似度分数。两项均留空即使用默认值。",
+    "similarityThreshold": "相似度阈值（0-1）",
+    "similarityThresholdPlaceholder": "留空 = 按查询长度（0.2 / 0.3 / 0.4）",
+    "fullSchemaTopN": "前 N 个结果返回完整 schema",
+    "fullSchemaTopNPlaceholder": "留空 = 全部结果；其余结果通过 describe_tool 获取",
+    "invalidSearchSettings": "{{fields}} 的值无效。相似度阈值必须在 0 到 1 之间，N 必须是大于或等于 0 的整数。",
+    "toolDefinitionFields": "结果中的工具字段",
+    "toolDefinitionFieldsDescription": "search_tools 和 describe_tool 结果在名称、描述和 inputSchema 之外附带的可选字段。默认：title 和 annotations。其余字段主要供客户端使用，可能很大（图标是 base64 图片）。",
+    "disablePasswordLogin": "禁用密码登录",
+    "disablePasswordLoginDescription": "仅允许通过 SSO 提供商登录：用户名/密码表单与 POST /api/auth/login 将被关闭。仅在至少一个提供商已启用且在应用启动时即已启用时生效。BETTER_AUTH_DISABLE_PASSWORD_LOGIN 环境变量会覆盖此设置；若身份提供商不可用，将其设为 false 是恢复访问的方式。"
   },
   "mcpb": {
     "upload": "上传",

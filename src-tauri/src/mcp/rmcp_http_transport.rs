@@ -77,6 +77,9 @@ pub struct RmcpHttpTransport {
     /// stateless) — logged for the activity panel, rmcp drives the difference.
     modern: bool,
     server_version: Option<String>,
+    /// Upstream-advertised TTL from the most recent list_tools fetch
+    /// (only positive single-page TTLs recorded — origin #1277 freshness).
+    last_list_ttl: std::sync::Mutex<Option<u64>>,
 }
 
 impl RmcpHttpTransport {
@@ -93,6 +96,7 @@ impl RmcpHttpTransport {
             connected: false,
             modern: false,
             server_version: None,
+            last_list_ttl: std::sync::Mutex::new(None),
         }
     }
 
@@ -332,18 +336,25 @@ impl McpTransport for RmcpHttpTransport {
         let mut all = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen_cursors = std::collections::HashSet::new();
+        let mut last_ttl: Option<u64> = None;
         for _ in 0..100 {
             let params = cursor
                 .clone()
                 .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
             let result = service.peer().list_tools(params).await?;
+            // Freshness only from a positive TTL on the final (non-paged) result.
+            last_ttl = result.ttl_ms.filter(|t| *t > 0).map(|t| t as u64);
             all.extend(result.tools);
             match result.next_cursor {
-                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                Some(next) if seen_cursors.insert(next.clone()) => {
+                    cursor = Some(next);
+                    last_ttl = None; // paged lists carry no freshness (origin #1277)
+                }
                 // None (done) or repeated/absent-progress cursor — stop.
                 _ => break,
             }
         }
+        *self.last_list_ttl.lock().unwrap() = last_ttl;
         Ok(all
             .into_iter()
             .map(|t| Tool {
@@ -362,8 +373,28 @@ impl McpTransport for RmcpHttpTransport {
                     .as_ref()
                     .map(|s| Value::Object(s.as_ref().clone()))
                     .filter(|v| !v.is_null()),
+                title: t.title.clone().filter(|s| !s.is_empty()),
+                // rmcp 3.4.1 Tool has no execution field (added in a later SDK)
+                execution: None,
+                icons: t
+                    .icons
+                    .as_ref()
+                    .and_then(|i| serde_json::to_value(i).ok())
+                    .filter(|v| !v.is_null()),
+                meta: t
+                    .meta
+                    .as_ref()
+                    .and_then(|m| serde_json::to_value(m).ok())
+                    .filter(|v| !v.is_null()),
+                description_overridden: false,
             })
             .collect())
+    }
+
+    async fn list_tools_with_ttl(&self) -> Result<(Vec<Tool>, Option<u64>)> {
+        let tools = self.list_tools().await?;
+        let ttl = *self.last_list_ttl.lock().unwrap();
+        Ok((tools, ttl))
     }
 
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
@@ -458,7 +489,13 @@ impl RmcpHttpTransport {
                 })
             }
             CallToolResponse::Task(create) => {
-                let poll_interval = create.task.poll_interval_ms.unwrap_or(1000).max(200);
+                // Mirror the stdio transport: clamp both ends so a hostile
+                // poll_interval_ms can neither spin nor swallow the deadline.
+                let poll_interval = create
+                    .task
+                    .poll_interval_ms
+                    .unwrap_or(1000)
+                    .clamp(200, 30_000);
                 let task_id = create.task.task_id.clone();
                 self.poll_task_to_terminal(task_id, poll_interval).await
             }

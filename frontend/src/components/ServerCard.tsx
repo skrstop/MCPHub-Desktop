@@ -306,6 +306,12 @@ const ServerCard = ({
       // the result returns via the server://update-available event. Clearing the
       // spinner shortly after lets the badge (if any) take over as feedback.
       await new Promise((resolve) => setTimeout(resolve, 1200));
+    } catch {
+      // apiPost throws on network/HTTP failure — the hardest failure must
+      // surface like the non-success branch instead of an unhandled rejection
+      // that leaves the menu open and the spinner spinning forever.
+      setShowMenu(false);
+      showToast(t('server.checkForUpdatesError') || 'Check failed', 'error');
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -404,6 +410,41 @@ const ServerCard = ({
       if (result.success) {
         showToast(t(enabled ? 'tool.enableSuccess' : 'tool.disableSuccess', { name: toolName }), 'success');
         onRefresh?.();
+      } else {
+        showToast(result.error || t('tool.toggleFailed'), 'error');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast(t('tool.toggleFailed'), 'error');
+    }
+  };
+
+  // Server-level $smart pins — loaded lazily when the tools tab opens.
+  const [pinnedTools, setPinnedTools] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    if (expandedTab === 'tools') {
+      import('@/services/toolService').then(({ listToolPins }) =>
+        listToolPins(server.name),
+      ).then((pins) => {
+        if (!cancelled) setPinnedTools(pins);
+      }).catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [expandedTab, server.name]);
+
+  const handleToolPinToggle = async (toolName: string, pinned: boolean) => {
+    try {
+      const { pinTool } = await import('@/services/toolService');
+      const result = await pinTool(server.name, toolName, pinned);
+      if (result.success) {
+        setPinnedTools((prev) => {
+          const next = new Set(prev);
+          if (pinned) next.add(toolName);
+          else next.delete(toolName);
+          return Array.from(next);
+        });
+        showToast(t(pinned ? 'groups.pinToolSuccess' : 'groups.unpinToolSuccess', { name: toolName }), 'success');
       } else {
         showToast(result.error || t('tool.toggleFailed'), 'error');
       }
@@ -1151,6 +1192,11 @@ const ServerCard = ({
                     readOnly={!canManage}
                     onToggle={handleToolToggle}
                     onDescriptionUpdate={handleToolDescriptionUpdate}
+                    pinned={pinnedTools.includes(tool.name)}
+                    // Builtin (RAG) tools are excluded from the smart index
+                    // by design — a pin on them is a dead row. Align with the
+                    // other management actions: no pin toggle on builtin.
+                    onPinToggle={canManageServerActions ? handleToolPinToggle : undefined}
                     cost={cost?.items.find((i) => i.kind === 'tool' && i.name === tool.name)?.cost}
                   />
                 ))}
