@@ -400,6 +400,19 @@ const ServerCard = ({
       if (server.oauth.clientIdConfigured) {
         showToast(t('status.oauthClientIdHint'), 'warning');
       }
+      return;
+    }
+    // Desktop (v1.1.1004): the Rust backend runs the whole flow — discovery,
+    // registration, PKCE, system browser + loopback listener. The URL is not
+    // embedded in server state (the browser is opened by Rust directly).
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      import('@/services/serverOAuthService')
+        .then(({ connectServerOAuth }) => connectServerOAuth(server.name))
+        .then(() => showToast(t('server.oauth.connectStarted'), 'info'))
+        .catch((err: { message?: string }) => {
+          console.error('OAuth connect failed:', err);
+          showToast(err?.message || t('server.oauth.connectFailed'), 'error');
+        });
     }
   };
 

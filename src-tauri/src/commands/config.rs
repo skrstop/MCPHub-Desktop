@@ -232,6 +232,22 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
         }
         Some(v)
     });
+    // OAuth secrets/tokens never leave the machine in plaintext copies.
+    // Endpoints/scopes/resource stay intact so the copy can be re-imported and
+    // re-authenticated via the authorization flow.
+    let redacted_oauth = server.oauth.as_ref().map(|o| {
+        let mut v = serde_json::to_value(o).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            for key in ["clientSecret", "accessToken", "refreshToken"] {
+                if let Some(s) = obj.get(key).and_then(|x| x.as_str()) {
+                    if !s.is_empty() {
+                        obj.insert(key.to_string(), serde_json::json!("***REDACTED***"));
+                    }
+                }
+            }
+        }
+        v
+    });
 
     Ok(serde_json::json!({
         "mcpServers": {
@@ -253,6 +269,7 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
                 "enableKeepAlive": server.enable_keep_alive,
                 "keepAliveInterval": server.keep_alive_interval,
                 "passthroughHeaders": server.passthrough_headers,
+                "oauth": redacted_oauth,
             }
         }
     }))

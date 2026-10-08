@@ -118,6 +118,48 @@ pub struct ProxychainsConfig {
     pub config_path: Option<String>,
 }
 
+/// OAuth client credentials for an upstream MCP server (sse / streamable-http /
+/// openapi). Mirrors the frontend `ServerConfig.oauth` shape (origin parity).
+/// The static fields here describe the OAuth client; tokens obtained via the
+/// authorization flow live in the `oauth_upstream_tokens` DB table (v30), NOT
+/// in the config — except `access_token`/`refresh_token` which support the
+/// "static pre-obtained token" mode and the legacy hand-filled flow.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerOauthConfig {
+    /// Origin #1293: admin-only exception allowing a plain-HTTP token endpoint
+    /// for this upstream. Gated in `services::oauth_upstream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_insecure_token_endpoint: Option<bool>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Space-joined on the wire; stored as the frontend sends it (string[]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    /// Static pre-obtained access token (bypasses the authorization flow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    /// Static refresh token paired with `access_token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Hand-filled authorization endpoint (static configuration mode — skips
+    /// WWW-Authenticate-driven discovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
+    /// Hand-filled token endpoint. Subject to the `allowInsecureTokenEndpoint`
+    /// gate: plain-HTTP URLs are rejected unless the admin opted in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    /// RFC 8707 resource indicator sent on authorization/token requests to
+    /// prevent token mix-up across upstreams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// Optional explicit redirect URI. Default: ephemeral loopback listener
+    /// (RFC 8252) started only while an authorization is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+}
+
 /// Full server configuration stored in DB / returned to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,6 +220,12 @@ pub struct ServerConfig {
     /// transport's request headers once wired.
     #[serde(default)]
     pub passthrough_headers: Option<Vec<String>>,
+    /// OAuth client configuration for sse/streamable-http/openapi upstreams.
+    /// Serialized to the same `oauth` key the frontend already sends, so this
+    /// closes the old "UI collects, Rust drops" gap (R10). Included in the
+    /// connection-relevance comparison: endpoint/scope changes must reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<ServerOauthConfig>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

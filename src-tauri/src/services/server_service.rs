@@ -30,7 +30,7 @@ fn encode_server_type(t: &ServerType) -> &'static str {
 
 pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled
          FROM servers WHERE enabled = 1",
     )
     .fetch_all(db::pool())
@@ -40,7 +40,7 @@ pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
 
 pub async fn list_all() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled
          FROM servers ORDER BY name",
     )
     .fetch_all(db::pool())
@@ -56,7 +56,7 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
     let key = search_key.trim();
     if key.is_empty() {
         let rows = sqlx::query(
-            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled \
+            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled \
              FROM servers ORDER BY name",
         )
         .fetch_all(db::pool())
@@ -78,7 +78,7 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
             let counts: std::collections::HashMap<String, i64> =
                 weighted.into_iter().collect();
             let all = sqlx::query(
-                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled \
+                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled \
                  FROM servers ORDER BY name",
             )
             .fetch_all(db::pool())
@@ -111,7 +111,7 @@ async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
             .replace('_', "\\_")
     );
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled \
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled \
          FROM servers \
          WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\' \
          ORDER BY name",
@@ -125,7 +125,7 @@ async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
 
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled
          FROM servers WHERE name = ?",
     )
     .bind(name)
@@ -199,6 +199,11 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let oauth = cfg
+        .oauth
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
@@ -209,8 +214,8 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
 
     let mut tx = db::pool().begin().await?;
     sqlx::query(
-        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&cfg.name)
@@ -230,6 +235,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(enable_keep_alive)
     .bind(keep_alive_interval)
     .bind(&passthrough_headers)
+    .bind(&oauth)
     .bind(enabled)
     .execute(&mut *tx)
     .await
@@ -282,6 +288,11 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let oauth = cfg
+        .oauth
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let server_type = encode_server_type(&cfg.server_type);
     let enabled = cfg.enabled as i64;
     let per_session_client = cfg.per_session_client.unwrap_or(false) as i64;
@@ -293,7 +304,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let mut tx = db::pool().begin().await?;
     let result = sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
-         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enable_keep_alive=?, keep_alive_interval=?, passthrough_headers=?, enabled=?, updated_at=datetime('now') WHERE name=?",
+         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enable_keep_alive=?, keep_alive_interval=?, passthrough_headers=?, oauth=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
     .bind(&cfg.name)
     .bind(server_type)
@@ -312,6 +323,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(enable_keep_alive)
     .bind(keep_alive_interval)
     .bind(&passthrough_headers)
+    .bind(&oauth)
     .bind(enabled)
     .bind(name)
     .execute(&mut *tx)
@@ -628,6 +640,11 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         .as_deref()
         .map(serde_json::from_str)
         .transpose()?;
+    let oauth: Option<crate::models::server::ServerOauthConfig> = r
+        .try_get::<Option<String>, _>("oauth")?
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     Ok(ServerConfig {
         id: r.try_get("id")?,
         name: r.try_get("name")?,
@@ -644,6 +661,7 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         enable_keep_alive,
         keep_alive_interval,
         passthrough_headers,
+        oauth,
         per_session_client: Some(r.try_get::<i64, _>("per_session_client")? != 0),
         start_on_demand: Some(r.try_get::<i64, _>("start_on_demand")? != 0),
         idle_timeout_ms: {

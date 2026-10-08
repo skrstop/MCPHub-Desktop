@@ -117,14 +117,23 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       },
     };
   }
-  // Upstream OAuth disconnect (#984) — desktop has no upstream-OAuth token storage,
-  // so this is a no-op stub. The UI button stays hidden (oauth.connected is never
-  // populated by the Rust backend); the stub only guards against an unmapped-route error.
-  if (segs[0] === 'servers' && segs[2] === 'oauth' && segs[3] === 'disconnect' && m === 'POST')
+  // Upstream OAuth (v1.1.1004): connect starts the full authorization flow
+  // (discovery → registration → PKCE → system browser + loopback listener);
+  // disconnect clears stored credentials; status reports the flow state.
+  if (segs[0] === 'servers' && segs.length === 4 && segs[2] === 'oauth' && segs[3] === 'connect' && m === 'POST')
     return {
-      command: '__stub__',
-      args: { __response: { success: false, message: 'OAuth disconnect is not available in desktop mode' } },
+      command: 'oauth_connect',
+      args: { serverName: decodeURIComponent(segs[1]), challenge: (body as { challenge?: string } | null)?.challenge ?? null },
     };
+  if (segs[0] === 'servers' && segs.length === 4 && segs[2] === 'oauth' && segs[3] === 'disconnect' && m === 'POST')
+    return { command: 'oauth_disconnect', args: { serverName: decodeURIComponent(segs[1]) } };
+  if (segs[0] === 'servers' && segs.length === 4 && segs[2] === 'oauth' && segs[3] === 'status' && m === 'GET')
+    return { command: 'get_server_oauth_status', args: { serverName: decodeURIComponent(segs[1]) } };
+  // OAuth Provider client management (v1.1.1004 §B4).
+  if (segs[0] === 'oauth-clients' && segs.length === 1 && m === 'GET')
+    return { command: 'list_oauth_clients', args: {} };
+  if (segs[0] === 'oauth-clients' && segs.length === 2 && m === 'DELETE')
+    return { command: 'revoke_oauth_client', args: { clientId: decodeURIComponent(segs[1]) } };
 
   // Per-server tool/prompt/resource toggle & description overrides.
   // Server-level $smart pin: POST /servers/:s/tools/:t/pin
@@ -1131,6 +1140,10 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   if (command === 'smart_routing_status') {
     return { success: true, data: result };
   }
+  // get_server_oauth_status returns a plain status string.
+  if (command === 'get_server_oauth_status') {
+    return { success: true, data: { status: result } };
+  }
 
   // ── Void-return commands ──────────────────────────────────────────────────
   // NOTE: commands returning Option<T> (get_server, get_market_server, ...)
@@ -1182,9 +1195,20 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   const toFrontendServer = (si: Record<string, unknown>) => {
     const cfg = si.config as Record<string, unknown> | undefined;
     const st = si.status as Record<string, unknown> | undefined;
+    // OAuth (v1.1.1004): a connect failure whose message marks a pending
+    // authorization surfaces as the oauth_required status (StatusDot renders
+    // a warn badge + the ServerCard OAuth action button becomes available).
+    const oauthPending = typeof st?.error === 'string'
+      && st.error.includes('OAuth authorization is pending');
     return {
       name: cfg?.name ?? st?.name ?? '',
-      status: st?.starting ? 'connecting' : st?.connected ? 'connected' : 'disconnected',
+      status: oauthPending
+        ? 'oauth_required'
+        : st?.starting
+          ? 'connecting'
+          : st?.connected
+            ? 'connected'
+            : 'disconnected',
       error: st?.error ?? null,
       version: (st?.serverVersion as string | undefined) ?? undefined,
       tools: si.tools ?? [],

@@ -14,14 +14,14 @@ use crate::{
     mcp::pool,
     models::{bearer_key::BearerKey, server::Tool},
     services::{
-        app_logger, bearer_key_service, config_service, group_service, log_service,
+        app_logger, bearer_key_service, config_service, group_service, log_service, oauth_provider,
         mcp_tasks, server_tool_config_service,
     },
 };
 use axum::response::IntoResponse;
 use axum::{
     body::Body,
-    extract::{Path, Query},
+    extract::{Form, Path, Query},
     http::{header, HeaderMap, StatusCode},
     response::{
         Json, Response,
@@ -382,7 +382,12 @@ struct SmartCallRequest {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Validate the bearer token in the request headers.
-/// Returns `Ok(None)` when bearer auth is disabled (all access allowed),
+/// Dual-track (OAuth Provider, v1.1.1004): when the OAuth server is enabled,
+/// an OAuth access token is tried FIRST (scope → synthetic BearerKey reusing
+/// the entire existing allowed_servers/allowed_groups gating chain); a bearer
+/// key is tried next; both must fail before the 401.
+/// Returns `Ok(None)` when neither bearer auth nor the OAuth provider is
+/// enabled (all access allowed),
 /// `Ok(Some(key))` when auth is enabled and the token is valid,
 /// `Err(response)` when auth is enabled but the token is missing or invalid.
 pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<BearerKey>, Response> {
@@ -402,7 +407,12 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
         .and_then(|v| v.as_bool())
         .or_else(|| config.get("bearerKeyEnabled").and_then(|v| v.as_bool()))
         .unwrap_or(false);
-    if !enabled {
+    let oauth_enabled = config
+        .get("oauthServer")
+        .and_then(|o| o.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !enabled && !oauth_enabled {
         return Ok(None);
     }
 
@@ -427,6 +437,52 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
     // Case-insensitive scheme per OAuth 2.0 (RFC 6750); the token starts
     // after the first space.
     let token = auth.split_once(' ').map(|(_, t)| t).unwrap_or(&auth[7..]);
+
+    // Track 1 — OAuth access token (provider enabled only).
+    if oauth_enabled {
+        match oauth_provider::validate_access_token(token).await {
+            Ok(Some((client_id, scope))) => {
+                let client_name = oauth_provider::find_client(&client_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| client_id.clone());
+                let allowed = oauth_provider::scope_to_allowed_servers(&scope)
+                    .await
+                    .unwrap_or_default();
+                let (access_type, allowed_servers, allowed_groups) = if allowed.is_empty() {
+                    ("all".to_string(), Vec::new(), Vec::new())
+                } else {
+                    ("servers".to_string(), allowed.into_iter().collect(), Vec::new())
+                };
+                let fallback_name = client_id.clone();
+                return Ok(Some(BearerKey {
+                    id: client_id,
+                    // Activity-log source label: oauth:{client_name}.
+                    name: format!("oauth:{}", if client_name.is_empty() { fallback_name } else { client_name }),
+                    token: "[oauth]".to_string(),
+                    enabled: true,
+                    access_type,
+                    allowed_groups,
+                    allowed_servers,
+                    created_at: String::new(),
+                }));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!("[http] oauth token validation error: {e}; failing closed");
+                return Err(build_oauth_401(headers, "invalid"));
+            }
+        }
+        // OAuth enabled but token isn't one of ours: still allow bearer keys
+        // when bearer auth is on (dual-track), otherwise reject.
+        if !enabled {
+            return Err(build_oauth_401(headers, "invalid"));
+        }
+    }
+
+    // Track 2 — bearer key.
     match bearer_key_service::find_by_token(token).await {
         Ok(Some(key)) if key.enabled => Ok(Some(key)),
         _ => Err(build_oauth_401(headers, "invalid")),
@@ -1006,12 +1062,407 @@ async fn oauth_protected_resource(headers: HeaderMap) -> Response {
     let base_url = build_resource_metadata_url(&headers)
         .map(|url| url.replace("/.well-known/oauth-protected-resource", ""))
         .unwrap_or_else(|| "http://localhost:23333".to_string());
-    Json(json!({
+    // When the OAuth provider is enabled we ARE the authorization server —
+    // point clients at ourselves instead of the placeholder.
+    let provider_on = oauth_provider::provider_config().await.enabled;
+    let auth_servers = if provider_on {
+        vec![base_url.clone()]
+    } else {
+        vec![base_url.clone()]
+    };
+    let mut body = json!({
         "resource": base_url,
-        "authorization_servers": [base_url],
+        "authorization_servers": auth_servers,
         "scopes_supported": ["read", "write"],
         "bearer_methods_supported": ["header"],
-    })).into_response()
+    });
+    if !provider_on {
+        // Placeholder semantics preserved when the provider is off.
+        body["scopes_supported"] = json!([]);
+    }
+    Json(body).into_response()
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// OAuth Provider endpoints (/oauth/*) — active only when oauthServer.enabled
+// ────────────────────────────────────────────────────────────────────────────
+
+fn issuer_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|h| format!("http://{h}"))
+        .unwrap_or_else(|| "http://localhost:23333".to_string())
+}
+
+fn provider_disabled_response() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({"error": "OAuth server is not enabled"}))).into_response()
+}
+
+/// RFC 8414 authorization-server metadata.
+async fn oauth_authorization_server_metadata(headers: HeaderMap) -> Response {
+    let cfg = oauth_provider::provider_config().await;
+    if !cfg.enabled {
+        return provider_disabled_response();
+    }
+    let issuer = issuer_from_headers(&headers);
+    Json(json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/oauth/authorize"),
+        "token_endpoint": format!("{issuer}/oauth/token"),
+        "registration_endpoint": format!("{issuer}/oauth/register"),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+        "scopes_supported": ["mcp:all", "read", "write"],
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct RegisterBody {
+    client_name: Option<String>,
+    redirect_uris: Vec<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    token_endpoint_auth_method: Option<String>,
+}
+
+/// RFC 7591 dynamic registration (Claude requires this).
+async fn oauth_register(body: Option<Json<RegisterBody>>) -> Response {
+    let cfg = oauth_provider::provider_config().await;
+    if !cfg.enabled {
+        return provider_disabled_response();
+    }
+    if !cfg.dynamic_registration {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "access_denied", "error_description": "dynamic registration is disabled"})),
+        )
+            .into_response();
+    }
+    let Some(Json(body)) = body else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_client_metadata"}))).into_response();
+    };
+    let name = body.client_name.unwrap_or_else(|| "MCP client".into());
+    match oauth_provider::register_client(&name, &body.redirect_uris, body.scope.as_deref().unwrap_or("mcp:all"), body.token_endpoint_auth_method.as_deref() == Some("client_secret_post")).await {
+        Ok((client, secret)) => {
+            let mut out = json!({
+                "client_id": client.client_id,
+                "client_id_issued_at": client.created_at,
+                "client_name": client.name,
+                "redirect_uris": oauth_provider::client_redirect_uris(&client),
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": if secret.is_some() { "client_secret_post" } else { "none" },
+            });
+            if let Some(secret) = secret {
+                out["client_secret"] = json!(secret);
+                out["client_secret_expires_at"] = json!(0);
+            }
+            (StatusCode::CREATED, Json(out)).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid_redirect_uri", "error_description": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AuthorizeQuery {
+    response_type: Option<String>,
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    scope: Option<String>,
+    state: Option<String>,
+    #[serde(rename = "code_challenge")]
+    challenge: Option<String>,
+    #[serde(rename = "code_challenge_method")]
+    challenge_method: Option<String>,
+    resource: Option<String>,
+}
+
+fn redirect_error(redirect_uri: &str, state: &str, error: &str, description: &str) -> Response {
+    let sep = if redirect_uri.contains('?') { '&' } else { '?' };
+    let mut url = format!("{redirect_uri}{sep}error={error}");
+    if !state.is_empty() {
+        url.push_str(&format!("&state={}", urlencode(&state)));
+    }
+    url.push_str(&format!("&error_description={}", urlencode(description)));
+    axum::http::Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, url)
+        .body(Body::empty())
+        .unwrap()
+        .into_response()
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// One-time nonces for the consent form (CSRF): a cross-site POST without the
+/// nonce the user's browser actually received can never mint an authorization
+/// code. Entries expire after 5 minutes (page open longer → reload).
+static CONSENT_NONCES: OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+    OnceLock::new();
+
+fn consent_nonces() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
+    CONSENT_NONCES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn issue_consent_nonce() -> String {
+    let nonce = oauth_provider::random_token();
+    let now = oauth_provider::now_epoch();
+    let mut map = consent_nonces().lock().unwrap_or_else(|p| p.into_inner());
+    map.retain(|_, exp| *exp > now);
+    map.insert(nonce.clone(), now + 300);
+    nonce
+}
+
+fn consume_consent_nonce(nonce: &str) -> bool {
+    let now = oauth_provider::now_epoch();
+    let mut map = consent_nonces().lock().unwrap_or_else(|p| p.into_inner());
+    map.retain(|_, exp| *exp > now);
+    map.remove(nonce).is_some()
+}
+
+/// Self-contained consent page (browser-only flow — local single-user hub).
+async fn oauth_authorize_page(
+    Query(q): Query<AuthorizeQuery>,
+) -> Response {
+    let cfg = oauth_provider::provider_config().await;
+    if !cfg.enabled {
+        return provider_disabled_response();
+    }
+    let Some(client_id) = q.client_id.clone() else {
+        return (StatusCode::BAD_REQUEST, "missing client_id").into_response();
+    };
+    let client = match oauth_provider::find_client(&client_id).await {
+        Ok(Some(c)) if !c.revoked => c,
+        _ => return (StatusCode::BAD_REQUEST, "unknown client_id").into_response(),
+    };
+    let redirect = q.redirect_uri.clone().unwrap_or_default();
+    if !oauth_provider::client_redirect_uris(&client).iter().any(|u| u == &redirect) {
+        return (StatusCode::BAD_REQUEST, "redirect_uri not registered").into_response();
+    }
+    if q.response_type.as_deref() != Some("code") {
+        return redirect_error(&redirect, q.state.as_deref().unwrap_or(""), "unsupported_response_type", "only code is supported");
+    }
+    if q.challenge.is_none() || q.challenge_method.as_deref() != Some("S256") {
+        return redirect_error(&redirect, q.state.as_deref().unwrap_or(""), "invalid_request", "PKCE S256 is required");
+    }
+    let scope = q.scope.clone().unwrap_or_else(|| "mcp:all".into());
+    let resource = q.resource.clone().unwrap_or_default();
+    let state = q.state.clone().unwrap_or_default();
+    let nonce = issue_consent_nonce();
+    // Self-contained consent HTML: approve posts the full request back.
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>MCPHub Desktop — Authorization</title>
+<style>body{{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}}
+.card{{background:#1e293b;padding:32px;border-radius:12px;max-width:420px;box-shadow:0 8px 30px rgba(0,0,0,.4)}}
+h1{{font-size:18px;margin-top:0}} .kv{{color:#94a3b8;font-size:13px;margin:6px 0;word-break:break-all}}
+button{{margin-top:20px;padding:10px 22px;border:0;border-radius:8px;font-size:14px;cursor:pointer}}
+.approve{{background:#2563eb;color:#fff}}.deny{{background:#475569;color:#fff;margin-left:10px}}</style></head>
+<body><div class="card"><h1>Authorize {client_name}?</h1>
+<div class="kv">Client: {client_id}</div>
+<div class="kv">Scopes: {scope}</div>
+<div class="kv">Resource: {resource}</div>
+<div class="kv">Redirect: {redirect}</div>
+<form method="post" action="/oauth/authorize">
+<input type="hidden" name="client_id" value="{client_id}">
+<input type="hidden" name="redirect_uri" value="{redirect_attr}">
+<input type="hidden" name="scope" value="{scope_attr}">
+<input type="hidden" name="state" value="{state_attr}">
+<input type="hidden" name="code_challenge" value="{challenge_attr}">
+<input type="hidden" name="resource" value="{resource_attr}">
+<input type="hidden" name="nonce" value="{nonce_attr}">
+<button class="approve" name="action" value="approve">Approve</button>
+<button class="deny" name="action" value="deny">Deny</button>
+</form></div></body></html>"#,
+        client_name = html_escape(&client.name),
+        client_id = html_escape(&client.client_id),
+        scope = html_escape(&scope),
+        resource = html_escape(&resource),
+        redirect = html_escape(&redirect),
+        redirect_attr = html_attr(&redirect),
+        scope_attr = html_attr(&scope),
+        state_attr = html_attr(&state),
+        challenge_attr = html_attr(q.challenge.as_deref().unwrap_or("")),
+        resource_attr = html_attr(&resource),
+        nonce_attr = html_attr(&nonce),
+    );
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(html))
+        .unwrap()
+        .into_response()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn html_attr(s: &str) -> String {
+    html_escape(s).replace('\'', "&#39;")
+}
+
+#[derive(Deserialize)]
+struct AuthorizeForm {
+    nonce: String,
+    client_id: String,
+    redirect_uri: String,
+    scope: String,
+    state: String,
+    code_challenge: String,
+    resource: String,
+    action: String,
+}
+
+async fn oauth_authorize_submit(Form(form): Form<AuthorizeForm>) -> Response {
+    let cfg = oauth_provider::provider_config().await;
+    if !cfg.enabled {
+        return provider_disabled_response();
+    }
+    // CSRF: the approval must present the one-time nonce the consent page
+    // rendered (a cross-site form post cannot know it).
+    if !consume_consent_nonce(&form.nonce) {
+        return (StatusCode::BAD_REQUEST, "invalid or expired consent session — reload the page").into_response();
+    }
+    if form.action != "approve" {
+        return redirect_error(&form.redirect_uri, &form.state, "access_denied", "user denied the request");
+    }
+    // Authorize endpoint is user-facing: NO client authentication here (per
+    // OAuth 2.1 client auth happens only at the token endpoint). Existence +
+    // not-revoked is the correct check — validate_client with no secret would
+    // permanently lock out secret-registered clients from consenting.
+    let client = match oauth_provider::find_client(&form.client_id).await {
+        Ok(Some(c)) if !c.revoked => c,
+        _ => return (StatusCode::BAD_REQUEST, "invalid client").into_response(),
+    };
+    if !oauth_provider::client_redirect_uris(&client).iter().any(|u| u == &form.redirect_uri) {
+        return (StatusCode::BAD_REQUEST, "redirect_uri not registered").into_response();
+    }
+    match oauth_provider::store_code(&client.client_id, &form.code_challenge, &form.scope, &form.resource, &form.redirect_uri, cfg.authorization_code_lifetime).await {
+        Ok(code) => {
+            let mut url = format!(
+                "{}?code={}",
+                form.redirect_uri,
+                urlencode(&code)
+            );
+            if !form.state.is_empty() {
+                url.push_str(&format!("&state={}", urlencode(&form.state)));
+            }
+            axum::http::Response::builder()
+                .status(StatusCode::FOUND)
+                .header(header::LOCATION, url)
+                .body(Body::empty())
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TokenForm {
+    grant_type: String,
+    code: Option<String>,
+    redirect_uri: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    code_verifier: Option<String>,
+    refresh_token: Option<String>,
+}
+
+async fn oauth_token(
+    axum::Form(form): axum::Form<TokenForm>,
+) -> Response {
+    let cfg = oauth_provider::provider_config().await;
+    if !cfg.enabled {
+        return provider_disabled_response();
+    }
+    match form.grant_type.as_str() {
+        "authorization_code" => {
+            let Some(code) = form.code.as_deref() else {
+                return token_error("invalid_request", "code is required");
+            };
+            let Some(verifier) = form.code_verifier.as_deref() else {
+                return token_error("invalid_request", "code_verifier is required (PKCE)");
+            };
+            let consumed = match oauth_provider::consume_code(code).await {
+                Ok(Some(c)) => c,
+                Ok(None) => return token_error("invalid_grant", "unknown authorization code"),
+                Err(e) => return token_error("invalid_grant", &e),
+            };
+            // PKCE verification.
+            if oauth_provider::pkce_s256(verifier) != consumed.challenge {
+                return token_error("invalid_grant", "PKCE verification failed");
+            }
+            // Client binding + secret (when the client has one).
+            let client_id = form.client_id.clone().unwrap_or_else(|| consumed.client_id.clone());
+            if client_id != consumed.client_id {
+                return token_error("invalid_grant", "client_id mismatch");
+            }
+            if oauth_provider::validate_client(&client_id, form.client_secret.as_deref()).await.is_err() {
+                return token_error("invalid_client", "client authentication failed");
+            }
+            // redirect_uri must match the authorize request exactly.
+            if form.redirect_uri.as_deref().unwrap_or("") != consumed.redirect_uri {
+                return token_error("invalid_grant", "redirect_uri mismatch");
+            }
+            match oauth_provider::issue_tokens(&client_id, &consumed.scope, &consumed.resource, &cfg).await {
+                Ok(t) => token_success(&t),
+                Err(e) => token_error("server_error", &e),
+            }
+        }
+        "refresh_token" => {
+            let Some(rt) = form.refresh_token.as_deref() else {
+                return token_error("invalid_request", "refresh_token is required");
+            };
+            match oauth_provider::refresh_tokens(rt, &cfg).await {
+                Ok(Some((_cid, _scope, t))) => token_success(&t),
+                Ok(None) => token_error("invalid_grant", "unknown refresh token"),
+                Err(e) => token_error("invalid_grant", &e),
+            }
+        }
+        other => token_error("unsupported_grant_type", &format!("grant type not supported: {other}")),
+    }
+}
+
+fn token_error(error: &str, description: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+        Json(json!({ "error": error, "error_description": description })),
+    )
+        .into_response()
+}
+
+fn token_success(t: &oauth_provider::IssuedTokens) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+        Json(json!({
+            "access_token": t.access_token,
+            "token_type": "Bearer",
+            "expires_in": t.expires_in,
+            "refresh_token": t.refresh_token,
+        })),
+    )
+        .into_response()
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2661,6 +3112,12 @@ fn build_router(body_limit_bytes: usize, sdk_cancel: tokio_util::sync::Cancellat
     Router::new()
         .route("/health", get(health))
         .route("/.well-known/oauth-protected-resource", get(oauth_protected_resource))
+        // OAuth Provider (active only when oauthServer.enabled; each handler
+        // self-gates so the routes can sit unconditionally in the router).
+        .route("/.well-known/oauth-authorization-server", get(oauth_authorization_server_metadata))
+        .route("/oauth/register", post(oauth_register))
+        .route("/oauth/authorize", get(oauth_authorize_page).post(oauth_authorize_submit))
+        .route("/oauth/token", post(oauth_token))
         .route("/servers", get(list_servers))
         // Legacy REST API (moved to /rest prefix to avoid wildcard conflict)
         .route("/rest/{server}/tools", get(list_server_tools))

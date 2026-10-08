@@ -313,7 +313,7 @@ mod windows_imp {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod linux {
-    use super::{clean_text, TESSERACT_LANGS, OcrStatus};
+    use super::{clean_text, decode_limited, TESSERACT_LANGS, OcrStatus};
     use anyhow::{anyhow, Result};
     use std::sync::OnceLock;
 

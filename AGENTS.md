@@ -138,7 +138,7 @@ npm run build                     # 生产构建
 
 #### 3.4.2 DB 版本化迁移（MUST FOLLOW）
 
-- `db/migration.rs`：`schema_version` 表 + `run_pending()` 幂等执行；兼容旧 `_sqlx_migrations`。当前 `TARGET_VERSION = 29`（v26 keepalive/passthrough、v27 builtin 唯一索引、v28 server pin、v29 全新装 bearer_keys token 形态修复）。
+- `db/migration.rs`：`schema_version` 表 + `run_pending()` 幂等执行；兼容旧 `_sqlx_migrations`。当前 `TARGET_VERSION = 31`（v26 keepalive/passthrough、v27 builtin 唯一索引、v28 server pin、v29 全新装 bearer_keys token 形态修复、v30 servers.oauth + oauth_upstream_tokens、v31 OAuth Provider 三表）。
 - 新增迁移步骤：①递增 `TARGET_VERSION`；②新增 `migrate_v{N}`；③`apply_migration` 加 match 分支；④配套 `migrations/000N_xxx.sql`；⑤更新文档。
 - 迁移前自动备份：有 pending 时 `VACUUM INTO` 生成 `mcphub.db.bak`（回滚：关应用 → .bak 覆盖 mcphub.db → 删 -wal/-shm → 重启）。
 - 迁移保证 schema 完整后，service 层 SQL 直接引用全部列，**不需要运行时列检测**。
@@ -466,6 +466,17 @@ npm run build                     # 生产构建
 
 - **复核第十一轮（2026-09-30，R108-R157：4 波独立逐行扫描代理 + 亲核 diff + 第 18 套件）**：修复 16 项——①[H] `/api/*` REST 经 meta 工具绕过 bearer 服务器 allow-list（execute_openapi_impl 落 pool meta 分发 allowed=None，打破 $smart 独占）→ 补 builtin+meta 404 门控；②[M] `/rest/{server}/tools` 泄漏 meta schema、`/rest/group/{g}/tools` 不应用组 allow-list → 两 listing 面补齐（裸名 retain + fail-closed）；③[M] smart_route_call 三入口全链无 600s 超时（挂死上游锁死 per-client mutex）→ handle_call_tool 单点包 timeout_tool_call；④[M] resources/read 缺 ttlMs/cacheScope 注入（2026 缓存契约缺口）→ 2026 会话注入 30s/Private；⑤[M] tasks/list+result 对 2026 客户端恒发 2025-11 字段名 → result/list_all 加 modern 分形；⑥[M] pool 重试门槛迁移后死代码（rmcp 错误串不匹配 "child process exited"）+ connect 重入 TOCTOU（并发同名 connect 覆盖 live client 孤儿化孙进程）→ 门槛补 rmcp 错误串 + per-server 连接锁；⑦[M] 导出/复制配置丢弃 headers/proxy/openapi/options 等连接字段（导出→导入后认证静默丢失）→ 补齐 + 全量脱敏（headers/proxy 账密/openapi.security 叶子递归）；⑧[M] get_registry_server_version 未注册 invoke_handler → 补；⑨[M] i18n errors.failedToUpdateSystemConfig 仅 zh → 三语言补译；⑩[L] tasks ttl i64 负回绕、终态保留与 TTL 矛盾、content block 静默丢弃、裸名被误剥前缀、reinstalled 标记早消费、openapi 凭据入日志、导入丢 proxy/options/openapi、is_connected 驱逐注释失实。记录不修：bearer 明文落库/permissive CORS/资源 bearer allow-list（存量设计债单独排期）。新套件 `rmcp_r158_fixes.py` 25 项；新单测 6 个（ttl 语义×4 + parse_body_limit + 协议版本白名单）。**18 套 635/635 全绿；cargo test --lib 92 passed；cargo check 0 错 0 警；build ✓**。详见 `doc/rmcp_review_r108_r157_20260930.md`。
 
+### 3.10 OAuth（v1.1.1004，2026-10-08）
+
+> 计划与 spike 结论：`doc/oauth_plan_20261008.md`。登录 SSO 明确不做（本地单用户）。
+
+- **A. 服务器级 OAuth（上游客户端，`services/oauth_upstream.rs` ~800 行）**：直接采用 rmcp 3.4.1 `auth` feature（`AuthorizationManager`：挑战式发现 RFC 9728 → CIMD/预注册/RFC7591 注册三级 → PKCE S256）。桌面驱动层：临时 loopback 监听（RFC 8252，**AbortOnDropHandle 必须存结构体字段——函数局部 guard 在 bind() 返回即 drop，回调端口秒死**）、`FlowDriver::State/Session` 双模式（静态手填端点必须走 `AuthorizationSession::new` 直建——`OAuthState::start_authorization` 无条件重新发现、丢弃 preset metadata）、FLOWS 注册表只存 cancel Notify（完成 task 持有 flow 所有权，重启 flow 不偷条目）、`MCPHUB_OAUTH_NO_BROWSER=1` 测试钩子。LegacyEndpointFallback（从 base URL 合成 /authorize）→ `NoOauthSupport` 拒绝；`allowInsecureTokenEndpoint` 门控对发现+手填双路径生效。`build_client` 改 async，三 HTTP 传输分支注入 Authorization（用户手填头优先）。命令 `oauth_connect/oauth_disconnect/get_server_oauth_status`（require_admin）+ `server://oauth-connected/error` 事件 + tauriClient 3 路由映射 + StatusDot/ServerCard 接入。DB **v30**（servers.oauth 列 + oauth_upstream_tokens 表）。
+- **B. OAuth Provider（`services/oauth_provider.rs` + http_server /oauth/* 路由）**：`oauthServer.enabled` 配置门控（关=404）。端点：`/.well-known/oauth-authorization-server`（issuer=Host 头）、`POST /oauth/register`（RFC 7591，redirect scheme 白名单 http loopback/https）、`GET|POST /oauth/authorize`（自包含 consent HTML，Approve 302 带 code+state；Deny → access_denied）、`POST /oauth/token`（authorization_code PKCE 强制 + refresh 轮换）。**token/secret 只存 SHA-256 hash**（区别于 bearer 明文存量债）；授权码 60s 单次使用（先删后验）。DB **v31**（oauth_clients/oauth_tokens/oauth_codes 三表 + fresh-DB 单测）。
+- **双轨鉴权**：`check_bearer_auth` 改 oauth-first——OAuth access token 命中 → 合成 BearerKey（scope `mcp:all`=无限制；否则服务器/组名映射 allowed_servers，组名展开）**零改动复用既有门控全链**（组 gate/pin/$smart 过滤）；name=`oauth:{client}` 落活动日志。均未命中 401（WWW-Authenticate 带 resource_metadata）。`.well-known/oauth-protected-resource` enabled 时 authorization_servers 指向自身。
+- **前端**：SettingsPage OAuth Server 区块解除隐藏（桌面提示依赖 exposeHttp）+ **启用联动**：OAuth Server 开关打开时自动开启 exposeHttp（外部客户端要能到达 /oauth/*，避免「开了 provider 但 HTTP 服务关着」的静默不可用）+ 已注册客户端列表/撤销（`list_oauth_clients/revoke_oauth_client` 命令 + tauriClient 映射 GET/DELETE /oauth-clients）+ locales ×4（9 键）。
+- **测试**：lib 115 passed（+provider 单测：PKCE RFC7636 附录 B 向量、注册/撤销/token 生命周期、配置默认值；flow E2E：mock AS + mock 上游 + 浏览器重定向链模拟跑通 discovery→注册→PKCE→token 全链）；新套件 `oauth_provider_e2e.py` 35/35（负路径：disabled 404×3、坏 redirect scheme、deny、未注册 redirect、缺 nonce、PKCE 重放、refresh 轮换 + 重放吊销、revoke 401）。**54 套 E2E 全绿零回归**；cargo check 0 错 0 警；tsc 0 错；build ✓。
+- **OAuth 复核轮（2026-10-08 晚，独立 code-review 代理 + 亲核）**：修复 3 项——①[H] redirect_uri 白名单**前缀匹配**（`http://localhost.evil.com` 可注册）→ `url::Url` 精确 host 校验（loopback= localhost/127.0.0.1/::1 允许 http，其余强制 https）+ CRLF/反斜杠拒收；②[M] consent 表单无 CSRF（任意网页可跨站 POST approve 直取授权码）→ 一次性 nonce（内存 Map，5min TTL，GET 渲染 POST 必验）；③[M] refresh 重放无检测（旧 token 轮换后可静默重放，BCP 违规）→ 轮换改 `refresh_used` 标记制（1h 保留 + cleanup_expired 清理），重放检测 → **整族吊销**（含 successor access，E2E N7b 钉死）+ 轮换时同步删同族旧 access；④[M] `oauth_authorize_submit` 误用 `validate_client(None)` → secret 客户端永远无法同意授权 → 改 find_client + revoked 检查（authorize 端点不做 client 认证，OAuth 语义）；⑤ cleanup_expired 接入 6h 日志清理循环（原为死代码）。**游客模式确认**：`require_admin` 在 skipAuth 下放行系全仓统一设计——游客模式可操作全部 OAuth 命令（本地单用户工具语义）。
+
 ## 4. 上游 mcphub-origin 同步记录（重要）
 
 ### 4.1 同步策略
@@ -719,12 +730,13 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 已完成（节选，全量见 [agent_20260924.md](doc/agent_20260924.md) §7）
 
-基础架构 / 全部 Tauri 命令 / 前端适配器 / 托盘 / 免登录 / 运行时版本管理 / 内置 HTTP 服务器 / Bearer Keys / Prompts & Resources / Activity Log / Market / Registry & Cloud Proxy / SSE 改进 / DB 版本化迁移 / OpenAPI 传输 / starting 状态 / 日志清理 / 工具禁用同步 / Context Footprint / 系统日志面板 / Splash / stdio 下载进度与更新检测（3.5.1）/ 启动更新检查 + Markdown release notes + 安装进度可视化（3.2）/ 版本号四源同步 / on-demand 按需启动（3.5.3）/ stderr 诊断（3.4.5）/ 无谓重连避免 + proxy 持久化（3.5.4）/ FTS5 全文索引 + 活动日志筛选 + 日志检索（3.4.4）/ RAG 全功能族（3.6）/ OpenAPI 兼容端点（3.3）/ agent catalog 补齐（3.7）
+基础架构 / 全部 Tauri 命令 / 前端适配器 / 托盘 / 免登录 / 运行时版本管理 / 内置 HTTP 服务器 / Bearer Keys / Prompts & Resources / Activity Log / Market / Registry & Cloud Proxy / SSE 改进 / DB 版本化迁移 / OpenAPI 传输 / starting 状态 / 日志清理 / 工具禁用同步 / Context Footprint / 系统日志面板 / Splash / stdio 下载进度与更新检测（3.5.1）/ 启动更新检查 + Markdown release notes + 安装进度可视化（3.2）/ 版本号四源同步 / on-demand 按需启动（3.5.3）/ stderr 诊断（3.4.5）/ 无谓重连避免 + proxy 持久化（3.5.4）/ FTS5 全文索引 + 活动日志筛选 + 日志检索（3.4.4）/ RAG 全功能族（3.6）/ OpenAPI 兼容端点（3.3）/ agent catalog 补齐（3.7）/ OAuth 上下游（3.10）
 
 ### 待办
 
 - [ ] Smart Routing（智能路由）
-- [ ] OAuth Server / Better Auth 集成
+- [x] OAuth（服务器级上游客户端 + MCPHub 作为 OAuth Provider，3.10；登录 SSO 不做）
+- [ ] Better Auth 登录集成（不做——本地工具维持账密 + skipAuth）
 - [ ] Tool Result Compression
 - [ ] MCPB/DXT 文件安装
 - [ ] Templates（配置模板）
@@ -734,4 +746,4 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.1001**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.1004**。

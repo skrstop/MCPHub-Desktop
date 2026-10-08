@@ -19,3 +19,4 @@ pub mod cost;
 pub mod skills;
 pub mod rag;
 pub mod smart_routing;
+pub mod oauth;

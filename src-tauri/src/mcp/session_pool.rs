@@ -214,7 +214,7 @@ async fn build_and_connect(
         "[session-pool] Building + connecting isolated client for session {} -> {} (type={:?})",
         session_id, cfg.name, cfg.server_type
     );
-    let mut client = pool::build_client(cfg)?;
+    let mut client = pool::build_client(cfg).await?;
     match timeout(CONNECT_TIMEOUT, client.connect()).await {
         Ok(Ok(())) => Ok(client),
         Ok(Err(e)) => {

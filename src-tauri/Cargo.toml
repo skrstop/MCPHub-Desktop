@@ -1,6 +1,6 @@
 [package]
 name = "mcphub"
-version = "1.1.1003"
+version = "1.1.1004"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"
@@ -140,7 +140,7 @@ rmcp-openapi = "0.32"
 # Official MCP SDK (replaces hand-written dispatch_mcp on /mcp; POC verified
 # in AGENTS.md §3.9.2). Macros feature required for rmcp's derive ecosystem;
 # tower feature pulled in by transport-streamable-http-server.
-rmcp = { version = "3.4", features = ["server", "client", "macros", "transport-streamable-http-server", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.4", features = ["server", "client", "macros", "transport-streamable-http-server", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 http = "1"
 
 # RAG binary office-document import (rag/extract/): pure-Rust extractors,

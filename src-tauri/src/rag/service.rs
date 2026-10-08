@@ -1706,6 +1706,7 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
             enable_keep_alive: None,
             keep_alive_interval: None,
             passthrough_headers: None,
+            oauth: None,
             enabled: true,
         },
         status: ServerStatus {

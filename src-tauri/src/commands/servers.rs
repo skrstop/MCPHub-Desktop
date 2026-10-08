@@ -1003,8 +1003,35 @@ mod connection_relevance_tests {
     }
 
     #[test]
-    fn description_only_edit_does_not_reconnect() {
+    fn oauth_change_forces_reconnect_and_absence_is_equivalent() {
+        // Absent oauth and null oauth compare as equal (strip_empty), so a
+        // description-only edit of a server without oauth does not reconnect.
         let prev = cfg_from(json!({"description": "old"}));
+        let next = cfg_from(json!({"description": "new", "oauth": null}));
+        assert!(!has_connection_relevant_change(&prev, &next));
+
+        // An empty oauth object strips to absent as well.
+        let empty = cfg_from(json!({"description": "new", "oauth": {}}));
+        assert!(!has_connection_relevant_change(&prev, &empty));
+
+        // But a real oauth block change is connection-relevant (endpoints/tokens
+        // affect the upstream connection).
+        let with_oauth = cfg_from(json!({
+            "description": "new",
+            "oauth": {"clientId": "cid", "tokenEndpoint": "https://up.example/token"}
+        }));
+        assert!(has_connection_relevant_change(&prev, &with_oauth));
+
+        // Changing only the token endpoint inside oauth also reconnects.
+        let oauth_b = cfg_from(json!({
+            "description": "new",
+            "oauth": {"clientId": "cid", "tokenEndpoint": "https://up.example/token2"}
+        }));
+        assert!(has_connection_relevant_change(&with_oauth, &oauth_b));
+    }
+
+    #[test]
+    fn description_only_edit_does_not_reconnect() {        let prev = cfg_from(json!({"description": "old"}));
         let next = cfg_from(json!({"description": "new"}));
         assert!(!has_connection_relevant_change(&prev, &next));
 

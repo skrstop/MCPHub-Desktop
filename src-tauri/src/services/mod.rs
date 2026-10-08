@@ -17,5 +17,7 @@ pub mod subscription_hub;
 pub mod http_server;
 pub mod rmcp_bridge;
 pub mod list_freshness;
+pub mod oauth_upstream;
+pub mod oauth_provider;
 pub mod skill_service;
 pub mod fts_service;

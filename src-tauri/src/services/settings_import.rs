@@ -46,6 +46,8 @@ struct RawServerConfig {
     keep_alive_interval: Option<u64>,
     #[serde(rename = "passthroughHeaders", alias = "passthrough_headers")]
     passthrough_headers: Option<Vec<String>>,
+    #[serde(default)]
+    oauth: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +155,13 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 enable_keep_alive: raw.enable_keep_alive,
                 keep_alive_interval: raw.keep_alive_interval,
                 passthrough_headers: raw.passthrough_headers,
+                oauth: raw.oauth.and_then(|v| match serde_json::from_value(v) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        log::warn!("[import] server '{}': invalid oauth ({}), dropped", name, e);
+                        None
+                    }
+                }),
                 per_session_client: raw.per_session_client,
                 start_on_demand: raw.start_on_demand,
                 idle_timeout_ms: raw.idle_timeout_ms,
@@ -277,5 +286,45 @@ mod tests {
         let parsed: McpSettings = serde_json::from_str(json).expect("parse");
         assert!(parsed.mcp_servers.unwrap().is_empty());
         assert!(parsed.users.unwrap().is_empty());
+    }
+
+    /// oauth blocks (v30) must round-trip through import into ServerOauthConfig,
+    /// including the #1293 allowInsecureTokenEndpoint flag.
+    #[test]
+    fn raw_server_config_parses_oauth_block() {
+        let json = r#"{
+            "mcpServers": {
+                "srv": {
+                    "url": "https://up.example/mcp",
+                    "type": "streamable-http",
+                    "oauth": {
+                        "clientId": "cid",
+                        "clientSecret": "sec",
+                        "scopes": ["read", "write"],
+                        "authorizationEndpoint": "https://up.example/authorize",
+                        "tokenEndpoint": "https://up.example/token",
+                        "resource": "https://up.example",
+                        "allowInsecureTokenEndpoint": true
+                    }
+                }
+            }
+        }"#;
+        let settings: McpSettings = serde_json::from_str(json).expect("parse");
+        let raw = settings.mcp_servers.unwrap().remove("srv").unwrap();
+        let oauth = raw.oauth.expect("oauth block present");
+        let parsed: crate::models::server::ServerOauthConfig =
+            serde_json::from_value(oauth).expect("oauth deserializes into ServerOauthConfig");
+        assert_eq!(parsed.client_id.as_deref(), Some("cid"));
+        assert_eq!(parsed.client_secret.as_deref(), Some("sec"));
+        assert_eq!(parsed.scopes.as_deref(), Some(&["read".to_string(), "write".to_string()][..]));
+        assert_eq!(parsed.authorization_endpoint.as_deref(), Some("https://up.example/authorize"));
+        assert_eq!(parsed.token_endpoint.as_deref(), Some("https://up.example/token"));
+        assert_eq!(parsed.resource.as_deref(), Some("https://up.example"));
+        assert_eq!(parsed.allow_insecure_token_endpoint, Some(true));
+
+        // Missing oauth block → None (no silent Some({})).
+        let json2 = r#"{"mcpServers": {"srv2": {"url": "https://x/mcp"}}}"#;
+        let s2: McpSettings = serde_json::from_str(json2).expect("parse");
+        assert!(s2.mcp_servers.unwrap().remove("srv2").unwrap().oauth.is_none());
     }
 }

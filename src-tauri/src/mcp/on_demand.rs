@@ -456,7 +456,7 @@ async fn build_and_connect(
         "[on-demand] Building + connecting on-demand client for '{}' (type={:?})",
         cfg.name, cfg.server_type
     );
-    let mut client = pool::build_client(cfg)?;
+    let mut client = pool::build_client(cfg).await?;
     match timeout(CONNECT_TIMEOUT, client.connect()).await {
         Ok(Ok(())) => {
             // 60s cap on tools/list: rmcp peer requests have no default

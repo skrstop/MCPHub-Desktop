@@ -48,7 +48,7 @@ fn pool() -> &'static Pool {
 }
 
 /// Build a McpClient from a ServerConfig
-pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
+pub(crate) async fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
     let name = cfg.name.clone();
     match cfg.server_type {
         ServerType::Stdio => {
@@ -71,7 +71,12 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
                 .as_deref()
                 .ok_or_else(|| anyhow!("SSE server '{}' missing url", name))?
                 .to_string();
-            let headers = cfg.headers.clone().unwrap_or_default();
+            let mut headers = cfg.headers.clone().unwrap_or_default();
+            // OAuth (v1.1.1004 §A3): inject flow/static token credentials.
+            let oauth_header = crate::services::oauth_upstream::resolve_authorization_header(cfg)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            crate::services::oauth_upstream::merge_authorization_header(&mut headers, oauth_header);
             let transport = SseTransport::new(&name, url, headers);
             Ok(McpClient::new(name, Box::new(transport)))
         }
@@ -81,7 +86,12 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
                 .as_deref()
                 .ok_or_else(|| anyhow!("HTTP server '{}' missing url", name))?
                 .to_string();
-            let headers = cfg.headers.clone().unwrap_or_default();
+            let mut headers = cfg.headers.clone().unwrap_or_default();
+            // OAuth (v1.1.1004 §A3): inject flow/static token credentials.
+            let oauth_header = crate::services::oauth_upstream::resolve_authorization_header(cfg)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            crate::services::oauth_upstream::merge_authorization_header(&mut headers, oauth_header);
             // rmcp-backed transport (AGENTS.md §3.9.6): official SDK protocol
             // layer — Auto lifecycle (discover probe → legacy fallback),
             // native MRTR, native tasks/get polling, custom headers.
@@ -152,7 +162,20 @@ pub(crate) fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
                 version: openapi_cfg.version.clone(),
                 security,
                 passthrough_headers,
-                headers: cfg.headers.clone().unwrap_or_default(),
+                // OAuth (v1.1.1004 §A3): inject flow/static token credentials
+                // into the default headers (user Authorization wins).
+                headers: {
+                    let mut headers = cfg.headers.clone().unwrap_or_default();
+                    let oauth_header =
+                        crate::services::oauth_upstream::resolve_authorization_header(cfg)
+                            .await
+                            .map_err(|e| anyhow!(e))?;
+                    crate::services::oauth_upstream::merge_authorization_header(
+                        &mut headers,
+                        oauth_header,
+                    );
+                    headers
+                },
             };
 
             let transport = OpenapiTransport::new(&name, transport_config);
@@ -281,7 +304,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
 
     for attempt in 1..=MAX_RETRIES {
         // Build client
-        let mut entry_client = match build_client(cfg) {
+        let mut entry_client = match build_client(cfg).await {
             Ok(c) => c,
             Err(e) => {
                 log::error!("[{}] Failed to build client: {}", name, e);

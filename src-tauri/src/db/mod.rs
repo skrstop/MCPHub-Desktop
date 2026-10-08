@@ -14,6 +14,16 @@ pub fn pool() -> &'static SqlitePool {
     DB_POOL.get().expect("Database not initialized")
 }
 
+/// Test-only: install a pool into the global slot without an AppHandle.
+/// Lets service-layer integration tests (oauth_upstream flow E2E, oauth
+/// provider tests) exercise the real DB-backed stores. Idempotent: multiple
+/// test modules each run their own Once-init; the first one wins and later
+/// initializations are silently ignored (a test binary runs one global DB).
+#[cfg(test)]
+pub fn set_pool_for_test(pool: SqlitePool) {
+    let _ = DB_POOL.set(pool);
+}
+
 pub async fn initialize(app: &AppHandle) -> Result<()> {
     let app_dir = app
         .path()

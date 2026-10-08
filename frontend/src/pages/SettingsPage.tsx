@@ -24,7 +24,7 @@ import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import SmartRoutingIndexPanel from '@/components/SmartRoutingIndexPanel';
 import ModelVectorSettings from '@/components/ModelVectorSettings';
 import { reindexSmartRouting } from '@/services/smartRoutingService';
-import { apiGet, apiPost, apiPut } from '@/utils/fetchInterceptor';
+import { apiDelete, apiGet, apiPost, apiPut } from '@/utils/fetchInterceptor';
 import {
   filterBearerKeysByScopeFilter,
   getBearerKeyScopeFilterOptions,
@@ -696,6 +696,12 @@ const SettingsPage: React.FC = () => {
     dynamicRegistrationClientTtl: '2592000',
   });
 
+  // OAuth Provider registered clients (desktop): loaded when the section
+  // expands; revoke drops the client + all its tokens.
+  const [oauthClients, setOauthClients] = useState<
+    { clientId: string; name: string; scopes: string[]; createdAt: number; revoked: boolean }[]
+  >([]);
+
   const [tempBetterAuthConfig, setTempBetterAuthConfig] = useState<{
     baseUrl: string;
     basePath: string;
@@ -1007,10 +1013,37 @@ const SettingsPage: React.FC = () => {
       | 'exportConfig'
       | 'bearerKeys',
   ) => {
-    setSectionsVisible((prev) => ({
-      ...prev,
-      [section]: !prev[section],
-    }));
+    setSectionsVisible((prev) => {
+      const next = { ...prev, [section]: !prev[section] };
+      // Load the OAuth client list when the section is expanded on desktop.
+      if (section === 'oauthServerConfig' && next.oauthServerConfig && isTauri()) {
+        loadOauthClients();
+      }
+      return next;
+    });
+  };
+
+  const loadOauthClients = async () => {
+    try {
+      const result = await apiGet<{ success: boolean; data?: { clientId: string; name: string; scopes: string[]; createdAt: number; revoked: boolean }[] }>('/oauth-clients');
+      setOauthClients(result.data ?? []);
+    } catch {
+      showToast(t('settings.oauthClientsLoadFailed'));
+    }
+  };
+
+  const handleRevokeOAuthClient = async (clientId: string) => {
+    try {
+      const ok = await apiDelete<{ success: boolean; data?: boolean }>(`/oauth-clients/${encodeURIComponent(clientId)}`);
+      if (ok?.data) {
+        showToast(t('settings.oauthClientRevokeSuccess'));
+      } else {
+        showToast(t('settings.oauthClientRevokeFailed'));
+      }
+      loadOauthClients();
+    } catch {
+      showToast(t('settings.oauthClientRevokeFailed'));
+    }
   };
 
   // Draft state for the HTTP port input: commit on blur instead of per
@@ -1294,6 +1327,11 @@ const SettingsPage: React.FC = () => {
     key: 'enabled' | 'requireClientSecret' | 'requireState',
     value: boolean,
   ) => {
+    // Linkage: enabling the OAuth server requires the built-in HTTP server —
+    // turn it on automatically so external clients can actually reach /oauth/*.
+    if (key === 'enabled' && value && !routingConfig.exposeHttp) {
+      await updateSystemConfig({ exposeHttp: true });
+    }
     await updateOAuthServerConfig(key, value);
   };
 
@@ -3665,8 +3703,9 @@ const SettingsPage: React.FC = () => {
         </div>
       </PermissionChecker>}
 
-      {/* OAuth Server Configuration Settings - Hidden in desktop client */}
-      {!isTauri() && <PermissionChecker permissions={PERMISSIONS.SETTINGS_OAUTH_SERVER}>
+      {/* OAuth Server Configuration Settings — desktop v1.1.1004: provider
+          endpoints live on the built-in HTTP server (issuer = its address). */}
+      {<PermissionChecker permissions={PERMISSIONS.SETTINGS_OAUTH_SERVER}>
         <div className="hub-card mb-6 overflow-hidden">
           <div
             className="flex justify-between items-center cursor-pointer transition-colors hover:bg-[var(--hub-surface-hover)] py-3 px-5"
@@ -3687,6 +3726,11 @@ const SettingsPage: React.FC = () => {
                   <p className="text-sm text-gray-500">
                     {t('settings.enableOauthServerDescription')}
                   </p>
+                  {isTauri() && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                      {t('settings.oauthServerDesktopHint')}
+                    </p>
+                  )}
                 </div>
                 <Switch
                   disabled={loading}
@@ -3955,6 +3999,46 @@ const SettingsPage: React.FC = () => {
                     </button>
                   </div>
                 </div>
+
+                {isTauri() && (
+                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                    <div className="mb-2">
+                      <h3 className="font-medium text-gray-700">{t('settings.oauthClients')}</h3>
+                      <p className="text-sm text-gray-500">{t('settings.oauthClientsDescription')}</p>
+                    </div>
+                    {oauthClients.length === 0 ? (
+                      <p className="text-sm text-gray-500">{t('settings.oauthClientsEmpty')}</p>
+                    ) : (
+                      <ul className="divide-y divide-[var(--hub-line-2)]">
+                        {oauthClients.map((c) => (
+                          <li key={c.clientId} className="flex items-center justify-between py-2 gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-gray-700 truncate">
+                                {c.name || c.clientId}
+                                {c.revoked && (
+                                  <span className="ml-2 text-xs text-red-500">{t('settings.oauthClientRevoked')}</span>
+                                )}
+                              </div>
+                              <div className="text-xs text-gray-500 truncate">{c.clientId}</div>
+                              <div className="text-xs text-gray-400 truncate">
+                                {c.scopes.join(' ') || 'mcp:all'} · {new Date(c.createdAt * 1000).toLocaleString()}
+                              </div>
+                            </div>
+                            {!c.revoked && (
+                              <button
+                                className="hub-btn danger shrink-0"
+                                disabled={loading}
+                                onClick={() => handleRevokeOAuthClient(c.clientId)}
+                              >
+                                {t('settings.oauthClientRevoke')}
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -406,6 +406,8 @@ pub fn run() {
                     loop {
                         // run_cleanup_with_summary already logs to both stderr and database
                         let _ = services::log_service::run_cleanup_with_summary().await;
+                        // OAuth provider: drop expired codes/tokens opportunistically.
+                        services::oauth_provider::cleanup_expired().await;
                         tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
                     }
                 });
@@ -459,6 +461,12 @@ pub fn run() {
             commands::servers::check_stdio_updates,
             commands::servers::check_server_update,
             commands::servers::clear_cache,
+            // OAuth upstream commands (v1.1.1004)
+            commands::oauth::oauth_connect,
+            commands::oauth::oauth_disconnect,
+            commands::oauth::get_server_oauth_status,
+            commands::oauth::list_oauth_clients,
+            commands::oauth::revoke_oauth_client,
             // Group commands
             commands::groups::list_groups,
             commands::groups::search_groups,

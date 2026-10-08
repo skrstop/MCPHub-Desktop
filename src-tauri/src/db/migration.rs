@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 29;
+pub const TARGET_VERSION: i64 = 31;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -180,6 +180,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         27 => migrate_v27(pool).await,
         28 => migrate_v28(pool).await,
         29 => migrate_v29(pool).await,
+        30 => migrate_v30(pool).await,
+        31 => migrate_v31(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -296,6 +298,92 @@ async fn migrate_v29(pool: &SqlitePool) -> Result<()> {
             .await?;
         log::warn!("[db] migration v29: rebuilt bearer_keys with token schema (fresh-install repair)");
     }
+    Ok(())
+}
+
+/// v29 → v30: OAuth upstream support.
+/// 1) `servers.oauth` column — stores the `ServerOauthConfig` JSON (client
+///    credentials, endpoints, scopes, static tokens) so the previously
+///    UI-only oauth block finally persists on the Rust side.
+/// 2) `oauth_upstream_tokens` — one row per server holding the rmcp
+///    `AuthorizationManager` state (credentials + pending authorization
+///    round) as JSON blobs, so token refreshes never rewrite the server row.
+async fn migrate_v30(pool: &SqlitePool) -> Result<()> {
+    let has_oauth: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('servers') WHERE name='oauth'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_oauth == 0 {
+        sqlx::query("ALTER TABLE servers ADD COLUMN oauth TEXT")
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_upstream_tokens (
+            server_name        TEXT PRIMARY KEY,
+            credentials_json   TEXT NOT NULL DEFAULT '',
+            pending_json       TEXT NOT NULL DEFAULT '',
+            status             TEXT NOT NULL DEFAULT 'disabled',
+            error_message      TEXT NOT NULL DEFAULT '',
+            updated_at         INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// v30 → v31: OAuth Provider (MCPHub as authorization server).
+/// Three tables backing the /oauth/* endpoint family:
+/// - `oauth_clients` — RFC 7591 dynamic / pre-registered clients.
+/// - `oauth_tokens`  — issued access/refresh tokens (SHA-256 hashes only —
+///   unlike bearer keys the token never lands in the DB in plaintext).
+/// - `oauth_codes`   — single-use authorization codes (60s TTL, PKCE bound).
+async fn migrate_v31(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_clients (
+            client_id          TEXT PRIMARY KEY,
+            client_secret_hash TEXT,
+            name               TEXT NOT NULL DEFAULT '',
+            redirect_uris      TEXT NOT NULL DEFAULT '[]',
+            scopes             TEXT NOT NULL DEFAULT '',
+            created_at         INTEGER NOT NULL DEFAULT 0,
+            revoked            INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_tokens (
+            token_hash          TEXT PRIMARY KEY,
+            kind                TEXT NOT NULL DEFAULT 'access',
+            client_id           TEXT NOT NULL,
+            scope               TEXT NOT NULL DEFAULT '',
+            resource            TEXT NOT NULL DEFAULT '',
+            expires_at          INTEGER NOT NULL DEFAULT 0,
+            refresh_expires_at  INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS oauth_codes (
+            code_hash        TEXT PRIMARY KEY,
+            client_id        TEXT NOT NULL,
+            challenge        TEXT NOT NULL DEFAULT '',
+            challenge_method TEXT NOT NULL DEFAULT 'S256',
+            scope            TEXT NOT NULL DEFAULT '',
+            resource         TEXT NOT NULL DEFAULT '',
+            redirect_uri     TEXT NOT NULL DEFAULT '',
+            expires_at       INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client ON oauth_tokens(client_id)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1480,6 +1568,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hit, 1);
+    }
+
+    /// v30 迁移在全新库上应为 servers 表加 oauth 列、建出 oauth_upstream_tokens
+    /// 表（可直插直查），并推进到 TARGET_VERSION；重跑幂等。
+    #[tokio::test]
+    async fn v30_oauth_upstream_schema() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('servers')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(cols.iter().any(|x| x == "oauth"), "servers.oauth missing in {:?}", cols);
+
+        sqlx::query(
+            "INSERT INTO oauth_upstream_tokens (server_name, status, updated_at) \
+             VALUES ('srv', 'connected', 123)",
+        )
+        .execute(&pool)
+        .await
+        .expect("oauth_upstream_tokens insert must succeed");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM oauth_upstream_tokens WHERE server_name = 'srv'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "connected");
+
+        // Idempotent: second run is a no-op.
+        run_pending(&pool).await.expect("re-run migrations");
+    }
+
+    /// v31 迁移在全新库上应建出 OAuth Provider 三表（可直插直查），推进到
+    /// TARGET_VERSION，且重跑幂等。
+    #[tokio::test]
+    async fn v31_oauth_provider_schema() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        sqlx::query(
+            "INSERT INTO oauth_clients (client_id, name, redirect_uris, created_at) \
+             VALUES ('cid', 'Claude', '[\"http://127.0.0.1/cb\"]', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("oauth_clients insert");
+        sqlx::query(
+            "INSERT INTO oauth_tokens (token_hash, client_id, expires_at) \
+             VALUES ('h1', 'cid', 99)",
+        )
+        .execute(&pool)
+        .await
+        .expect("oauth_tokens insert");
+        sqlx::query(
+            "INSERT INTO oauth_codes (code_hash, client_id, expires_at) \
+             VALUES ('c1', 'cid', 60)",
+        )
+        .execute(&pool)
+        .await
+        .expect("oauth_codes insert");
+
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM oauth_clients WHERE client_id = 'cid'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name, "Claude");
+        let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oauth_tokens WHERE client_id='cid'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cnt, 1);
+
+        // Idempotent: second run is a no-op.
+        run_pending(&pool).await.expect("re-run migrations");
     }
 
     /// v21 迁移在全新库上应建出三张 RAG 表 + 全部查询索引，且版本号推进到
