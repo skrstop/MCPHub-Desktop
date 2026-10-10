@@ -193,6 +193,7 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 
 ## 致谢与许可
 
+- [AtomGit](https://atomgit.com/skrstop/MCPHub-Desktop) 在国内托管, 帮助国内用户更快访问项目与下载Release
 - **上游项目归属**：[`mcphub-origin/`](./mcphub-origin) 内的全部代码、文档、资源均来自第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub)，**版权归原作者 [@samanhappy](https://github.com/samanhappy) 及其贡献者所有**，本项目仅作镜像保留以便溯源，未对其主张任何权利。
 - **致谢**：感谢 [@samanhappy](https://github.com/samanhappy) 及所有上游贡献者提供了优秀的开源实现。
 - **许可证**：上游项目许可证见 [`mcphub-origin/LICENSE`](./mcphub-origin/LICENSE)；本桌面端在严格遵守该许可证的前提下进行二次开发与发布。
