@@ -17,6 +17,7 @@
 """
 import json, http.client, sqlite3, os, sys, time
 from urllib.parse import quote
+from pin_helper import pin, unpin
 
 HOST, PORT = "127.0.0.1", 23333
 DB = os.path.expanduser("~/Library/Application Support/app.mcphub.desktop/mcphub.db")
@@ -134,109 +135,122 @@ KEY_MAP = {"_meta": "_meta", "title": "title", "annotations": "annotations",
 saved_fields, saved_prog = set_fields(SIX)
 time.sleep(0.3)
 
-# 发现一个带 annotations 或 outputSchema 的真实工具作正向样例
-sid = mcp_session()
-check("P0 $smart session", sid is not None)
-st, r = mcp_call(sid, "smart_route_search", {"query": "code", "limit": 20}, rid="p0")
-all_hits = unwrap_text(r).get("tools", [])
-probe = mcp_session()
-st, r = mcp_call(probe, "smart_route_search", {"query": "a", "limit": 50}, rid="p0b")
-all_hits = unwrap_text(r).get("tools", []) or all_hits
-src_ann = next((h for h in all_hits if "annotations" in h), None)
-src_os = next((h for h in all_hits if "outputSchema" in h), None)
-print(f"# probe: hits={len(all_hits)} ann_src={src_ann and src_ann['name']} os_src={src_os and src_os['name']}")
-
-def run_search(sid):
-    st, r = mcp_call(sid, "smart_route_search", {"query": "a", "limit": 50}, rid="s")
-    return unwrap_text(r).get("tools", [])
-
-def run_describe(sid, tool_name):
-    st, r = mcp_call(sid, "smart_route_describe", {"toolName": tool_name}, rid="d")
-    return unwrap_text(r).get("tool", {})
-
-# ── 逐字段验证 ──────────────────────────────────────────────────────────
-for field in SIX:
-    key = KEY_MAP[field]
-    others = [k for k in SIX if k != field]
-
-    # 1) 仅启用该字段
-    set_fields([field]); time.sleep(0.3)
-    sid = mcp_session()
-    hits = run_search(sid)
-    extra_in_hits = set()
-    for h in hits:
-        extra_in_hits |= (set(h.keys()) - BASE - {"inputSchema"})
-    only_field = extra_in_hits <= {key}
-    check(f"F1[{field}] enable-only: search extra keys ⊆ {{{key}}}", only_field,
-          f"extra={sorted(extra_in_hits)}")
-    # 正向样例：若库里有带该字段样例（annotations/outputSchema 有；其余上游不发 → 无样例）
-    if field == "annotations":
-        check(f"F1[{field}] positive sample appears", src_ann is not None,
-              "no ann sample found in library")
-    if field == "outputSchema":
-        check(f"F1[{field}] positive sample appears", src_os is not None,
-              "no outputSchema sample found in library")
-    # describe 正向（有样例时）
-    if field == "annotations" and src_ann:
-        tool = run_describe(sid, src_ann["name"])
-        check(f"F1[{field}] describe carries field", key in tool, f"keys={sorted(tool.keys())}")
-    if field == "outputSchema" and src_os:
-        tool = run_describe(sid, src_os["name"])
-        check(f"F1[{field}] describe carries field", key in tool, f"keys={sorted(tool.keys())}")
-
-    # 2) 排除该字段（其余五个开）
-    set_fields(others); time.sleep(0.3)
-    sid = mcp_session()
-    hits = run_search(sid)
-    leaked = set()
-    for h in hits:
-        leaked |= (set(h.keys()) - BASE - {"inputSchema"})
-    check(f"F2[{field}] excluded: field never appears", key not in leaked,
-          f"leaked={sorted(leaked)}")
-    if field == "annotations" and src_ann:
-        tool = run_describe(sid, src_ann["name"])
-        check(f"F2[{field}] describe excludes field", key not in tool)
-
-set_fields(SIX); time.sleep(0.3)
-
-# ── G. 渐进披露：search 不携带 optional fields ─────────────────────────
-set_progressive(True); time.sleep(0.3)
-_G_OK = False
 try:
+    # Round-8 pin parity: $smart search is pin-filtered. Seed pins for the tools
+    # the probe targets (Idea analyze_calls carries annotations; search_text
+    # carries outputSchema) + the ip tool; restore at the end.
+    pin("Idea-mcp-server", "analyze_calls")
+    pin("Idea-mcp-server", "search_text")
+    pin("本机公网ip查询", "getPublicIp")
+    # 发现一个带 annotations 或 outputSchema 的真实工具作正向样例
     sid = mcp_session()
-    hits = run_search(sid)
-    extras = set()
-    for h in hits:
-        extras |= (set(h.keys()) - BASE)
-    check("G progressive search carries no optional fields", extras <= {"inputSchema"} or not extras,
-          f"extras={sorted(extras)}")
-    tools_list_ok = False
-    st, r = mcp_call(sid, "smart_route_search", {"query": "ip", "limit": 5}, rid="g2")
-    # 渐进模式下元工具目录应为 3 个（search/describe/call）
-    st, data, _ = req("POST", "/mcp/$smart", {"jsonrpc":"2.0","id":"tl","method":"tools/list"},
-                      headers={"mcp-session-id": sid})
-    tl = sse_last(data, "tl")
-    names = [t["name"] for t in tl.get("result", {}).get("tools", [])]
-    meta_named = [n for n in names if n.startswith("smart_route_")]
-    check("G2 progressive lists 3 meta tools", len(meta_named) == 3, f"meta={meta_named}")
-    _G_OK = True
+    check("P0 $smart session", sid is not None)
+    st, r = mcp_call(sid, "smart_route_search", {"query": "code", "limit": 20}, rid="p0")
+    all_hits = unwrap_text(r).get("tools", [])
+    probe = mcp_session()
+    st, r = mcp_call(probe, "smart_route_search", {"query": "a", "limit": 50}, rid="p0b")
+    all_hits = unwrap_text(r).get("tools", []) or all_hits
+    src_ann = next((h for h in all_hits if "annotations" in h), None)
+    src_os = next((h for h in all_hits if "outputSchema" in h), None)
+    print(f"# probe: hits={len(all_hits)} ann_src={src_ann and src_ann['name']} os_src={src_os and src_os['name']}")
+
+    def run_search(sid):
+        st, r = mcp_call(sid, "smart_route_search", {"query": "a", "limit": 50}, rid="s")
+        return unwrap_text(r).get("tools", [])
+
+    def run_describe(sid, tool_name):
+        st, r = mcp_call(sid, "smart_route_describe", {"toolName": tool_name}, rid="d")
+        return unwrap_text(r).get("tool", {})
+
+    # ── 逐字段验证 ──────────────────────────────────────────────────────────
+    for field in SIX:
+        key = KEY_MAP[field]
+        others = [k for k in SIX if k != field]
+
+        # 1) 仅启用该字段
+        set_fields([field]); time.sleep(0.3)
+        sid = mcp_session()
+        hits = run_search(sid)
+        extra_in_hits = set()
+        for h in hits:
+            extra_in_hits |= (set(h.keys()) - BASE - {"inputSchema"})
+        only_field = extra_in_hits <= {key}
+        check(f"F1[{field}] enable-only: search extra keys ⊆ {{{key}}}", only_field,
+              f"extra={sorted(extra_in_hits)}")
+        # 正向样例：若库里有带该字段样例（annotations/outputSchema 有；其余上游不发 → 无样例）
+        if field == "annotations":
+            check(f"F1[{field}] positive sample appears", src_ann is not None,
+                  "no ann sample found in library")
+        if field == "outputSchema":
+            check(f"F1[{field}] positive sample appears", src_os is not None,
+                  "no outputSchema sample found in library")
+        # describe 正向（有样例时）
+        if field == "annotations" and src_ann:
+            tool = run_describe(sid, src_ann["name"])
+            check(f"F1[{field}] describe carries field", key in tool, f"keys={sorted(tool.keys())}")
+        if field == "outputSchema" and src_os:
+            tool = run_describe(sid, src_os["name"])
+            check(f"F1[{field}] describe carries field", key in tool, f"keys={sorted(tool.keys())}")
+
+        # 2) 排除该字段（其余五个开）
+        set_fields(others); time.sleep(0.3)
+        sid = mcp_session()
+        hits = run_search(sid)
+        leaked = set()
+        for h in hits:
+            leaked |= (set(h.keys()) - BASE - {"inputSchema"})
+        check(f"F2[{field}] excluded: field never appears", key not in leaked,
+              f"leaked={sorted(leaked)}")
+        if field == "annotations" and src_ann:
+            tool = run_describe(sid, src_ann["name"])
+            check(f"F2[{field}] describe excludes field", key not in tool)
+
+    set_fields(SIX); time.sleep(0.3)
+
+    # ── G. 渐进披露：search 不携带 optional fields ─────────────────────────
+    set_progressive(True); time.sleep(0.3)
+    _G_OK = False
+    try:
+        sid = mcp_session()
+        hits = run_search(sid)
+        extras = set()
+        for h in hits:
+            extras |= (set(h.keys()) - BASE)
+        check("G progressive search carries no optional fields", extras <= {"inputSchema"},
+              f"extras={sorted(extras)}")
+        tools_list_ok = False
+        st, r = mcp_call(sid, "smart_route_search", {"query": "ip", "limit": 5}, rid="g2")
+        # 渐进模式下元工具目录应为 3 个（search/describe/call）
+        st, data, _ = req("POST", "/mcp/$smart", {"jsonrpc":"2.0","id":"tl","method":"tools/list"},
+                          headers={"mcp-session-id": sid})
+        tl = sse_last(data, "tl")
+        names = [t["name"] for t in tl.get("result", {}).get("tools", [])]
+        meta_named = [n for n in names if n.startswith("smart_route_")]
+        check("G2 progressive lists 3 meta tools", len(meta_named) == 3, f"meta={meta_named}")
+        _G_OK = True
+    finally:
+        # Restore even when a G-group assertion crashes — leaked SIX+progressive
+        # would poison every later suite.
+        restore(saved_fields, saved_prog); time.sleep(0.3)
+        if not _G_OK:
+            check("G section completed", False, "G group crashed mid-section (config restored)")
+
+    # ── H/I. REST 状态码回归 ────────────────────────────────────────────────
+    st, data, _ = req("POST", "/api/$smart/call", {"toolName": "definitely-not-a-tool", "arguments": {}})
+    err_code = None
+    try: err_code = json.loads(data).get("error") and json.loads(data).get("status")
+    except Exception: pass
+    check("H smart_rest_call unknown tool → 400", st == 400, f"st={st} body={data[:120]}")
+    st, data, _ = req("POST", "/api/$smart/describe", {"toolName": "definitely-not-a-tool"})
+    check("I smart_rest_describe unknown tool → 200 + error body", st == 200 and "not found" in data,
+          f"st={st} body={data[:120]}")
 finally:
-    # Restore even when a G-group assertion crashes — leaked SIX+progressive
-    # would poison every later suite.
+    # Restore config + pins even on a mid-loop crash — leaked SIX fields or
+    # stale pins would poison every later suite.
     restore(saved_fields, saved_prog); time.sleep(0.3)
-    if not _G_OK:
-        check("G section completed", False, "G group crashed mid-section (config restored)")
-
-# ── H/I. REST 状态码回归 ────────────────────────────────────────────────
-st, data, _ = req("POST", "/api/$smart/call", {"toolName": "definitely-not-a-tool", "arguments": {}})
-err_code = None
-try: err_code = json.loads(data).get("error") and json.loads(data).get("status")
-except Exception: pass
-check("H smart_rest_call unknown tool → 400", st == 400, f"st={st} body={data[:120]}")
-st, data, _ = req("POST", "/api/$smart/describe", {"toolName": "definitely-not-a-tool"})
-check("I smart_rest_describe unknown tool → 200 + error body", st == 200 and "not found" in data,
-      f"st={st} body={data[:120]}")
-
+    unpin("Idea-mcp-server", "analyze_calls")
+    unpin("Idea-mcp-server", "search_text")
+    unpin("本机公网ip查询", "getPublicIp")
 print(f"\n== {len(PASS)}/{len(PASS)+len(FAIL)} passed, {len(FAIL)} failed ==")
 if FAIL:
     print("FAILED:", *FAIL, sep="\n  ")

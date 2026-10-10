@@ -225,18 +225,20 @@ interface SettingsContextValue {
 }
 
 const getDefaultOAuthServerConfig = (): OAuthServerConfig => ({
-  enabled: true,
+  // Rust provider_config defaults: enabled=false, code lifetime=60 — the UI
+  // switch must not render ON while the provider is actually off.
+  enabled: false,
   accessTokenLifetime: 3600,
   refreshTokenLifetime: 1209600,
-  authorizationCodeLifetime: 300,
+  authorizationCodeLifetime: 60,
   requireClientSecret: false,
-  allowedScopes: ['read', 'write'],
+  allowedScopes: [] as string[],
   requireState: false,
   dynamicRegistration: {
     enabled: true,
     allowedGrantTypes: ['authorization_code', 'refresh_token'],
     requiresAuthentication: false,
-    clientTtl: 2592000,
+    clientTtl: 0,
   },
 });
 
@@ -1017,6 +1019,17 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
         setOAuthServerConfig((prev) => ({
           ...prev,
           ...updates,
+          // Deep-merge nested groups so a partial `dynamicRegistration`
+          // update can't silently drop sibling keys locally while the
+          // server-side deep merge keeps them (UI/persisted drift).
+          ...(updates.dynamicRegistration
+            ? {
+                dynamicRegistration: {
+                  ...prev.dynamicRegistration,
+                  ...updates.dynamicRegistration,
+                },
+              }
+            : {}),
         }));
         showToast(t('settings.systemConfigUpdated'));
         return true;

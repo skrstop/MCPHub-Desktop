@@ -328,7 +328,8 @@
       "allowInsecureTokenEndpointHelp": "Admin uniquement. Désactivé par défaut. Envoie les identifiants et jetons sans TLS pour ce serveur en amont. À activer uniquement sur un réseau de confiance ; HTTPS est recommandé. Une fois activé, seuls les administrateurs peuvent modifier l'intégralité de la configuration de ce serveur ; un propriétaire non admin ne peut pas le faire.",
       "connectStarted": "Autorisation démarrée — approuvez-la dans la fenêtre du navigateur qui vient de s'ouvrir.",
       "connectFailed": "Échec du démarrage de l'autorisation OAuth",
-      "disconnected": "OAuth déconnecté"
+      "disconnected": "OAuth déconnecté",
+      "connectSuccess": "Autorisation OAuth terminée — identifiants enregistrés."
     },
     "duplicate": "Dupliquer",
     "nameInvalid": "Le nom du serveur ne peut contenir que des lettres, chiffres, points, underscores et traits d'union (ni espaces ni caractères spéciaux)",
@@ -897,7 +898,9 @@
       "excludeFileGroupRemove": "Réinclure ces fichiers (reprendre les vérifications de mise à jour)",
       "refreshSourceDone": "Mise à jour de la source terminée : {{added}} importés, {{removed}} supprimés, {{updated}} mis à jour",
       "refreshSourceTitle": "Mise à jour de la source",
-      "selectedCount": "{{count}} sélectionnés"
+      "selectedCount": "{{count}} sélectionnés",
+      "batchTagsPartialFailed": "Certains tags n'ont pas pu être enregistrés ({{n}} terminés)",
+      "exclusionPersistFailed": "Impossible d'enregistrer les exclusions"
     },
     "skills": {
       "title": "Skills"
@@ -1460,7 +1463,7 @@
     "dynamicRegistrationAllowedGrantTypesDescription": "Liste séparée par des virgules des types de flux disponibles pour les clients enregistrés dynamiquement",
     "dynamicRegistrationAllowedGrantTypesPlaceholder": "ex. authorization_code, refresh_token",
     "dynamicRegistrationAuth": "Exiger une authentification",
-    "dynamicRegistrationAuthDescription": "Protège l'endpoint d'enregistrement afin que seules les requêtes authentifiées puissent créer des clients",
+    "dynamicRegistrationAuthDescription": "Ferme l'enregistrement dynamique aux nouveaux clients (ce fournisseur n'offre pas de mécanisme d'identification — enregistrez les clients à l'avance).",
     "invalidNumberInput": "Veuillez saisir un nombre valide supérieur ou égal à zéro",
     "runtimeSystemDefault": "Par défaut du système",
     "runtimeInstalled": "Installé",
@@ -1554,7 +1557,8 @@
     "toolDefinitionFields": "Champs d'outil dans les résultats",
     "toolDefinitionFieldsDescription": "Champs facultatifs que les résultats de search_tools et describe_tool incluent en plus du nom, de la description et de l'inputSchema. Par défaut : title et annotations. Les autres servent surtout aux clients et peuvent être volumineux (les icônes sont des images base64).",
     "disablePasswordLogin": "Désactiver la connexion par mot de passe",
-    "disablePasswordLoginDescription": "Autoriser uniquement la connexion via les fournisseurs SSO : le formulaire utilisateur/mot de passe et POST /api/auth/login sont désactivés. Prend effet uniquement tant qu'au moins un fournisseur est activé et l'était déjà au démarrage de l'application. BETTER_AUTH_DISABLE_PASSWORD_LOGIN remplace ce paramètre ; le définir à false permet de retrouver l'accès si le fournisseur d'identité est indisponible."
+    "disablePasswordLoginDescription": "Autoriser uniquement la connexion via les fournisseurs SSO : le formulaire utilisateur/mot de passe et POST /api/auth/login sont désactivés. Prend effet uniquement tant qu'au moins un fournisseur est activé et l'était déjà au démarrage de l'application. BETTER_AUTH_DISABLE_PASSWORD_LOGIN remplace ce paramètre ; le définir à false permet de retrouver l'accès si le fournisseur d'identité est indisponible.",
+    "oauthClientRevokeConfirm": "La révocation de ce client invalide immédiatement tous ses jetons d'accès et de rafraîchissement. Le client devra se réenregistrer et se réautoriser."
   },
   "mcpb": {
     "upload": "Télécharger",

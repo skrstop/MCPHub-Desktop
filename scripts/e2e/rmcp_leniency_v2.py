@@ -102,13 +102,20 @@ def run_strict():
     if sid2: req(None, {"Mcp-Session-Id": sid2}, method="DELETE")
     if sid: req(None, {"Mcp-Session-Id": sid}, method="DELETE")
 
-run_lenient()
+def get_strict():
+    con = sqlite3.connect(DB)
+    cfg = json.loads(con.execute("SELECT config_json FROM system_config WHERE rowid=1").fetchone()[0] or "{}")
+    con.close()
+    return cfg.get("mcp", {}).get("strictValidation", False)
+
+_orig_strict = get_strict()  # capture pre-run baseline BEFORE any mutation
 try:
+    run_lenient()
     run_strict()
 finally:
     # 还原必须在 finally：strict 中途崩溃时残留 True 会毒化后续所有套件
-    # （review round 9，与第 8 轮连环失败同型）。
-    set_strict(False)
+    # （review round 9，与第 8 轮连环失败同型）。还原为运行前基线而非硬编码 False。
+    set_strict(_orig_strict)
     time.sleep(0.2)
 print(f"\n== {len(PASS)}/{len(PASS)+len(FAIL)} passed ==")
 if FAIL:

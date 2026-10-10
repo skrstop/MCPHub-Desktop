@@ -690,17 +690,23 @@ const SettingsPage: React.FC = () => {
   }>({
     accessTokenLifetime: '3600',
     refreshTokenLifetime: '1209600',
-    authorizationCodeLifetime: '300',
-    allowedScopes: 'read, write',
+    authorizationCodeLifetime: '60',
+    allowedScopes: '',
     dynamicRegistrationAllowedGrantTypes: 'authorization_code, refresh_token',
-    dynamicRegistrationClientTtl: '2592000',
+    dynamicRegistrationClientTtl: '0',
   });
+
+  // Set by every temp-field change; skipped by the rebuild effect so
+  // immediate-write toggles can't wipe unsaved drafts. Cleared on
+  // successful saves (saved == temp then, rebuild becomes a no-op).
+  const oauthDirtyRef = useRef(false);
 
   // OAuth Provider registered clients (desktop): loaded when the section
   // expands; revoke drops the client + all its tokens.
   const [oauthClients, setOauthClients] = useState<
     { clientId: string; name: string; scopes: string[]; createdAt: number; revoked: boolean }[]
   >([]);
+  const [revokeClientTarget, setRevokeClientTarget] = useState<string | null>(null);
 
   const [tempBetterAuthConfig, setTempBetterAuthConfig] = useState<{
     baseUrl: string;
@@ -899,7 +905,12 @@ const SettingsPage: React.FC = () => {
   }, [mcpRouterConfig]);
 
   useEffect(() => {
-    if (oauthServerConfig) {
+    // Drafts typed into tempOAuthServerConfig must survive immediate-write
+    // toggles in the same section (requireState / dynamicRegistration / etc.):
+    // each toggle updates the saved config, which re-fires this effect — an
+    // unconditional rebuild would silently discard unsaved edits. Same
+    // dirty-ref pattern as smartRouting above.
+    if (oauthServerConfig && !oauthDirtyRef.current) {
       setTempOAuthServerConfig({
         accessTokenLifetime:
           oauthServerConfig.accessTokenLifetime !== undefined
@@ -1219,6 +1230,11 @@ const SettingsPage: React.FC = () => {
 
   const handleEmbeddingProviderPresetChange = (presetId: EmbeddingProviderPresetId) => {
     const preset = EMBEDDING_PROVIDER_PRESETS[presetId];
+    // Mutates temp (incl. baseUrl/model) — must mark dirty or a subsequent
+    // immediate-write toggle rebuilds temp from saved config and silently
+    // discards the un-saved preset selection (same class as the other
+    // smartRouting handlers; review round 9).
+    smartRoutingDirtyRef.current = true;
     setTempSmartRoutingConfig({
       ...tempSmartRoutingConfig,
       embeddingProviderPreset: presetId,
@@ -1251,6 +1267,7 @@ const SettingsPage: React.FC = () => {
   type OAuthServerTempNumberField = OAuthServerNumberField | 'dynamicRegistrationClientTtl';
 
   const handleOAuthServerNumberChange = (key: OAuthServerTempNumberField, value: string) => {
+    oauthDirtyRef.current = true;
     setTempOAuthServerConfig((prev) => ({
       ...prev,
       [key]: value,
@@ -1261,6 +1278,7 @@ const SettingsPage: React.FC = () => {
     key: 'allowedScopes' | 'dynamicRegistrationAllowedGrantTypes',
     value: string,
   ) => {
+    oauthDirtyRef.current = true;
     setTempOAuthServerConfig((prev) => ({
       ...prev,
       [key]: value,
@@ -1275,12 +1293,25 @@ const SettingsPage: React.FC = () => {
     }
 
     const parsedValue = Number(rawValue);
-    if (Number.isNaN(parsedValue) || parsedValue < 0) {
+    // Rust contract: `.filter(|v| *v > 0)` + as_i64 — 0, negatives, and
+    // fractions silently fall back to the default lifetime while the UI would
+    // keep showing the stored value. Reject at the source.
+    if (Number.isNaN(parsedValue) || parsedValue <= 0 || !Number.isInteger(parsedValue)) {
       showToast(t('settings.invalidNumberInput') || 'Please enter a valid number', 'error');
       return;
     }
 
-    await updateOAuthServerConfig(key, parsedValue);
+    const ok = await updateOAuthServerConfig(key, parsedValue);
+    if (ok) {
+      // Keep the displayed value in sync with the persisted (normalized)
+      // number — temp would otherwise keep showing the raw input.
+      setTempOAuthServerConfig((prev) => ({ ...prev, [key]: parsedValue }));
+    }
+    // Field-scoped save: leave the section-wide dirty ref alone — clearing
+    // it here would let the temp-rebuild effect overwrite OTHER fields'
+    // unsaved drafts (cross-field draft wipe, round 11 review). There is no
+    // full-section save for this section: the flag is intentionally never
+    // auto-cleared and temp re-syncs from saved config on section remount.
   };
 
   const saveDynamicRegistrationClientTtl = async () => {
@@ -1296,10 +1327,19 @@ const SettingsPage: React.FC = () => {
       return;
     }
 
-    await updateOAuthServerConfig('dynamicRegistration', {
+    const normalizedTtl = Math.floor(parsedValue);
+    const ok = await updateOAuthServerConfig('dynamicRegistration', {
       ...oauthServerConfig.dynamicRegistration,
-      clientTtl: Math.floor(parsedValue),
+      clientTtl: normalizedTtl,
     });
+    if (ok) {
+      setTempOAuthServerConfig((prev) => ({ ...prev, dynamicRegistrationClientTtl: String(normalizedTtl) }));
+    }
+    // Field-scoped save: leave the section-wide dirty ref alone — clearing
+    // it here would let the temp-rebuild effect overwrite OTHER fields'
+    // unsaved drafts (cross-field draft wipe, round 11 review). There is no
+    // full-section save for this section: the flag is intentionally never
+    // auto-cleared and temp re-syncs from saved config on section remount.
   };
 
   const saveOAuthServerAllowedScopes = async () => {
@@ -1308,7 +1348,12 @@ const SettingsPage: React.FC = () => {
       .map((scope) => scope.trim())
       .filter((scope) => scope.length > 0);
 
-    await updateOAuthServerConfig('allowedScopes', scopes);
+    const ok = await updateOAuthServerConfig('allowedScopes', scopes);
+    // Field-scoped save: leave the section-wide dirty ref alone — clearing
+    // it here would let the temp-rebuild effect overwrite OTHER fields'
+    // unsaved drafts (cross-field draft wipe, round 11 review). There is no
+    // full-section save for this section: the flag is intentionally never
+    // auto-cleared and temp re-syncs from saved config on section remount.
   };
 
   const saveOAuthServerGrantTypes = async () => {
@@ -1317,10 +1362,15 @@ const SettingsPage: React.FC = () => {
       .map((grant) => grant.trim())
       .filter((grant) => grant.length > 0);
 
-    await updateOAuthServerConfig('dynamicRegistration', {
+    const ok = await updateOAuthServerConfig('dynamicRegistration', {
       ...oauthServerConfig.dynamicRegistration,
       allowedGrantTypes: grantTypes,
     });
+    // Field-scoped save: leave the section-wide dirty ref alone — clearing
+    // it here would let the temp-rebuild effect overwrite OTHER fields'
+    // unsaved drafts (cross-field draft wipe, round 11 review). There is no
+    // full-section save for this section: the flag is intentionally never
+    // auto-cleared and temp re-syncs from saved config on section remount.
   };
 
   const handleOAuthServerToggle = async (
@@ -1330,9 +1380,12 @@ const SettingsPage: React.FC = () => {
     // Linkage: enabling the OAuth server requires the built-in HTTP server —
     // turn it on automatically so external clients can actually reach /oauth/*.
     if (key === 'enabled' && value && !routingConfig.exposeHttp) {
-      await updateSystemConfig({ exposeHttp: true });
+      const linked = await updateSystemConfig({ exposeHttp: true });
+      // Provider without the HTTP server is unreachable — abort the enable so
+      // the persisted state can't end up oauth-on/expose-off.
+      if (!linked) return false;
     }
-    await updateOAuthServerConfig(key, value);
+    return await updateOAuthServerConfig(key, value);
   };
 
   const handleDynamicRegistrationToggle = async (
@@ -1675,10 +1728,17 @@ const SettingsPage: React.FC = () => {
         updates.scoreThreshold = parsedScoreThreshold;
       }
 
-      // Save all changes in a single batch update
-      await updateSmartRoutingConfigBatch(updates);
+      // Save all changes in a single batch update; clear the dirty flag on
+      // success so later saved-config updates (e.g. envOverriddenFields)
+      // can rebuild temp again — a stuck dirty ref freezes the form.
+      const ok = await updateSmartRoutingConfigBatch(updates);
+      if (ok !== false) smartRoutingDirtyRef.current = false;
     } else {
-      // If disabling, just update the enabled status
+      // If disabling, just update the enabled status. Do NOT clear the dirty
+      // ref here: the save only persists `enabled`, so the successful write
+      // re-fires the temp-rebuild effect with the flag down and silently
+      // wipes any unsaved edits the user typed before flipping the toggle
+      // (round 10 review — mirror of the round-9 fix, opposite direction).
       await updateSmartRoutingConfig('enabled', value);
     }
   };
@@ -4028,7 +4088,7 @@ const SettingsPage: React.FC = () => {
                               <button
                                 className="hub-btn danger shrink-0"
                                 disabled={loading}
-                                onClick={() => handleRevokeOAuthClient(c.clientId)}
+                                onClick={() => setRevokeClientTarget(c.clientId)}
                               >
                                 {t('settings.oauthClientRevoke')}
                               </button>
@@ -4040,6 +4100,19 @@ const SettingsPage: React.FC = () => {
                   </div>
                 )}
               </div>
+              <ConfirmDialog
+                isOpen={revokeClientTarget !== null}
+                onClose={() => setRevokeClientTarget(null)}
+                onConfirm={() => {
+                  const id = revokeClientTarget;
+                  setRevokeClientTarget(null);
+                  if (id) handleRevokeOAuthClient(id);
+                }}
+                title={t('settings.oauthClientRevoke')}
+                message={t('settings.oauthClientRevokeConfirm')}
+                confirmText={t('settings.oauthClientRevoke')}
+                variant="danger"
+              />
             </div>
           )}
         </div>

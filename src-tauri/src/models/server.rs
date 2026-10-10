@@ -158,6 +158,15 @@ pub struct ServerOauthConfig {
     /// (RFC 8252) started only while an authorization is pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
+    /// RFC 7009 revocation endpoint (frontend collects it; no desktop flow
+    /// consumes it yet — persisted verbatim per #1193 round-trip guarantee).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_endpoint: Option<String>,
+    /// RFC 7591 dynamic-registration hints collected by the frontend. Opaque
+    /// pass-through blob (persisted verbatim; the desktop flow registers via
+    /// rmcp and does not consume these hints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_registration: Option<serde_json::Value>,
 }
 
 /// Full server configuration stored in DB / returned to frontend

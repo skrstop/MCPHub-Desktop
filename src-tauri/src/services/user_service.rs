@@ -164,8 +164,10 @@ pub async fn update_by_username(
     // BEGIN IMMEDIATE: the last-admin guard read and the writes must share
     // the write lock, or two concurrent demotes can both pass the guard and
     // leave zero admins (review round 10 TOCTOU fix).
-    let mut tx = db::pool().begin().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *tx).await?;
+    // begin() already issues BEGIN eagerly (sqlx 0.9) — a raw "BEGIN
+    // IMMEDIATE" inside it fails with "cannot start a transaction within a
+    // transaction" and made every deletion error out (R4 audit).
+    let mut tx = db::pool().begin_with("BEGIN IMMEDIATE").await?;
     if let Some(admin) = is_admin {
         // Last-admin guard (parity with delete_by_username): demoting the
         // final admin leaves user management unreachable until a restart
@@ -219,8 +221,10 @@ pub async fn update_by_username(
 pub async fn delete_by_username(username: &str) -> Result<()> {
     // BEGIN IMMEDIATE: guard read + delete share the write lock (review
     // round 10 TOCTOU fix, same as update_by_username).
-    let mut tx = db::pool().begin().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *tx).await?;
+    // begin() already issues BEGIN eagerly (sqlx 0.9) — a raw "BEGIN
+    // IMMEDIATE" inside it fails with "cannot start a transaction within a
+    // transaction" and made every deletion error out (R4 audit).
+    let mut tx = db::pool().begin_with("BEGIN IMMEDIATE").await?;
     // Last-admin guard: deleting the final admin leaves user management
     // unreachable until a restart reseeds the KNOWN default credential
     // (admin/admin) on a machine that may expose the HTTP server.

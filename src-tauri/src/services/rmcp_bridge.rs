@@ -392,45 +392,71 @@ impl HubBridge {
     /// resolves, and the subsequent `pool::call_tool` path cold-starts it.
     pub(crate) async fn resolve_pinned_target(
         &self,
+        pinned: Vec<(String, Vec<String>)>,
         scope: &str,
         bearer: Option<&crate::models::bearer_key::BearerKey>,
         tool_name: &str,
     ) -> Option<(String, String)> {
-        let pinned = self.smart_pinned_servers(scope, bearer).await;
+        // `pinned` is precomputed ONCE per request by the caller (the
+        // registry read costs a DB query per visible server — recomputing
+        // it per face was 3-4x the intended hot-path cost; re-applied round
+        // 12 after a concurrent-edit clobber).
         let server_filters = self.scope_filters(scope, bearer).await;
         let name_sep = name_separator().await;
         let use_prefix = server_filters.len() > 1;
-        for (server, pins) in &pinned {
-            for p in pins {
-                // A pin named like a meta tool is never listed — its prefixed
-                // form must not be callable either (parity).
-                if crate::smart_routing::meta::is_meta_tool(p) {
-                    continue;
-                }
-                let hit = if use_prefix {
-                    format!("{}{}{}", server, name_sep, p) == tool_name
-                } else {
-                    *p == tool_name
-                };
-                if !hit {
-                    continue;
-                }
-                // Group selection whitelist parity: the listing narrows every
-                // pin (server-level ones included) to the member's `tools`
-                // selection; the call side must refuse the same set.
-                if let Some(sf) = server_filters.iter().find(|f| f.name == *server) {
-                    if let Some(ref allowed) = sf.tools {
-                        if !allowed.contains(p) {
-                            continue;
+        let try_pin = |exact_only: bool| -> Option<(String, String)> {
+            for (server, pins) in &pinned {
+                for p in pins {
+                    // A pin named like a meta tool is never listed — its
+                    // prefixed form must not be callable either (parity).
+                    if crate::smart_routing::meta::is_meta_tool(p) {
+                        continue;
+                    }
+                    // The search surface (display_tool_name) ALWAYS emits the
+                    // prefixed "{server}{sep}{tool}" name, even in single-server
+                    // scopes where tools/list exposes the bare name — accept both
+                    // spellings whenever the prefix names a visible server,
+                    // otherwise smart_route_call would refuse the toolName the
+                    // search result itself handed out (single-server deployments).
+                    let prefixed = format!("{}{}{}", server, name_sep, p);
+                    let hit = if use_prefix {
+                        prefixed == tool_name
+                    } else if exact_only {
+                        *p == tool_name
+                    } else {
+                        prefixed == tool_name
+                    };
+                    if !hit {
+                        continue;
+                    }
+                    // Group selection whitelist parity: the listing narrows every
+                    // pin (server-level ones included) to the member's `tools`
+                    // selection; the call side must refuse the same set.
+                    if let Some(sf) = server_filters.iter().find(|f| f.name == *server) {
+                        if let Some(ref allowed) = sf.tools {
+                            if !allowed.contains(p) {
+                                continue;
+                            }
                         }
                     }
+                    return Some((server.clone(), p.clone()));
                 }
-                return Some((server.clone(), p.clone()));
             }
-        }
-        None
+            None
+        };
+        // Deterministic resolution: an exact bare-name match always wins over
+        // a prefixed match — pins `a` and `s-a` (separator `-`, server `s`)
+        // must not resolve ambiguously by pin-vector order. (Multi-server
+        // scopes only ever accept the prefixed form inside try_pin — the
+        // round-6 bare-name contract — so the two passes are unambiguous.)
+        try_pin(true).or_else(|| try_pin(false))
     }
 
+    /// Pin gate ACTIVE only when at least one pin exists in the scope: an
+    /// empty registry must mean "no restriction" on ALL four faces
+    /// (list/search/describe/call) — round 9 fixed list/search/describe but
+    /// left the call lanes refusing everything, recreating the same
+    /// dead-end on the call face (round 10 review).
     async fn pinned_tools_for_scope(scope: &str) -> Vec<(String, Vec<String>)> {
         let clean = scope.trim_start_matches('/').trim();
         let Some(group_name) = clean.strip_prefix("$smart/") else {
@@ -445,8 +471,16 @@ impl HubBridge {
         else {
             return Vec::new();
         };
+        Self::group_member_pins(&g.servers)
+    }
+
+    /// Pure core of `pinned_tools_for_scope`: collect (server, pinned tools)
+    /// from group member objects. Extracted so the gate semantics
+    /// ("gate active iff smart_pinned_servers returns non-empty for the
+    /// scope") are unit-testable without a live pool.
+    fn group_member_pins(members: &[Value]) -> Vec<(String, Vec<String>)> {
         let mut out = Vec::new();
-        for member in &g.servers {
+        for member in members {
             let Some(name) = member.get("name").and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -476,7 +510,6 @@ impl HubBridge {
         }
         out
     }
-
     /// Aggregate visible tools for this scope. Mirrors the dispatch
     /// `tools/list` semantics: bearer filter, group allow-list, disabled skip,
     /// server-prefix when multiple servers are in scope, RAG builtin, smart
@@ -1012,9 +1045,12 @@ impl HubBridge {
         // pins ∪ server-level pins (group scope), or server-level pins across
         // all bearer-visible servers (root scope).
         if smart_group_direct {
-            if Self::resolve_pinned_target(self, &scope, bearer, &tool_name)
-                .await
-                .is_none()
+            // One registry read per request feeds gate + resolve + fallback.
+            let pinned_servers = self.smart_pinned_servers(&scope, bearer).await;
+            if !pinned_servers.is_empty()
+                && Self::resolve_pinned_target(self, pinned_servers.clone(), &scope, bearer, &tool_name)
+                    .await
+                    .is_none()
             {
                 return Err(Self::invalid_params(format!(
                     "Tool '{}' is not a pinned tool of this $smart scope",
@@ -1074,6 +1110,29 @@ impl HubBridge {
                 }
                 Err(e) => Err(anyhow::anyhow!(e.to_string())),
             };
+            // Pin parity set for $smart scopes: search/describe must agree
+            // with the tools/list face and the call gates — only pinned
+            // tools are exposed on a $smart scope.
+            // One registry read per request feeds pinned_ref + gate + resolve.
+            let pinned_servers: Vec<(String, Vec<String>)> = if scope_clean.starts_with("$smart") {
+                self.smart_pinned_servers(&scope_clean, bearer).await
+            } else {
+                Vec::new()
+            };
+            let pinned_set: std::collections::HashSet<(String, String)> = pinned_servers
+                .iter()
+                .flat_map(|(srv, pins)| pins.iter().map(move |p| (srv.clone(), p.clone())))
+                .collect();
+            // Pin gate is ACTIVE only when at least one pin exists on the
+            // scope: an empty set must mean "no restriction" (normal gates
+            // apply), not "expose nothing" — otherwise an unpinned root
+            // $smart search would refuse every hit and the endpoint would
+            // be unusable. (Regression from round 8; caught by r460 B1.)
+            let pinned_ref = if scope_clean.starts_with("$smart") && !pinned_set.is_empty() {
+                Some(&pinned_set)
+            } else {
+                None
+            };
             // Timer BEFORE the meta dispatch so activity duration covers the
             // actual upstream work (self-review: measuring after the await
             // recorded ~0ms for every smart call).
@@ -1098,11 +1157,11 @@ impl HubBridge {
                 "smart_route_search" => {
                     let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     let limit = args.get("limit").cloned().unwrap_or(json!(10));
-                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed, group_gate.as_ref()).await
+                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed, group_gate.as_ref(), pinned_ref).await
                 }
                 "smart_route_describe" => {
                     let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-                    crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref()).await
+                    crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref(), pinned_ref).await
                 }
                 "smart_route_call" => {
                     let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
@@ -1111,9 +1170,10 @@ impl HubBridge {
                     // smart_route_call must not reach an unpinned tool (the
                     // raw-name direct-call lane is already gated above; this
                     // is the same gate applied to the meta wrapper).
-                    if Self::resolve_pinned_target(self, &scope, bearer, tn)
-                        .await
-                        .is_none()
+                    if !pinned_servers.is_empty()
+                        && Self::resolve_pinned_target(self, pinned_servers.clone(), &scope, bearer, tn)
+                            .await
+                            .is_none()
                     {
                         return Err(Self::invalid_params(format!(
                             "Tool '{}' is not a pinned tool of this $smart scope",
@@ -1121,7 +1181,7 @@ impl HubBridge {
                         )));
                     }
                     let tool_args = args.get("arguments").cloned().unwrap_or(json!({}));
-                    crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref()).await
+                    crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref(), Some(upstream_meta.clone())).await
                 }
                 other => Err(format!(
                     "Unknown smart routing tool '{}'. Available: smart_route_search, smart_route_describe, smart_route_call",
@@ -1182,7 +1242,13 @@ impl HubBridge {
                 // cached tool list is empty — resolve from the pin registry
                 // and let the pool::call_tool path below cold-start it.
                 if smart_group_direct {
-                    self.resolve_pinned_target(&scope, bearer, &tool_name).await
+                    self.resolve_pinned_target(
+                        self.smart_pinned_servers(&scope, bearer).await,
+                        &scope,
+                        bearer,
+                        &tool_name,
+                    )
+                    .await
                 } else {
                     None
                 }
@@ -2280,5 +2346,70 @@ mod native_notify_tests {
         assert!(client.prompt_changes.load(Ordering::SeqCst) >= 1, "prompts/list_changed");
         assert!(client.resource_changes.load(Ordering::SeqCst) >= 1, "resources/list_changed");
         client_service.cancel().await;
+    }
+}
+
+#[cfg(test)]
+mod upstream_meta_tests {
+    use super::*;
+    use rmcp::model::{MetaObject, RequestMetaObject};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn upstream_meta_passthrough_keeps_request_meta() {
+        let mut m = serde_json::Map::new();
+        m.insert("traceparent".to_string(), json!("00-trace-span-01"));
+        let mut params = CallToolRequestParams::new("tool_a");
+        params.meta = Some(RequestMetaObject(MetaObject(m)));
+        let out = HubBridge::upstream_meta_from(&params);
+        assert_eq!(out["traceparent"], json!("00-trace-span-01"));
+    }
+
+    #[test]
+    fn upstream_meta_merges_input_responses_and_request_state() {
+        let mut responses: BTreeMap<String, Value> = BTreeMap::new();
+        responses.insert("req-1".to_string(), json!({"value": 42}));
+        let mut params = CallToolRequestParams::new("tool_a");
+        params.input_responses = Some(responses);
+        params.request_state = Some("state-xyz".to_string());
+        let out = HubBridge::upstream_meta_from(&params);
+        assert_eq!(out["io.modelcontextprotocol/inputResponses"]["req-1"]["value"], json!(42));
+        assert_eq!(out["io.modelcontextprotocol/requestState"], json!("state-xyz"));
+    }
+
+    #[test]
+    fn upstream_meta_without_any_meta_is_empty_object() {
+        let params = CallToolRequestParams::new("tool_a");
+        let out = HubBridge::upstream_meta_from(&params);
+        assert!(out.as_object().is_some_and(|o| o.is_empty()));
+    }
+
+    /// Pin-gate semantics via the pure core of `pinned_tools_for_scope`:
+    /// Gate active = non-empty pin registry. Selection narrowing, string
+    /// members, missing names and empty pin vectors must behave exactly as the
+    /// call/list parity contract requires.
+    #[test]
+    fn group_member_pins_selection_and_gate_semantics() {
+        // Object members with pinnedTools: kept, narrowed by `tools` selection.
+        let members = vec![
+            json!({"name": "s-a", "tools": ["t1", "t2"], "pinnedTools": ["t1", "t3"]}),
+            json!({"name": "s-b", "pinnedTools": ["px"]}),
+        ];
+        let out = HubBridge::group_member_pins(&members);
+        assert_eq!(out, vec![("s-a".to_string(), vec!["t1".to_string()]),
+                             ("s-b".to_string(), vec!["px".to_string()])]);
+
+        // Selection narrowing to empty ⇒ the member contributes nothing (a
+        // pinned-but-unselected tool must NOT make the gate active).
+        let empty_sel = vec![json!({"name": "s", "tools": [], "pinnedTools": ["t1"]})];
+        assert!(HubBridge::group_member_pins(&empty_sel).is_empty());
+
+        // Plain string member (origin string[] shape): no pinnedTools object.
+        let strings = vec![json!("s-a"), json!({"name": "s-c"})];
+        assert!(HubBridge::group_member_pins(&strings).is_empty());
+
+        // Empty pinnedTools ⇒ gate-inactive for that member.
+        let empty_pins = vec![json!({"name": "s", "pinnedTools": []})];
+        assert!(HubBridge::group_member_pins(&empty_pins).is_empty());
     }
 }

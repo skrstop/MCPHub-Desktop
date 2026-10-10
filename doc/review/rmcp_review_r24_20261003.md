@@ -14,11 +14,11 @@
 
 ## 2. 契约 diff 脚本（R23 教训固化）
 
-`scripts/check_frontend_rust_contract.py`：提取 Rust ServerConfig 字段 × 前端 buildServerPayload 键，camel↔snake 对账，静默丢弃即 FAIL（'type'→server_type 重命名、'oauth' R10 裁定项白名单）。当前 0 mismatch。CI 可直接挂。
+`../../scripts/check_frontend_rust_contract.py`：提取 Rust ServerConfig 字段 × 前端 buildServerPayload 键，camel↔snake 对账，静默丢弃即 FAIL（'type'→server_type 重命名、'oauth' R10 裁定项白名单）。当前 0 mismatch。CI 可直接挂。
 
 ## 3. 新套件
 
-`scripts/e2e/rmcp_supplement_v24.py`（12 项）：
+`../../scripts/e2e/rmcp_supplement_v24.py`（12 项）：
 - 日志写路径吞吐：60 次 MCP 调用计时 + activity 行数增长（修复后 avg 1ms/调用）
 - FTS 一致性：fts_app_log == app_log 行数（30459=30459）
 - 2026 特性终验：discover ttlMs=3600000/public、未知版本 -32022、tools/list ttlMs=30000/private

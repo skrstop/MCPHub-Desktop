@@ -111,17 +111,20 @@ def set_strict(on):
 
 # ════ 阶段 1: 宽松模式（默认）全版本×全通道 ════
 print("== 阶段1: 宽松模式 5版本×4通道 ==")
-set_strict(False)
-for v in VERSIONS:
-    for ch_name, base, prefix in CHANNELS:
-        if v == "2026-07-28":
-            modern_channel(ch_name, base, prefix)
-        else:
-            legacy_lifecycle(ch_name, base, prefix, v)
+_orig_strict = set_strict(False)  # capture true baseline BEFORE any mutation
+try:
+    for v in VERSIONS:
+        for ch_name, base, prefix in CHANNELS:
+            if v == "2026-07-28":
+                modern_channel(ch_name, base, prefix)
+            else:
+                legacy_lifecycle(ch_name, base, prefix, v)
+finally:
+    set_strict(_orig_strict)
 
 # ════ 阶段 2: 严格模式：规范请求全通过 + 缺陷请求全拒绝 ════
 print("== 阶段2: 严格模式 ==")
-_orig_strict = set_strict(True)
+set_strict(True)
 try:
     time.sleep(0.3)
     for v in VERSIONS:

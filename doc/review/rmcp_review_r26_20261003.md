@@ -17,7 +17,7 @@
 
 ## 3. 新套件
 
-`scripts/e2e/rmcp_supplement_v26.py`（12 项）——全协议快照终验：
+`../../scripts/e2e/rmcp_supplement_v26.py`（12 项）——全协议快照终验：
 - 4 legacy 版本 × root 通道公网IP 真实调用 + tools/list 形状（inputSchema 102/102）
 - 2026 modern 直达公网IP
 - 严格/宽松热切换基线（规范请求两模式均通过）

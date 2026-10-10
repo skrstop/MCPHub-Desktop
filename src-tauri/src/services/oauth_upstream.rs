@@ -188,7 +188,7 @@ impl StateStore for DbStateStore {
 
     async fn load(
         &self,
-        _csrf_token: &str,
+        csrf_token: &str,
     ) -> Result<Option<StoredAuthorizationState>, rmcp::transport::auth::AuthError> {
         let row: Option<String> = sqlx::query_scalar(
             "SELECT pending_json FROM oauth_upstream_tokens WHERE server_name = ?",
@@ -199,15 +199,24 @@ impl StateStore for DbStateStore {
         .map_err(|e| {
             rmcp::transport::auth::AuthError::OAuthError(format!("state store load: {e}"))
         })?;
-        match row {
-            Some(json) if !json.is_empty() => serde_json::from_str(&json).map(Some).map_err(|e| {
+        let Some(json) = row.filter(|j| !j.is_empty()) else {
+            return Ok(None);
+        };
+        let state: StoredAuthorizationState =
+            serde_json::from_str(&json).map_err(|e| {
                 rmcp::transport::auth::AuthError::OAuthError(format!(
                     "corrupt pending_json for {}: {e}",
                     self.server_name
                 ))
-            }),
-            _ => Ok(None),
+            })?;
+        // CSRF contract (rmcp keys the round by this): a state value that
+        // doesn't match the pending round must read as None — returning the
+        // blob unconditionally would let a forged callback state complete
+        // the exchange (authorization-code injection).
+        if state.csrf_token != csrf_token {
+            return Ok(None);
         }
+        Ok(Some(state))
     }
 
     async fn delete(
@@ -379,10 +388,14 @@ async fn serve_one_callback(
     } else {
         Err(params.get("error").cloned().unwrap_or_else(|| "missing code".into()))
     };
-    // Deliver once: the first successful callback wins; duplicate requests
-    // (browser preflight, user refresh) just get the landing page.
-    if let Some(tx) = slot.lock().await.take() {
-        let _ = tx.send(result);
+    // Deliver once: the first successful callback wins. Requests without a
+    // code/error (favicon, OPTIONS preflight, manual visits) are answered but
+    // NEVER delivered — they would consume the single-consumer slot and kill
+    // the flow before the real callback arrives.
+    if ok || params.contains_key("error") {
+        if let Some(tx) = slot.lock().await.take() {
+            let _ = tx.send(result);
+        }
     }
 
     let http = format!(
@@ -482,17 +495,43 @@ pub async fn start_authorization(
     oauth_cfg: &ServerOauthConfig,
     challenge: Option<&str>,
 ) -> Result<String, OauthError> {
-    // Reject an already-running flow for this server (restart = new listener).
-    flows().remove(server_name);
+    // Supersede any already-running flow for this server (restart = new
+    // listener): signal the old completion task so its listener dies and it
+    // can never write state for an authorization the user replaced.
+    if let Some(old) = flows().remove(server_name) {
+        old.notify_one(); // stored permit: wakes even if not yet awaiting
+    }
 
     // RFC 8252 §7.3: loopback redirects may use an ephemeral port. Bind the
     // listener FIRST so its port can be baked into the redirect URI.
     let listener = LoopbackListener::bind().await.map_err(OauthError::Other)?;
-    let redirect_uri = oauth_cfg
-        .redirect_uri
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| listener.redirect_uri());
+    let redirect_uri = match oauth_cfg.redirect_uri.clone().filter(|s| !s.is_empty()) {
+        Some(uri) => {
+            // The loopback listener is the ONLY completion path (no deep-link
+            // handler exists): a redirect_uri the browser delivers elsewhere —
+            // an external https URL, or a fixed loopback port other than the
+            // ephemeral port actually bound — would hang the flow until the
+            // 600s timeout. Loopback URIs must match the bound listener's
+            // port; non-loopback URIs are rejected outright.
+            let parsed = url::Url::parse(&uri).map_err(|_| {
+                OauthError::Other(format!("configured redirect_uri is not a valid URL: {uri}"))
+            })?;
+            let host = parsed.host_str().unwrap_or_default();
+            let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]");
+            let bound_port = listener.port;
+            let uri_port = parsed.port();
+            if !loopback
+                || uri_port.map(|p| p != bound_port).unwrap_or(true)
+                || parsed.path() != "/"
+            {
+                return Err(OauthError::Other(format!(
+                    "configured redirect_uri '{uri}' cannot receive the callback (this build completes flows via the ephemeral loopback listener on port {bound_port})"
+                )));
+            }
+            format!("http://127.0.0.1:{bound_port}/")
+        }
+        None => listener.redirect_uri(),
+    };
 
     let allow_insecure = oauth_cfg.allow_insecure_token_endpoint.unwrap_or(false);
 
@@ -625,8 +664,10 @@ pub async fn start_authorization(
             Ok(hit) => hit,
             Err(e) => {
                 log::warn!("[oauth:{server}] callback failed: {e}");
-                let _ = upsert_token_row(&server, "error", None, None, now_epoch()).await;
-                emit_oauth_event("server://oauth-error", &server, &e);
+                if still_owns_flow(&server, &cancel) {
+                    let _ = upsert_token_row(&server, "error", None, None, now_epoch()).await;
+                    emit_oauth_event("server://oauth-error", &server, &e);
+                }
                 return;
             }
         };
@@ -640,17 +681,34 @@ pub async fn start_authorization(
         let mut driver = driver;
         match driver.complete(&callback_url, &hit.code, &hit.state).await {
             Ok(_token_response) => {
-                let _ = upsert_token_row(&server, "connected", None, None, now_epoch()).await;
-                log::info!("[oauth:{server}] authorization completed, credentials stored");
-                emit_oauth_event("server://oauth-connected", &server, "authorized");
+                // disconnect()/restart may have landed while the exchange was
+                // in flight — notify_one cannot stop a task past the select!,
+                // so ownership is re-checked before EVERY status write or a
+                // deleted row would be resurrected with live credentials.
+                if still_owns_flow(&server, &cancel) {
+                    let _ = upsert_token_row(&server, "connected", None, None, now_epoch()).await;
+                    log::info!("[oauth:{server}] authorization completed, credentials stored");
+                    emit_oauth_event("server://oauth-connected", &server, "authorized");
+                }
             }
             Err(e) => {
                 log::warn!("[oauth:{server}] token exchange failed: {e}");
-                let _ = upsert_token_row(&server, "error", None, None, now_epoch()).await;
-                emit_oauth_event("server://oauth-error", &server, &e.to_string());
+                if still_owns_flow(&server, &cancel) {
+                    let _ = upsert_token_row(&server, "error", None, None, now_epoch()).await;
+                    emit_oauth_event("server://oauth-error", &server, &e.to_string());
+                }
             }
         }
-        flows().remove(&server);
+        // Remove the cancel entry only if THIS task still owns it — a
+        // restarted flow has already replaced the entry, and stealing it
+        // would make disconnect unable to cancel the live flow.
+        let owns = flows()
+            .get(&server)
+            .map(|n| Arc::ptr_eq(n, &cancel))
+            .unwrap_or(false);
+        if owns {
+            flows().remove(&server);
+        }
     });
 
     log::info!(
@@ -686,11 +744,26 @@ pub async fn status_of(server_name: &str) -> String {
     .unwrap_or_else(|| "disabled".to_string())
 }
 
+/// Whether this completion task still owns the server's flow entry: a
+/// disconnect() or restarted flow replaces/removes the entry, and this task
+/// must not write status rows (they would resurrect deleted state) or emit
+/// events for an authorization the user replaced.
+fn still_owns_flow(server_name: &str, cancel: &std::sync::Arc<tokio::sync::Notify>) -> bool {
+    flows()
+        .get(server_name)
+        .map(|n| Arc::ptr_eq(n, cancel))
+        .unwrap_or(false)
+}
+
 /// Clear all stored credentials/pending state for a server (disconnect).
 pub async fn disconnect(server_name: &str) -> Result<(), String> {
     // Signal any in-flight completion task to stop before deleting the row.
     if let Some(cancel) = flows().remove(server_name) {
-        cancel.notify_waiters();
+        // notify_one stores a permit when no waiter exists yet — the
+        // completion task may not have been polled since spawn; notify_waiters
+        // (no permit storage) would lose that race and let a disconnected
+        // flow resurrect a "connected" row.
+        cancel.notify_one();
     }
     sqlx::query("DELETE FROM oauth_upstream_tokens WHERE server_name = ?")
         .bind(server_name)
@@ -872,9 +945,33 @@ mod flow_e2e {
                 let Ok((mut stream, _)) = listener.accept().await else { continue };
                 let f = f.clone();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    use tokio::io::AsyncReadExt;
+                    // Read until the declared Content-Length is satisfied — a
+                    // single read() may return only the headers (TCP
+                    // segmentation), silently truncating the body.
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                                if let Some(h) = head_end {
+                                    let cl = String::from_utf8_lossy(&buf[..h])
+                                        .to_lowercase()
+                                        .lines()
+                                        .find_map(|l| l.strip_prefix("content-length:"))
+                                        .and_then(|v| v.trim().parse::<usize>().ok())
+                                        .unwrap_or(0);
+                                    if buf.len() >= h + 4 + cl {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&buf).to_string();
                     let mut lines = req.split("\r\n");
                     let request_line = lines.next().unwrap_or("");
                     let mut parts = request_line.split_whitespace();
@@ -1037,22 +1134,12 @@ mod flow_e2e {
     }
 
     async fn init_test_db() {
-        // Tests run in parallel against distinct server names — a single
-        // shared global DB is sufficient; only the first caller initializes.
-        static INIT: std::sync::Once = std::sync::Once::new();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        INIT.call_once(|| {
-            tokio::spawn(async move {
-                let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                    .connect("sqlite::memory:")
-                    .await
-                    .unwrap();
-                crate::db::migration::run_pending(&pool).await.unwrap();
-                crate::db::set_pool_for_test(pool);
-                let _ = tx.send(());
-            });
-        });
-        let _ = rx.await;
+        // Shared test-pool init (single in-memory DB, migrated once) — see
+        // db::ensure_test_pool. The previous per-module `Once` + `tokio::spawn`
+        // raced with the oauth_provider tests' own init: whichever global
+        // replace ran second pointed the slot at a pool other tests were
+        // still migrating ("no such table" under parallel cargo test).
+        crate::db::ensure_test_pool().await;
     }
 
     /// Full flow: discovery → dynamic registration → PKCE authorize (mock AS
@@ -1078,6 +1165,8 @@ mod flow_e2e {
             token_endpoint: None,
             resource: None,
             redirect_uri: None, // ephemeral loopback (RFC 8252)
+            revocation_endpoint: None,
+            dynamic_registration: None,
         };
         let upstream = format!("http://127.0.0.1:{UPSTREAM_PORT}/mcp");
         let challenge = format!(

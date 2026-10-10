@@ -27,6 +27,24 @@ pub struct ProviderConfig {
     pub refresh_token_lifetime: i64,
     pub authorization_code_lifetime: i64,
     pub dynamic_registration: bool,
+    /// UI `requireClientSecret`: dynamic registration always issues a secret
+    /// and the token endpoint requires it for every client.
+    pub require_client_secret: bool,
+    /// UI `dynamicRegistration.clientTtl` (seconds): reap dynamically
+    /// registered clients with no live tokens older than this. 0 = disabled.
+    pub client_ttl: i64,
+    /// UI `dynamicRegistration.requiresAuthentication` (SettingsPage toggle):
+    /// registering a client requires credentials. OR-ed into the register gate
+    /// with `require_client_secret` so the toggle has runtime effect.
+    pub dynamic_registration_requires_authentication: bool,
+    /// UI `requireState`: the authorize request must carry a non-empty state.
+    pub require_state: bool,
+    /// UI `allowedScopes`: non-empty restricts both the advertised
+    /// scopes_supported and the scope a client may request.
+    pub allowed_scopes: Vec<String>,
+    /// UI `dynamicRegistration.allowedGrantTypes`: non-empty restricts the
+    /// grant types the token endpoint accepts.
+    pub allowed_grant_types: Vec<String>,
 }
 
 impl Default for ProviderConfig {
@@ -34,9 +52,17 @@ impl Default for ProviderConfig {
         Self {
             enabled: false,
             access_token_lifetime: 3600,
-            refresh_token_lifetime: 30 * 24 * 3600,
+            // UI default (SettingsContext) is 14 days — the fallback must match or
+        // the badge shows a value the runtime doesn't enforce.
+        refresh_token_lifetime: 14 * 24 * 3600,
             authorization_code_lifetime: 60,
             dynamic_registration: true,
+            dynamic_registration_requires_authentication: false,
+            client_ttl: 0,
+            require_client_secret: false,
+            require_state: false,
+            allowed_scopes: Vec::new(),
+            allowed_grant_types: Vec::new(),
         }
     }
 }
@@ -65,7 +91,82 @@ pub async fn provider_config() -> ProviderConfig {
             .and_then(|d| d.get("enabled"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        dynamic_registration_requires_authentication: o
+            .get("dynamicRegistration")
+            .and_then(|d| d.get("requiresAuthentication"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        client_ttl: o
+            .get("dynamicRegistration")
+            .and_then(|d| d.get("clientTtl"))
+            .and_then(|v| v.as_i64())
+            .filter(|v| *v >= 0)
+            .unwrap_or(0),
+        require_client_secret: o
+            .get("requireClientSecret")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        require_state: o
+            .get("requireState")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        allowed_scopes: o
+            .get("allowedScopes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        allowed_grant_types: o
+            .get("dynamicRegistration")
+            .and_then(|d| d.get("allowedGrantTypes"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
     }
+}
+
+/// The scopes the provider advertises / accepts. Empty `allowedScopes` in the
+/// UI = no restriction (mcp:all only, since read/write semantics are not
+/// implemented — non-mcp:all scopes are treated as server/group names).
+pub fn effective_scopes(cfg: &ProviderConfig) -> Vec<String> {
+    if cfg.allowed_scopes.is_empty() {
+        vec!["mcp:all".to_string()]
+    } else {
+        cfg.allowed_scopes.clone()
+    }
+}
+
+/// Validate the requested scope against the provider restriction: every
+/// requested item must be inside `effective_scopes`. `mcp:all` is only
+/// allowed when the provider is unrestricted — otherwise `"read mcp:all"`
+/// would smuggle the unrestricted scope past `scope_to_allowed_servers`.
+pub fn scope_allowed(cfg: &ProviderConfig, scope: &str) -> bool {
+    let unrestricted = cfg.allowed_scopes.is_empty();
+    let effective = effective_scopes(cfg);
+    let items: Vec<&str> = scope.trim().split_whitespace().collect();
+    if items.is_empty() {
+        // A whitespace-only / empty scope under a RESTRICTED config must be
+        // rejected: the token would carry an empty scope, and
+        // scope_to_allowed_servers("") → None = unrestricted — a full escape
+        // of the admin's allowedScopes restriction. (The authorize endpoint
+        // already defaults an OMITTED scope to "mcp:all", so an explicit
+        // empty value is malformed, not a legitimate default request.)
+        return unrestricted;
+    }
+    // Unrestricted config + explicit mcp:all: accept the whole scope verbatim
+    // (stored scope contains mcp:all → scope_to_allowed_servers → None, the
+    // pre-tightening behavior — keeps existing clients that request
+    // "read mcp:all" working; there is no escape because the config is
+    // unrestricted anyway).
+    if unrestricted && items.iter().any(|i| *i == "mcp:all") {
+        return true;
+    }
+    items.iter().all(|i| {
+        if *i == "mcp:all" {
+            unrestricted
+        } else {
+            effective.iter().any(|e| e == i)
+        }
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -114,11 +215,36 @@ pub async fn register_client(
     name: &str,
     redirect_uris: &[String],
     scopes: &str,
-    with_secret: bool,
+    mut with_secret: bool,
 ) -> Result<(OAuthClient, Option<String>), String> {
+    let cfg = provider_config().await;
+    if cfg.dynamic_registration_requires_authentication {
+        // The provider has no credential mechanism for registration (no
+        // sessions / initial access tokens on the hub surface) — honoring the
+        // toggle honestly means closing open registration, not silently
+        // issuing secrets to unauthenticated callers.
+        return Err("dynamic registration requires authentication, which this provider does not offer — use a pre-registered client".into());
+    }
+    if cfg.require_client_secret {
+        with_secret = true;
+    }
     if redirect_uris.is_empty() {
         return Err("redirect_uris is required".into());
     }
+    // Flood caps: dynamic registration is unauthenticated (local tool), so a
+    // drive-by page with CORS preflight must not be able to grow the table
+    // without bound.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM oauth_clients WHERE revoked = 0")
+            .fetch_one(pool())
+            .await
+            .unwrap_or(0);
+    if count >= 200 {
+        return Err("too many registered clients — revoke unused ones first".into());
+    }
+    let name = name.chars().take(200).collect::<String>();
+    // Dynamic marker: the clientTtl reaper only reaps dynamic registrations —
+    // pre-registered clients must never be silently deregistered.
     for uri in redirect_uris {
         // Exact host check (never string prefix — "http://localhost.evil.com"
         // must not pass). Loopback hosts allow http; everything else needs https.
@@ -141,8 +267,8 @@ pub async fn register_client(
     let secret = with_secret.then(random_token);
     let now = now_epoch();
     sqlx::query(
-        "INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, scopes, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, scopes, created_at, dynamic) \
+         VALUES (?, ?, ?, ?, ?, ?, 1)",
     )
     .bind(&client_id)
     .bind(secret.as_deref().map(sha256_hex))
@@ -274,22 +400,27 @@ pub struct ConsumedCode {
     pub redirect_uri: String,
 }
 
-/// Single-use consume: the row is deleted before validation results are used
-/// (replay of even a failed exchange is impossible).
+/// Single-use consume: atomic DELETE-then-read inside a BEGIN IMMEDIATE
+/// transaction — two concurrent exchanges can never both observe the row
+/// (sequential delete-then-validate had a replay window).
 pub async fn consume_code(code: &str) -> Result<Option<ConsumedCode>, String> {
     let hash = sha256_hex(code);
+    // BEGIN IMMEDIATE takes the write lock up front: the concurrent second
+    // exchange blocks until the first commits, then finds nothing.
+    let mut tx = pool().begin_with("BEGIN IMMEDIATE").await.map_err(|e| e.to_string())?;
     let row = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
         "SELECT client_id, challenge, scope, resource, redirect_uri, expires_at \
          FROM oauth_codes WHERE code_hash = ?",
     )
     .bind(&hash)
-    .fetch_optional(pool())
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
     let _ = sqlx::query("DELETE FROM oauth_codes WHERE code_hash = ?")
         .bind(&hash)
-        .execute(pool())
+        .execute(&mut *tx)
         .await;
+    tx.commit().await.map_err(|e| e.to_string())?;
     let Some((client_id, challenge, scope, resource, redirect_uri, expires_at)) = row else {
         return Ok(None);
     };
@@ -354,6 +485,30 @@ pub async fn issue_tokens(
 /// Reuse detection (RFC 6749 §10.4 / oauth-security-topics §4.13.2): a replayed
 /// (already-rotated) refresh token is a theft signal — the whole client's
 /// token family is revoked before invalid_grant is returned.
+/// Resolve which client a refresh token belongs to WITHOUT consuming it.
+/// Used by the token endpoint to authenticate the client before rotating.
+/// The bool is true when the token is ALREADY CONSUMED (kind='refresh_used',
+/// i.e. a replay/theft signal): replayed tokens skip client authentication
+/// in the handler so `refresh_tokens` runs and performs the family
+/// revocation the replay must trigger (RFC 6749 §10.4).
+pub async fn refresh_owner(
+    refresh_token: &str,
+    _cfg: &ProviderConfig,
+) -> Result<(String, bool), String> {
+    let hash = sha256_hex(refresh_token);
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT client_id, kind FROM oauth_tokens WHERE token_hash = ? AND kind IN ('refresh', 'refresh_used')",
+    )
+    .bind(&hash)
+    .fetch_optional(pool())
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some((cid, kind)) = row else {
+        return Err("unknown refresh token".to_string());
+    };
+    Ok((cid, kind == "refresh_used"))
+}
+
 pub async fn refresh_tokens(
     refresh_token: &str,
     cfg: &ProviderConfig,
@@ -375,18 +530,46 @@ pub async fn refresh_tokens(
             .await;
         return Err("refresh token reuse detected — all tokens for this client were revoked".into());
     }
+    // Rotation IS the single-use gate: a conditional UPDATE flips the row
+    // atomically (BEGIN IMMEDIATE serializes concurrent refreshes of the
+    // same token — only one wins rows_affected==1, the other sees the
+    // 'refresh_used' marker on retry).
+    let mut tx = pool().begin_with("BEGIN IMMEDIATE").await.map_err(|e| e.to_string())?;
     let row = sqlx::query_as::<_, (String, String, String, i64)>(
         "SELECT client_id, scope, resource, refresh_expires_at FROM oauth_tokens \
          WHERE token_hash = ? AND kind = 'refresh'",
     )
     .bind(&hash)
-    .fetch_optional(pool())
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
     let Some((client_id, scope, resource, refresh_expires_at)) = row else {
+        // No live 'refresh' row for this hash: either an unknown token, or a
+        // CONCURRENT refresh already rotated it (the pre-tx replay probe ran
+        // before the winner's commit and saw nothing). Inside this serialized
+        // tx the marker check is authoritative — a 'refresh_used' marker on
+        // the same hash is theft-typical replay → family revocation (RFC 6749
+        // §10.4), not a silent unknown-token answer.
+        let replay: Option<String> = sqlx::query_scalar(
+            "SELECT client_id FROM oauth_tokens WHERE token_hash = ? AND kind = 'refresh_used'",
+        )
+        .bind(&hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Some(client_id) = replay {
+            let _ = sqlx::query("DELETE FROM oauth_tokens WHERE client_id = ?")
+                .bind(&client_id)
+                .execute(&mut *tx)
+                .await;
+            tx.commit().await.map_err(|e| e.to_string())?;
+            return Err("refresh token reuse detected — all tokens for this client were revoked".into());
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
         return Ok(None);
     };
     if now_epoch() > refresh_expires_at {
+        tx.commit().await.map_err(|e| e.to_string())?;
         // Expired refresh: revoke the whole family (client's tokens).
         let _ = sqlx::query("DELETE FROM oauth_tokens WHERE client_id = ?")
             .bind(&client_id)
@@ -394,24 +577,49 @@ pub async fn refresh_tokens(
             .await;
         return Err("refresh token expired".into());
     }
-    // Rotation: mark this refresh consumed (kept for reuse detection; dropped
-    // later by cleanup_expired) + its sibling access tokens for the client.
-    let _ = sqlx::query(
-        "UPDATE oauth_tokens SET kind = 'refresh_used', expires_at = ? WHERE token_hash = ?",
+    let flipped = sqlx::query(
+        "UPDATE oauth_tokens SET kind = 'refresh_used', expires_at = ? \
+         WHERE token_hash = ? AND kind = 'refresh'",
     )
     .bind(now_epoch() + 3600)
     .bind(&hash)
-    .execute(pool())
-    .await;
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if flipped.rows_affected() != 1 {
+        // Lost the race — treat as replay.
+        tx.commit().await.map_err(|e| e.to_string())?;
+        let _ = sqlx::query("DELETE FROM oauth_tokens WHERE client_id = ?")
+            .bind(&client_id)
+            .execute(pool())
+            .await;
+        return Err("refresh token reuse detected — all tokens for this client were revoked".into());
+    }
     let _ = sqlx::query("DELETE FROM oauth_tokens WHERE client_id = ? AND kind = 'access'")
         .bind(&client_id)
-        .execute(pool())
+        .execute(&mut *tx)
         .await;
+    tx.commit().await.map_err(|e| e.to_string())?;
     let client = find_client(&client_id).await?;
     if client.map(|c| c.revoked).unwrap_or(true) {
         return Err("client is revoked".into());
     }
-    let issued = issue_tokens(&client_id, &scope, &resource, cfg).await?;
+    let issued = match issue_tokens(&client_id, &scope, &resource, cfg).await {
+        Ok(i) => i,
+        // The rotation flip committed before the new pair existed; without
+        // this compensation a transient issue failure (DB hiccup, pool
+        // saturation) would brick the family — the old token is marked used
+        // and no replacement exists. Restore the row so the client can retry.
+        Err(e) => {
+            let _ = sqlx::query(
+                "UPDATE oauth_tokens SET kind = 'refresh', expires_at = 0                  WHERE token_hash = ? AND kind = 'refresh_used'",
+            )
+            .bind(&hash)
+            .execute(pool())
+            .await;
+            return Err(e);
+        }
+    };
     Ok(Some((client_id, scope, issued)))
 }
 
@@ -465,6 +673,23 @@ pub async fn cleanup_expired() {
     .bind(now)
     .execute(pool())
     .await;
+
+    // dynamicRegistration.clientTtl reaper (UI promise: "reap dynamically
+    // registered clients with no live tokens ... older than this age; 0 =
+    // disabled"). A client is reapable when it has NO live token rows at all
+    // (access/refresh/refresh_used all gone) — an in-progress authorization
+    // has no tokens yet, so additionally keep clients younger than the TTL
+    // regardless.
+    let cfg = provider_config().await;
+    let ttl = cfg.client_ttl;
+    if ttl > 0 {
+        let _ = sqlx::query(
+            "DELETE FROM oauth_clients WHERE revoked = 0 AND dynamic = 1              AND created_at < ?              AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id)",
+        )
+        .bind(now - ttl)
+        .execute(pool())
+        .await;
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -530,17 +755,49 @@ fn _pool_type_witness(_p: &SqlitePool) {}
 mod tests {
     use super::*;
 
+    fn cfg_scopes(list: &[&str]) -> ProviderConfig {
+        ProviderConfig {
+            allowed_scopes: list.iter().map(|s| s.to_string()).collect(),
+            ..ProviderConfig::default()
+        }
+    }
+
+    /// R2-B1-H1 回归：受限配置下 mcp:all 不得搭车（"read mcp:all" 会经
+    /// scope_to_allowed_servers 逃逸为无限制）。
+    #[test]
+    fn scope_allowed_rejects_mcp_all_smuggling_when_restricted() {
+        let cfg = cfg_scopes(&["read"]);
+        assert!(scope_allowed(&cfg, "read"));
+        // R3 修复：受限配置下空/空白 scope = token 落空 scope = 全权限逃逸 → 拒绝。
+        assert!(!scope_allowed(&cfg, ""));
+        assert!(!scope_allowed(&cfg, "   "));
+        assert!(!scope_allowed(&cfg, "read mcp:all"), "mcp:all must not bypass a restricted config");
+        assert!(!scope_allowed(&cfg, "mcp:all"));
+        assert!(!scope_allowed(&cfg, "write"));
+        let open = ProviderConfig::default();
+        // Unrestricted: mcp:all accepted; explicit "read mcp:all" also accepted
+        // verbatim (pre-tightening compatibility — no escape possible when the
+        // config is unrestricted anyway).
+        assert!(scope_allowed(&open, "mcp:all"));
+        assert!(scope_allowed(&open, "read mcp:all"));
+    }
+
+    /// R2-B1-M：provider_config 解析字符串型布尔/数字容错（bool-as-string
+    /// 应落默认而非 panic/误 true）。
+    #[tokio::test]
+    async fn provider_config_tolerates_wrong_types() {
+        init_pool().await;
+        // provider_config reads the global config; the wrong-type branches are
+        // exercised by its .and_then(as_bool/as_i64) chain — this test pins the
+        // no-panic contract on a missing oauthServer block (fresh-install path).
+        let cfg = provider_config().await;
+        assert!(!cfg.enabled);
+        assert!(!cfg.dynamic_registration_requires_authentication);
+        assert!(cfg.access_token_lifetime > 0);
+    }
+
     async fn init_pool() {
-        static INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-        INIT.get_or_init(|| async {
-            let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                .connect("sqlite::memory:")
-                .await
-                .unwrap();
-            crate::db::migration::run_pending(&pool).await.unwrap();
-            crate::db::set_pool_for_test(pool);
-        })
-        .await;
+        crate::db::ensure_test_pool().await;
     }
 
     #[tokio::test]
@@ -621,5 +878,39 @@ mod tests {
         let cfg = provider_config().await;
         assert!(!cfg.enabled, "disabled by default");
         assert_eq!(cfg.access_token_lifetime, 3600);
+    }
+
+    /// refresh_owner resolves the owning client WITHOUT consuming the token,
+    /// and flags already-consumed ('refresh_used') tokens so the handler can
+    /// skip client auth and let refresh_tokens perform family revocation.
+    #[tokio::test]
+    async fn refresh_owner_resolves_client_and_replay_flag() {
+        init_pool().await;
+        let cfg = ProviderConfig { enabled: true, ..Default::default() };
+        let (client, _) = register_client("O", &["http://127.0.0.1/cb".into()], "srv-a", true)
+            .await
+            .expect("register");
+        let tokens = issue_tokens(&client.client_id, "srv-a", "", &cfg).await.expect("issue");
+
+        // Live refresh: resolves owner, not flagged as replay.
+        let (cid, replay) = refresh_owner(&tokens.refresh_token, &cfg).await.expect("owner");
+        assert_eq!(cid, client.client_id);
+        assert!(!replay);
+
+        // Unknown token: hard error (handler turns it into invalid_grant).
+        assert!(refresh_owner("not-a-real-token", &cfg).await.is_err());
+
+        // Consume it → replay flag flips on for the consumed hash.
+        let rotated = refresh_tokens(&tokens.refresh_token, &cfg)
+            .await
+            .expect("refresh")
+            .expect("valid");
+        let (cid2, replay2) = refresh_owner(&tokens.refresh_token, &cfg).await.expect("owner2");
+        assert_eq!(cid2, client.client_id);
+        assert!(replay2, "consumed refresh must be flagged refresh_used");
+
+        // Successor still live: resolves, not replay.
+        let (_, replay3) = refresh_owner(&rotated.2.refresh_token, &cfg).await.expect("owner3");
+        assert!(!replay3);
     }
 }

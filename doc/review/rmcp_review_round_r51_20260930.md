@@ -101,7 +101,7 @@
 
 ---
 
-## 3. 新增测试套件 `scripts/e2e/rmcp_round_r51.py`（35 项，全过）
+## 3. 新增测试套件 `../../scripts/e2e/rmcp_round_r51.py`（35 项，全过）
 
 | 组 | 覆盖 |
 |---|---|
@@ -163,9 +163,9 @@
 | 7 | config.rs | **import_settings 无鉴权可提权**（导入可创建 admin 用户）、**get_settings 泄露 bearerKeys 明文 token + llmProviderApiKey** → 两者加 require_admin（skipAuth 短路不受影响） |
 | 8 | runtime.rs 两处 | **char-boundary panic**：PATH 含中文目录时 `&path[..300]` 字节切片 panic（启动路径可触发）→ char_indices 安全截断 |
 | 9 | runtime.rs tar 解压 | **zip-slip**：tar 0.4 `Entry::unpack` 无路径校验（Windows zip 有 mangled_name，不对称）→ 拒绝 ParentDir/RootDir/Prefix 条目 |
-| 10 | runtime.rs | **版本参数白名单** `validate_version_arg`（`../`/绝对路径可逃逸 remove_dir_all）→ install×2/uninstall 应用 |
+| 10 | runtime.rs | **版本参数白名单** `validate_version_arg`（`../..`/绝对路径可逃逸 remove_dir_all）→ install×2/uninstall 应用 |
 | 11 | skill_service.rs | **symlink 环栈溢出崩溃**：copy_dir_recursive 无条件跟随链接环 → visited 集合防护（允许 DAG 重复） |
-| 12 | skill_service.rs | **dir_name 消费点无二次校验**：export/uninstall/delete/reconcile 的 `join(dir_name)+remove_link` 可被手改 DB 的 `../` 逃逸 → 抽 `valid_dir_name` helper 4 处应用 |
+| 12 | skill_service.rs | **dir_name 消费点无二次校验**：export/uninstall/delete/reconcile 的 `join(dir_name)+remove_link` 可被手改 DB 的 `../..` 逃逸 → 抽 `valid_dir_name` helper 4 处应用 |
 | 13 | cloud.rs+registry.rs×5 | reqwest::Client::new() 无超时（上游挂起命令永久阻塞）→ 30s timeout |
 | 14 | auth.rs | register 无门控（注释与实现矛盾）→ 桌面端禁用（无 UI 入口） |
 | 15 | auth.rs | skipAuth 兜底不一致（auth 侧 false / get_public_config true）→ 统一 true（桌面端） |
@@ -183,7 +183,7 @@
 ## E2E 回归（最终）
 
 - **16 套件 570/570 全绿**：full_regress 41 / matrix_v2 152 / matrix 39 / leniency_matrix 34 / leniency_v2 15 / strict_matrix 10 / round50 33 / 50b 77 / 50c 19 / 50d 18 / 50e 14 / 50f 14 / 50g 12 / round100 44 / round_r51 35 / **gap_matrix_r107 43**（新计入）。
-- **公网IP MCP 真实调用矩阵 10/10**（新固化 `scripts/e2e/rmcp_public_ip_matrix.py`）：3 个 legacy 版本完整 lifecycle（init 协商一致 + notifications/initialized + tools/call）+ 2026 无状态 + 单服务器 scope + REST 单服务器 + REST group，全部返回真实公网 IP（ip.3322.net 上游）。
+- **公网IP MCP 真实调用矩阵 10/10**（新固化 `../../scripts/e2e/rmcp_public_ip_matrix.py`）：3 个 legacy 版本完整 lifecycle（init 协商一致 + notifications/initialized + tools/call）+ 2026 无状态 + 单服务器 scope + REST 单服务器 + REST group，全部返回真实公网 IP（ip.3322.net 上游）。
 - `cargo test --lib` **86 passed**（新增 3 个 connection_relevance 单测）；`cargo check` 0 错 0 警；`npx tsc --noEmit` 12 = 基线；`npm run build` ✓。
 
 ## 记录不修项（评估后保留）

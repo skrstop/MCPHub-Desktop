@@ -174,14 +174,42 @@ pub(crate) async fn canonicalize_url(url: &str) -> String {
     .flatten();
     let final_url = match res {
         Some(final_url) => final_url,
-        None => return u.to_string(),
+        // Probe failed (offline/unreachable): cache identity so we don't pay
+        // the 10s timeout on every subsequent call for the TTL window.
+        None => {
+            let cache = REDIRECT_CACHE.get_or_init(|| async_utils_mutex_default());
+            cache
+                .lock()
+                .await
+                .insert(u.to_string(), (std::time::Instant::now(), u.to_string()));
+            return u.to_string();
+        }
     };
     // Derive the canonical repo base from the final /info/refs URL.
+    // Only adopt the redirect target when it still looks like a git smart-HTTP
+    // endpoint. An SSO gateway 302s the anonymous probe to a login page (no
+    // /info/refs) — adopting that as the repo identity would permanently move
+    // the persistent dir / abort-token / credential keys to a bogus value.
+    if !final_url.contains("/info/refs") {
+        // SSO gateway 302'd to a login page — identity is already the safe
+        // answer; cache it so the SSO probe doesn't re-fire every call.
+        let cache = REDIRECT_CACHE.get_or_init(|| async_utils_mutex_default());
+        cache
+            .lock()
+            .await
+            .insert(u.to_string(), (std::time::Instant::now(), u.to_string()));
+        return u.to_string();
+    }
     let canonical_base = final_url
         .split("/info/refs")
         .next()
         .map(|s| s.to_string())
         .unwrap_or_else(|| u.to_string());
+    // Cache the identity result too: for a normal https repo (the common case)
+    // the probe would otherwise re-fire on EVERY call (delete_doc refcounts,
+    // per-batch/auto-tick syncs, cancel paths) — an unreachable/slow remote
+    // serializes 10s of blocking probe into each operation, and offline users
+    // pay the full timeout every time (round 15 review).
     if canonical_base != u.trim_end_matches('/') {
         let cache = REDIRECT_CACHE.get_or_init(|| async_utils_mutex_default());
         cache.lock().await.insert(
@@ -190,6 +218,11 @@ pub(crate) async fn canonicalize_url(url: &str) -> String {
         );
         canonical_base
     } else {
+        let cache = REDIRECT_CACHE.get_or_init(|| async_utils_mutex_default());
+        cache
+            .lock()
+            .await
+            .insert(u.to_string(), (std::time::Instant::now(), u.to_string()));
         u.to_string()
     }
 }
@@ -580,7 +613,8 @@ pub(crate) fn clone_blocking(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let url = gix::url::parse(url.as_bytes().into())?;
+    let url = gix::url::parse(url.as_bytes().into())
+        .map_err(|e| anyhow!("url: {}", scrub_credentials(&e.to_string())))?;
     // SSH remotes: install a ssh wrapper (stderr filter + optional askpass
     // for password-auth servers) and point the clone at it via
     // `core.sshCommand`. The wrapper dir is unique per clone (concurrent
@@ -1226,8 +1260,14 @@ pub async fn refresh_persistent(
     .await
     {
         Ok(c) => c,
-        Err(e) if is_auth_error(&e) => return Err(auth_error(e)),
-        Err(e) => return Err(e),
+        Err(e) if is_auth_error(&e) => {
+            let _ = std::fs::remove_dir_all(&new_dir);
+            return Err(auth_error(e));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&new_dir);
+            return Err(e);
+        }
     };
     // Atomic-ish swap: main -> .old, .new -> main, delete .old. If the final
     // rename fails, roll `.old` back to main so the previous clone keeps
@@ -1413,6 +1453,10 @@ fn write_credentials_nolock(
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        // mode(0600) only applies on CREATE — a stale 0644 tmp from a
+        // pre-fix crash would be reused as-is and renamed into place
+        // world-readable. Remove first so the open always creates.
+        let _ = std::fs::remove_file(&tmp);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)

@@ -35,6 +35,21 @@ pub async fn get_config(
     }))
 }
 
+/// True when ANY tool description override exists — a cheap single-row
+/// probe used to skip the per-server live-list refresh on the smart search
+/// hot path when no override can change results (round 10 review).
+pub async fn any_description_override() -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM server_tool_config
+         WHERE item_type='tool' AND description IS NOT NULL AND description != ''
+         LIMIT 1",
+    )
+    .fetch_optional(db::pool())
+    .await
+    .map(|o| o.is_some())
+    .unwrap_or(false)
+}
+
 /// List all overrides for a given server (and optionally item_type).
 pub async fn list_for_server(
     server_name: &str,
@@ -271,7 +286,11 @@ pub async fn apply_tool_filters(server_name: &str, tools: Vec<Tool>) -> Result<V
         .map(|mut tool| {
             if let Some(cfg) = config_map.get(&tool.name) {
                 tool.enabled = cfg.enabled;
-                if let Some(ref desc) = cfg.description {
+                // An explicit empty-string override is treated as "no
+                // override" — matching any_description_override's probe so
+                // the hot-path skip can't serve results that disagree with
+                // this filter (round 12 review).
+                if let Some(desc) = cfg.description.as_ref().filter(|d| !d.is_empty()) {
                     tool.description = Some(desc.clone());
                     // Mark for the smart toolset hash: override edits must
                     // trigger a re-embed (origin #1198 parity).

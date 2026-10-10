@@ -58,7 +58,14 @@ def method_semantics(tag):
     st, _ = raw("POST", f"/rest/{SCOPE}/call", "", {"Content-Type": "application/json"})
     check(f"{tag} 空 body call → 4xx", 400 <= st < 500, f"st={st}")
 
+def get_strict():
+    con = sqlite3.connect(DB)
+    cfg = json.loads(con.execute("SELECT config_json FROM system_config WHERE rowid=1").fetchone()[0] or "{}")
+    con.close()
+    return bool(cfg.get("mcp", {}).get("strictValidation", False))
+
 def strict_unaffected():
+    orig = get_strict()  # capture pre-run baseline BEFORE any mutation
     set_strict(True); time.sleep(0.4)
     try:
         # 严格模式只作用于 /mcp；REST 面保持正常
@@ -74,12 +81,15 @@ def strict_unaffected():
         r = c.getresponse(); r.read(); c.close()
         check("[strict] /mcp 缺 Accept → 4xx 拒绝", 400 <= r.status < 500, f"st={r.status}")
     finally:
-        set_strict(set_strict(False)); time.sleep(0.4)
-    # 宽松恢复：同请求放行（结果可解析）
-    st, d = raw("POST", "/mcp", json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize",
-        "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"m22","version":"1"}}}),
-        {"Content-Type":"application/json"})
-    check("[lenient] /mcp 缺 Accept → 放行 2xx", 200 <= st < 300, f"st={st}")
+        set_strict(orig); time.sleep(0.4)  # 还原运行前基线
+    # 宽松恢复：同请求放行（结果可解析）；基线本就是 strict 时跳过
+    if orig:
+        print("[lenient] baseline strict=true, skip lenient-restored check")
+    else:
+        st, d = raw("POST", "/mcp", json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"m22","version":"1"}}}),
+            {"Content-Type":"application/json"})
+        check("[lenient] /mcp 缺 Accept → 放行 2xx", 200 <= st < 300, f"st={st}")
 
 def concurrent_same_session():
     # 建会话

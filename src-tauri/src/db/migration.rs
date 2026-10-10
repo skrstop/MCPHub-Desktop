@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 31;
+pub const TARGET_VERSION: i64 = 33;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -182,6 +182,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         29 => migrate_v29(pool).await,
         30 => migrate_v30(pool).await,
         31 => migrate_v31(pool).await,
+        32 => migrate_v32(pool).await,
+        33 => migrate_v33(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -319,6 +321,26 @@ async fn migrate_v30(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
     }
+    // Repair guard: dev DBs that predate this migration can hold the table in
+    // an older shape (issuer/client_id/access_token columns); `IF NOT EXISTS`
+    // would silently keep it and every rmcp credentials/pending write would
+    // fail with "no column named credentials_json". The table is transient
+    // OAuth flow state (worst case: the user reconnects), so rebuilding is safe.
+    let has_credentials_json: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_upstream_tokens'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_credentials_json > 0 {
+        let shape_ok: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('oauth_upstream_tokens') WHERE name='credentials_json'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if shape_ok == 0 {
+            sqlx::query("DROP TABLE oauth_upstream_tokens").execute(pool).await?;
+        }
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS oauth_upstream_tokens (
             server_name        TEXT PRIMARY KEY,
@@ -332,6 +354,57 @@ async fn migrate_v30(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// v31 → v32: repair legacy-shaped `oauth_upstream_tokens` tables. Dev DBs
+/// that predate v30 can hold the table with issuer/client_id columns; the
+/// rmcp state store writes credentials_json/pending_json and every such write
+/// fails with "no column named credentials_json". Transient flow state —
+/// rebuilding is safe (worst case the user reconnects the server).
+async fn migrate_v32(pool: &SqlitePool) -> Result<()> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='oauth_upstream_tokens'",
+    )
+    .fetch_one(pool)
+    .await?;
+    // No early return: a crash between v32's DROP and CREATE (statements are
+    // individually autocommitted, version only advances after apply_migration
+    // returns) leaves the table absent on retry — IF NOT EXISTS here is the
+    // self-healing path (v30 already ran, nothing else recreates it).
+    let shape_ok: i64 = if exists == 0 {
+        0
+    } else {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('oauth_upstream_tokens') WHERE name='credentials_json'",
+        )
+        .fetch_one(pool)
+        .await?
+    };
+    if shape_ok == 0 {
+        if exists > 0 {
+            sqlx::query("DROP TABLE oauth_upstream_tokens").execute(pool).await?;
+        }
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS oauth_upstream_tokens (
+                server_name        TEXT PRIMARY KEY,
+                credentials_json   TEXT NOT NULL DEFAULT '',
+                pending_json       TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'disabled',
+                error_message      TEXT NOT NULL DEFAULT '',
+                updated_at         INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// v32 → v33: mark dynamically registered clients so the clientTtl reaper
+/// only reaps dynamic registrations — pre-registered clients (seeded or
+/// created out-of-band) must never be silently deregistered.
+async fn migrate_v33(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(pool, "oauth_clients", "dynamic", "INTEGER NOT NULL DEFAULT 0").await
 }
 
 /// v30 → v31: OAuth Provider (MCPHub as authorization server).
@@ -658,8 +731,7 @@ async fn migrate_v8(pool: &SqlitePool) -> Result<()> {
         "UPDATE app_log SET created_at = datetime(created_at, 'localtime') WHERE created_at IS NOT NULL"
     )
     .execute(pool)
-    .await
-    .ok();
+    .await?;
 
     // Update other tables with created_at/updated_at columns
     for table in &["users", "servers", "groups", "bearer_keys", "templates", "server_tool_config", "builtin_prompts", "builtin_resources"] {
@@ -667,14 +739,14 @@ async fn migrate_v8(pool: &SqlitePool) -> Result<()> {
             "UPDATE {} SET created_at = datetime(created_at, 'localtime') WHERE created_at IS NOT NULL",
             table
         );
-        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await.ok();
+        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await?;
     }
     for table in &["users", "servers", "templates", "server_tool_config"] {
         let sql = format!(
             "UPDATE {} SET updated_at = datetime(updated_at, 'localtime') WHERE updated_at IS NOT NULL",
             table
         );
-        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await.ok();
+        sqlx::query(sqlx::AssertSqlSafe(&*sql)).execute(pool).await?;
     }
 
     log::info!("[db] migration v8: converted existing timestamps to local time");
@@ -1188,23 +1260,38 @@ async fn migrate_v21(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     // 幂等：只在旧表还有数据而新表为空时平移（防重跑重复插入）
-    let migrated: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM rag_tags) + (SELECT COUNT(*) FROM rag_tag_stats)",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
-    let new_empty: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_tags")
-        .fetch_one(pool)
+    // Count → INSERT → DROP must be one serialized unit: a crash between
+    // INSERT and DROP used to leave a partial copy, and the rerun (version
+    // still v20) then skipped the copy and DROPPED the un-copied rows. A
+    // count error previously fell back to 0 and the DROP still ran —
+    // destroying the source data the migration was supposed to carry.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let old_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_tag_stats")
+        .fetch_one(&mut *tx)
         .await?;
-    if migrated > 0 && new_empty == 0 {
+    let new_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_tags")
+        .fetch_one(&mut *tx)
+        .await?;
+    // Copy only into an EMPTY destination. A pre-existing partial state
+    // (old non-empty AND new non-empty, from a pre-fix buggy build) must NOT
+    // be dropped — the un-copied source rows would be destroyed.
+    if old_rows > 0 && new_rows == 0 {
         sqlx::query("INSERT INTO rag_tags (tag, file_count) SELECT tag, file_count FROM rag_tag_stats")
-            .execute(pool)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM rag_tag_stats").execute(&mut *tx).await?;
+    }
+    // Drop only when the source table holds nothing (never ran, or copy
+    // completed and drained). A partial state keeps its rows intact.
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_tag_stats")
+        .fetch_one(&mut *tx)
+        .await?;
+    if remaining == 0 {
+        sqlx::query("DROP TABLE IF EXISTS rag_tag_stats")
+            .execute(&mut *tx)
             .await?;
     }
-    sqlx::query("DROP TABLE IF EXISTS rag_tag_stats")
-        .execute(pool)
-        .await?;
+    tx.commit().await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_rag_tags_file_count ON rag_tags(file_count DESC, tag)")
         .execute(pool)
         .await?;
@@ -1607,6 +1694,84 @@ mod tests {
 
         // Idempotent: second run is a no-op.
         run_pending(&pool).await.expect("re-run migrations");
+    }
+
+    /// v30 修复自证：存量库若持有旧形态 oauth_upstream_tokens（无
+    /// credentials_json 列），迁移必须重建出正确形状（否则 rmcp 凭据写入
+    /// 全部 no such column）。
+    #[tokio::test]
+    async fn v30_repairs_legacy_oauth_upstream_tokens_shape() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        // Seed the legacy shape manually, then run migrations.
+        sqlx::query(
+            "CREATE TABLE oauth_upstream_tokens (\
+                server_name TEXT PRIMARY KEY, issuer TEXT NOT NULL DEFAULT '', \
+                status TEXT NOT NULL DEFAULT 'disabled')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed legacy table");
+        run_pending(&pool).await.expect("run migrations");
+
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('oauth_upstream_tokens')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        for c in ["credentials_json", "pending_json", "error_message", "updated_at"] {
+            assert!(cols.iter().any(|x| x == c), "missing col {} in {:?}", c, cols);
+        }
+        assert!(!cols.iter().any(|x| x == "issuer"), "legacy col issuer survived: {:?}", cols);
+
+        // The rebuilt table accepts the rmcp-shaped write.
+        sqlx::query(
+            "INSERT INTO oauth_upstream_tokens (server_name, credentials_json, pending_json, status, updated_at) \
+             VALUES ('srv', '{}', '{}', 'pending', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("credentials_json write must succeed");
+    }
+
+    /// v32 修复迁移：存量库（已推进到 v31）持旧形态 oauth_upstream_tokens 时，
+    /// run_pending 到 v32 必须重建出 credentials_json 形状。
+    #[tokio::test]
+    async fn v32_repairs_existing_db_legacy_shape() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        // Run to v31 only, then corrupt the table into the legacy shape.
+        let _ = get_current_version(&pool).await.expect("init schema_version");
+        for version in 1..=31 {
+            apply_migration(&pool, version).await.expect("apply to v31");
+            set_version(&pool, version).await.expect("set version");
+        }
+        sqlx::query("DROP TABLE oauth_upstream_tokens").execute(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE oauth_upstream_tokens (server_name TEXT PRIMARY KEY, issuer TEXT NOT NULL DEFAULT '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run_pending(&pool).await.expect("run to v32");
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('oauth_upstream_tokens')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(cols.iter().any(|x| x == "credentials_json"), "cols {:?}", cols);
+        assert!(!cols.iter().any(|x| x == "issuer"), "legacy issuer survived: {:?}", cols);
     }
 
     /// v31 迁移在全新库上应建出 OAuth Provider 三表（可直插直查），推进到

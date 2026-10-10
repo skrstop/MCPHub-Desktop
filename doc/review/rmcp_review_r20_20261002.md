@@ -39,7 +39,7 @@
 
 ## 2. 新套件
 
-`scripts/e2e/rmcp_supplement_v20.py`（36 项）：
+`../../scripts/e2e/rmcp_supplement_v20.py`（36 项）：
 1. **group allow-list 强制执行**（Test 组 tools/list 成员边界 + 组外工具调用拒绝）
 2. **$smart 端点**（initialize / tools/list 仅 meta 工具 / search_tools 真实检索）
 3. **GET SSE server-push 流 × 5 版本**（200 SSE + keep-alive 输出 + 流开后 POST 仍通）

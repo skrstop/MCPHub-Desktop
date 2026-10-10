@@ -482,7 +482,10 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
       setExcludedBase(new Set(stored));
       setExcludedLocal(new Set());
     } catch (err) {
+      // Silent drop = user's exclusions silently revert on the next update
+      // check; surface a non-blocking warning (round 13 review).
       console.warn('[RAG] persist exclusion diff failed:', err);
+      showToast(t('pages.rag.exclusionPersistFailed', 'Exclusions could not be saved'), 'error');
     }
   };
 
@@ -890,11 +893,24 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     }
     // Use the full hook list (`ragDocs`) so batch ops work across pages —
     // selectedIds can contain docs from pages other than the current one.
-    for (const doc of ragDocs.filter((d) => selectedIds.has(d.id))) {
-      const set = new Set(doc.tags || []);
-      if (batchMode === 'add') cleaned.forEach((x) => set.add(x));
-      else cleaned.forEach((x) => set.delete(x));
-      await setTags(doc.id, Array.from(set));
+    let succeeded = 0;
+    try {
+      for (const doc of ragDocs.filter((d) => selectedIds.has(d.id))) {
+        const set = new Set(doc.tags || []);
+        if (batchMode === 'add') cleaned.forEach((x) => set.add(x));
+        else cleaned.forEach((x) => set.delete(x));
+        await setTags(doc.id, Array.from(set));
+        succeeded += 1;
+      }
+    } catch (err) {
+      // Loop aborts on first failure; docs before it are already mutated.
+      // Without this catch the rejection is unhandled, no toast shows and
+      // the dialog stays open as if nothing happened (round 13 review).
+      showToast(
+        t('pages.rag.batchTagsPartialFailed', 'Some tags could not be saved ({{n}} done)', { n: succeeded }),
+        'error',
+      );
+      return;
     }
     showToast(t('pages.rag.tagsSaved'), 'success');
     setShowBatchTags(false);

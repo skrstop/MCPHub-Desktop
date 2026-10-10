@@ -1,3 +1,10 @@
+def _valid_pub_ip(x):
+    try:
+        import ipaddress as _ip
+        a = _ip.ip_address(x)
+        return not (a.is_private or a.is_loopback or a.is_link_local or a.is_reserved)
+    except Exception:
+        return False
 #!/usr/bin/env python3
 """v32 suite — R32 regression: rag command gating (fail-closed 403s in multi-user is Rust-side; here verify protocol surface + group endpoint encoding observable via /api/{name} + public-IP rotation)."""
 import json, urllib.request, urllib.parse, re, sys, base64, http.client
@@ -74,7 +81,9 @@ for v in ["2025-03-26", "2025-06-18"]:
         text = r["result"]["content"][0]["text"]
     except Exception:
         pass
-    m = re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+    m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+    if m and not _valid_pub_ip(m.group(0)):
+        m = None  # loopback/private/reserved is NOT a public-IP success
     check(f"ip-{v}", st2 == 200 and not r.get("result", {}).get("isError") and m, f"{st2} {text[-50:]}")
 
 # 3. /api/{name}/openapi.json with percent-encoded CJK server name resolves
@@ -88,7 +97,7 @@ try:
     check("api-encoded-cjk-path", ok, f"{resp.status} len={len(body)}")
 except urllib.error.HTTPError as e:
     # 404 acceptable if server group not exposed via /api single-server spec — but must NOT be 5xx
-    check("api-encoded-cjk-path", e.code in (401, 403, 404), str(e.code))
+    check("api-encoded-cjk-path", e.code in (401, 403), str(e.code))
 except Exception as e:
     check("api-encoded-cjk-path", False, str(e))
 
@@ -123,7 +132,9 @@ try:
     text = r["result"]["content"][0]["text"]
 except Exception:
     pass
-m = re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+if m and not _valid_pub_ip(m.group(0)):
+    m = None  # loopback/private/reserved is NOT a public-IP success
 check("ip-2026", resp.status == 200 and r.get("result", {}).get("resultType") == "complete" and m, f"{text[-50:]}")
 
 # 5. Health

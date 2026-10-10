@@ -161,6 +161,55 @@ fn is_sensitive_name(lower_k: &str) -> bool {
 /// Redact sensitive env vars / HTTP headers for export & copy.
 /// Headers routinely carry `Authorization` / `X-Api-Key`; exporting them
 /// verbatim would leak upstream credentials into the shared settings file.
+/// Redact credential-bearing values from a stdio `args` list for the SHARED
+/// export file: values following sensitive flags (`--header "Authorization:
+/// …"`, `--api-key sk-…`) are the standard remote-MCP credential pattern and
+/// land in mcp_settings.json verbatim otherwise. The COPY path deliberately
+/// does NOT redact args — the user pasting their own config to another
+/// machine needs working arguments.
+fn redact_args_for_export(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for a in args {
+        let lower = a.to_lowercase();
+        if redact_next && !a.starts_with('-') {
+            redact_next = false;
+            out.push("***REDACTED***".to_string());
+            continue;
+        }
+        // A flag is never a flag's VALUE. Fall through to the inline-`=`
+        // check — `--api-key=sk-…` in value position must still be redacted.
+        redact_next = is_sensitive_flag(&lower) && a.contains('=') == false;
+        // `--api-key=sk-…` inline form: redact the value part. Compute the
+        // lowercase prefix from `a` itself — reusing a byte offset from `a`
+        // against `lower` panics when to_lowercase() changes byte length.
+        if !redact_next {
+            if let Some(eq) = a.find('=') {
+                let lower_prefix = a[..eq].to_lowercase();
+                if is_sensitive_flag(&lower_prefix) {
+                    out.push(format!("{}={}", &a[..eq + 1], "***REDACTED***"));
+                    continue;
+                }
+            }
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
+fn is_sensitive_flag(lower_arg: &str) -> bool {
+    let flag = lower_arg.trim_start_matches('-');
+    // `-H` / `-a` short aliases of --header/--api-key.
+    flag == "h" || flag == "a"
+        || flag.starts_with("header")
+        || flag.starts_with("api-key")
+        || flag.starts_with("apikey")
+        || flag.starts_with("token")
+        || flag.starts_with("secret")
+        || flag.starts_with("password")
+        || flag.starts_with("authorization")
+}
+
 fn redact_map(map: HeaderMapCfg) -> HeaderMapCfg {
     map.map(|env| {
         env.iter()
@@ -178,9 +227,14 @@ fn redact_map(map: HeaderMapCfg) -> HeaderMapCfg {
 /// Get a single server's config for copying (no admin auth required).
 /// Sensitive values (API keys, tokens) are redacted.
 #[tauri::command]
-pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_json::Value, String> {
+pub async fn get_server_config_for_copy(session: tauri::State<'_, SessionState>, server_name: String) -> Result<serde_json::Value, String> {
     use crate::services::server_service;
 
+    // Admin-gated: args pass through verbatim and stdio args routinely carry
+    // inline credentials (--header "Authorization: …"); the export path
+    // redacts them for the same reason. skipAuth default keeps the copy
+    // button working for the single-user desktop (round 14 review).
+    require_admin(&session).await?;
     let server = server_service::get_by_name(&server_name)
         .await
         .map_err(|e| e.to_string())?
@@ -233,21 +287,7 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
         Some(v)
     });
     // OAuth secrets/tokens never leave the machine in plaintext copies.
-    // Endpoints/scopes/resource stay intact so the copy can be re-imported and
-    // re-authenticated via the authorization flow.
-    let redacted_oauth = server.oauth.as_ref().map(|o| {
-        let mut v = serde_json::to_value(o).unwrap_or_else(|_| serde_json::json!({}));
-        if let Some(obj) = v.as_object_mut() {
-            for key in ["clientSecret", "accessToken", "refreshToken"] {
-                if let Some(s) = obj.get(key).and_then(|x| x.as_str()) {
-                    if !s.is_empty() {
-                        obj.insert(key.to_string(), serde_json::json!("***REDACTED***"));
-                    }
-                }
-            }
-        }
-        v
-    });
+    let redacted_oauth = redact_oauth_for_export(server.oauth.as_ref());
 
     Ok(serde_json::json!({
         "mcpServers": {
@@ -276,6 +316,24 @@ pub async fn get_server_config_for_copy(server_name: String) -> Result<serde_jso
 }
 
 /// Recursively replace string leaves under sensitive-looking keys.
+/// OAuth secrets/tokens never leave the machine in plaintext (copy + export).
+/// Endpoints/scopes/resource stay intact so the output can be re-imported and
+/// re-authenticated via the authorization flow.
+fn redact_oauth_for_export(oauth: Option<&crate::models::server::ServerOauthConfig>) -> serde_json::Value {
+    let Some(o) = oauth else { return serde_json::Value::Null };
+    let mut v = serde_json::to_value(o).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        for key in ["clientSecret", "accessToken", "refreshToken"] {
+            if let Some(s) = obj.get(key).and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    obj.insert(key.to_string(), serde_json::json!("***REDACTED***"));
+                }
+            }
+        }
+    }
+    v
+}
+
 fn redact_secret_leaves(v: serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(map) => serde_json::Value::Object(
@@ -353,7 +411,7 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
                 "type": s.server_type,
                 "description": s.description,
                 "command": s.command,
-                "args": s.args,
+                "args": redact_args_for_export(s.args.as_deref().unwrap_or(&[])),
                 "env": redacted_env,
                 "url": s.url,
                 "disabled": !s.enabled,
@@ -367,6 +425,9 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
                 "enableKeepAlive": s.enable_keep_alive,
                 "keepAliveInterval": s.keep_alive_interval,
                 "passthroughHeaders": s.passthrough_headers,
+                // OAuth block redacted exactly like the copy path — export→
+                // import must not silently drop the oauth configuration.
+                "oauth": redact_oauth_for_export(s.oauth.as_ref()),
             }),
         );
     }

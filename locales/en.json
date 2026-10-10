@@ -332,7 +332,8 @@
       "allowInsecureTokenEndpointHelp": "Admin only. Disabled by default. Sends credentials and tokens without TLS for this upstream. Enable only on a trusted network; HTTPS is recommended. Once enabled, only administrators can edit this entire server configuration; a non-admin owner cannot edit it.",
       "connectStarted": "Authorization started — approve it in the browser window that just opened.",
       "connectFailed": "Failed to start OAuth authorization",
-      "disconnected": "OAuth disconnected"
+      "disconnected": "OAuth disconnected",
+      "connectSuccess": "OAuth authorization completed — credentials stored."
     },
     "duplicate": "Duplicate",
     "nameInvalid": "Server name can only contain letters, numbers, dots, underscores, and hyphens (no spaces or special characters)",
@@ -900,7 +901,9 @@
       "excludeFileGroupRemove": "Re-include these files (resume update checks)",
       "refreshSourceDone": "Source update done: imported {{added}}, removed {{removed}}, updated {{updated}}",
       "refreshSourceTitle": "Source Update",
-      "selectedCount": "{{count}} selected"
+      "selectedCount": "{{count}} selected",
+      "batchTagsPartialFailed": "Some tags could not be saved ({{n}} done)",
+      "exclusionPersistFailed": "Exclusions could not be saved"
     }
   },
   "logs": {
@@ -1484,8 +1487,8 @@
     "dynamicRegistrationAllowedGrantTypes": "Allowed Grant Types",
     "dynamicRegistrationAllowedGrantTypesDescription": "Comma-separated list of grants permitted for dynamically registered clients",
     "dynamicRegistrationAllowedGrantTypesPlaceholder": "e.g. authorization_code, refresh_token",
-    "dynamicRegistrationAuth": "Require Authentication",
-    "dynamicRegistrationAuthDescription": "Protect the registration endpoint so only authenticated requests can register clients",
+    "dynamicRegistrationAuth": "Require authentication for dynamic registration",
+    "dynamicRegistrationAuthDescription": "Close dynamic registration to new clients (this provider offers no registration credential — pre-register clients instead).",
     "invalidNumberInput": "Please enter a valid non-negative number",
     "skillsAgentsTitle": "Agent Install Paths",
     "skillsAgentsDescription": "Configure known AI agents' skills install paths, used for scanning and exporting skills. Paths may start with ~.",
@@ -1554,7 +1557,8 @@
     "toolDefinitionFields": "Tool fields in results",
     "toolDefinitionFieldsDescription": "Optional fields that search_tools and describe_tool results carry next to the name, description and inputSchema. Default: title and annotations. The others are mostly for clients and can be large (icons are base64 images).",
     "disablePasswordLogin": "Disable password login",
-    "disablePasswordLoginDescription": "Only allow sign-in through the SSO providers: the username/password form and POST /api/auth/login are turned off. Takes effect only while at least one provider is enabled and was already enabled when the application started. BETTER_AUTH_DISABLE_PASSWORD_LOGIN overrides this setting, and setting it to false is the way back in if the identity provider is unavailable."
+    "disablePasswordLoginDescription": "Only allow sign-in through the SSO providers: the username/password form and POST /api/auth/login are turned off. Takes effect only while at least one provider is enabled and was already enabled when the application started. BETTER_AUTH_DISABLE_PASSWORD_LOGIN overrides this setting, and setting it to false is the way back in if the identity provider is unavailable.",
+    "oauthClientRevokeConfirm": "Revoking this client immediately invalidates all its access and refresh tokens. The client must register and authorize again."
   },
   "mcpb": {
     "upload": "Upload",

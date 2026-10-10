@@ -18,18 +18,24 @@ pub struct SessionState(pub Mutex<Option<AuthToken>>);
 /// settings export / bearer-key management. Migration 0005 seeds this key, so
 /// the fallback only triggers on corrupted configs.
 pub(crate) async fn is_skip_auth_enabled() -> bool {
-    match config_service::get().await {
+    // Use get_strict(): config_service::get() backs up corrupt JSON and returns
+    // Ok({}) — an auth-enabled deployment would silently flip to guest mode
+    // (skipAuth=true) on bit-rot, propping open every require_admin gate
+    // (round 15 review; mirrors http_server's hub_admin_gate). NULL config is
+    // still Ok({}) here, so fresh installs keep the default-true behavior.
+    match config_service::get_strict().await {
         Ok(c) => c
             .get("routing")
             .and_then(|r| r.get("skipAuth"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        // DB read failure: keep the desktop-friendly default (skipAuth on) so a
-        // transient error never locks the local user out, but log loudly —
-        // in an auth-enabled deployment this window keeps require_admin open.
+        // DB read failure: fail CLOSED — an auth-enabled deployment must not
+        // have every require_admin gate propped open by a transient DB error
+        // (round 14 review). In skipAuth desktops the DB being unreadable
+        // breaks every command anyway, so no new lock-out is introduced.
         Err(e) => {
-            log::warn!("[auth] skipAuth config read failed ({e}); falling back to skipAuth=true");
-            true
+            log::warn!("[auth] skipAuth config read failed ({e}); failing closed (skipAuth=false)");
+            false
         }
     }
 }
@@ -153,8 +159,9 @@ pub async fn change_password(
         .map_err(|e| e.to_string())?
         .ok_or("User not found")?;
 
-    let valid = auth_util::verify_password(&old_password, &user.password_hash)
-        .map_err(|e| e.to_string())?;
+    // Verify errors (corrupt hash) must read as "incorrect", not a
+    // distinguishable InvalidHash oracle — same decision as login (round 14).
+    let valid = auth_util::verify_password(&old_password, &user.password_hash).unwrap_or(false);
     if !valid {
         return Err("Current password is incorrect".to_string());
     }

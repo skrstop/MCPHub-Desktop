@@ -24,7 +24,7 @@ market/cost 全净（只读 catalog、无安装流、cost 无溢出面）；FTS 
 
 ## 4. 新套件
 
-`scripts/e2e/rmcp_supplement_v25.py`（4 项）——builtin prompts 端到端：list 形状 + required 透传、填参渲染无占位残留、值含 `{{token}}` 不崩（交叉展开由 Rust 单测精确覆盖：`render_single_pass_no_cross_expansion` 等 5 个新单测）、缺 required → invalid_params。
+`../../scripts/e2e/rmcp_supplement_v25.py`（4 项）——builtin prompts 端到端：list 形状 + required 透传、填参渲染无占位残留、值含 `{{token}}` 不崩（交叉展开由 Rust 单测精确覆盖：`render_single_pass_no_cross_expansion` 等 5 个新单测）、缺 required → invalid_params。
 
 ## 5. 验证结果
 

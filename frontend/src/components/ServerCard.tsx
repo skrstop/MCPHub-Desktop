@@ -221,7 +221,26 @@ const ServerCard = ({
   // Reinstall is only available for stdio servers using npx or uvx
   const supportsReinstall =
     server.config?.command === 'npx' || server.config?.command === 'uvx';
-  const supportsOAuthDisconnect = Boolean(server.oauth?.connected && onOAuthDisconnect);
+  // Upstream OAuth connect state: the Rust list_servers payload carries no
+  // oauth status, so fetch it lazily (same pattern as the pins above) —
+  // without this the "Disconnect OAuth" menu item is unreachable.
+  const [oauthConnected, setOauthConnected] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (expandedTab === 'tools') {
+      import('@/services/serverOAuthService')
+        .then(({ getServerOAuthStatus }) => getServerOAuthStatus(server.name))
+        .then((st) => {
+          if (!cancelled) setOauthConnected(st === 'connected');
+        })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [expandedTab, server.name]);
+
+  const supportsOAuthDisconnect = Boolean(
+    (server.oauth?.connected || oauthConnected) && onOAuthDisconnect,
+  );
   // Live install/download progress + update-available info (event-driven).
   const installProgress = getProgress(server.name);
   const isDownloading = isInstalling(server.name);
@@ -446,6 +465,37 @@ const ServerCard = ({
     return () => { cancelled = true; };
   }, [expandedTab, server.name]);
 
+  // OAuth flow completion/failure events (emitted by the Rust completion
+  // task): surface success/failure toasts + refresh the status badge.
+  useEffect(() => {
+    if (!(typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)) return;
+    let disposed = false;
+    let unlisteners: (() => void)[] = [];
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (disposed) return;
+      const onConnected = await listen<{ serverName: string }>('server://oauth-connected', (e) => {
+        if (e.payload?.serverName === server.name) {
+          setOauthConnected(true);
+          showToast(t('server.oauth.connectSuccess'), 'success');
+          onRefresh?.();
+        }
+      });
+      if (disposed) { onConnected(); return; }
+      const onError = await listen<{ serverName: string; message?: string }>('server://oauth-error', (e) => {
+        if (e.payload?.serverName === server.name) {
+          showToast(e.payload?.message || t('server.oauth.connectFailed'), 'error');
+          onRefresh?.();
+        }
+      });
+      unlisteners = [onConnected, onError];
+    })().catch(() => {});
+    return () => {
+      disposed = true;
+      unlisteners.forEach((u) => u());
+    };
+  }, [server.name]);
+
   const handleToolPinToggle = async (toolName: string, pinned: boolean) => {
     try {
       const { pinTool } = await import('@/services/toolService');
@@ -566,8 +616,10 @@ const ServerCard = ({
     return parts.join(' ');
   })();
 
-  const serverEndpoint = `${baseUrl}/mcp/${server.name}`;
-  const serverOpenApiEndpoint = `${baseUrl}/api/${server.name}`;
+  // encodeURIComponent matches GroupCard's copy endpoints — CJK/space
+  // names otherwise produce a URL no MCP/REST client can use (round 13).
+  const serverEndpoint = `${baseUrl}/mcp/${encodeURIComponent(server.name)}`;
+  const serverOpenApiEndpoint = `${baseUrl}/api/${encodeURIComponent(server.name)}`;
   // Smart Routing meta tools: shown on the builtin card with a Smart badge;
   // their only HTTP access point is /mcp/$smart (non-$smart /mcp|/api paths
   // filter them out server-side).

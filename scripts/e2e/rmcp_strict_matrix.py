@@ -87,6 +87,7 @@ check("宽松: 正常请求不受影响", st==200 and obj and "result" in obj)
 
 # ── 严格模式 ──
 print("== 严格模式（strictValidation=true）==")
+_orig_strict = get_strict()  # capture pre-run baseline BEFORE any mutation
 set_strict(True)
 try:
     # 配置热读：中间件每请求读 config（与 is_skip_auth_enabled 同模式），无需重启
@@ -97,7 +98,7 @@ try:
         {"Accept":"application/json, text/event-stream"})
     check("严格: 正常请求不受影响", st==200 and obj and "result" in obj)
 finally:
-    set_strict(False)  # 还原默认关
+    set_strict(_orig_strict)  # 还原运行前基线
 
 print(f"\n== {len(PASS)}/{len(PASS)+len(FAIL)} passed ==")
 if FAIL:

@@ -53,9 +53,14 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
             }
             // Find enabled servers that are currently disconnected
             let all_statuses = pool::get_all_statuses().await;
+            // Skip starting servers: their in-flight connect holds the
+            // per-name lock; connect_server would block on it and then tear
+            // down the JUST-established live connection to reconnect
+            // (spurious churn on every rebuild tick during a slow npx
+            // handshake — round 12 review).
             let disconnected: Vec<String> = all_statuses
                 .into_iter()
-                .filter(|s| !s.connected)
+                .filter(|s| !s.connected && !s.starting)
                 .map(|s| s.name)
                 .collect();
             if disconnected.is_empty() {

@@ -328,7 +328,8 @@
       "allowInsecureTokenEndpointHelp": "Yalnızca yönetici. Varsayılan olarak devre dışı. Bu üst sunucu için kimlik bilgilerini ve token'ları TLS olmadan gönderir. Yalnızca güvenilir bir ağda etkinleştirin; HTTPS önerilir. Etkinleştirildiğinde yalnızca yöneticiler bu sunucunun tüm yapılandırmasını düzenleyebilir; yönetici olmayan sahip düzenleyemez.",
       "connectStarted": "Yetkilendirme başlatıldı — yeni açılan tarayıcı penceresinde onaylayın.",
       "connectFailed": "OAuth yetkilendirmesi başlatılamadı",
-      "disconnected": "OAuth bağlantısı kesildi"
+      "disconnected": "OAuth bağlantısı kesildi",
+      "connectSuccess": "OAuth yetkilendirmesi tamamlandı — kimlik bilgileri kaydedildi."
     },
     "duplicate": "Çoğalt",
     "nameInvalid": "Sunucu adı yalnızca harf, rakam, nokta, alt çizgi ve tire içerebilir (boşluk veya özel karakter içeremez)",
@@ -897,7 +898,9 @@
       "excludeFileGroupRemove": "Bu dosyaları yeniden dahil et (güncelleme kontrolleri sürer)",
       "refreshSourceDone": "Kaynak güncellemesi tamamlandı: {{added}} içe aktarıldı, {{removed}} kaldırıldı, {{updated}} güncellendi",
       "refreshSourceTitle": "Kaynak Güncellemesi",
-      "selectedCount": "{{count}} öğe seçildi"
+      "selectedCount": "{{count}} öğe seçildi",
+      "batchTagsPartialFailed": "Bazı etiketler kaydedilemedi ({{n}} tamamlandı)",
+      "exclusionPersistFailed": "Hariç tutma kuralları kaydedilemedi"
     },
     "skills": {
       "title": "Skills"
@@ -1459,7 +1462,7 @@
     "dynamicRegistrationAllowedGrantTypesDescription": "Dinamik olarak kaydedilen istemciler için kullanılabilecek grant türlerinin virgülle ayrılmış listesi",
     "dynamicRegistrationAllowedGrantTypesPlaceholder": "örn. authorization_code, refresh_token",
     "dynamicRegistrationAuth": "Kayıt için kimlik doğrulaması iste",
-    "dynamicRegistrationAuthDescription": "Kayıt uç noktasını korur, yalnızca kimliği doğrulanmış istekler yeni istemci oluşturabilir",
+    "dynamicRegistrationAuthDescription": "Dinamik kaydı yeni istemcilere kapatır (bu sağlayıcı kayıt kimlik bilgisi sunmaz — istemcileri önceden kaydedin).",
     "invalidNumberInput": "Lütfen sıfırdan küçük olmayan geçerli bir sayı girin",
     "runtimeSystemDefault": "Sistem varsayılanı",
     "runtimeInstalled": "Yüklü",
@@ -1554,7 +1557,8 @@
     "toolDefinitionFields": "Sonuçlardaki araç alanları",
     "toolDefinitionFieldsDescription": "search_tools ve describe_tool sonuçlarının ad, açıklama ve inputSchema dışında içerdiği isteğe bağlı alanlar. Varsayılan: title ve annotations. Diğerleri çoğunlukla istemciler içindir ve büyük olabilir (simgeler base64 görsellerdir).",
     "disablePasswordLogin": "Şifreyle girişi devre dışı bırak",
-    "disablePasswordLoginDescription": "Yalnızca SSO sağlayıcılarıyla girişe izin ver: kullanıcı adı/şifre formu ve POST /api/auth/login kapatılır. En az bir sağlayıcı etkin olduğunda ve uygulama başlangıcında zaten etkin olduğunda geçerlidir. BETTER_AUTH_DISABLE_PASSWORD_LOGIN bu ayarı geçersiz kılar; kimlik sağlayıcısı kullanılamıyorsa false yapmak geri dönüş yoludur."
+    "disablePasswordLoginDescription": "Yalnızca SSO sağlayıcılarıyla girişe izin ver: kullanıcı adı/şifre formu ve POST /api/auth/login kapatılır. En az bir sağlayıcı etkin olduğunda ve uygulama başlangıcında zaten etkin olduğunda geçerlidir. BETTER_AUTH_DISABLE_PASSWORD_LOGIN bu ayarı geçersiz kılar; kimlik sağlayıcısı kullanılamıyorsa false yapmak geri dönüş yoludur.",
+    "oauthClientRevokeConfirm": "Bu istemciyi iptal etmek tüm erişim ve yenileme jetonlarını geçersiz kılar. İstemcinin yeniden kaydolup yetkilendirmesi gerekir."
   },
   "mcpb": {
     "upload": "Yükle",

@@ -1,3 +1,10 @@
+def _valid_pub_ip(x):
+    try:
+        import ipaddress as _ip
+        a = _ip.ip_address(x)
+        return not (a.is_private or a.is_loopback or a.is_link_local or a.is_reserved)
+    except Exception:
+        return False
 #!/usr/bin/env python3
 """v39 suite — R39 regression: rebuild recheck (Rust timing), user svc guards (Rust-side); protocol surface + public-IP rotation."""
 import json, urllib.request, re, sys, base64, http.client
@@ -69,7 +76,9 @@ if sid:
         text = r["result"]["content"][0]["text"]
     except Exception:
         pass
-    m = re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+    m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+    if m and not _valid_pub_ip(m.group(0)):
+        m = None  # loopback/private/reserved is NOT a public-IP success
     check("ip-2024-11-05", st2 == 200 and not r.get("result", {}).get("isError") and m, f"{st2} {text[-50:]}")
 else:
     check("ip-2024-11-05", False, "no session")
@@ -105,7 +114,9 @@ try:
     text = r["result"]["content"][0]["text"]
 except Exception:
     pass
-m = re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+if m and not _valid_pub_ip(m.group(0)):
+    m = None  # loopback/private/reserved is NOT a public-IP success
 check("ip-2026", resp.status == 200 and r.get("result", {}).get("resultType") == "complete" and m, f"{text[-50:]}")
 
 # 4. Health

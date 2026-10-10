@@ -1,3 +1,4 @@
+use crate::commands::auth::SessionState;
 use crate::services::config_service;
 
 const DEFAULT_BASE_URL: &str = "https://api.mcprouter.to/v1";
@@ -26,7 +27,12 @@ async fn get_mcprouter_config() -> Result<(String, String, String, String), Stri
 
 /// List all available cloud servers from MCPRouter.
 #[tauri::command]
-pub async fn list_cloud_servers() -> Result<serde_json::Value, String> {
+pub async fn list_cloud_servers(
+    session: tauri::State<'_, SessionState>,
+) -> Result<serde_json::Value, String> {
+    // Spends the stored MCPRouter API key on an authenticated external call —
+    // admin-gated like every other consumer of shared credentials.
+    crate::commands::config::require_admin(&session).await?;
     let (api_key, referer, title, base_url) = get_mcprouter_config().await?;
     if api_key.is_empty() {
         // Parity with get_cloud_server_tools: a request with an empty
@@ -65,7 +71,11 @@ pub async fn list_cloud_servers() -> Result<serde_json::Value, String> {
 
 /// Get tools for a specific cloud server.
 #[tauri::command]
-pub async fn get_cloud_server_tools(server: String) -> Result<serde_json::Value, String> {
+pub async fn get_cloud_server_tools(
+    session: tauri::State<'_, SessionState>,
+    server: String,
+) -> Result<serde_json::Value, String> {
+    crate::commands::config::require_admin(&session).await?;
     let (api_key, referer, title, base_url) = get_mcprouter_config().await?;
     if api_key.is_empty() {
         return Err("MCPROUTER_API_KEY_NOT_CONFIGURED".to_string());

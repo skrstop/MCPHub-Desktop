@@ -18,7 +18,7 @@ vectordb SQL 注入（全部字面量 + 转义）、pdf 畸形页 panic、office
 
 ## 3. 新套件
 
-`scripts/e2e/rmcp_supplement_v27.py`（3 项）——RAG builtin 工具聚合存活 + `mcphub-desktop-rag_search` 真实检索调用 + 非法 httpPort 不致进程崩溃（DB 直改观测 + 还原）。
+`../../scripts/e2e/rmcp_supplement_v27.py`（3 项）——RAG builtin 工具聚合存活 + `mcphub-desktop-rag_search` 真实检索调用 + 非法 httpPort 不致进程崩溃（DB 直改观测 + 还原）。
 
 ## 4. 验证结果
 

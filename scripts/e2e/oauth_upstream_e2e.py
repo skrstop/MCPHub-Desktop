@@ -69,7 +69,9 @@ def hub(method, path, body=None, headers=None):
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, json.loads(r.read().decode() or "{}")
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode() or "{}")
+        raw = e.read().decode()
+        print(f"  [hub] {method} {path} -> {e.code} {raw[:200]!r}")
+        return e.code, json.loads(raw or "{}")
 
 
 # ── mock MCP upstream (401-challenged) ──────────────────────────────────────
@@ -81,7 +83,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "unauthorized"}}).encode()
         self.send_response(401)
         self.send_header("WWW-Authenticate",
-                         f'Bearer realm="mcp", resource_metadata="http://localhost:{AS_PORT}/.well-known/oauth-protected-resource"')
+                         f'Bearer realm="mcp", resource_metadata="http://localhost:{UPSTREAM_PORT}/.well-known/oauth-protected-resource"')
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -101,6 +103,27 @@ class UpstreamHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
         self._401()
+
+    def do_GET(self):
+        # Same-origin protected-resource metadata (rmcp rejects cross-origin
+        # resource_metadata URLs — SEP security policy), pointing at the AS.
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/.well-known/oauth-protected-resource":
+            body = json.dumps({
+                "resource": f"http://localhost:{UPSTREAM_PORT}",
+                "authorization_servers": [f"http://localhost:{AS_PORT}"],
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        # Other metadata discovery probes (RFC 8414 path-inserted + root) must
+        # 404 so the client falls through to the WWW-Authenticate resource hint.
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 # ── mock authorization server ───────────────────────────────────────────────
@@ -224,11 +247,12 @@ def seed_server():
         "url": f"http://localhost:{UPSTREAM_PORT}/mcp",
         "enabled": True,
     })
+    oauth_cfg = json.dumps({"dynamicRegistration": {"enabled": True}})
     con.execute(
-        """INSERT INTO servers (id, name, server_type, url, enabled, description)
-           VALUES (lower(hex(randomblob(16))), 'oauthdemo', 'streamable-http', ?, 1, 'oauth e2e')
-           ON CONFLICT(name) DO UPDATE SET url=excluded.url, enabled=1""",
-        (f"http://localhost:{UPSTREAM_PORT}/mcp",),
+        """INSERT INTO servers (id, name, server_type, url, enabled, description, oauth)
+           VALUES (lower(hex(randomblob(16))), 'oauthdemo', 'streamable-http', ?, 1, 'oauth e2e', ?)
+           ON CONFLICT(name) DO UPDATE SET url=excluded.url, enabled=1, oauth=excluded.oauth""",
+        (f"http://localhost:{UPSTREAM_PORT}/mcp", oauth_cfg),
     )
     con.commit()
     con.close()
@@ -262,13 +286,29 @@ def main():
     seed_server()
     try:
         # 1. Connect → 401 challenge → oauth_required error surface
-        st, res = hub("POST", "/mcp/oauthdemo/tools/list")  # any traffic; connect happens via pool
+        st, res = hub("POST", "/mcp/oauthdemo", {"jsonrpc": "2.0", "id": 1, "method": "ping"})  # any traffic; connect happens via pool
         # Trigger connect through the update/reload path
-        st, res = hub("POST", "/servers/oauthdemo/reload")
-        check("reload triggers connect against 401 upstream", st in (200, 500, 502), str(st))
+        st, res = hub("POST", "/rest/oauthdemo/call", {"tool": "anything", "arguments": {}})
+        # REST face maps pool/upstream-unavailable errors to 500 with a
+        # "not connected" message (documented mapping, R50d family); the
+        # guard's intent is "error surfaced, not a crash" — so accept the
+        # explicit 200/401/502 set plus that 500 form, but not a bare 5xx
+        # catch-all (the round-4 tautology class).
+        _ok_st = st in (200, 401, 502) or (
+            st == 500 and "not connected" in str((res or {}).get("error", "")))
+        check("pool connect against 401 upstream surfaces error (not crash)", _ok_st, f"st={st} res={str(res)[:120]}")
 
         # 2. Start the OAuth flow via the Tauri-mapped REST route
-        st, res = hub("POST", "/servers/oauthdemo/oauth/connect")
+        # Capture the 401 challenge from the mock upstream (mirrors the real
+        # frontend flow: pool connect → 401 → challenge → connect(challenge)).
+        import http.client as _hc
+        _c = _hc.HTTPConnection("localhost", UPSTREAM_PORT, timeout=10)
+        _c.request("POST", "/mcp", json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                   {"Content-Type": "application/json"})
+        _r = _c.getresponse(); _r.read()
+        _challenge = _r.getheader("WWW-Authenticate") or ""
+        _c.close()
+        st, res = hub("POST", "/servers/oauthdemo/oauth/connect", {"challenge": _challenge})
         check("oauth/connect returns 200", st == 200, f"{st} {res}")
 
         # 3. Flow completes: mock AS auto-approves → loopback callback → token
@@ -280,6 +320,7 @@ def main():
         check("authorize endpoint called", EVENTS["authorize"] >= 1, str(EVENTS))
         check("token exchange called", EVENTS["token"] >= 1, str(EVENTS))
         check("no PKCE failures on the happy path", not PKCE_BAD_ATTEMPTS, str(PKCE_BAD_ATTEMPTS))
+        # (duplicate len==0 check removed — same fact counted once)
 
         # 5. Status endpoint reports connected
         st, res = hub("GET", "/servers/oauthdemo/oauth/status")
@@ -287,7 +328,7 @@ def main():
 
         # 6. Negative: PKCE-less token request rejected by the mock AS
         #    (already covered by the AS-side check; assert counter semantics)
-        check("PKCE bad-attempt list stays empty", len(PKCE_BAD_ATTEMPTS) == 0)
+        # (was: duplicate empty-list check, removed)
 
         # 7. Disconnect clears the row
         st, res = hub("POST", "/servers/oauthdemo/oauth/disconnect")

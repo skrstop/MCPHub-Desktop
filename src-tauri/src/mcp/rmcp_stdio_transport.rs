@@ -76,7 +76,7 @@ pub struct RmcpStdioTransport {
     env: HashMap<String, String>,
     service: Option<RunningService<RoleClient, BridgeClientHandler>>,
     pid: Mutex<Option<u32>>,
-    connected: bool,
+    connected: std::sync::atomic::AtomicBool,
     /// Rolling stderr tail (~32KB) so handshake failures include the upstream
     /// stderr (mirrors origin #1015 behaviour of StdioTransport).
     stderr_tail: Arc<Mutex<String>>,
@@ -100,7 +100,7 @@ impl RmcpStdioTransport {
             env,
             service: None,
             pid: Mutex::new(None),
-            connected: false,
+            connected: std::sync::atomic::AtomicBool::new(false),
             stderr_tail: Arc::new(Mutex::new(String::new())),
             server_version: None,
             intentional_disconnect: Arc::new(AtomicBool::new(false)),
@@ -350,7 +350,8 @@ impl McpTransport for RmcpStdioTransport {
         }
 
         self.service = Some(service);
-        self.connected = true;
+        self.connected
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         app_logger::log_to_db(
             "info",
             &format!(
@@ -363,7 +364,8 @@ impl McpTransport for RmcpStdioTransport {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.connected = false;
+        self.connected
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.intentional_disconnect.store(true, Ordering::SeqCst);
         // Kill the process tree first (npx/uvx wrapper children survive plain
         // kill-on-drop), then cancel the rmcp worker.
@@ -392,7 +394,16 @@ impl McpTransport for RmcpStdioTransport {
 
     fn is_connected(&self) -> bool {
         self.connected
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Post-rmcp migration, `is_connected()` only flips on explicit
+    /// connect/disconnect — a dead child process / dropped stream never
+    /// lowered the flag, which left every eviction/rebuild consumer
+    /// (session_pool / on_demand run_call, mcp_manager session_rebuild's
+    /// `!s.connected` filter) dead code for rmcp transports. Connection-
+    /// class call errors mark the transport disconnected so those existing
+    /// paths go live again.
 
     fn server_version(&self) -> Option<String> {
         self.server_version.clone()
@@ -412,18 +423,31 @@ impl McpTransport for RmcpStdioTransport {
         let mut cursor: Option<String> = None;
         let mut seen_cursors = std::collections::HashSet::new();
         let mut last_ttl: Option<u64> = None;
+        let mut was_paged = false;
         for _ in 0..100 {
             let params = cursor
                 .clone()
                 .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
-            let result = service.peer().list_tools(params).await?;
+            let result = match service.peer().list_tools(params).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.mark_conn_loss(&e);
+                    return Err(anyhow!("tools/list failed: {e}"));
+                }
+            };
             // Freshness only from a positive TTL on the final (non-paged) result.
-            last_ttl = result.ttl_ms.filter(|t| *t > 0).map(|t| t as u64);
+            if !was_paged {
+                last_ttl = result.ttl_ms.filter(|t| *t > 0).map(|t| t as u64);
+            }
             all.extend(result.tools);
             match result.next_cursor {
                 Some(next) if seen_cursors.insert(next.clone()) => {
                     cursor = Some(next);
-                    last_ttl = None; // paged lists carry no freshness (origin #1277)
+                    // Paged lists carry no freshness (origin #1277) — the
+                    // flag, not a None-then-overwrite, keeps a ttl-bearing
+                    // FINAL page from restoring freshness after the fact.
+                    last_ttl = None;
+                    was_paged = true;
                 }
                 // None (done) or repeated/absent-progress cursor — stop.
                 _ => break,
@@ -518,7 +542,10 @@ impl McpTransport for RmcpStdioTransport {
             .peer()
             .call_tool_once(params)
             .await
-            .map_err(|e| anyhow!("tools/call failed: {}", e))?;
+            .map_err(|e| {
+                self.mark_conn_loss(&e);
+                anyhow!("tools/call failed: {}", e)
+            })?;
         match response {
             rmcp::model::CallToolResponse::Complete(r) => {
                 let structured_content = r.structured_content.clone().filter(|v| !v.is_null());
@@ -577,6 +604,7 @@ impl McpTransport for RmcpStdioTransport {
                         Err(e) => {
                             transient_failures += 1;
                             if transient_failures >= 3 {
+                                self.mark_conn_loss(&e);
                                 return Err(anyhow!("tasks/get failed: {}", e));
                             }
                             continue;
@@ -643,5 +671,93 @@ impl McpTransport for RmcpStdioTransport {
             }
             _ => Err(anyhow!("unexpected call_tool response")),
         }
+    }
+}
+
+impl RmcpStdioTransport {
+    /// Connection-loss classification by rmcp ServiceError VARIANT (the
+    /// previous string-marker version was dead code: a dead stdio child
+    /// surfaces as TransportClosed -> "Transport closed", which matched none
+    /// of the old markers; "connection closed"/"send message error" exist
+    /// only on initialize-time errors). Mark on transport-class failures —
+    /// McpError is the SERVER's JSON-RPC error (its message text is
+    /// server-controlled and often mentions "connection closed" for its own
+    /// DB), and Timeout is our own cap: neither means the transport died.
+    fn mark_conn_loss(&self, e: &rmcp::ServiceError) {
+        use rmcp::ServiceError as SE;
+        let conn_class = matches!(
+            e,
+            SE::TransportClosed { .. }
+                | SE::TransportSend { .. }
+                | SE::UnexpectedResponse { .. }
+        );
+        if conn_class {
+            self.connected
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            crate::services::app_logger::log_to_db(
+                "warn",
+                &format!(
+                    "[{}] connection-class error, marked disconnected: {e}",
+                    self.server_name
+                ),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn transport() -> RmcpStdioTransport {
+        RmcpStdioTransport::new("t", "true".to_string(), vec![], HashMap::new())
+    }
+
+    fn set_connected(t: &RmcpStdioTransport) {
+        t.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_connected(t: &RmcpStdioTransport) -> bool {
+        t.connected.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// mark_conn_loss must classify by ServiceError VARIANT: transport-class
+    /// errors (TransportClosed/TransportSend/UnexpectedResponse) flip the
+    /// connected flag; McpError (server's own JSON-RPC error, whose message
+    /// may itself say "connection closed") and Timeout (our own cap) must NOT.
+    #[test]
+    fn mark_conn_loss_classifies_by_variant() {
+        let t = transport();
+        set_connected(&t);
+
+        // Transport class → disconnect.
+        t.mark_conn_loss(&rmcp::ServiceError::TransportClosed);
+        assert!(!is_connected(&t));
+
+        set_connected(&t);
+        let dte = rmcp::transport::DynamicTransportError::from_parts(
+            "test",
+            std::any::TypeId::of::<()>(),
+            Box::<std::io::Error>::new(std::io::Error::other("broken pipe")),
+        );
+        t.mark_conn_loss(&rmcp::ServiceError::TransportSend(dte));
+        assert!(!is_connected(&t));
+
+        set_connected(&t);
+        t.mark_conn_loss(&rmcp::ServiceError::UnexpectedResponse);
+        assert!(!is_connected(&t));
+
+        // Non-transport class → stays connected even when the message text
+        // mentions "connection closed" (server-controlled string).
+        set_connected(&t);
+        t.mark_conn_loss(&rmcp::ServiceError::McpError(
+            rmcp::ErrorData::internal_error("connection closed by server db", None),
+        ));
+        assert!(is_connected(&t));
+
+        set_connected(&t);
+        t.mark_conn_loss(&rmcp::ServiceError::Timeout { timeout: Duration::from_secs(60) });
+        assert!(is_connected(&t));
     }
 }

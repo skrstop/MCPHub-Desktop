@@ -40,7 +40,9 @@ def main():
     # Fields frontend emits that Rust doesn't know: serde ignores → silent data loss
     # 'type' → server_type rename; 'oauth' → R10-adjudicated (UI collects, no
     # Rust storage point yet, needs product decision) — tracked, not new.
-    dropped = sorted(fe - set(rust) - {'type', 'oauth'})
+    # 'type' → server_type rename. ('oauth' whitelist removed round 16: Rust
+    # ServerConfig has an oauth field since R10, so a dropped key IS a defect.)
+    dropped = sorted(fe - set(rust) - {'type'})
     if dropped:
         problems.append(f"frontend emits fields Rust ServerConfig does not have (silent drop): {dropped}")
     for p in problems:

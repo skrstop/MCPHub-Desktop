@@ -82,6 +82,21 @@ const MarketPage: React.FC = () => {
   const [registrySearchQuery, setRegistrySearchQuery] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installedRegistryServers, setInstalledRegistryServers] = useState<Set<string>>(new Set());
+  // Seed from actually-installed servers so a registry server installed in a
+  // PREVIOUS session renders as installed instead of re-POSTing a duplicate
+  // name. localServers arrives asynchronously (useMarketData fetch), so the
+  // seed must be an EFFECT — the round-13 useState initializer always saw an
+  // empty array. Keys are slugified server names everywhere (the install
+  // path posts the slug as the local server's name); union-merge so
+  // in-session installs are never clobbered (round 14 review).
+  useEffect(() => {
+    if (localServers.length === 0) return;
+    setInstalledRegistryServers((prev) => {
+      const next = new Set(prev);
+      for (const sv of localServers) next.add(slugifyServerName(sv.name));
+      return next;
+    });
+  }, [localServers]);
 
   useEffect(() => {
     const loadServerDetails = async () => {
@@ -173,7 +188,7 @@ const MarketPage: React.FC = () => {
         showToast(result?.message || t('server.addError'), 'error');
         return;
       }
-      setInstalledRegistryServers((prev) => new Set(prev).add(server.name));
+      setInstalledRegistryServers((prev) => new Set(prev).add(slugifyServerName(server.name)));
       showToast(t('registry.installSuccess', { name: server.title || server.name }), 'success');
     } catch (error) {
       showToast(
@@ -216,7 +231,7 @@ const MarketPage: React.FC = () => {
         onBack={handleBackToList}
         onInstall={handleRegistryInstall}
         installing={installing}
-        isInstalled={installedRegistryServers.has(selectedRegistryServer.server.name)}
+        isInstalled={installedRegistryServers.has(slugifyServerName(selectedRegistryServer.server.name))}
         fetchVersions={fetchRegistryServerVersions}
       />
     );

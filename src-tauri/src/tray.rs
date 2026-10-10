@@ -212,23 +212,30 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     let result = {
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open").arg(&url).spawn()
+            std::process::Command::new("open").arg(&trimmed).spawn()
         }
         #[cfg(target_os = "windows")]
         {
             let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "start", "", &url]);
+            c.args(["/C", "start", "", &trimmed]);
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
             c.spawn()
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            std::process::Command::new("xdg-open").arg(&url).spawn()
+            std::process::Command::new("xdg-open").arg(&trimmed).spawn()
         }
     };
     result
-        .map(|_| ())
+        .map(|mut child| {
+            // Reap the opener child (open/xdg-open/cmd) on a detached
+            // thread — dropping it without wait() leaves a zombie per
+            // opened link for the app's lifetime (round 10 review).
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        })
         .map_err(|e| format!("failed to open URL {url}: {e}"))
 }
 

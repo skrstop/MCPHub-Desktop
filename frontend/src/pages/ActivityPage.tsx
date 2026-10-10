@@ -160,9 +160,11 @@ const ActivityPage: React.FC = () => {
         setCurrentPage(1);
       } else {
         console.error('Cleanup failed:', response);
+        showToast(t('common.operationFailed', 'Operation failed'), 'error');
       }
     } catch (err) {
       console.error('Error cleaning up activities:', err);
+      showToast(t('common.operationFailed', 'Operation failed'), 'error');
     }
   };
 

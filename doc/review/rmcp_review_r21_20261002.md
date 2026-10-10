@@ -23,7 +23,7 @@
 
 ## 3. 新套件
 
-`scripts/e2e/rmcp_supplement_v21.py`（26 项）——REST/OpenAPI 面 bearer 矩阵：
+`../../scripts/e2e/rmcp_supplement_v21.py`（26 项）——REST/OpenAPI 面 bearer 矩阵：
 - bearer-off：/rest/{server}/tools+call（openapi 上游真实公网IP）、/rest/group/tools+call、/api/openapi.json+servers+stats、/api/{中文名}/openapi.json、/api/tools/{s}/{t} GET+POST（global+scoped）、未知工具 404 语义
 - bearer-on：无 token /rest 与 /api 均 401；带 key 上述全部通道真实公网IP 调用全通
 

@@ -122,7 +122,18 @@ pub async fn list_agents() -> Result<Vec<SkillAgent>> {
         .collect())
 }
 
+/// Whole-array write. Locks the agents mutex — the ONLY locking entry
+/// point; internal callers that already hold the guard must use
+/// `save_agents_locked` (tokio Mutexes are NOT re-entrant — round 12's
+/// unconditional lock deadlocked create/delete which call this while
+/// holding the guard; caught by the round-13 review).
 pub async fn save_agents(agents: Vec<SkillAgent>) -> Result<()> {
+    let _guard = agents_lock().lock().await;
+    save_agents_locked(agents).await
+}
+
+/// Caller MUST already hold `agents_lock()`.
+async fn save_agents_locked(agents: Vec<SkillAgent>) -> Result<()> {
     let patch = json!({ "skills": { "agents": agents } });
     config_service::update(&patch).await?;
     Ok(())
@@ -212,7 +223,7 @@ pub async fn create_custom_agent(name: &str, skills_path: &str) -> Result<SkillA
         custom: true,
     };
     agents.push(agent.clone());
-    save_agents(agents).await?;
+    save_agents_locked(agents).await?;
     Ok(agent)
 }
 
@@ -228,7 +239,7 @@ pub async fn delete_custom_agent(id: &str) -> Result<()> {
     if agents.len() == before {
         return Err(anyhow!("agent not found: {}", id));
     }
-    save_agents(agents).await?;
+    save_agents_locked(agents).await?;
     Ok(())
 }
 
@@ -1769,14 +1780,20 @@ fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
 }
 
 /// Open the OS folder picker and return the chosen absolute path, or None if
-/// cancelled. Blocking (runs in the command's async context).
+/// cancelled. The native modal can stay open indefinitely, so it runs on a
+/// blocking thread (same pattern as save_settings_json) to avoid pinning an
+/// async-runtime worker.
 pub async fn pick_directory(app: &AppHandle) -> Result<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    let folder = app
-        .dialog()
-        .file()
-        .set_title("Select skills folder")
-        .blocking_pick_folder();
+    let app = app.clone();
+    let folder = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_title("Select skills folder")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("folder picker task failed: {e}"))?;
     Ok(match folder {
         Some(fp) => Some(fp.into_path().map_err(|e| anyhow::anyhow!("{}", e))?.to_string_lossy().into_owned()),
         None => None,

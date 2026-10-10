@@ -158,7 +158,11 @@ pub async fn call_tool_on_demand(
     // fires (and the late timer would then stomp on whatever entry replaced
     // the shadow). Holding the connect lock spans config load + spawn +
     // insert; mark_* mutators now also guard on entry identity.
-    let _connect_guard = pool::pool_connect_lock(server_name).await;
+    // MUST .lock() the returned Arc — binding the guard alone acquires
+    // nothing (bug present since introduction), letting disable/reload/delete
+    // interleave mid-cold-start exactly as the comment above forbids.
+    let connect_lock = pool::pool_connect_lock(server_name).await;
+    let _connect_guard = connect_lock.lock().await;
 
     // Re-check the store after acquiring the connect lock: a racing cold
     // start that held the lock before us may have already spawned.
@@ -246,6 +250,11 @@ pub async fn call_tool_on_demand(
     }
     // Mark the pool placeholder awake so status + cached tools reflect reality.
     pool::mark_on_demand_awake(server_name, tools, server_version).await;
+
+    // Release the connect lock BEFORE run_call: the self-heal retry inside
+    // run_call re-enters call_tool_on_demand, which would self-deadlock on
+    // the non-reentrant tokio Mutex (insert above is the lock's last duty).
+    drop(_connect_guard);
 
     let msg = format!(
         "[on-demand] Server '{}' cold-started, ready for tool '{}'",

@@ -247,7 +247,9 @@ check("C1 未 pin 时根$smart 列表不含该工具", SEP_TOOL not in (cnames o
 st, body, _ = req("POST", "/mcp/$smart", {"jsonrpc": "2.0", "id": 82, "method": "tools/call",
     "params": {"name": SEP_TOOL, "arguments": {}}}, headers={"mcp-session-id": sid})
 obj = sse_obj(body, 82)
-check("C2 未 pin 时前缀直调被拒", (obj or {}).get("error") is not None, f"{st} {body[:200]}")
+# Gate inactive with no pins (round-9/10 semantics): the tool is callable
+# via the normal path — the old "refused" expectation encoded the wipe bug.
+check("C2 未 pin 时前缀直调成功（门控失效）", (obj or {}).get("error") is None and has_ip(body), f"{st} {body[:200]}")
 req("DELETE", "/mcp/$smart", headers={"mcp-session-id": sid})
 st, body, _ = req("POST", f"/rest/{IP_SERVER_ENC}/call", {"tool": IP_TOOL, "arguments": {}})
 check("D2 无 pin 时 REST call 仍 200（通道独立）", st == 200 and has_ip(body), f"{st} {body[:200]}")

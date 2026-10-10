@@ -1,3 +1,10 @@
+def _valid_pub_ip(x):
+    try:
+        import ipaddress as _ip
+        a = _ip.ip_address(x)
+        return not (a.is_private or a.is_loopback or a.is_link_local or a.is_reserved)
+    except Exception:
+        return False
 #!/usr/bin/env python3
 """v30 suite — R30 fixes regression: resource name guard, group create re-read (created_at format), market logging is Rust-side; here: protocol surface + group/resource API shape verification + public-IP calls."""
 import json, urllib.request, urllib.parse, re, sys
@@ -81,7 +88,9 @@ for v in ["2024-11-05", "2025-03-26"]:
             text = cr["result"]["content"][0]["text"]
         except Exception:
             pass
-        m = re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+        m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+        if m and not _valid_pub_ip(m.group(0)):
+            m = None  # loopback/private/reserved is NOT a public-IP success
         check(f"ip-{v}", st == 200 and not cr.get("result", {}).get("isError") and m, f"{st} {text[-50:]}")
 
 # 2026 stateless IP call
@@ -99,7 +108,9 @@ try:
     text = cr["result"]["content"][0]["text"]
 except Exception:
     pass
-m = re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text.split("Response Body:")[-1])
+if m and not _valid_pub_ip(m.group(0)):
+    m = None  # loopback/private/reserved is NOT a public-IP success
 check("ip-2026", st == 200 and cr.get("result", {}).get("resultType") == "complete" and m, f"{st} {text[-50:]}")
 
 # 6. health

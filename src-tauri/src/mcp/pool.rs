@@ -874,3 +874,29 @@ pub(crate) async fn mark_on_demand_error(name: &str, error: String) {
         entry.status.error = Some(error);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{forget_connect_lock, pool_connect_lock};
+
+    #[tokio::test]
+    async fn connect_lock_same_name_shares_arc() {
+        let a = pool_connect_lock("r1300-lock-a").await;
+        let b = pool_connect_lock("r1300-lock-a").await;
+        assert!(std::sync::Arc::ptr_eq(&a, &b),
+                "same server name must share one connect lock");
+    }
+
+    #[tokio::test]
+    async fn forget_connect_lock_mints_fresh_lock_for_new_connects() {
+        let name = "r1300-lock-forget";
+        let old = pool_connect_lock(name).await;
+        forget_connect_lock(name).await;
+        let fresh = pool_connect_lock(name).await;
+        assert!(!std::sync::Arc::ptr_eq(&old, &fresh),
+                "after forget_connect_lock a new connect must get a fresh lock, \
+                 not the stale entry");
+        // Idempotent: forgetting a name that was never minted is a no-op.
+        forget_connect_lock("r1300-lock-never-existed").await;
+    }
+}

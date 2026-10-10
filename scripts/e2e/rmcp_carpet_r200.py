@@ -42,8 +42,14 @@ GROUP_ENC = quote(GROUP, safe="")
 VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"]
 META26 = {"_meta": {"protocolVersion": "2026-07-28"}}
 
-# MCP $smart 面 list/call pin parity：A 组 $smart 直调用例需要 pin（结束还原）
+# MCP $smart 面 list/call/search/describe 四面 pin parity（round-8 起 search/
+# describe 也 pin 过滤）：A 组直调 + B 组六字段查询的工具都需要 pin（结束还原）
 pin(IP_SERVER, IP_TOOL)
+PW_SRV = PW_FULL.split("-browser_")[0] if False else "playwright"
+IDEA_SRV = "Idea-mcp-server"
+pin("playwright", "browser_close")
+pin("Idea-mcp-server", "analyze_calls")
+pin("Idea-mcp-server", "search_text")
 
 def check(name, ok, detail=""):
     (PASS if ok else FAIL).append(name)
@@ -453,6 +459,9 @@ finally:
 # ============ C组：#1234 fullSchemaTopN ============
 print("== C: fullSchemaTopN ==")
 try:
+    # C 需要 ≥3 个 "browser" 命中且 pin parity 只暴露 pinned —— 补 pin（C 结束还原）
+    for _t in ["browser_snapshot", "browser_click", "browser_navigate", "browser_type"]:
+        pin("playwright", _t)
     # C0: 未设置 → standard 模式 2 个 meta 工具（search/call），所有命中带 inputSchema
     set_smart("fullSchemaTopN", None)
     st, sid, _ = init("2025-11-25", path="/mcp/$smart")
@@ -490,6 +499,10 @@ try:
     check("C[n=2] describe补出inputSchema", "inputSchema" in set(dtool.keys()), f"describe={dtool}")
     del sid
 
+        # C 需要 ≥3 个 "browser" 命中且 pin parity 只暴露 pinned —— 补 pin（C 结束还原）
+    for _t in ["browser_snapshot", "browser_click", "browser_navigate", "browser_type"]:
+        pin("playwright", _t)
+
     # C2: fullSchemaTopN=0 → 全部裁剪 + 文案「do not include」
     set_smart("fullSchemaTopN", 0)
     st, sid, _ = init("2025-11-25", path="/mcp/$smart")
@@ -519,6 +532,11 @@ finally:
     cfg = db_read_config()
     cfg["smartRouting"] = smart0
     db_write_config(cfg)
+
+# 还原 C/B 的临时 pin（D 的 reject 用例要求 browser_close 未 pin）
+unpin("playwright", "browser_close")
+for _t in ["browser_snapshot", "browser_click", "browser_navigate", "browser_type"]:
+    unpin("playwright", _t)
 
 # ============ D组：#1238 组成员 pinnedTools ============
 print("== D: 组成员 pinnedTools ==")
@@ -786,6 +804,8 @@ check("I[2025] call结果键正常", result_ok(oc25), f"res_keys={sorted(res25.k
 
 # ============ J组：$smart/{group} 搜索 group 门控 ============
 print("== J: $smart 组搜索门控 ==")
+# J 的搜索断言需要组内 pinned 命中（round-8 pin parity：search 也 pin 过滤）
+pin("playwright", "browser_close")
 st, sid, _ = init("2025-11-25", path=f"/mcp/$smart/{GROUP_ENC}")
 p = smart_search(sid, "browser page", path=f"/mcp/$smart/{GROUP_ENC}", limit=10)
 entries = (p or {}).get("tools", [])
@@ -798,6 +818,9 @@ del sid
 print()
 print(f"TOTAL: {len(PASS)+len(FAIL)} | PASS: {len(PASS)} | FAIL: {len(FAIL)}")
 unpin(IP_SERVER, IP_TOOL)
+unpin("playwright", "browser_close")
+unpin("Idea-mcp-server", "analyze_calls")
+unpin("Idea-mcp-server", "search_text")
 if FAIL:
     print("FAILED CASES:")
     for f in FAIL: print(" -", f)

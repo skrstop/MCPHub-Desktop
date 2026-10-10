@@ -209,13 +209,47 @@ mod macos {
 mod windows_imp {
     use super::{clean_text, OcrStatus};
     use anyhow::{anyhow, Result};
+    use std::sync::OnceLock;
+
+    // status() must not lie: recognize_inner can fail with "no OCR language
+    // installed" when no engine can be created (round 16 review). Probe the
+    // engine once and cache the outcome so image_bytes' OCR_MISSING gating
+    // and the frontend install dialog trigger correctly.
+    fn engine_probe() -> &'static Result<(), String> {
+        static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
+        PROBE.get_or_init(|| {
+            use windows::core::HSTRING;
+            use windows::Globalization::Language;
+            use windows::Media::Ocr::OcrEngine;
+            OcrEngine::TryCreateFromUserProfileLanguages()
+                .is_ok()
+                .then_some(())
+                .or_else(|| {
+                    Language::CreateLanguage(&HSTRING::from("zh-Hans"))
+                        .ok()
+                        .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok())
+                        .map(|_| ())
+                })
+                .or_else(|| {
+                    Language::CreateLanguage(&HSTRING::from("en-US"))
+                        .ok()
+                        .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok())
+                        .map(|_| ())
+                })
+                .ok_or_else(|| "no OCR language installed on this Windows system".to_string())
+        })
+    }
 
     pub fn status() -> OcrStatus {
+        let (available, engine) = match engine_probe() {
+            Ok(()) => (true, "Windows.Media.Ocr".to_string()),
+            Err(e) => (false, e),
+        };
         OcrStatus {
-            available: true,
+            available,
             platform: "windows".into(),
             distro: None,
-            engine: "Windows.Media.Ocr".into(),
+            engine,
             missing_langs: vec![],
         }
     }

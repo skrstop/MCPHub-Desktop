@@ -146,6 +146,12 @@ def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
     print(("PASS" if cond else "FAIL"), name, detail if not cond else "")
 
+# Round-8 pin parity: $smart search is pin-filtered — seed the pins the
+# sections query (A/B need optional-field carriers: Idea analyze_calls has
+# annotations, search_text has outputSchema; restored at the end).
+pin("本机公网ip查询", "getPublicIp")
+pin("Idea-mcp-server", "analyze_calls")
+pin("Idea-mcp-server", "search_text")
 # ────────────────────────── A. toolDefinitionFields ──────────────────────────
 BASELINE_KEYS = {"name", "description", "inputSchema", "serverName", "score"}
 SIX = ["title", "annotations", "outputSchema", "execution", "icons", "_meta"]
@@ -157,8 +163,12 @@ check("A0 initialize session", sid is not None)
 st, r = mcp_call(sid, "smart_route_search", {"query": "ip", "limit": 10}, path="/mcp/$smart", rid="a1")
 hits = unwrap_text(r).get("tools", [])
 check("A1 search returns hits", len(hits) >= 1, f"hits={len(hits)}")
-ann_hits = [h for h in hits if "annotations" in h]
-os_hits = [h for h in hits if "outputSchema" in h]
+# Optional-field carriers (Idea tools) don't match the "ip" query — run a
+# second search pinned+query that surfaces them (pin parity, round-8).
+st, r = mcp_call(sid, "smart_route_search", {"query": "analyze calls search text", "limit": 20}, path="/mcp/$smart", rid="a1b")
+idea_hits = unwrap_text(r).get("tools", [])
+ann_hits = [h for h in idea_hits if "annotations" in h]
+os_hits = [h for h in idea_hits if "outputSchema" in h]
 check("A1 annotations attached when tool has it", len(ann_hits) >= 1,
       f"ann_hits={len(ann_hits)}")
 check("A1 outputSchema attached when tool has it", len(os_hits) >= 1,
@@ -189,6 +199,13 @@ restore_smart_cfg(saved_fields)
 time.sleep(0.3)
 
 # ────────────────────────── B. fullSchemaTopN ──────────────────────────
+# B needs ≥2 hits for the truncation contract — the A/C pin seeds would
+# pin-filter the search to the single IP tool, so lift the pins for this
+# section (C re-seeds the IP pin itself; A's Idea pins restored at the end).
+unpin("本机公网ip查询", "getPublicIp")
+unpin("Idea-mcp-server", "analyze_calls")
+unpin("Idea-mcp-server", "search_text")
+time.sleep(0.3)
 saved_n = set_smart_cfg({"fullSchemaTopN": 1})
 time.sleep(0.3)
 sid2, _, _ = mcp_session("2025-06-18", path="/mcp/$smart")
@@ -230,7 +247,12 @@ try:
             check(f"C-{v} initialize", False); continue
         # 版本回显一致（2026 modern 无 initialize 握手语义 → fallback 最新 legacy）
         echoed = i_o.get("result", {}).get("protocolVersion")
-        check(f"C-{v} version echo consistent", echoed in (v, "2025-11-25"), f"echo={echoed}")
+        # 2026-07-28 modern has no initialize handshake (rmcp: >=2026 falls
+        # back to the latest legacy 2025-11-25 response) — that single
+        # documented fallback is whitelisted; every other version must echo
+        # itself exactly.
+        _expect = {"2025-11-25"} if v == "2026-07-28" else set()
+        check(f"C-{v} version echo consistent", echoed == v or echoed in _expect, f"echo={echoed}")
         # 通道1: $smart meta call 真实公网IP（pin parity：MCP $smart 面需 pin）
         st, r = mcp_call(sid3, "smart_route_call",
                          {"toolName": SEP_TOOL, "arguments": {}}, path="/mcp/$smart", rid=f"c-{v}-smart")
@@ -295,7 +317,7 @@ try:
         "jsonrpc": "2.0", "id": "strict", "method": "tools/call",
         "params": {"name": SEP_TOOL, "arguments": {}}}, default_accept=False)
     o = sse_last(data, "strict")
-    check("E-strict missing Accept rejected", st in (400, 406, 422) or (o and "error" in o),
+    check("E-strict missing Accept rejected", st in (400, 406, 422),
           f"st={st}")
 finally:
     set_strict(old_strict if old_strict is not None else False)
@@ -329,6 +351,9 @@ finally:
 st, _, _ = req("GET", "/health", default_accept=False)
 check("F2 /health stays public", st == 200, f"st={st}")
 
+unpin("本机公网ip查询", "getPublicIp")
+unpin("Idea-mcp-server", "analyze_calls")
+unpin("Idea-mcp-server", "search_text")
 # ────────────────────────── 汇总 ──────────────────────────
 print(f"\n== {len(PASS)}/{len(PASS)+len(FAIL)} passed, {len(FAIL)} failed ==")
 if FAIL:

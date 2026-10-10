@@ -361,6 +361,7 @@ pub async fn handle_search_tools(
     limit: Value,
     allowed: Option<Vec<String>>,
     group_gate: Option<&GroupToolGate>,
+    pinned: Option<&std::collections::HashSet<(String, String)>>,
 ) -> Result<Value, String> {
     if query.is_empty() {
         return Err("Query parameter is required and must be a string".to_string());
@@ -371,16 +372,32 @@ pub async fn handle_search_tools(
         .unwrap_or(10)
         .clamp(1, settings.max_results.max(1) as u64) as u32;
 
-    // When a group gate is applied, over-fetch (up to settings.max_results)
-    // before filtering so excluded tools don't crowd the limited window.
-    let search_limit = if group_gate.is_some() {
+    // When a group gate or pin filter will run post-merge, keep ALL fetched
+    // candidates through the merge (merge_limit = 4x window): truncating to
+    // the window before filtering could hide valid gated/pinned hits ranked
+    // below the cut (the old over-fetch was exactly the final window size).
+    let filtered = group_gate.is_some() || pinned.is_some();
+    let search_limit = if filtered {
         settings.max_results.max(1)
     } else {
         limit_n
     };
-    let results = search::search(query, Some(search_limit), allowed.clone())
-        .await
-        .map_err(|e| e.to_string())?;
+    let results = search::search(
+        query,
+        Some(search_limit),
+        allowed.clone(),
+        if filtered {
+            // The merge input is the UNION of two per-channel candidate sets
+            // (each fetched at search_limit*4) — a cut at 4x could still hide
+            // keyword-only matches ranked in the lower half. No-cut: let the
+            // caller's take(limit_n) bound the response.
+            Some(usize::MAX)
+        } else {
+            None
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let progressive = settings.progressive_disclosure;
     let name_sep = tool_name_separator().await;
     // Origin #1286: default (title, annotations) when unset; empty list = core four only.
@@ -402,10 +419,20 @@ pub async fn handle_search_tools(
     // index metadata only carries name/description/inputSchema, so title/
     // annotations/outputSchema would never appear if sourced from the index).
     // Fetch the cached tool list once per distinct server among the hits.
-    let tool_fields_live = !tool_fields.is_empty();
+    // The live list serves TWO purposes: optional-field attachment (only
+    // meaningful when toolDefinitionFields is non-empty) AND the description
+    // override refresh — the latter matters even with `toolDefinitionFields:
+    // []` (core-four-only), so the fetch is NOT gated on tool_fields.
     let mut live_tools: std::collections::HashMap<String, Vec<crate::models::server::Tool>> =
         std::collections::HashMap::new();
-    if tool_fields_live {
+    // Skip the per-server pool fetch entirely when nothing can change the
+    // result: no optional fields requested AND no description overrides
+    // exist anywhere (the fetch exists only to apply overrides). Every hit
+    // server otherwise pays a full live list + apply_tool_filters on the
+    // hot discovery path (round 10 review).
+    let overrides_exist =
+        crate::services::server_tool_config_service::any_description_override().await;
+    if !tool_fields.is_empty() || overrides_exist {
         for sn in results
             .iter()
             .filter(|r| !r.tool_name.is_empty())
@@ -413,9 +440,18 @@ pub async fn handle_search_tools(
             .map(|r| r.server_name.clone())
             .collect::<std::collections::HashSet<_>>()
         {
-            if let Ok(ts) = crate::mcp::pool::list_tools_for(&sn).await {
-                live_tools.insert(sn, ts);
-            }
+            // Apply per-tool config (description overrides / disabled
+            // removal) — pool list_tools_for returns the RAW connect-time
+            // list; using it verbatim made search show the upstream raw
+            // description while describe showed the user override.
+            match crate::services::server_tool_config_service::apply_tool_filters(&sn, {
+                crate::mcp::pool::list_tools_for(&sn).await.unwrap_or_default()
+            })
+            .await
+            {
+                Ok(ts) => live_tools.insert(sn, ts),
+                Err(_) => continue,
+            };
         }
     }
     let mut hit_index: u32 = 0;
@@ -423,6 +459,15 @@ pub async fn handle_search_tools(
         .iter()
         .filter(|r| !r.tool_name.is_empty())
         .filter(|r| group_tool_allowed(group_gate, &r.server_name, &r.tool_name))
+        // Pin parity: the tools/list face (and both call lanes) only expose
+        // pinned tools on $smart scopes — the search face must agree, or the
+        // advertised search->describe->call workflow dead-ends on exactly
+        // the hits the search itself recommended.
+        .filter(|r| {
+            pinned
+                .map(|p| p.contains(&(r.server_name.clone(), r.tool_name.clone())))
+                .unwrap_or(true)
+        })
         .map(|r| {
             let idx = hit_index;
             hit_index += 1;
@@ -662,6 +707,7 @@ async fn resolve_tool(
     servers.sort_by_key(|s| std::cmp::Reverse(s.len()));
     for sn in &servers {
         let prefix = format!("{sn}{sep}");
+        let prefixed = tool_name.starts_with(&prefix);
         let orig = tool_name.strip_prefix(&prefix).unwrap_or(tool_name);
         // Meta tools (smart_route_*) must never resolve onto the BUILTIN
         // server: pool::call_tool(BUILTIN, meta) re-enters handle_call_tool,
@@ -679,6 +725,26 @@ async fn resolve_tool(
                 return Some((sn.clone(), orig.to_string()));
             }
         }
+        // Sleeping (never-woken) on-demand servers hold an EMPTY pool cache —
+        // tools/list only runs on first wake. The direct lane (bridge) resolves
+        // such pins from the server_tool_config registry and lets pool::call_tool
+        // cold-start; the meta lane must honor the same fallback or a pinned
+        // tool would be callable by raw name but permanently "not available"
+        // via smart_route_call.
+        // The config fallback exists for PINS the pool cannot see (sleeping
+        // on-demand). Restrict it to the server whose prefix actually matched
+        // (bare names on multi-server scopes stay with the bridge resolver,
+        // which enforces the round-6 contract) and never resolve meta-named
+        // pins — matching resolve_pinned_target's exclusion (round 10).
+        if (prefixed || servers.len() == 1) && !is_meta_tool(orig) {
+            if let Ok(Some(cfg)) =
+                crate::services::server_tool_config_service::get_config(sn, "tool", orig).await
+            {
+                if cfg.pinned {
+                    return Some((sn.clone(), orig.to_string()));
+                }
+            }
+        }
     }
     None
 }
@@ -689,6 +755,7 @@ pub async fn handle_describe_tool(
     tool_name: &str,
     allowed: Option<Vec<String>>,
     group_tools: Option<&GroupToolGate>,
+    pinned: Option<&std::collections::HashSet<(String, String)>>,
 ) -> Result<Value, String> {
     if tool_name.is_empty() {
         return Err("toolName parameter is required and must be a string".to_string());
@@ -704,7 +771,17 @@ pub async fn handle_describe_tool(
                 "metadata": {"message": "The tool is excluded by the group's tool filter. Use smart_route_search to discover available tools."}
             })));
         }
+        if let Some(p) = pinned {
+            if !p.contains(&(server.clone(), orig.clone())) {
+                return Ok(text_response(json!({
+                    "error": format!("Tool '{tool_name}' is not available in this $smart scope"),
+                    "metadata": {"message": "Only pinned tools are exposed on this scope. Use smart_route_search to discover available tools."}
+                })));
+            }
+        }
+        let mut live_nonempty = false;
         if let Ok(ts) = crate::mcp::pool::list_tools_for(&server).await {
+            live_nonempty = !ts.is_empty();
             let filtered = crate::services::server_tool_config_service::apply_tool_filters(&server, ts)
                 .await
                 .unwrap_or_default();
@@ -730,6 +807,36 @@ pub async fn handle_describe_tool(
                 })));
             }
         }
+        // Live-list miss (e.g. a pinned tool on a never-woken on-demand
+        // server — pool cache empty) must not dead-end the advertised
+        // search→describe→call workflow: resolve via the config store like
+        // the call lane does, distinguishing disabled (refuse) from sleeping
+        // (direct the client to wake via call first).
+        if let Ok(Some(cfg)) =
+            crate::services::server_tool_config_service::get_config(&server, "tool", &orig).await
+        {
+            if !cfg.enabled {
+                return Ok(text_response(json!({
+                    "error": format!("Tool '{tool_name}' is disabled"),
+                    "metadata": {"message": "The specified tool is disabled. Use smart_route_search to discover available tools."}
+                })));
+            }
+            // list_tools_for succeeded with a NON-empty list → the server IS
+            // connected; the tool is simply gone from the live list (renamed
+            // or removed upstream while the config row survives). Directing
+            // the client to "call to wake" would be a false diagnosis — the
+            // call would fail with tool-not-found (round 10 review).
+            if live_nonempty {
+                return Ok(text_response(json!({
+                    "error": format!("Tool '{tool_name}' was not found on server '{server}'"),
+                    "metadata": {"message": "The tool may have been renamed or removed upstream. Use smart_route_search to discover available tools."}
+                })));
+            }
+            return Ok(text_response(json!({
+                "error": format!("Tool '{tool_name}' is on a server that is not currently connected"),
+                "metadata": {"message": format!("Invoke smart_route_call with '{tool_name}' once to wake the server, then describe again for the full schema.")}
+            })));
+        }
     }
     Ok(text_response(json!({
         "error": format!("Tool '{tool_name}' not found or not available"),
@@ -745,6 +852,7 @@ pub async fn handle_call_tool(
     args: Value,
     allowed: Option<Vec<String>>,
     group_tools: Option<&GroupToolGate>,
+    upstream_meta: Option<Value>,
 ) -> Result<Value, String> {
     if tool_name.is_empty() {
         return Err("toolName parameter is required".to_string());
@@ -764,7 +872,35 @@ pub async fn handle_call_tool(
         Ok(ts) => {
             match crate::services::server_tool_config_service::apply_tool_filters(&server, ts).await {
                 Ok(filtered) => {
-                    if filtered.iter().any(|t| t.name == orig && !t.enabled) {
+                    // Mirror the direct-lane disabled gate: a tool ABSENT from
+                    // the filtered list (empty pool cache, e.g. an on-demand
+                    // server that exposed nothing) must consult the config
+                    // store directly — `any()` over an empty list silently
+                    // bypassed the disable check (fail-open).
+                    let disabled = match filtered.iter().find(|t| t.name == orig) {
+                        Some(t) => !t.enabled,
+                        None => {
+                            match crate::services::server_tool_config_service::get_config(
+                                &server, "tool", &orig,
+                            )
+                            .await
+                            {
+                                Ok(Some(cfg)) => !cfg.enabled,
+                                Ok(None) => false,
+                                Err(e) => {
+                                    log::warn!(
+                                        "[smart] tool-config read failed for '{}': {} — refusing call",
+                                        orig, e
+                                    );
+                                    return Err(format!(
+                                        "Tool '{}' unavailable (tool config check failed)",
+                                        orig
+                                    ));
+                                }
+                            }
+                        }
+                    };
+                    if disabled {
                         return Err(format!("Tool '{}' is disabled", orig));
                     }
                 }
@@ -788,9 +924,14 @@ pub async fn handle_call_tool(
     // funnel through here — without this wrapper a hung upstream parks the
     // caller forever AND holds the pool's per-client mutex, deadlocking every
     // subsequent shared-path call for that server (M3 parity).
-    let result = crate::mcp::time::timeout_tool_call(crate::mcp::pool::call_tool(&server, &orig, args))
-        .await
-        .map_err(|e| e.to_string())?;
+    // Thread request-level _meta (MRTR inputResponses retry, OTel) into the
+    // upstream call — the direct raw-name lane forwards it; the meta lane
+    // dropping it broke MRTR resume through smart_route_call.
+    let result = crate::mcp::time::timeout_tool_call(crate::mcp::pool::call_tool_with_meta(
+        &server, &orig, args, upstream_meta,
+    ))
+    .await
+    .map_err(|e| e.to_string())?;
     let mut resp = json!({"content": result.content, "isError": result.is_error});
     if let Some(sc) = &result.structured_content {
         resp["structuredContent"] = sc.clone();
@@ -918,16 +1059,16 @@ pub async fn call_meta_tool_builtin(
         "smart_route_search" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").cloned().unwrap_or(json!(10));
-            handle_search_tools(q, limit, None, None).await
+            handle_search_tools(q, limit, None, None, None).await
         }
         "smart_route_describe" => {
             let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-            handle_describe_tool(tn, None, None).await
+            handle_describe_tool(tn, None, None, None).await
         }
         "smart_route_call" => {
             let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
             let a = args.get("arguments").cloned().unwrap_or(json!({}));
-            handle_call_tool(tn, a, None, None).await
+            handle_call_tool(tn, a, None, None, None).await
         }
         _ => Err(format!("Unknown meta tool: {tool_name}")),
     };
@@ -945,4 +1086,30 @@ pub async fn call_meta_tool_builtin(
             structured_content: None,
         },
     })
+}
+
+#[cfg(test)]
+mod is_meta_tool_tests {
+    use super::is_meta_tool;
+
+    #[test]
+    fn recognizes_all_meta_tool_names() {
+        for n in ["smart_route_search", "smart_route_describe", "smart_route_call"] {
+            assert!(is_meta_tool(n), "{n} must be recognized as a meta tool");
+        }
+    }
+
+    #[test]
+    fn rejects_non_meta_names() {
+        for n in ["getPublicIp", "playwright-browser_close", "", "smart_route_search_extra",
+                  "prefix-smart_route_call"] {
+            assert!(!is_meta_tool(n), "{n} must NOT be a meta tool");
+        }
+    }
+
+    #[test]
+    fn rejects_case_variants() {
+        assert!(!is_meta_tool("Smart_Route_Search"));
+        assert!(!is_meta_tool("SMART_ROUTE_CALL"));
+    }
 }

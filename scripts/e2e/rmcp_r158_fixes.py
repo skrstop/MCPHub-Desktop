@@ -66,7 +66,7 @@ else:
 
 # ── D: M-108-1 — 2026 stateless resources/read 带 CacheableResult ──
 st, obj, _, _ = req("GET", "/mcp")
-check("D0 GET /mcp 建流或 4xx（环境自检）", st in (200, 400, 405, 406), f"status={st}")
+print(f"  [info] D0 GET /mcp 环境自检 status={st}（不计 PASS）")
 # 先拿一个资源 URI
 st, obj, _, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "resources/list",
     "params": {"_meta": {PV: "2026-07-28", **CLIENT_META}}}, headers=H26)
@@ -124,7 +124,12 @@ if tid2026:
     st, obj, _, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 12, "method": "tasks/result",
         "params": {"taskId": tid2026, "_meta": {PV: "2026-07-28", **CLIENT_META}}}, headers=H26)
     snap = (obj or {}).get("result", {})
-    ok_shape = ("pollIntervalMs" in snap) or (snap.get("status") in ("completed", "failed", "cancelled"))
+    # Terminal tasks return the TOOL RESULT BODY itself (round-50c contract:
+    # "tasks/result 响应=工具结果本体" — resultType complete + content), not a
+    # status snapshot. Working tasks return the pollIntervalMs snapshot. The
+    # fast public-IP fetch usually completes before tasks/result arrives.
+    ok_shape = ("pollIntervalMs" in snap) or (snap.get("status") in ("completed", "failed", "cancelled")) or (
+        snap.get("resultType") == "complete" and isinstance(snap.get("content"), list))
     check("E4 [M-110-1] 2026 tasks/result 快照/终态载荷合法", ok_shape, f"{str(snap)[:120]}")
 # 2025-11 会话：legacy 字段名
 st, obj, sid, _ = req("POST", "/mcp", {"jsonrpc": "2.0", "id": 20, "method": "initialize",

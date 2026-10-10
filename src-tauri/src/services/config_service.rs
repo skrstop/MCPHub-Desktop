@@ -55,6 +55,25 @@ pub async fn get() -> Result<Value> {
     }
 }
 
+/// Security-relevant read: like `get()`, but a CORRUPT stored config is an
+/// error instead of a silent empty object. `get()` returns Ok({}) on
+/// corruption to protect the on-disk data (update path), which makes the
+/// corrupt-JSON state indistinguishable from "auth disabled" for readers
+/// that key off Ok/Err — bit-rot would silently turn off bearer auth and
+/// the OAuth provider while the app keeps running. NULL is still an empty
+/// config (a normal fresh-install state, not corruption). (Round 12.)
+pub async fn get_strict() -> Result<Value> {
+    let row = sqlx::query("SELECT config_json FROM system_config WHERE id=1")
+        .fetch_one(db::pool())
+        .await?;
+    let json_str: Option<String> = row.try_get("config_json")?;
+    match json_str.as_deref().map(serde_json::from_str::<Value>) {
+        Some(Ok(val)) => Ok(val),
+        Some(Err(e)) => Err(anyhow::anyhow!("stored config_json failed to parse: {e}")),
+        None => Ok(Value::Object(Default::default())),
+    }
+}
+
 /// Check if headless mode is enabled (disables built-in Web UI)
 pub async fn is_headless() -> bool {
     get()
@@ -152,5 +171,139 @@ pub async fn update(patch: &Value) -> Result<Value> {
             let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_json;
+    use super::{get, get_strict};
+    use crate::db;
+    use serde_json::json;
+
+    #[test]
+    fn merge_json_null_patch_stores_null_does_not_delete_key() {
+        // Documented semantics (AGENTS.md §4.5 sync notes): a null patch value
+        // is STORED as null rather than removing the key — frontend readers
+        // use `!= null` so the distinction is observable.
+        let mut current = json!({"routing": {"enableBearerAuth": true, "keep": 1}});
+        merge_json(&mut current, &json!({"routing": {"enableBearerAuth": null}}));
+        assert_eq!(current["routing"]["enableBearerAuth"], serde_json::Value::Null);
+        assert!(current["routing"].get("enableBearerAuth").is_some());
+        assert_eq!(current["routing"]["keep"], json!(1));
+    }
+
+    #[test]
+    fn merge_json_recursive_objects_and_scalar_replace() {
+        let mut current = json!({"a": {"b": {"c": 1}}, "s": "old", "n": 1});
+        merge_json(
+            &mut current,
+            &json!({"a": {"b": {"d": 2}}, "s": "new", "n": {"deep": true}}),
+        );
+        assert_eq!(current["a"]["b"]["c"], json!(1)); // sibling preserved
+        assert_eq!(current["a"]["b"]["d"], json!(2)); // recursive add
+        assert_eq!(current["s"], json!("new"));       // scalar replace
+        assert_eq!(current["n"], json!({"deep": true})); // scalar -> object replace
+    }
+
+    #[test]
+    fn merge_json_non_object_patch_is_noop_and_missing_key_created() {
+        let mut current = json!({"routing": {"x": 1}});
+        // Non-object patch (array/number) leaves current untouched.
+        merge_json(&mut current, &json!([1, 2, 3]));
+        assert_eq!(current, json!({"routing": {"x": 1}}));
+        // New top-level key is created (entry.or_insert(Null) path).
+        merge_json(&mut current, &json!({"fresh": {"k": "v"}}));
+        assert_eq!(current["fresh"]["k"], json!("v"));
+    }
+
+    // get_strict semantics against the shared migrated test pool (round 13).
+    // NULL row = normal fresh-install state -> Ok({}); corrupt JSON must be a
+    // loud Err (bit-rot must not silently disable bearer auth) while get()
+    // still returns Ok({}) to protect the update path.
+    async fn write_config_json(v: Option<&str>) {
+        match v {
+            Some(s) => {
+                sqlx::query("UPDATE system_config SET config_json=? WHERE id=1")
+                    .bind(s)
+                    .execute(db::pool())
+                    .await
+                    .expect("write config_json");
+            }
+            None => {
+                sqlx::query("UPDATE system_config SET config_json=NULL WHERE id=1")
+                    .execute(db::pool())
+                    .await
+                    .expect("clear config_json");
+            }
+        }
+    }
+
+    // Serialize the config-mutating tests: they snapshot/restore the same
+    // system_config row on the shared file-backed pool, and parallel runs
+    // race (one test's restore can interleave with another's snapshot,
+    // producing spurious decode panics — seen twice in full-suite runs).
+    static CONFIG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn get_strict_null_row_is_ok_empty_config() {
+        let _g = CONFIG_TEST_LOCK.lock().unwrap();
+        crate::db::ensure_test_pool().await;
+        let snap: Option<String> = sqlx::query_scalar(
+            "SELECT config_json FROM system_config WHERE id=1")
+            .fetch_one(db::pool()).await.expect("snapshot");
+        write_config_json(None).await;
+        let got = get_strict().await.expect("NULL config_json is Ok");
+        assert_eq!(got, json!({}));
+        // get() agrees: NULL is an empty config, not corruption.
+        assert_eq!(get().await.expect("get NULL"), json!({}));
+        write_config_json(snap.as_deref()).await;
+    }
+
+    #[tokio::test]
+    async fn get_strict_valid_json_round_trips() {
+        let _g = CONFIG_TEST_LOCK.lock().unwrap();
+        crate::db::ensure_test_pool().await;
+        let snap: Option<String> = sqlx::query_scalar(
+            "SELECT config_json FROM system_config WHERE id=1")
+            .fetch_one(db::pool()).await.expect("snapshot");
+        write_config_json(Some(r#"{"routing":{"enableBearerAuth":true}}"#)).await;
+        let got = get_strict().await.expect("valid config_json is Ok");
+        assert_eq!(got["routing"]["enableBearerAuth"], json!(true));
+        write_config_json(snap.as_deref()).await;
+    }
+
+    #[tokio::test]
+    async fn get_strict_corrupt_json_is_err_while_get_falls_back_ok() {
+        let _g = CONFIG_TEST_LOCK.lock().unwrap();
+        crate::db::ensure_test_pool().await;
+        let snap: Option<String> = sqlx::query_scalar(
+            "SELECT config_json FROM system_config WHERE id=1")
+            .fetch_one(db::pool()).await.expect("snapshot");
+        write_config_json(Some("{not json")).await;
+        assert!(get_strict().await.is_err(),
+                "corrupt config_json must be a loud Err in get_strict");
+        // get() keeps its protective Ok({}) fallback (update-path safety).
+        assert_eq!(get().await.expect("get corrupt falls back"), json!({}));
+        write_config_json(snap.as_deref()).await;
+    }
+
+    // Round 15: empty-string config_json is also corruption (serde_json
+    // cannot parse ""), so get_strict must Err while get() still falls back
+    // to Ok({}).  Guards the same fail-closed contract for the
+    // blank-cell/zeroed-value form of bit rot, not just truncated JSON.
+    #[tokio::test]
+    async fn get_strict_empty_string_is_err_while_get_falls_back_ok() {
+        let _g = CONFIG_TEST_LOCK.lock().unwrap();
+        crate::db::ensure_test_pool().await;
+        let snap: Option<String> = sqlx::query_scalar(
+            "SELECT config_json FROM system_config WHERE id=1")
+            .fetch_one(db::pool()).await.expect("snapshot");
+        write_config_json(Some("")).await;
+        assert!(get_strict().await.is_err(),
+                "empty-string config_json must be a loud Err in get_strict");
+        // get() keeps its protective Ok({}) fallback (update-path safety).
+        assert_eq!(get().await.expect("get empty-string falls back"), json!({}));
+        write_config_json(snap.as_deref()).await;
     }
 }

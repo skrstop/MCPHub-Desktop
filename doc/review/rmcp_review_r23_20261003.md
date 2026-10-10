@@ -23,7 +23,7 @@
 
 ## 4. 新套件
 
-`scripts/e2e/rmcp_supplement_v23.py`（16 项）——版本回显 × 通道矩阵 + 生命周期观测：
+`../../scripts/e2e/rmcp_supplement_v23.py`（16 项）——版本回显 × 通道矩阵 + 生命周期观测：
 - 请求版本==响应版本 × 4 legacy 版本 × root/scope/group 3 通道（12）
 - 未知版本 fallback 2025-11-25；2026 initialize 协商 legacy（2）
 - 服务器禁用/还原后工具列表观测（2，DB 直改+还原，缓存容忍）

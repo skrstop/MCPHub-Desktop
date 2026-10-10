@@ -24,6 +24,18 @@ impl ContentExtractor for PdfExtractor {
     }
 
     fn extract(&self, _filename: &str, bytes: Vec<u8>) -> Result<String> {
+        // pdf_oxide's token parser has uncapped mutual recursion
+        // (parse_array -> parse_object); a crafted `[[[[...` deep enough
+        // overflows the blocking-thread stack — SIGSEGV, uncatchable, kills
+        // the whole app (same class as chunker push_atoms, which had to be
+        // made iterative). Pre-scan the raw bytes for bracket nesting depth
+        // and refuse before handing the file to the library.
+        let max_depth = max_bracket_depth(&bytes);
+        if max_depth > 512 {
+            return Err(anyhow!(
+                "EXTRACT_FAILED: pdf array nesting depth {max_depth} exceeds limit (possible malformed/hostile file)"
+            ));
+        }
         let doc = PdfDocument::from_bytes(bytes)
             .map_err(|e| anyhow!("EXTRACT_FAILED: pdf open failed: {e}"))?;
         let page_count = doc
@@ -130,4 +142,51 @@ fn ocr_scanned_pdf(doc: &PdfDocument, page_count: usize) -> Result<String> {
 /// whether the "[图片未识别]" note is worth adding when OCR is unavailable.
 fn has_embedded_images(doc: &PdfDocument, page_count: usize) -> bool {
     (0..page_count).any(|p| doc.extract_images(p).map(|v| !v.is_empty()).unwrap_or(false))
+}
+
+/// Max `[`-nesting depth over the raw bytes (`]` unwinds). Kept separate from
+/// `extract` so the guard itself is unit-testable without pulling in pdf_oxide.
+fn max_bracket_depth(bytes: &[u8]) -> i32 {
+    bytes
+        .iter()
+        .scan(0i32, |d, b| {
+            match b {
+                b'[' => *d += 1,
+                b']' => *d -= 1,
+                _ => {}
+            }
+            Some(*d)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bracket_depth_guard_rejects_deep_and_allows_shallow() {
+        // 600 nested `[` -> rejected by extract() (SIGSEGV guard regression).
+        let deep: Vec<u8> = std::iter::repeat(b'[').take(600).collect();
+        assert_eq!(max_bracket_depth(&deep), 600);
+        let err = PdfExtractor.extract("a.pdf", deep).unwrap_err();
+        assert!(
+            err.to_string().contains("nesting depth"),
+            "expected depth rejection, got: {err}"
+        );
+
+        // 10 `[` -> below the 512 limit; extract proceeds to pdf-open failure
+        // (a DIFFERENT error text than the depth guard).
+        let shallow: Vec<u8> = std::iter::repeat(b'[').take(10).collect();
+        let err2 = PdfExtractor.extract("a.pdf", shallow).unwrap_err();
+        assert!(
+            err2.to_string().contains("pdf open failed"),
+            "expected pdf-open failure, got: {err2}"
+        );
+
+        // Plain empty/short input: depth 0, still pdf-open failure.
+        assert_eq!(max_bracket_depth(b""), 0);
+        assert_eq!(max_bracket_depth(b"hello [a][b]"), 1);
+    }
 }

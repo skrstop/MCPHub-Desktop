@@ -393,7 +393,9 @@ struct SmartCallRequest {
 pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<BearerKey>, Response> {
     // Dynamically read config so changes take effect without restarting the HTTP server.
     // Read failure must FAIL CLOSED: a transient DB error must not bypass bearer auth.
-    let config = match config_service::get().await {
+    // get_strict: corrupt stored JSON must fail closed too — get() maps
+    // corruption to Ok({}) which reads as "auth disabled" (round 12).
+    let config = match config_service::get_strict().await {
         Ok(c) => c,
         Err(e) => {
             log::warn!("[http] config read failed during bearer auth check: {e}; failing closed (401)");
@@ -448,14 +450,19 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
                     .flatten()
                     .map(|c| c.name)
                     .unwrap_or_else(|| client_id.clone());
-                let allowed = oauth_provider::scope_to_allowed_servers(&scope)
-                    .await
-                    .unwrap_or_default();
-                let (access_type, allowed_servers, allowed_groups) = if allowed.is_empty() {
-                    ("all".to_string(), Vec::new(), Vec::new())
-                } else {
-                    ("servers".to_string(), allowed.into_iter().collect(), Vec::new())
-                };
+                // None (mcp:all/empty scope) = unrestricted; Some(set) = the
+                // allowed set — including a legitimately EMPTY set (e.g. a
+                // scope naming a group whose membership is empty), which must
+                // DENY ALL, never collapse to "all" like bearer keys do.
+                let (access_type, allowed_servers, allowed_groups) =
+                    match oauth_provider::scope_to_allowed_servers(&scope).await {
+                        None => ("all".to_string(), Vec::new(), Vec::new()),
+                        Some(allowed) => (
+                            "servers".to_string(),
+                            allowed.into_iter().collect::<Vec<_>>(),
+                            Vec::new(),
+                        ),
+                    };
                 let fallback_name = client_id.clone();
                 return Ok(Some(BearerKey {
                     id: client_id,
@@ -590,6 +597,7 @@ async fn list_server_tools(
             return (StatusCode::FORBIDDEN, Json(json!({ "error": "Access denied for this server" }))).into_response();
         }
     }
+    let _rest_call_ip = client_ip_of(&headers);
     let tools = match pool::list_tools_for(&server_name).await {
         Ok(t) => t,
         Err(e) => return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
@@ -625,6 +633,7 @@ async fn call_server_tool(
             return (StatusCode::FORBIDDEN, Json(json!({ "error": "Access denied for this server" }))).into_response();
         }
     }
+    let _rest_call_ip = client_ip_of(&headers);
     // Meta tools are exclusive to $smart — never resolvable via the plain
     // single-server REST call path even when the target is the builtin.
     if server_name == crate::rag::service::BUILTIN_SERVER_NAME
@@ -676,8 +685,24 @@ async fn call_server_tool(
         Err(_) => true,
     };
     let args = req.arguments.unwrap_or(json!({}));
-    match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &req.tool, args)).await {
+    let rest_call_start = std::time::Instant::now();
+    match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &req.tool, args.clone())).await {
         Ok(result) => {
+            // Activity parity (R24: every user-visible call surface logs):
+            // the /rest call handlers were the only unlogged executors.
+            let duration_ms = rest_call_start.elapsed().as_millis() as i64;
+            let status = if result.is_error { "error" } else { "success" };
+            let _ = log_service::write_activity(
+                &server_name,
+                &req.tool,
+                Some(duration_ms),
+                status,
+                Some(args.clone()),
+                serde_json::to_value(&result).ok(),
+                None,
+                _rest_call_ip.as_deref(),
+            )
+            .await;
             // Omit structuredContent/_meta when absent — `_meta: null` is not
             // a spec-valid shape (MCP requires object when present).
             let mut body = json!({
@@ -694,6 +719,17 @@ async fn call_server_tool(
         }
         Err(e) => {
             let msg = e.to_string();
+            let _ = log_service::write_activity(
+                &server_name,
+                &req.tool,
+                Some(rest_call_start.elapsed().as_millis() as i64),
+                "error",
+                Some(args.clone()),
+                None,
+                Some(&msg),
+                _rest_call_ip.as_deref(),
+            )
+            .await;
             let lower = msg.to_lowercase();
             // 404 only when the call error itself indicates an unknown tool:
             // `!known_enabled` alone must not force 404 — the pool's tool
@@ -748,7 +784,10 @@ async fn list_group_tools(
     // (same semantics as the /mcp/{group} bridge surface and the spec
     // generation) — the REST listing must not leak tools the group allow-list
     // hides. Empty allow-list = fail-closed (deny all for that server).
-    let group_filters = mcp_scope_server_filters(&format!("/mcp/{group_name}")).await;
+    // BARE group name — mcp_scope_server_filters does its own '/' trimming,
+    // so a "/mcp/{name}" prefix yields "mcp/{name}", matches no group, and
+    // silently skips the allow-list (tools leaked).
+    let group_filters = mcp_scope_server_filters(&group_name).await;
     for server_name in &accessible {
         if let Ok(server_tools) = pool::list_tools_for(server_name).await {
             let mut filtered = server_tool_config_service::apply_tool_filters(server_name, server_tools)
@@ -855,8 +894,23 @@ async fn call_group_tool(
         }
     }
     let args = req.arguments.unwrap_or(json!({}));
-    match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, tool_name, args)).await {
+    // Activity parity with call_server_tool (R24 semantics).
+    let source_ip = client_ip_of(&headers);
+    let group_call_start = std::time::Instant::now();
+    match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, tool_name, args.clone())).await {
         Ok(result) => {
+            let status = if result.is_error { "error" } else { "success" };
+            let _ = log_service::write_activity(
+                &server_name,
+                tool_name,
+                Some(group_call_start.elapsed().as_millis() as i64),
+                status,
+                Some(args.clone()),
+                serde_json::to_value(&result).ok(),
+                None,
+                source_ip.as_deref(),
+            )
+            .await;
             let mut body = json!({
                 "result": result.content,
                 "is_error": result.is_error,
@@ -870,10 +924,21 @@ async fn call_group_tool(
             Json(body).into_response()
         }
         Err(e) => {
+            let msg = e.to_string();
+            let _ = log_service::write_activity(
+                &server_name,
+                tool_name,
+                Some(group_call_start.elapsed().as_millis() as i64),
+                "error",
+                Some(args.clone()),
+                None,
+                Some(&msg),
+                source_ip.as_deref(),
+            )
+            .await;
             // Same 404-on-unknown-tool semantics as call_server_tool — the
             // group path previously answered 500 for the same error shapes
             // (review round 10, surface consistency).
-            let msg = e.to_string();
             let status = if tool_call_error_is_not_found(&msg) {
                 StatusCode::NOT_FOUND
             } else {
@@ -1070,16 +1135,19 @@ async fn oauth_protected_resource(headers: HeaderMap) -> Response {
     } else {
         vec![base_url.clone()]
     };
-    let mut body = json!({
+    let body = json!({
         "resource": base_url,
         "authorization_servers": auth_servers,
-        "scopes_supported": ["read", "write"],
+        // Advertise what the AS will actually grant — advertising ["read","write"]
+        // made clients request scopes the provider's scope_allowed rejects.
+        "scopes_supported": if provider_on {
+            serde_json::to_value(oauth_provider::effective_scopes(&oauth_provider::provider_config().await))
+                .unwrap_or(json!([]))
+        } else {
+            json!([])
+        },
         "bearer_methods_supported": ["header"],
     });
-    if !provider_on {
-        // Placeholder semantics preserved when the provider is off.
-        body["scopes_supported"] = json!([]);
-    }
     Json(body).into_response()
 }
 
@@ -1099,6 +1167,134 @@ fn provider_disabled_response() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({"error": "OAuth server is not enabled"}))).into_response()
 }
 
+// ── Upstream server OAuth management (origin /servers/{name}/oauth parity) ──
+// Mirrors the tauriClient REST mapping; the desktop frontend in Tauri mode
+// routes these to invoke(), while the hub HTTP surface exposes them directly.
+
+/// Returns the authenticated BearerKey (None when no auth is in force) so
+/// handlers can enforce per-key server scoping on /servers/{name} routes.
+async fn hub_admin_gate(headers: &HeaderMap) -> Result<Option<BearerKey>, Response> {
+    // Fail closed: a transient config-read error must not open management routes
+    // (check_bearer_auth at line ~396 established this policy for the same read).
+    // get_strict: corrupt JSON must fail closed (see check_bearer_auth).
+    let config = match config_service::get_strict().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[http] config read failed during admin gate: {e}; failing closed (401)");
+            return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "admin session required"}))).into_response());
+        }
+    };
+    let bearer_on = config
+        .get("routing")
+        .and_then(|r| r.get("enableBearerAuth"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| config.get("bearerKeyEnabled").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+        || config
+            .get("oauthServer")
+            .and_then(|o| o.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if bearer_on {
+        // Network-reachable management routes inherit the bearer/OAuth gate:
+        // a valid key (or provider token) is required, mirroring /rest and /api.
+        return match check_bearer_auth(headers).await {
+            Ok(key) => Ok(key),
+            Err(resp) => Err(resp),
+        };
+    }
+    let skip_auth = config
+        .get("routing")
+        .and_then(|r| r.get("skipAuth"))
+        // Default deployments never WRITE routing.skipAuth (auth.rs and
+        // get_public_config both default true) — the fallback must match or
+        // the management routes 401 for every default guest deployment.
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if skip_auth {
+        Ok(None)
+    } else {
+        Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "admin session required"}))).into_response())
+    }
+}
+
+/// Per-key server scoping for /servers/{server}/oauth/* routes: a key with
+/// access_type "servers"/"groups"/"custom" scoped away from {server} must not
+/// manage that server's OAuth (it could evict another owner's credentials).
+async fn server_scope_gate(
+    bearer: Option<&BearerKey>,
+    server: &str,
+) -> Result<(), Response> {
+    match get_allowed_servers(bearer).await {
+        None => Ok(()),
+        Some(allowed) if allowed.contains(server) => Ok(()),
+        Some(_) => Err((StatusCode::FORBIDDEN, Json(json!({"error": format!("bearer key is not scoped to server '{server}'")}))).into_response()),
+    }
+}
+
+async fn server_oauth_connect(
+    Path(server): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let bearer = match hub_admin_gate(&headers).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if let Err(r) = server_scope_gate(bearer.as_ref(), &server).await { return r; }
+    let cfg = match crate::services::server_service::get_by_name(&server).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"error": format!("Server '{server}' not found")}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    let oauth_cfg = match cfg.oauth.as_ref() {
+        Some(o) => o,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Server '{server}' has no OAuth configuration")}))).into_response(),
+    };
+    if oauth_cfg.access_token.as_deref().map_or(false, |t| !t.is_empty()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Server '{server}' uses a static access token; clear it in the server form to use the authorization flow")}))).into_response();
+    }
+    let Some(upstream_url) = cfg.url.clone().filter(|u| !u.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Server '{server}' has no upstream URL (OAuth applies to sse/streamable-http/openapi servers)")}))).into_response();
+    };
+    let challenge = if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<Value>(&body).ok()
+    }
+        .and_then(|v| v.get("challenge").and_then(|c| c.as_str()).map(|s| s.to_string()));
+    match crate::services::oauth_upstream::start_authorization(&server, &upstream_url, oauth_cfg, challenge.as_deref()).await {
+        Ok(_) => (StatusCode::OK, Json(json!({"success": true, "message": format!("authorization started for '{server}'")}))).into_response(),
+        // Config-shaped determinism (server lacks OAuth support) is a client
+        // fault, not an infra failure — same class as the 400s above.
+        Err(crate::services::oauth_upstream::OauthError::NoOauthSupport) =>
+            (StatusCode::BAD_REQUEST, Json(json!({"error": "server does not support OAuth"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn server_oauth_disconnect(Path(server): Path<String>, headers: HeaderMap) -> Response {
+    let bearer = match hub_admin_gate(&headers).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if let Err(r) = server_scope_gate(bearer.as_ref(), &server).await { return r; }
+    match crate::services::oauth_upstream::disconnect(&server).await {
+        Ok(_) => (StatusCode::OK, Json(json!({"success": true}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn server_oauth_status(Path(server): Path<String>, headers: HeaderMap) -> Response {
+    let bearer = match hub_admin_gate(&headers).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if let Err(r) = server_scope_gate(bearer.as_ref(), &server).await { return r; }
+    let s = crate::services::oauth_upstream::status_of(&server).await;
+    (StatusCode::OK, Json(json!({"success": true, "data": {"status": s}}))).into_response()
+}
+
 /// RFC 8414 authorization-server metadata.
 async fn oauth_authorization_server_metadata(headers: HeaderMap) -> Response {
     let cfg = oauth_provider::provider_config().await;
@@ -1112,10 +1308,14 @@ async fn oauth_authorization_server_metadata(headers: HeaderMap) -> Response {
         "token_endpoint": format!("{issuer}/oauth/token"),
         "registration_endpoint": format!("{issuer}/oauth/register"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "grant_types_supported": if cfg.allowed_grant_types.is_empty() {
+            vec!["authorization_code".to_string(), "refresh_token".to_string()]
+        } else {
+            cfg.allowed_grant_types.clone()
+        },
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
-        "scopes_supported": ["mcp:all", "read", "write"],
+        "scopes_supported": oauth_provider::effective_scopes(&cfg),
     }))
     .into_response()
 }
@@ -1154,7 +1354,11 @@ async fn oauth_register(body: Option<Json<RegisterBody>>) -> Response {
                 "client_id_issued_at": client.created_at,
                 "client_name": client.name,
                 "redirect_uris": oauth_provider::client_redirect_uris(&client),
-                "grant_types": ["authorization_code", "refresh_token"],
+                "grant_types": if cfg.allowed_grant_types.is_empty() {
+                    vec!["authorization_code".to_string(), "refresh_token".to_string()]
+                } else {
+                    cfg.allowed_grant_types.clone()
+                },
                 "response_types": ["code"],
                 "token_endpoint_auth_method": if secret.is_some() { "client_secret_post" } else { "none" },
             });
@@ -1263,7 +1467,13 @@ async fn oauth_authorize_page(
     if q.challenge.is_none() || q.challenge_method.as_deref() != Some("S256") {
         return redirect_error(&redirect, q.state.as_deref().unwrap_or(""), "invalid_request", "PKCE S256 is required");
     }
+    if cfg.require_state && q.state.as_deref().unwrap_or("").is_empty() {
+        return redirect_error(&redirect, "", "invalid_request", "state is required");
+    }
     let scope = q.scope.clone().unwrap_or_else(|| "mcp:all".into());
+    if !oauth_provider::scope_allowed(&cfg, &scope) {
+        return redirect_error(&redirect, q.state.as_deref().unwrap_or(""), "invalid_scope", "requested scope is not permitted");
+    }
     let resource = q.resource.clone().unwrap_or_default();
     let state = q.state.clone().unwrap_or_default();
     let nonce = issue_consent_nonce();
@@ -1341,9 +1551,8 @@ async fn oauth_authorize_submit(Form(form): Form<AuthorizeForm>) -> Response {
     if !consume_consent_nonce(&form.nonce) {
         return (StatusCode::BAD_REQUEST, "invalid or expired consent session — reload the page").into_response();
     }
-    if form.action != "approve" {
-        return redirect_error(&form.redirect_uri, &form.state, "access_denied", "user denied the request");
-    }
+    // Client + redirect_uri validation MUST precede the deny branch — the
+    // deny 302 would otherwise be an open redirect to an attacker URL.
     // Authorize endpoint is user-facing: NO client authentication here (per
     // OAuth 2.1 client auth happens only at the token endpoint). Existence +
     // not-revoked is the correct check — validate_client with no secret would
@@ -1354,6 +1563,17 @@ async fn oauth_authorize_submit(Form(form): Form<AuthorizeForm>) -> Response {
     };
     if !oauth_provider::client_redirect_uris(&client).iter().any(|u| u == &form.redirect_uri) {
         return (StatusCode::BAD_REQUEST, "redirect_uri not registered").into_response();
+    }
+    if form.action != "approve" {
+        return redirect_error(&form.redirect_uri, &form.state, "access_denied", "user denied the request");
+    }
+    // Scope integrity: the consent POST carries form-controlled scope — the
+    // GET page's scope_allowed check does not bind to this submission (the
+    // nonce is a CSRF gate, not a scope gate; the hidden scope field is
+    // editable by the requester). Re-validate here or `scope=mcp:all` /
+    // `scope=` post-overshadows a restricted allowedScopes config.
+    if !oauth_provider::scope_allowed(&cfg, &form.scope) {
+        return redirect_error(&form.redirect_uri, &form.state, "invalid_scope", "requested scope is not permitted");
     }
     match oauth_provider::store_code(&client.client_id, &form.code_challenge, &form.scope, &form.resource, &form.redirect_uri, cfg.authorization_code_lifetime).await {
         Ok(code) => {
@@ -1394,6 +1614,9 @@ async fn oauth_token(
     if !cfg.enabled {
         return provider_disabled_response();
     }
+    if !cfg.allowed_grant_types.is_empty() && !cfg.allowed_grant_types.iter().any(|g| g == &form.grant_type) {
+        return token_error("unsupported_grant_type", "grant type is not allowed by the provider configuration");
+    }
     match form.grant_type.as_str() {
         "authorization_code" => {
             let Some(code) = form.code.as_deref() else {
@@ -1432,6 +1655,27 @@ async fn oauth_token(
             let Some(rt) = form.refresh_token.as_deref() else {
                 return token_error("invalid_request", "refresh_token is required");
             };
+            // RFC 6749 §6: confidential clients must authenticate at the
+            // token endpoint for the refresh grant too. Without this, a
+            // captured refresh token redeems without the client secret the
+            // code exchange enforced.
+            let (owned_cid, replayed) = match oauth_provider::refresh_owner(rt, &cfg).await {
+                Ok(v) => v,
+                Err(_) => return token_error("invalid_grant", "unknown refresh token"),
+            };
+            if !replayed {
+                if let Some(provided) = form.client_id.as_deref() {
+                    if provided != owned_cid {
+                        return token_error("invalid_grant", "client_id mismatch");
+                    }
+                }
+                if oauth_provider::validate_client(&owned_cid, form.client_secret.as_deref())
+                    .await
+                    .is_err()
+                {
+                    return token_error("invalid_client", "client authentication failed");
+                }
+            }
             match oauth_provider::refresh_tokens(rt, &cfg).await {
                 Ok(Some((_cid, _scope, t))) => token_success(&t),
                 Ok(None) => token_error("invalid_grant", "unknown refresh token"),
@@ -2382,14 +2626,15 @@ fn rmcp_service(
     // authenticated, so disable it (parity with origin's Express, which never
     // validated Host).
     let mut config = config.disable_allowed_hosts();
-    // Align with the leniency middleware's parse cap (8MB floor): the SDK
-    // default is 4MiB, which would make 4–8MB POSTs fully buffer + (re)parse
-    // in the middleware only to be rejected 413 by the SDK afterwards. Read
-    // the SAME snapshot the leniency middleware uses so a user-configured
-    // limit above 64MB is not buffered by the middleware then 413'd here.
+    // Align with the leniency middleware's parse cap: the SDK default is
+    // 4MiB, which would make 4–8MB POSTs fully buffer + (re)parse in the
+    // middleware only to be rejected 413 by the SDK afterwards. Take the
+    // SAME snapshot the leniency middleware uses, with the same 8MB floor —
+    // the previous .max(64MB) silently ignored any configured limit between
+    // 8MB and 64MB on the highest-traffic surface.
     config.max_request_body_bytes =
         std::sync::atomic::AtomicUsize::load(&BODY_LIMIT_SNAPSHOT, std::sync::atomic::Ordering::Relaxed)
-            .max(64 * 1024 * 1024);
+            .max(8 * 1024 * 1024);
     config.cancellation_token = sdk_cancel;
     rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
         || Ok(super::rmcp_bridge::HubBridge::new()),
@@ -2985,7 +3230,11 @@ async fn rest_post_bearer_middleware(
         return next.run(req).await;
     }
     let path = req.uri().path();
-    if !path.starts_with("/rest/") && !path.starts_with("/api/") {
+    // Also cover POST /servers/{server}/oauth/connect: the handler takes a
+    // Bytes extractor, which axum buffers BEFORE hub_admin_gate runs — the
+    // same pre-auth buffering this middleware exists to prevent.
+    let is_admin_oauth_connect = path.starts_with("/servers/") && path.ends_with("/oauth/connect");
+    if !path.starts_with("/rest/") && !path.starts_with("/api/") && !is_admin_oauth_connect {
         return next.run(req).await;
     }
     let headers = req.headers().clone();
@@ -3049,7 +3298,8 @@ async fn mcp_route_gate_middleware(
         let is_global_scope = scope_clean.is_empty() || scope_clean == "$smart";
         // Read failure must FAIL CLOSED (404) like check_bearer_auth — a
         // transient DB error must not re-expose scopes the operator disabled.
-        let config = match config_service::get().await {
+        // get_strict: corrupt JSON must fail closed (see check_bearer_auth).
+        let config = match config_service::get_strict().await {
             Ok(c) => Some(c),
             Err(e) => {
                 log::warn!("[http] config read failed during route gate: {e}; failing closed (404)");
@@ -3118,6 +3368,9 @@ fn build_router(body_limit_bytes: usize, sdk_cancel: tokio_util::sync::Cancellat
         .route("/oauth/register", post(oauth_register))
         .route("/oauth/authorize", get(oauth_authorize_page).post(oauth_authorize_submit))
         .route("/oauth/token", post(oauth_token))
+.route("/servers/{server}/oauth/connect", post(server_oauth_connect))
+        .route("/servers/{server}/oauth/disconnect", post(server_oauth_disconnect))
+        .route("/servers/{server}/oauth/status", get(server_oauth_status))
         .route("/servers", get(list_servers))
         // Legacy REST API (moved to /rest prefix to avoid wildcard conflict)
         .route("/rest/{server}/tools", get(list_server_tools))
@@ -4142,7 +4395,11 @@ async fn smart_rest_search(
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
     // Root $smart scope has no group tool whitelist — gate applies only to
     // /$smart/{group} (bridge handles that path).
-    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed, None).await {
+    // NOTE (deliberate, matches /call below): the REST $smart face does NOT
+    // narrow to pinned tools — REST search and REST call both see the full
+    // scope, internally consistent. Pin parity (search=list=call) applies to
+    // the MCP $smart face inside the bridge.
+    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed, None, None).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
@@ -4165,7 +4422,7 @@ async fn smart_rest_describe(
     let tool_name = p.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
-    match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None).await {
+    match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None, None).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         // handle_describe_tool returns Ok with an error body for unknown
         // tools (origin parity) — Err here is always a server fault.
@@ -4200,7 +4457,7 @@ async fn smart_rest_call(
     // "127.0.0.1" would poison activity-log source_ip data.
     let ip = client_ip_of(&headers);
     let start = std::time::Instant::now();
-    match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None).await {
+    match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None, None).await {
         Ok(v) => {
             // isError:true results are tool-level failures — don't log them
             // as "success" (parity with execute_openapi_impl's is_error split).

@@ -332,7 +332,8 @@
       "allowInsecureTokenEndpointHelp": "仅管理员可用，默认关闭。为该上游服务器以非 TLS 方式发送凭据与令牌。仅应在可信网络中启用；推荐使用 HTTPS。启用后，只有管理员可以编辑该服务器的全部配置；非管理员的所有者无法编辑。",
       "connectStarted": "授权已启动——请在刚打开的浏览器窗口中完成授权。",
       "connectFailed": "启动 OAuth 授权失败",
-      "disconnected": "OAuth 已断开"
+      "disconnected": "OAuth 已断开",
+      "connectSuccess": "OAuth 授权完成，凭证已保存。"
     },
     "duplicate": "创建副本",
     "nameInvalid": "服务器名称只能包含字母、数字、点、下划线和连字符（不能包含空格或特殊字符）",
@@ -900,7 +901,9 @@
       "excludeFileGroupRemove": "取消排除这些文件（恢复参与更新检查）",
       "refreshSourceDone": "数据源更新完成：导入 {{added}}，移除 {{removed}}，更新 {{updated}}",
       "refreshSourceTitle": "数据源更新",
-      "selectedCount": "已选 {{count}} 项"
+      "selectedCount": "已选 {{count}} 项",
+      "batchTagsPartialFailed": "部分标签保存失败（已完成 {{n}} 个）",
+      "exclusionPersistFailed": "排除规则保存失败"
     }
   },
   "logs": {
@@ -1486,7 +1489,7 @@
     "dynamicRegistrationAllowedGrantTypesDescription": "使用逗号分隔动态注册客户端可以使用的授权类型",
     "dynamicRegistrationAllowedGrantTypesPlaceholder": "例如：authorization_code, refresh_token",
     "dynamicRegistrationAuth": "注册需要认证",
-    "dynamicRegistrationAuthDescription": "开启后，注册端点需要认证请求才能创建客户端",
+    "dynamicRegistrationAuthDescription": "关闭动态注册：新客户端将无法注册（本 Provider 不提供注册凭据机制，请改用预注册客户端）。",
     "invalidNumberInput": "请输入合法的非负数字",
     "skillsAgentsTitle": "Agent 安装路径管理",
     "skillsAgentsDescription": "配置已知 AI Agent 的技能安装路径，用于扫描与导出技能。支持 ~ 开头的路径。",
@@ -1554,7 +1557,8 @@
     "toolDefinitionFields": "结果中的工具字段",
     "toolDefinitionFieldsDescription": "search_tools 和 describe_tool 结果在名称、描述和 inputSchema 之外附带的可选字段。默认：title 和 annotations。其余字段主要供客户端使用，可能很大（图标是 base64 图片）。",
     "disablePasswordLogin": "禁用密码登录",
-    "disablePasswordLoginDescription": "仅允许通过 SSO 提供商登录：用户名/密码表单与 POST /api/auth/login 将被关闭。仅在至少一个提供商已启用且在应用启动时即已启用时生效。BETTER_AUTH_DISABLE_PASSWORD_LOGIN 环境变量会覆盖此设置；若身份提供商不可用，将其设为 false 是恢复访问的方式。"
+    "disablePasswordLoginDescription": "仅允许通过 SSO 提供商登录：用户名/密码表单与 POST /api/auth/login 将被关闭。仅在至少一个提供商已启用且在应用启动时即已启用时生效。BETTER_AUTH_DISABLE_PASSWORD_LOGIN 环境变量会覆盖此设置；若身份提供商不可用，将其设为 false 是恢复访问的方式。",
+    "oauthClientRevokeConfirm": "撤销该客户端将立即使其全部访问令牌与刷新令牌失效。客户端需重新注册并授权。"
   },
   "mcpb": {
     "upload": "上传",

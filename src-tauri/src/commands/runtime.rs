@@ -188,8 +188,13 @@ async fn fetch_python_versions() -> Option<Vec<String>> {
     }
 
     let url = "https://endoflife.date/api/python.json";
+    // Explicit timeouts: endoflife.date stalling the response otherwise
+    // hangs list_python_versions forever (same rationale as http_client()
+    // below; node fetch already routes through it).
     let client = match reqwest::Client::builder()
         .user_agent("mcphub-desktop")
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(120))
         .build()
     {
         Ok(c) => c,
@@ -429,6 +434,10 @@ fn validate_version_arg(version: &str) -> Result<(), String> {
         && !version.contains("..")
         && !version.contains('/')
         && !version.contains('\\')
+        // A bare "." (or any digit-less name) would resolve base.join(".")
+        // to the node-versions base dir itself — uninstall/install would
+        // then remove_dir_all() every installed version.
+        && version.contains(|c: char| c.is_ascii_digit())
         && version
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));

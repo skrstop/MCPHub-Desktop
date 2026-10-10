@@ -157,10 +157,15 @@ pub fn extract_package_name(command: &str, args: &[String]) -> Option<String> {
         "npx" => {
             let mut iter = args.iter();
             let mut pkg: Option<&str> = None;
+            let mut pkg_locked = false;
             while let Some(a) = iter.next() {
                 if a == "--" {
-                    // package is the next arg after the separator
-                    pkg = iter.next().map(|s| s.as_str());
+                    // package is the next arg after the separator — unless
+                    // -p/--package already adopted it (the separator target
+                    // is then the run binary, not the package).
+                    if !pkg_locked {
+                        pkg = iter.next().map(|s| s.as_str());
+                    }
                     break;
                 }
                 if a.starts_with('-') {
@@ -179,9 +184,17 @@ pub fn extract_package_name(command: &str, args: &[String]) -> Option<String> {
                         .or_else(|| a.strip_prefix("-p="))
                     {
                         pkg = Some(v);
+                        // Lock the adoption: the first positional after
+                        // -p/--package is the command npx RUNS (e.g. "bar"
+                        // in `npx -p foo@2 bar`), and without the lock the
+                        // unconditional positional branch below overwrites
+                        // the adopted package — the rounds-8/9/10 fix never
+                        // took effect until this lock existed (review r7).
+                        pkg_locked = true;
                     } else if a == "-p" || a == "--package" {
                         if let Some(v) = iter.next() {
                             pkg = Some(v.as_str());
+                            pkg_locked = true;
                         }
                     } else if matches!(
                         a.as_str(),
@@ -193,6 +206,10 @@ pub fn extract_package_name(command: &str, args: &[String]) -> Option<String> {
                         let _ = iter.next();
                     }
                     continue;
+                }
+                if pkg_locked {
+                    // The run target never names the installed package.
+                    break;
                 }
                 pkg = Some(a.as_str());
                 break;
@@ -479,4 +496,54 @@ pub fn spawn_update_check(server_name: String, command: String, args: Vec<String
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkgs(args: &[&str]) -> Option<String> {
+        extract_package_name(
+            "npx",
+            &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+    }
+
+    /// pkg_locked semantics: `-p/--package` adopts its value as the installed
+    /// package and the first positional afterwards is the RUN TARGET, never
+    /// the package. A regression here reintroduces the round-7 High bug
+    /// (update checks pointing at the run binary instead of the package).
+    #[test]
+    fn extract_package_name_npx_branches() {
+        assert_eq!(pkgs(&["-p", "foo@2", "bar"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["--package=foo", "bar"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["-p=foo", "bar"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["foo"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["--", "foo"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["-p", "foo", "--", "bar"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["--registry", "http://r", "foo"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["-c", "echo hi", "foo"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["foo", "bar"]).as_deref(), Some("foo"));
+        assert_eq!(pkgs(&["-p", "foo@2"]).as_deref(), Some("foo"));
+        assert_eq!(extract_package_name("npx", &[]), None);
+    }
+
+    /// Round-11 coverage: `-p pkg@1.2 scoped-name` (space form), `--`
+    /// separator interaction and the positional-after-lock semantics.
+    #[test]
+    fn extract_package_name_pkg_lock_separator_forms() {
+        // Space form of -p: adopted value wins over the run binary.
+        assert_eq!(pkgs(&["-p", "pkg@1.2", "scoped-name"]).as_deref(), Some("pkg"));
+        assert_eq!(pkgs(&["--package", "pkg@1.2", "scoped-name"]).as_deref(), Some("pkg"));
+        // Scoped package names are preserved whole (no @ stripping for @scope/pkg).
+        assert_eq!(pkgs(&["-p", "@scope/pkg@1.2", "scoped-name"]).as_deref(), Some("@scope/pkg"));
+        // `--` after a locked -p adoption: the separator target is the run
+        // binary — must not overwrite the adopted package.
+        assert_eq!(pkgs(&["-p", "pkg@1.2", "--", "scoped-name"]).as_deref(), Some("pkg"));
+        assert_eq!(pkgs(&["--package=pkg@1.2", "--", "scoped-name"]).as_deref(), Some("pkg"));
+        // Bare `--` without any -p: the separator target IS the package.
+        assert_eq!(pkgs(&["--", "pkg@1.2"]).as_deref(), Some("pkg"));
+        // Positional after lock with additional flags: still locked.
+        assert_eq!(pkgs(&["-p", "foo", "--yes", "bar", "--", "baz"]).as_deref(), Some("foo"));
+    }
 }

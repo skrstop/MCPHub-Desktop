@@ -15,6 +15,11 @@ use std::collections::HashMap;
 struct McpSettings {
     mcp_servers: Option<HashMap<String, RawServerConfig>>,
     users: Option<Vec<RawUser>>,
+    // Parsed (not imported) so an export→import cycle that drops groups is
+    // at least loud about it instead of silently losing group definitions
+    // (and with them group-scoped bearer-key targets).
+    #[serde(default)]
+    groups: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +97,12 @@ fn parse_server_type(type_str: &str) -> ServerType {
 pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
     let settings: McpSettings = serde_json::from_str(json)?;
     let mut summary = ImportSummary::default();
+
+    if settings.groups.is_some() {
+        log::warn!(
+            "[import] source JSON contains a `groups` section; group import is not supported — group definitions were skipped (group-scoped bearer-key scoping may need manual recreation)"
+        );
+    }
 
     // Import servers
     if let Some(servers) = settings.mcp_servers {

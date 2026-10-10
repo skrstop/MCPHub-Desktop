@@ -111,7 +111,7 @@ def run(original):
     # Protected resource points at ourselves when enabled.
     st, _, b = req("GET", "/.well-known/oauth-protected-resource")
     pr = json.loads(b)
-    check("P1b protected-resource authorization_servers == issuer", pr.get("authorization_servers") == [pr.get("resource")] or len(pr.get("authorization_servers", [])) >= 1)
+    check("P1b protected-resource authorization_servers == issuer", pr.get("authorization_servers") == [pr.get("resource")], str(pr)[:120])
 
     # ── P2. Dynamic registration ──
     cb = "https://claude.ai/api/mcp/callback"
@@ -216,7 +216,11 @@ def run(original):
 
     # ── P6. $smart channel reachable with the token ──
     st, _, b = req("GET", "/mcp/$smart", headers={**auth, "Accept": "text/event-stream"})
-    check("P6 $smart GET not 401", st != 401, f"got {st}")
+    # rmcp GET without a session -> 400 "Session ID is required"; the point
+    # of this check is that the OAuth auth gate PASSED (401/403 would mean
+    # the token was rejected). 200 (stateless SSE) or 400 (session-required)
+    # both prove the gate passed; anything else fails.
+    check("P6 $smart GET auth gate passed", st in (200, 400), f"got {st}")
 
     # ── P7. Refresh rotation ──
     st, _, b = req("POST", "/oauth/token", form={"grant_type": "refresh_token", "refresh_token": refresh})
@@ -228,6 +232,11 @@ def run(original):
     # replay triggers family revocation per RFC 6749 §10.4).
     st, _, _ = req("POST", "/mcp", body=init_body, headers={**{"Authorization": f"Bearer {access2}"}, "Accept": "application/json, text/event-stream"})
     check("P7b new access works", st == 200, f"got {st}")
+
+    # RFC 6749 §6: refresh grant authenticates the client. A wrong
+    # client_id for a valid refresh token must be rejected.
+    st, _, _ = req("POST", "/oauth/token", form={"grant_type": "refresh_token", "refresh_token": tok2.get("refresh_token", ""), "client_id": "wrong-client"})
+    check("N7c refresh wrong client_id rejected", st == 400, f"got {st}")
 
     # Replayed (rotated) refresh = theft signal → family revoked + error.
     st, _, _ = req("POST", "/oauth/token", form={"grant_type": "refresh_token", "refresh_token": refresh})

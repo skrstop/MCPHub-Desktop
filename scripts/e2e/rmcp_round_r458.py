@@ -14,6 +14,7 @@ G8  空 mcp-session-id 头：宽松剥离升格放行（严格模式回归由既
 依赖：服务器运行于 :23333，「本机公网ip查询」(openapi) 已连接，分组 Test 存在。
 """
 import http.client, json, sqlite3, os, re, sys, time, urllib.parse, socket
+from pin_helper import pin, unpin
 
 HOST, PORT = "localhost", 23333
 DB = os.path.expanduser("~/Library/Application Support/app.mcphub.desktop/mcphub.db")
@@ -98,10 +99,17 @@ def g2():
         "params": {"_meta": {PV: "2026-07-28", **CLIENT_META}}})
     tools = (obj or {}).get("result", {}).get("tools", [])
     names = [t["name"] for t in tools]
-    # progressiveDisclosure=false exposes exactly 2 tools (search + call);
-    # progressive mode would expose 3 (incl. smart_route_describe).
-    check("G2 $smart tools/list (2026 meta 工具)", st == 200 and len(names) in (2, 3)
-          and "smart_route_search" in names and "smart_route_call" in names, f"st={st} {names}")
+    # progressiveDisclosure=true exposes 3 tools (incl. smart_route_describe);
+    # false exposes exactly 2 (search + call). Assert against the actual mode.
+    prog = json.loads(sqlite3.connect(DB).execute(
+        "SELECT config_json FROM system_config WHERE rowid=1").fetchone()[0] or "{}").get(
+        "smartRouting", {}).get("progressiveDisclosure", False)
+    expected = 3 if prog else 2
+    check("G2 $smart tools/list (2026 meta 工具)", st == 200 and len(names) == expected
+          and "smart_route_search" in names and "smart_route_call" in names,
+          f"st={st} progressive={prog} {names}")
+    # Round-8 pin parity: seed the pin the G2 search targets
+    pin("本机公网ip查询", "getPublicIp")
     # search_tools for the IP tool
     st2, _, obj2, _, _ = req("POST", base, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "smart_route_search", "arguments": {"query": "公网 ip"},
@@ -273,14 +281,17 @@ def g8():
     check("G8 空 session 头宽松放行 + 公网IP真实调用", st == 200 and ip is not None, f"st={st} ip={ip} {raw[:80]}")
 
 def main():
-    for f in [g5, g1, g2, g3, g4, g8, g6, g7]:
-        try:
-            f()
-        except Exception as e:
-            check(f.__name__ + " (exception)", False, repr(e))
-    print(f"\n== {PASS}/{PASS+FAIL} passed, {SKIPPED} skipped ==")
-    if FAILED:
-        print("FAILED:", ", ".join(FAILED)); sys.exit(1)
+    try:
+        for f in [g5, g1, g2, g3, g4, g8, g6, g7]:
+            try:
+                f()
+            except Exception as e:
+                check(f.__name__ + " (exception)", False, repr(e))
+    finally:
+        unpin("本机公网ip查询", "getPublicIp")  # idempotent safety net (covers KeyboardInterrupt/sys.exit)
+        print(f"\n== {PASS}/{PASS+FAIL} passed, {SKIPPED} skipped ==")
+        if FAILED:
+            print("FAILED:", ", ".join(FAILED)); sys.exit(1)
 
 if __name__ == "__main__":
     main()

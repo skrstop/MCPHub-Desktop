@@ -78,10 +78,13 @@ def check(name, cond, detail=""):
 def set_strict(on):
     con = sqlite3.connect(DB)
     cfg = json.loads(con.execute("SELECT config_json FROM system_config WHERE rowid=1").fetchone()[0] or "{}")
-    cfg.setdefault("mcp", {})["strictValidation"] = on
+    mcp = cfg.setdefault("mcp", {})
+    prev = mcp.get("strictValidation", False)
+    mcp["strictValidation"] = on
     con.execute("UPDATE system_config SET config_json=?, updated_at=datetime('now') WHERE rowid=1",
                 (json.dumps(cfg, ensure_ascii=False),))
     con.commit(); con.close()
+    return bool(prev)
 
 # 读 Test group 现状（终了还原用）
 con = sqlite3.connect(DB)
@@ -241,12 +244,16 @@ def _g_section():
     txt = json.dumps((obj or {}).get("result", {}), ensure_ascii=False)
     check("G3 还原宽松后放行恢复", ok_call(obj) and has_ip(txt), f"{st} {body[:200]}")
 
+ORIG_STRICT = None
 try:
+    ORIG_STRICT = bool(json.loads(sqlite3.connect(DB).execute(
+        "SELECT config_json FROM system_config WHERE rowid=1").fetchone()[0] or "{}").get("mcp", {}).get("strictValidation", False))
     _g_section()
 finally:
-    # set_strict returns the PREVIOUS value — restore it rather than
-    # hardcoding False (operators with strict baseline must not be flipped).
-    set_strict(set_strict(False))
+    # Restore the PRE-RUN baseline (captured before any mutation) rather
+    # than hardcoding False — the nested set_strict(set_strict(False))
+    # form returned None and wrote strictValidation: null (round 17 audit).
+    set_strict(ORIG_STRICT)
 
 print(f"\n{'='*50}\nPASS={len(PASS)} FAIL={len(FAIL)}")
 if FAIL:

@@ -244,17 +244,21 @@ def main():
             {"mcp-session-id": sid})
         o2 = sse_obj(d2, 6)
         txt2 = json.dumps((o2 or {}).get("result", o2 or {}), ensure_ascii=False)
-        check("N-PU[b] unpin 后直调拒绝", o2 is None or (o2.get("error") is not None or "is not a pinned tool" in txt2 or "not available" in txt2 or "not found" in txt2.lower()), f"st={st2} {txt2[:120]}")
+        # Round-9/10 semantics: unpinning the LAST pin deactivates the gate —
+        # the formerly-pinned tool returns to the normal call path (succeeds).
+        # The old "refused" expectation encoded the empty-pin wipe bug.
+        check("N-PU[b] unpin 后直调成功（门控失效）", o2 is not None and o2.get("error") is None and valid_ip(txt2), f"st={st2} {txt2[:120]}")
         st3, d3, _, _ = raw_post("/mcp/$smart", {"jsonrpc":"2.0","id":7,"method":"tools/call",
             "params":{"name":"smart_route_describe","arguments":{"toolName": SEP_TOOL if pinned_on else IP_TOOL}}},
             {"mcp-session-id": sid})
         o3 = sse_obj(d3, 7)
         txt3 = json.dumps((o3 or {}).get("result", {}), ensure_ascii=False)
-        # describe is NOT pin-gated (origin parity): its allowed set is the
-        # $smart scope's pool tools, not the pinned list. Only the direct-call
-        # lane and the tools/list exposure are pin-gated.
-        check("N-PU[c] unpin 后 describe 仍可用（origin parity：describe 不查 pin）",
-              st3 == 200 and _describe_tool_present(o3), f"st={st3} {txt3[:100]}")
+        # Round-8 pin parity: describe IS pin-gated on $smart scopes now —
+        # search/list/describe/call all agree (an unpinned tool is invisible
+        # on every face, not just uncallable).
+        # Gate inactive: describe succeeds again (see N-PU[b]).
+        check("N-PU[c] unpin 后 describe 成功（门控失效）",
+              o3 is not None and "not available" not in txt3 and "not a pinned" not in txt3, f"st={st3} {txt3[:120]}")
         raw_post("/mcp/$smart", {"jsonrpc":"2.0","id":8,"method":"not-a-method"}, {"mcp-session-id": sid})
 
     # ── N9 卫生 ─────────────────────────────────────────────────────────────

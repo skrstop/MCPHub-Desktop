@@ -1,6 +1,5 @@
-//! rmcp-backed Streamable HTTP transport — replaces the hand-written JSON-RPC
-//! POST/SSE framing in `http_transport.rs` with the official rmcp client while
-//! preserving the hub's upstream behaviours:
+//! rmcp-backed Streamable HTTP transport — official rmcp client with the
+//! hub's upstream behaviours preserved:
 //!
 //! - **Auto lifecycle**: rmcp probes `server/discover` first (2026 modern,
 //!   stateless) and falls back to the legacy `initialize` handshake — exactly
@@ -72,7 +71,7 @@ pub struct RmcpHttpTransport {
     url: String,
     headers: HashMap<String, String>,
     service: Option<RunningService<RoleClient, BridgeClientHandler>>,
-    connected: bool,
+    connected: std::sync::atomic::AtomicBool,
     /// True when the upstream answered `server/discover` (2026 modern,
     /// stateless) — logged for the activity panel, rmcp drives the difference.
     modern: bool,
@@ -93,7 +92,7 @@ impl RmcpHttpTransport {
             url: url.into(),
             headers,
             service: None,
-            connected: false,
+            connected: std::sync::atomic::AtomicBool::new(false),
             modern: false,
             server_version: None,
             last_list_ttl: std::sync::Mutex::new(None),
@@ -136,6 +135,7 @@ impl RmcpHttpTransport {
                 Err(e) => {
                     transient_failures += 1;
                     if transient_failures >= 3 {
+                        self.mark_conn_loss(&e);
                         return Err(anyhow!("tasks/get failed: {}", e));
                     }
                     continue;
@@ -214,8 +214,54 @@ impl McpTransport for RmcpHttpTransport {
         let mut auth_header = None;
         let mut custom_headers = HashMap::new();
         for (k, v) in &self.headers {
+            // rmcp rejects these reserved headers PER-REQUEST via
+            // validate_custom_header (ReservedHeaderConflict) — a
+            // user-configured one turns connect/every request into a fatal
+            // error loop feeding mark_conn_loss. mcp-protocol-version is
+            // reserved but allowed through by rmcp itself. (Rounds 11-12.)
+            if k.eq_ignore_ascii_case("mcp-session-id")
+                || k.eq_ignore_ascii_case("accept")
+                || k.eq_ignore_ascii_case("last-event-id")
+            {
+                log::warn!(
+                    "[{}] ignoring user-configured reserved header '{}' (managed by the MCP client)",
+                    self.server_name,
+                    k
+                );
+                continue;
+            }
             if k.eq_ignore_ascii_case("authorization") {
-                auth_header = Some(v.clone());
+                // rmcp applies auth_header via reqwest bearer_auth(), which
+                // unconditionally prepends "Bearer " — a value that already
+                // carries a scheme (OAuth-resolved "Bearer x", "Basic ...")
+                // would go out as "Bearer Bearer x" (round 11 review). Pass
+                // scheme-carrying values through custom_headers verbatim
+                // (applied after bearer_auth, so it wins); bare tokens take
+                // the auth_header path.
+                let lower = v.to_ascii_lowercase();
+                let has_scheme = ["bearer ", "basic ", "digest "]
+                    .iter()
+                    .any(|p| lower.starts_with(p));
+                if has_scheme {
+                    match (
+                        http::HeaderName::try_from("authorization"),
+                        http::HeaderValue::from_str(v),
+                    ) {
+                        (Ok(name), Ok(value)) => {
+                            custom_headers.insert(name, value);
+                        }
+                        // A silently dropped Authorization goes out
+                        // unauthenticated and only surfaces as an upstream
+                        // 401 — warn like the generic invalid-header branch
+                        // (round 12 review).
+                        _ => log::warn!(
+                            "[{}] dropping invalid Authorization header value",
+                            self.server_name
+                        ),
+                    }
+                } else {
+                    auth_header = Some(v.clone());
+                }
             } else if let (Ok(name), Ok(value)) = (
                 http::HeaderName::try_from(k.as_str()),
                 http::HeaderValue::from_str(v),
@@ -295,12 +341,14 @@ impl McpTransport for RmcpHttpTransport {
         app_logger::log_to_db("info", &ok_msg);
 
         self.service = Some(service);
-        self.connected = true;
+        self.connected
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.connected = false;
+        self.connected
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(service) = self.service.take() {
             // Bounded like the stdio transport: a wedged service (streaming
             // response / half-closed TCP) must not stall disconnect forever —
@@ -317,7 +365,16 @@ impl McpTransport for RmcpHttpTransport {
 
     fn is_connected(&self) -> bool {
         self.connected
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Post-rmcp migration, `is_connected()` only flips on explicit
+    /// connect/disconnect — a dead child process / dropped stream never
+    /// lowered the flag, which left every eviction/rebuild consumer
+    /// (session_pool / on_demand run_call, mcp_manager session_rebuild's
+    /// `!s.connected` filter) dead code for rmcp transports. Connection-
+    /// class call errors mark the transport disconnected so those existing
+    /// paths go live again.
 
     fn server_version(&self) -> Option<String> {
         self.server_version.clone()
@@ -337,18 +394,31 @@ impl McpTransport for RmcpHttpTransport {
         let mut cursor: Option<String> = None;
         let mut seen_cursors = std::collections::HashSet::new();
         let mut last_ttl: Option<u64> = None;
+        let mut was_paged = false;
         for _ in 0..100 {
             let params = cursor
                 .clone()
                 .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
-            let result = service.peer().list_tools(params).await?;
+            let result = match service.peer().list_tools(params).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.mark_conn_loss(&e);
+                    return Err(anyhow!("tools/list failed: {e}"));
+                }
+            };
             // Freshness only from a positive TTL on the final (non-paged) result.
-            last_ttl = result.ttl_ms.filter(|t| *t > 0).map(|t| t as u64);
+            if !was_paged {
+                last_ttl = result.ttl_ms.filter(|t| *t > 0).map(|t| t as u64);
+            }
             all.extend(result.tools);
             match result.next_cursor {
                 Some(next) if seen_cursors.insert(next.clone()) => {
                     cursor = Some(next);
-                    last_ttl = None; // paged lists carry no freshness (origin #1277)
+                    // Paged lists carry no freshness (origin #1277) — the
+                    // flag, not a None-then-overwrite, keeps a ttl-bearing
+                    // FINAL page from restoring freshness after the fact.
+                    last_ttl = None;
+                    was_paged = true;
                 }
                 // None (done) or repeated/absent-progress cursor — stop.
                 _ => break,
@@ -425,7 +495,10 @@ impl McpTransport for RmcpHttpTransport {
                     .peer()
                     .call_tool_once(params)
                     .await
-                    .map_err(|e| anyhow!("tools/call failed: {}", e))?;
+                    .map_err(|e| {
+                        self.mark_conn_loss(&e);
+                        anyhow!("tools/call failed: {}", e)
+                    })?;
                 return self.map_call_response_once(response).await;
             }
             // ② Other request-level meta (OTel trace keys, …) travels upstream.
@@ -443,7 +516,10 @@ impl McpTransport for RmcpHttpTransport {
             .peer()
             .call_tool_once(params)
             .await
-            .map_err(|e| anyhow!("tools/call failed: {}", e))?;
+            .map_err(|e| {
+                self.mark_conn_loss(&e);
+                anyhow!("tools/call failed: {}", e)
+            })?;
         self.map_call_response_once(response).await
     }
 }
@@ -500,6 +576,37 @@ impl RmcpHttpTransport {
                 self.poll_task_to_terminal(task_id, poll_interval).await
             }
             _ => Err(anyhow!("unexpected call_tool response")),
+        }
+    }
+}
+
+impl RmcpHttpTransport {
+    /// Connection-loss classification by rmcp ServiceError VARIANT (the
+    /// previous string-marker version was dead code: a dead stdio child
+    /// surfaces as TransportClosed -> "Transport closed", which matched none
+    /// of the old markers; "connection closed"/"send message error" exist
+    /// only on initialize-time errors). Mark on transport-class failures —
+    /// McpError is the SERVER's JSON-RPC error (its message text is
+    /// server-controlled and often mentions "connection closed" for its own
+    /// DB), and Timeout is our own cap: neither means the transport died.
+    fn mark_conn_loss(&self, e: &rmcp::ServiceError) {
+        use rmcp::ServiceError as SE;
+        let conn_class = matches!(
+            e,
+            SE::TransportClosed { .. }
+                | SE::TransportSend { .. }
+                | SE::UnexpectedResponse { .. }
+        );
+        if conn_class {
+            self.connected
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            crate::services::app_logger::log_to_db(
+                "warn",
+                &format!(
+                    "[{}] connection-class error, marked disconnected: {e}",
+                    self.server_name
+                ),
+            );
         }
     }
 }

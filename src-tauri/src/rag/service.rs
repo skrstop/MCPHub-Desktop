@@ -848,7 +848,15 @@ async fn plan_source_sync(
                 && !std::path::Path::new(op).exists()
                 && !is_path_excluded(op, &excluded).await
             {
-                removed.push((meta.id.clone(), meta.name.clone()));
+                // Only symlink-method docs are auto-deleted when their original
+                // vanishes (they hold no local content). Copy-method file docs
+                // keep a healthy local copy — a transient disappearance
+                // (unplugged drive, moved/renamed file) must not delete the doc
+                // plus its copy and vectors; they surface as lost-original
+                // instead (round 15 review).
+                if meta.method.as_deref() == Some("symlink") {
+                    removed.push((meta.id.clone(), meta.name.clone()));
+                }
             }
         }
     }
@@ -3516,8 +3524,14 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
     if by_id.exists() {
         return by_id;
     }
-    // Candidate 4: {meta_name} (rag_file_create).
-    dir.join(meta_name)
+    // Candidate 4: {meta_name} (rag_file_create). Never resolve to a meta
+    // JSON — a rename to `{something}.meta` would make rename() clobber the
+    // meta file with content (destroying the doc, or another doc's meta).
+    if meta_name.to_ascii_lowercase().ends_with(".meta") {
+        dir.join(format!("{id}.meta.banned"))
+    } else {
+        dir.join(meta_name)
+    }
 }
 
 /// Compute the MD5 hex digest of `bytes`. Used to fingerprint imported file
@@ -3533,12 +3547,24 @@ fn compute_md5(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Read a file's bytes and compute its MD5. Returns Ok(hash) or Err if the
-/// file can't be read (caller decides what "unreadable" means — e.g. a missing
-/// symlink source is "lost original", not a hard error).
+/// Stream a file's MD5 incrementally. `std::fs::read` would pull the whole
+/// source into RAM with no cap — import caps at MAX_UPLOAD_BYTES but the
+/// original can grow after import, and this runs on every batch-update tick
+/// per copy/symlink doc (OOM potential, repeated per interval).
 fn md5_of_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)?;
-    Ok(compute_md5(&bytes))
+    use md5::Digest;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Md5::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        use std::io::Read;
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 /// Classify a `DocMeta`'s original-source state for the single-doc update
@@ -3834,6 +3860,37 @@ pub async fn update_doc(
     if let Some(n) = name {
         let n = sanitize_file_name(n);
         if !n.is_empty() {
+            // Guard BEFORE any fs mutation / re-index: `.meta` is reserved
+            // ({id}.meta is the meta JSON); renaming content to it would
+            // clobber meta JSON and destroy documents.
+            if n.to_ascii_lowercase().ends_with(".meta") {
+                return Err(anyhow!("INVALID_NAME: '.meta' is a reserved internal extension"));
+            }
+            // Collision guard BEFORE any fs mutation / content write /
+            // re-index: for docs whose content actually lives at the name
+            // path (candidate 4 = `{name}`), a rename to an existing display
+            // name would make content_path_for resolve to ANOTHER doc's
+            // file — reads serve the wrong content and later writes clobber
+            // it (round 16 review; the round-15 warn-after-the-fact check
+            // was too late since meta.name was already persisted). The
+            // guard applies ONLY when content_path_for(old) resolves to the
+            // bare name path — uploads ({id}.{ext}, candidates 1-3) are
+            // immune because resolution never reaches candidate 4 (round 17
+            // review; the earlier bare-{id} probe was wrong — uploads never
+            // have a bare {id} file). Case-only renames short-circuit:
+            // on case-insensitive filesystems they're a no-op/rename-in-place.
+            if !n.eq_ignore_ascii_case(&old_name) {
+                let old_resolved = content_path_for(&dir, doc_id, &old_name);
+                if old_resolved == dir.join(&old_name)
+                    && old_resolved.exists()
+                    && dir.join(&n).exists()
+                {
+                    return Err(anyhow!(
+                        "NAME_COLLISION: a document content file named '{}' already exists; choose a different name",
+                        n.clone()
+                    ));
+                }
+            }
             meta.name = n;
         }
     }
@@ -3967,7 +4024,18 @@ pub async fn update_doc(
             let old_path = content_path_for(&dir, doc_id, &old_name);
             let new_path = content_path_for(&dir, doc_id, &meta.name);
             if old_path.exists() && old_path != new_path {
-                if let Err(e) = std::fs::rename(&old_path, &new_path) {
+                // Unix rename silently replaces an existing target. If the new
+                // display name collides with ANOTHER doc's content file, the
+                // rename would clobber that doc's content (round 15 review);
+                // skipping the rename while meta.name is already persisted
+                // leaves content resolving to the WRONG file (round 17
+                // review) — hard-fail so meta and disk stay consistent.
+                if new_path.exists() {
+                    return Err(anyhow!(
+                        "NAME_COLLISION: a document content file named '{}' already exists; choose a different name",
+                        meta.name
+                    ));
+                } else if let Err(e) = std::fs::rename(&old_path, &new_path) {
                     rag_log(
                         "warn",
                         format!("rag_file_update: renaming content file {:?} -> {:?} failed: {} (content may be unreachable under the new name)", old_path, new_path, e),
@@ -4396,7 +4464,65 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                 .filter(|p| !p.is_empty())
                 .map(Path::new)
             {
-                Some(p) if p.exists() => std::fs::read_to_string(p).unwrap_or_default(),
+                Some(p) if p.exists() => {
+                // Read raw bytes and decode (GBK/GB18030/UTF-16 sources are
+                // common for CJK users; read_to_string fails on invalid
+                // UTF-8 -> "" -> delete_all + 0 chunks = index permanently
+                // wiped by a routine model swap, round 15 review). Non-text
+                // originals are skipped with a warn instead of wiped.
+                match std::fs::metadata(p) {
+                    Ok(m) if m.len() <= MAX_UPLOAD_BYTES as u64 => match std::fs::read(p) {
+                        Ok(raw) if is_likely_text(&raw) => {
+                            let (text, _) = decode_text(&raw, &meta.name);
+                            text
+                        }
+                        Ok(_) => {
+                            rag_log(
+                                "warn",
+                                format!(
+                                    "reindex: symlink '{}' original is not decodable text ({}), skipped",
+                                    meta.name,
+                                    meta.original_path.as_deref().unwrap_or("")
+                                ),
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            rag_log(
+                                "warn",
+                                format!(
+                                    "reindex: symlink '{}' original unreadable ({}): {e}, skipped",
+                                    meta.name,
+                                    meta.original_path.as_deref().unwrap_or("")
+                                ),
+                            );
+                            continue;
+                        }
+                    },
+                    Ok(m) => {
+                        rag_log(
+                            "warn",
+                            format!(
+                                "reindex: symlink '{}' original too large ({} bytes > cap), skipped",
+                                meta.name,
+                                m.len()
+                            ),
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        rag_log(
+                            "warn",
+                            format!(
+                                "reindex: symlink '{}' original metadata failed ({}): {e}, skipped",
+                                meta.name,
+                                meta.original_path.as_deref().unwrap_or("")
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            }
                 _ => {
                     rag_log(
                         "warn",
@@ -4472,17 +4598,23 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
             }
         }
     }
-    NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
-    // Record the model the index was just rebuilt with, so the same-dim swap
-    // detection at start() doesn't force another reindex next time.
-    let built_with = match crate::mv::active_model().await {
-        Some(m) => Some(m),
-        None => crate::mv::current_model().await,
-    };
-    match built_with.as_deref() {
-        Some(m) => set_indexed_model(m).await,
-        None => {
-            rag_log("warn", "reindex: could not resolve active model to persist rag.indexedModel");
+    // Only mark the index current when at least one doc re-embedded: with
+    // done == 0 the failures stand and NEEDS_REINDEX must stay true so the
+    // next start() re-requests a reindex (failed docs would otherwise get no
+    // automatic retry path).
+    if done > 0 {
+        NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Record the model the index was just rebuilt with, so the same-dim swap
+        // detection at start() doesn't force another reindex next time.
+        let built_with = match crate::mv::active_model().await {
+            Some(m) => Some(m),
+            None => crate::mv::current_model().await,
+        };
+        match built_with.as_deref() {
+            Some(m) => set_indexed_model(m).await,
+            None => {
+                rag_log("warn", "reindex: could not resolve active model to persist rag.indexedModel");
+            }
         }
     }
     emit_reindex_progress(app, total, total, "");
@@ -6276,6 +6408,31 @@ mod exclusion_tests {
         assert!(!path_under_root("/a/bc/x.txt", "/a/b"));
         assert!(!path_under_root("", "/a/b"));
         assert!(!path_under_root("/a/b/c.txt", ""));
+    }
+
+    #[test]
+    fn path_under_root_normalization_round18_semantics() {
+        // Round 18 (R461-era) fix: Windows backslash paths must normalize to
+        // forward slashes so directory exclusions never silently no-op;
+        // trailing separators on the root must not break the prefix; and the
+        // compare is case-insensitive ONLY on case-preserving filesystems
+        // (macOS/Windows) — on Linux the case-sensitive branch must hold.
+        let fold = cfg!(windows) || cfg!(target_os = "macos");
+        // Backslash scan path vs forward-slash exclusion entry (and vice versa).
+        assert!(path_under_root("C:\\dir\\sub\\file.txt", "C:/dir"));
+        assert!(path_under_root("C:/dir/sub/file.txt", "C:\\dir"));
+        // Trailing slash on the root entry.
+        assert!(path_under_root("/data/dir/inner.txt", "/data/dir/"));
+        // Root equal to whole path after normalization.
+        assert!(path_under_root("C:\\dir", "C:\\dir\\"));
+        // Case sensitivity per platform.
+        if fold {
+            assert!(path_under_root("/Data/Dir/file.txt", "/data/dir"));
+        } else {
+            assert!(!path_under_root("/Data/Dir/file.txt", "/data/dir"));
+        }
+        // Normalization must not over-match sibling prefixes even folded.
+        assert!(!path_under_root("C:\\dirx\\file.txt", "C:/dir"));
     }
 
     #[test]

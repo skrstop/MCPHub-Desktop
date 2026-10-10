@@ -48,7 +48,7 @@
 
 ---
 
-## 2. 全矩阵 E2E（新增 `scripts/e2e/rmcp_matrix_v2.py`，152 项）
+## 2. 全矩阵 E2E（新增 `../../scripts/e2e/rmcp_matrix_v2.py`，152 项）
 
 **阶段 1（宽松）**：4 个 legacy 版本 × 4 通道：initialize 版本回显一致 + session mint + tools/list（IP 工具暴露、无 ttlMs/resultType 污染）+ **公网IP真实调用** + 2024 structuredContent 剥离；2026 版 × 4 通道：无状态 tools/list（CacheableResult）+ 无状态公网IP调用 + server/discover（supportedVersions/ttlMs/cacheScope）+ 未知版本 -32022 结构化错误。
 

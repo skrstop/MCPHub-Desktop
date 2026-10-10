@@ -24,6 +24,43 @@ pub fn set_pool_for_test(pool: SqlitePool) {
     let _ = DB_POOL.set(pool);
 }
 
+/// Test-only shared init: ONE in-memory pool, migrated ONCE, installed once.
+/// Each test module used to own its own init (fresh pool + global replace);
+/// under parallel `cargo test` the second replace pointed the global slot at
+/// a pool other tests were mid-migrating, producing "no such table" races.
+/// All test modules must call this instead of rolling their own init.
+#[cfg(test)]
+pub async fn ensure_test_pool() {
+    static INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    INIT.get_or_init(|| async {
+        // A file-backed DB, NOT `sqlite::memory:`: each #[tokio::test] owns
+        // its own runtime, and when that runtime drops the pooled connection
+        // dies with it — the pool then opens a FRESH EMPTY :memory: database
+        // for the next test ("no such table" races only in the full parallel
+        // suite). A file survives connection recycling. Deleted first so
+        // every test process starts from a clean migrated schema.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-pool.sqlite");
+        for p in [path.clone(),
+                  path.with_extension("sqlite-wal"),
+                  path.with_extension("sqlite-shm")] {
+            let _ = std::fs::remove_file(&p);
+        }
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let opts = SqliteConnectOptions::from_str(&url)
+            .expect("parse test db url");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(opts)
+            .await
+            .expect("connect test sqlite");
+        migration::run_pending(&pool)
+            .await
+            .expect("run migrations on test pool");
+        set_pool_for_test(pool);
+    })
+    .await;
+}
+
 pub async fn initialize(app: &AppHandle) -> Result<()> {
     let app_dir = app
         .path()

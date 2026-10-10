@@ -9,7 +9,12 @@ use crate::{
 };
 
 #[tauri::command]
-pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
+pub async fn list_servers(session: tauri::State<'_, SessionState>) -> Result<Vec<ServerInfo>, String> {
+    // Admin-gated: ServerInfo carries the full ServerConfig (env/headers/
+    // oauth/proxy credentials) verbatim — the same payload export_settings
+    // gates and redacts. skipAuth (desktop default) short-circuits, so the
+    // single-user UI is unaffected (round 14 review).
+    crate::commands::config::require_admin(&session).await?;
     let configs = server_service::list_all().await.map_err(|e| e.to_string())?;
     let mut result = Vec::new();
 
@@ -59,12 +64,15 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>, String> {
 /// `page` is 1-based (matches the dashboard's pagination).
 #[tauri::command]
 pub async fn search_servers(
+    session: tauri::State<'_, SessionState>,
     search: String,
     type_filter: String,
     status_filter: String,
     page: u32,
     page_size: u32,
 ) -> Result<ServerPage, String> {
+    // Admin-gated: see list_servers (credentials in payload) — round 14.
+    crate::commands::config::require_admin(&session).await?;
     let page = page.max(1);
     let page_size = page_size.clamp(1, 200);
     let key = search.trim().to_lowercase();
@@ -226,7 +234,9 @@ pub async fn search_servers(
 }
 
 #[tauri::command]
-pub async fn get_server(name: String) -> Result<Option<ServerInfo>, String> {
+pub async fn get_server(session: tauri::State<'_, SessionState>, name: String) -> Result<Option<ServerInfo>, String> {
+    // Admin-gated: see list_servers (credentials in payload) — round 14.
+    crate::commands::config::require_admin(&session).await?;
     let cfg = server_service::get_by_name(&name)
         .await
         .map_err(|e| e.to_string())?;

@@ -129,6 +129,7 @@ pub async fn search(
     query: &str,
     limit_override: Option<u32>,
     allowed_servers: Option<Vec<String>>,
+    merge_limit: Option<usize>,
 ) -> Result<Vec<SmartSearchResult>> {
     let settings = models::get_settings().await;
     if !settings.enabled {
@@ -190,6 +191,10 @@ pub async fn search(
     // served. One config read per distinct server (tiny table).
     let hits = filter_disabled(vec_hits, kw_hits).await;
 
+    // merge_limit lets the caller keep ALL fetched candidates through the
+    // merge (instead of truncating to `limit`) when it intends to apply its
+    // own post-merge filtering (group gate / pin parity) — truncating first
+    // defeated the over-fetch and could hide valid gated hits below the cut.
     Ok(merge_hits(
         &hits.0,
         &hits.1,
@@ -197,7 +202,7 @@ pub async fn search(
         settings.vector_weight,
         settings.keyword_weight,
         settings.score_threshold,
-        limit,
+        merge_limit.unwrap_or(limit),
     ))
 }
 
@@ -312,6 +317,42 @@ mod tests {
             .collect();
         let out = merge_hits(&[], &kw_hits, "deploy", 0.0, 1.0, 0.0, 3);
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn merge_limit_usize_max_no_truncate_no_overflow() {
+        // merge_limit=usize::MAX must keep every hit and must not overflow /
+        // panic in the truncate path (regression guard for unbounded limits).
+        let kw_hits: Vec<SmartHit> = (0..25)
+            .map(|i| hit("s", &format!("t{:02}", i), "deploy", 0.0))
+            .collect();
+        let vec_hits: Vec<SmartHit> = (0..7)
+            .map(|i| hit("v", &format!("u{:02}", i), "deploy", 0.1))
+            .collect();
+        let out = merge_hits(&vec_hits, &kw_hits, "deploy", 0.5, 0.5, 0.0, usize::MAX);
+        assert_eq!(out.len(), 32, "no truncation at usize::MAX");
+        assert!(out.iter().all(|r| r.score.is_finite()));
+    }
+
+    #[test]
+    fn merge_dedup_sums_scores_across_channels() {
+        // The same (server, tool) present in BOTH channels is deduped into a
+        // single result whose score is the SUM vw*vs + kw*ks — not two rows.
+        let v = vec![hit("s1", "alpha", "alpha text", 0.2)]; // vs = 0.8
+        let k = vec![hit("s1", "alpha", "alpha text", 0.0)]; // ks = 1.0
+        let out = merge_hits(&v, &k, "alpha", 0.5, 0.5, 0.0, 50);
+        assert_eq!(out.len(), 1, "dual-channel hit must dedup to one row");
+        assert!((out[0].score - (0.5 * 0.8 + 0.5 * 1.0)).abs() < 1e-4);
+        assert_eq!(out[0].tool_name, "alpha");
+    }
+
+    #[test]
+    fn merge_empty_inputs_return_empty() {
+        let out = merge_hits(&[], &[], "anything", 0.5, 0.5, 0.0, usize::MAX);
+        assert!(out.is_empty(), "no panic on empty input, empty output");
+        // Empty with a threshold too.
+        let out2 = merge_hits(&[], &[], "", 1.0, 1.0, 0.5, 10);
+        assert!(out2.is_empty());
     }
 
     #[test]
@@ -468,4 +509,63 @@ mod edge_tests {
         }
     }
     use hit as _hit_unused; // silence unused warning when tests::hit is importable
+
+    #[test]
+    fn merge_dedup_both_channels_sums_scores() {
+        // Same (server, tool) in BOTH channels merges: vw*vs + kw*ks — the
+        // entry is emitted once, not duplicated per channel.
+        let v = vec![hit("s1", "alpha", "alpha text", 0.0)]; // vs = 1.0
+        let k = vec![hit("s1", "alpha", "alpha text", 0.0)]; // ks = 1.0
+        let out = merge_hits(&v, &k, "alpha", 0.6, 0.4, 0.0, 50);
+        assert_eq!(out.len(), 1, "deduped to one result per (server, tool)");
+        assert!((out[0].score - (0.6 * 1.0 + 0.4 * 1.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn merge_tiebreak_is_byte_order_deterministic() {
+        // Equal scores → deterministic byte-order tiebreak on (server, tool);
+        // HashMap iteration order must never leak into the output.
+        let kw_hits = vec![
+            hit("beta", "x", "deploy", 0.0),
+            hit("alpha", "z", "deploy", 0.0),
+            hit("alpha", "a", "deploy", 0.0),
+        ];
+        let out = merge_hits(&[], &kw_hits, "deploy", 0.0, 1.0, 0.0, 50);
+        let keys: Vec<(String, String)> =
+            out.iter().map(|r| (r.server_name.clone(), r.tool_name.clone())).collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("alpha".to_string(), "a".to_string()),
+                ("alpha".to_string(), "z".to_string()),
+                ("beta".to_string(), "x".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_threshold_boundary_is_inclusive() {
+        // score == threshold must be KEPT (retain uses >=).
+        // kw 0.5 * weight 1.0 = 0.5; threshold 0.5.
+        let kw_hits = vec![hit("s1", "half", "deploy", 0.0)];
+        let out = merge_hits(&[], &kw_hits, "deploy other", 0.0, 1.0, 0.5, 50);
+        assert_eq!(out.len(), 1, "boundary score exactly at threshold is kept");
+        // Just below the threshold is dropped.
+        let out2 = merge_hits(&[], &kw_hits, "deploy other third", 0.0, 1.0, 0.5, 50);
+        assert!(out2.is_empty(), "score 0.333 < 0.5 dropped");
+    }
+
+    #[test]
+    fn merge_limit_truncates_highest_scores() {
+        // limit truncation must keep the TOP scores, not a random subset.
+        let kw_hits = vec![
+            hit("s", "low", "deploy", 0.0),              // matches 1/2 terms → 0.5
+            hit("s", "high", "deploy full", 0.0),        // 1.0
+            hit("s", "mid", "deploy things", 0.0),       // 1.0 (2 distinct terms)
+        ];
+        let out = merge_hits(&[], &kw_hits, "deploy things", 0.0, 1.0, 0.0, 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].tool_name, "mid"); // 1.0 (matches both terms)
+        assert_eq!(out[1].tool_name, "high"); // 0.5, byte-order tiebreak over "low"
+    }
 }

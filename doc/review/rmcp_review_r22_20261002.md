@@ -23,7 +23,7 @@
 
 ## 3. 新套件
 
-`scripts/e2e/rmcp_supplement_v22.py`（16 项）——HTTP 面边界与方法语义：
+`../../scripts/e2e/rmcp_supplement_v22.py`（16 项）——HTTP 面边界与方法语义：
 - PUT/DELETE/PATCH × /rest + /api → 405 非 5xx（6）
 - 未知服务器/未知 /api 路径 404（2）
 - 无 Content-Type / text/plain / 空 body POST → 4xx 非 5xx（3）
