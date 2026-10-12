@@ -740,6 +740,40 @@ pub async fn call_tool_with_meta(
     result
 }
 
+/// Read an upstream resource (MCP Apps #1303): same routing as
+/// [`call_tool_with_meta`] — on-demand servers are woken first, real pool
+/// clients are used under the per-client lock (released after the call).
+pub async fn read_resource(
+    server_name: &str,
+    uri: &str,
+) -> Result<Vec<rmcp::model::ResourceContents>> {
+    if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        return Err(anyhow!(
+            "builtin server '{}' has no upstream resources to read",
+            server_name
+        ));
+    }
+    let on_demand = {
+        let map = pool().read().await;
+        map.get(server_name).map(|e| e.start_on_demand).unwrap_or(false)
+    };
+    if on_demand {
+        return super::on_demand::read_resource_on_demand(server_name, uri).await;
+    }
+    let client_arc = {
+        let map = pool().read().await;
+        let entry = map
+            .get(server_name)
+            .ok_or_else(|| anyhow!("Server '{}' not connected", server_name))?;
+        entry
+            .client
+            .clone()
+            .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?
+    }; // pool read lock released before the upstream call
+    let client = client_arc.lock().await;
+    client.read_resource(uri).await
+}
+
 pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> Result<ToolCallResult> {
     // Builtin "mcphub-desktop" server (RAG tools): virtual, not in the pool.
     // Route to the RAG dispatch so invoking rag_* via the Tauri call_tool

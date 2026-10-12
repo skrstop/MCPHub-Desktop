@@ -29,11 +29,20 @@ interface TreeNode {
 const KIND_ORDER: Record<string, number> = { folder: 0, git: 1, file: 2, tool: 3 };
 
 /** 路径前缀判定：child == root 或 child 在 root 之下（与后端
-    is_excluded_sync 的 path_under_root 语义一致，忽略尾随斜杠）。 */
+    path_under_root 语义一致：忽略尾随斜杠 + 双侧 `\`→`/` 归一 +
+    Windows/macOS 大小写折叠）。 */
 const pathUnderRoot = (child: string, root: string): boolean => {
   if (!root || !child) return false;
-  const c = child.replace(/\/+$/, '');
-  const r = root.replace(/\/+$/, '');
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+  // ASCII-only case fold, and ONLY on windows/macOS — parity with the
+  // backend's path_under_root (Linux must NOT fold: ext4 is case-sensitive).
+  const fold = (p: string) => {
+    const plat = window.navigator.platform.toLowerCase();
+    if (!(plat.startsWith('win') || plat.startsWith('mac'))) return p;
+    return p.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
+  };
+  const c = fold(norm(child));
+  const r = fold(norm(root));
   return c === r || c.startsWith(r + '/');
 };
 

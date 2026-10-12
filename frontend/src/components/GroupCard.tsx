@@ -58,6 +58,7 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [clientConfigTarget, setClientConfigTarget] = useState<ClientSnippetTarget | null>(null);
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showCopyDropdown, setShowCopyDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -77,7 +78,10 @@ const GroupCard = ({ group, servers, onEdit, onDelete, cost }: GroupCardProps) =
       setCopied(true);
       setShowCopyDropdown(false);
       showToast(t('common.copySuccess') || 'Copied', 'success');
-      setTimeout(() => setCopied(false), 1500);
+      // Two copies within 1.5s: clear the previous timer or it cancels the
+      // NEW one and the checkmark sticks forever.
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
     } else {
       showToast(t('common.copyFailed') || 'Copy failed', 'error');
     }

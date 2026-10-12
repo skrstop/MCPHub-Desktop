@@ -169,11 +169,7 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 
 - **端口被占用**：换一个空闲端口（设置 → HTTP 服务端口，修改后重启应用生效）。
 - **Windows 防火墙拦截**：Windows Defender 防火墙可能阻止本应用监听端口或被外部访问。
-  - 在「Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙」中放行 `MCPHub Desktop`；
-  - 或为对应端口（默认 `23333`）放行入站 TCP 规则。
-  - 仅本机访问（`127.0.0.1`）不受防火墙影响；要让局域网其他设备访问才需放行。
-- **复制接入配置**：仪表盘「MCP 接入端点」卡片右上角有「复制 MCP 配置」按钮，可一键复制可直接粘贴到 Claude Desktop / Cursor 等客户端的 `mcpServers` 配置（开启 Bearer 鉴权时自动带上鉴权头）。桌面端默认地址为 `http://localhost:<端口>/mcp`；分享给其他设备时把 `localhost` 换成本机局域网 IP，并放行防火墙。
-
+  - 在「Windows 安全中心 → 防火墙
 ### Windows 首次安装后启动闪退
 
 少数情况下，Windows 安装完成后从安装程序直接打开应用会闪退，手动重新打开一次即正常。已通过以下方式缓解：

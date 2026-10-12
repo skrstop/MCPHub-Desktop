@@ -87,16 +87,18 @@ fn create_locks() -> &'static CreateLocks {
     CREATE_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Get-or-spawn the on-demand client for `server_name` and call `tool` with
-/// `arguments`. On a connection-class failure the entry is evicted so the next
-/// call rebuilds it. After a successful call the idle-shutdown timer is reset.
-pub async fn call_tool_on_demand(
+/// Get-or-spawn the on-demand client for `server_name`. Shared by the
+/// tool-call and resource-read paths (MCP Apps #1303): fast-path reuse,
+/// per-server create lock, double-checks, connect-lock serialization, cold
+/// start and post-connect enabled re-check are identical for both — the
+/// operation only differs in the log label (`op_label`, e.g. `tool 'x'` /
+/// `read 'ui://...'`) and in what the caller runs on the returned client.
+async fn ensure_on_demand_client(
     server_name: &str,
-    tool: &str,
-    arguments: Value,
-) -> Result<ToolCallResult> {
+    op_label: &str,
+) -> Result<(Arc<Mutex<McpClient>>, u64)> {
     // Fast path: a cached client exists. Clone the Arc + read idle_ms under a
-    // read lock, then run the call outside the store lock.
+    // read lock, then run the operation outside the store lock.
     {
         let map = store().read().await;
         if let Some(entry) = map.get(server_name) {
@@ -104,10 +106,10 @@ pub async fn call_tool_on_demand(
             let idle_ms = entry.idle_ms;
             drop(map);
             log::debug!(
-                "[on-demand] Reusing spawned client for '{}' (tool '{}')",
-                server_name, tool
+                "[on-demand] Reusing spawned client for '{}' ({})",
+                server_name, op_label
             );
-            return run_call(server_name, &client_arc, tool, arguments, idle_ms).await;
+            return Ok((client_arc, idle_ms));
         }
     }
 
@@ -131,22 +133,22 @@ pub async fn call_tool_on_demand(
             let idle_ms = entry.idle_ms;
             drop(map);
             log::debug!(
-                "[on-demand] Spawned client created by a concurrent call for '{}' (tool '{}')",
-                server_name, tool
+                "[on-demand] Spawned client created by a concurrent call for '{}' ({})",
+                server_name, op_label
             );
-            return run_call(server_name, &client_arc, tool, arguments, idle_ms).await;
+            return Ok((client_arc, idle_ms));
         }
     }
 
     log::info!(
-        "[on-demand] No cached client for '{}', cold-starting (tool '{}')",
-        server_name, tool
+        "[on-demand] No cached client for '{}', cold-starting ({})",
+        server_name, op_label
     );
     app_logger::log_to_db(
         "info",
         &format!(
-            "[on-demand] Cold-starting on-demand server '{}' (tool '{}')",
-            server_name, tool
+            "[on-demand] Cold-starting on-demand server '{}' ({})",
+            server_name, op_label
         ),
     );
 
@@ -173,10 +175,10 @@ pub async fn call_tool_on_demand(
             let idle_ms = entry.idle_ms;
             drop(map);
             log::debug!(
-                "[on-demand] Client for '{}' appeared while waiting for connect lock (tool '{}')",
-                server_name, tool
+                "[on-demand] Client for '{}' appeared while waiting for connect lock ({})",
+                server_name, op_label
             );
-            return run_call(server_name, &client_arc, tool, arguments, idle_ms).await;
+            return Ok((client_arc, idle_ms));
         }
     }
 
@@ -224,8 +226,8 @@ pub async fn call_tool_on_demand(
         Ok(Some(c)) if c.enabled => {}
         _ => {
             let msg = format!(
-                "[on-demand] Server '{}' disabled/removed during cold start; discarding fresh client (tool '{}')",
-                server_name, tool
+                "[on-demand] Server '{}' disabled/removed during cold start; discarding fresh client ({})",
+                server_name, op_label
             );
             log::warn!("{}", msg);
             app_logger::log_to_db("warn", &msg);
@@ -251,24 +253,48 @@ pub async fn call_tool_on_demand(
     // Mark the pool placeholder awake so status + cached tools reflect reality.
     pool::mark_on_demand_awake(server_name, tools, server_version).await;
 
-    // Release the connect lock BEFORE run_call: the self-heal retry inside
-    // run_call re-enters call_tool_on_demand, which would self-deadlock on
-    // the non-reentrant tokio Mutex (insert above is the lock's last duty).
+    // Release the connect lock BEFORE the caller runs the operation: the
+    // self-heal retry inside run_call/run_read re-enters the public entry
+    // point, which would self-deadlock on the non-reentrant tokio Mutex
+    // (insert above is the lock's last duty).
     drop(_connect_guard);
 
     let msg = format!(
-        "[on-demand] Server '{}' cold-started, ready for tool '{}'",
-        server_name, tool
+        "[on-demand] Server '{}' cold-started, ready for {}",
+        server_name, op_label
     );
     log::info!("{}", msg);
     app_logger::log_to_db("info", &msg);
 
+    Ok((client_arc, idle_ms))
+}
+
+/// Get-or-spawn the on-demand client for `server_name` and call `tool` with
+/// `arguments`. On a connection-class failure the entry is evicted so the next
+/// call rebuilds it. After a successful call the idle-shutdown timer is reset.
+pub async fn call_tool_on_demand(
+    server_name: &str,
+    tool: &str,
+    arguments: Value,
+) -> Result<ToolCallResult> {
+    let (client_arc, idle_ms) =
+        ensure_on_demand_client(server_name, &format!("tool '{}'", tool)).await?;
     run_call(server_name, &client_arc, tool, arguments, idle_ms).await
 }
 
-/// Run `call_tool` on a cached on-demand client. On a connection-class error
-/// the entry is evicted so the next call rebuilds. On success the idle-shutdown
-/// timer is reset.
+/// Read an upstream resource on a (possibly sleeping) on-demand server
+/// (MCP Apps #1303): identical wake/idle-hold semantics to the tool path —
+/// the read is covered by the same `in_flight` busy counter so an armed idle
+/// timer or an overlapping read cannot close the server mid-read.
+pub async fn read_resource_on_demand(
+    server_name: &str,
+    uri: &str,
+) -> Result<Vec<rmcp::model::ResourceContents>> {
+    let (client_arc, idle_ms) =
+        ensure_on_demand_client(server_name, &format!("read '{}'", uri)).await?;
+    run_read(server_name, &client_arc, uri, idle_ms).await
+}
+
 /// RAII guard for the `in_flight` busy flag (see `run_call`). On Drop —
 /// including future cancellation — spawns a detached task that clears the
 /// flag (generation-guarded) and re-arms the idle timer.
@@ -302,6 +328,9 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Run `call_tool` on a cached on-demand client. On a connection-class error
+/// the entry is evicted so the next call rebuilds. On success the idle-shutdown
+/// timer is reset.
 async fn run_call(
     server_name: &str,
     client_arc: &Arc<Mutex<McpClient>>,
@@ -453,6 +482,112 @@ async fn run_call(
         }
     }
 }
+/// Run `read_resource` on a cached on-demand client (MCP Apps #1303). Mirror
+/// of [`run_call`] with the resource URI as the operation: same busy-counter
+/// increment + `last_used` bump, same `InFlightGuard` cancellation protection,
+/// same generation guards, same eviction-on-connection-loss semantics.
+async fn run_read(
+    server_name: &str,
+    client_arc: &Arc<Mutex<McpClient>>,
+    uri: &str,
+    idle_ms: u64,
+) -> Result<Vec<rmcp::model::ResourceContents>> {
+    let read_start = Instant::now();
+    // Mark the entry busy + bump `last_used` before the read starts (see the
+    // long comment in `run_call` — identical rationale, shared machinery).
+    {
+        let mut map = store().write().await;
+        if let Some(entry) = map.get_mut(server_name) {
+            if !Arc::ptr_eq(&entry.client, client_arc) {
+                log::debug!("[on-demand] '{}' entry rebuilt during read setup; retrying", server_name);
+                return Box::pin(read_resource_on_demand(server_name, uri)).await;
+            }
+            entry.last_used = Instant::now();
+            entry.in_flight += 1;
+        }
+    }
+    // No await between the increment and the guard (see run_call).
+    let mut guard = InFlightGuard {
+        server_name: server_name.to_string(),
+        client_arc: client_arc.clone(),
+        idle_ms,
+        armed: true,
+    };
+    schedule_idle(server_name, idle_ms).await;
+    let result = {
+        let client = client_arc.lock().await;
+        client.read_resource(uri).await
+    };
+    guard.armed = false;
+    {
+        let mut map = store().write().await;
+        if let Some(entry) = map.get_mut(server_name) {
+            if Arc::ptr_eq(&entry.client, client_arc) {
+                entry.in_flight = entry.in_flight.saturating_sub(1);
+                if result.is_ok() {
+                    entry.last_used = Instant::now();
+                }
+            }
+        }
+    }
+    match result {
+        Ok(contents) => {
+            log::debug!(
+                "[on-demand] Read '{}' on '{}' success ({}ms)",
+                uri,
+                server_name,
+                read_start.elapsed().as_millis()
+            );
+            schedule_idle(server_name, idle_ms).await;
+            Ok(contents)
+        }
+        Err(e) => {
+            // Same eviction policy as run_call: only evict on a genuinely
+            // broken connection; upstream application errors (e.g. "resource
+            // not found" — expected while probing ui:// candidates) keep the
+            // client alive.
+            let still_connected = client_arc.lock().await.is_connected();
+            if still_connected {
+                log::warn!(
+                    "[on-demand] Read '{}' failed on '{}' but connection healthy, keeping client: {}",
+                    uri, server_name, e
+                );
+                return Err(e);
+            }
+            let client_to_disconnect = {
+                let mut map = store().write().await;
+                let evict = map
+                    .get(server_name)
+                    .map(|e| Arc::ptr_eq(&e.client, client_arc))
+                    .unwrap_or(false);
+                if evict {
+                    map.remove(server_name).map(|e| e.client)
+                } else {
+                    None
+                }
+            };
+            let evicted = client_to_disconnect.is_some();
+            if let Some(arc) = client_to_disconnect {
+                let mut client = arc.lock().await;
+                let _ = client.disconnect().await;
+            }
+            if evicted {
+                pool::mark_on_demand_sleeping(server_name).await;
+            }
+            let msg = format!(
+                "[on-demand] Read '{}' failed on '{}' ({}ms), evicted client: {}",
+                uri,
+                server_name,
+                read_start.elapsed().as_millis(),
+                e
+            );
+            log::warn!("{}", msg);
+            app_logger::log_to_db("warn", &msg);
+            Err(e)
+        }
+    }
+}
+
 
 /// Build a client from config, connect it within `CONNECT_TIMEOUT`, and fetch
 /// its tool list + server version. On ANY failure (handshake error or timeout)

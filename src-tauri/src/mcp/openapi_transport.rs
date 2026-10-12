@@ -84,10 +84,59 @@ impl OpenapiTransport {
         if let Some(ref url) = self.config.spec_url {
             // Fetch spec from URL (bounded: 30s total + 32MB body cap).
             log::info!("[{}] Fetching OpenAPI spec from URL: {}", self.server_name, url);
-            let client = reqwest::Client::builder()
+            // SSRF guard (origin #1300/#1294 mirror): validate scheme + every
+            // resolved IP against the internal-range blocklist, with
+            // system_config.network.allowedCidrs carve-outs, then PIN the
+            // validated IPs so a rebinding DNS answer between validation and
+            // connect cannot bypass the check. Fail closed.
+            let allowed_cidrs: Vec<String> = crate::services::config_service::get()
+                .await
+                .ok()
+                .and_then(|c| {
+                    c.get("network")
+                        .and_then(|n| n.get("allowedCidrs"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect::<Vec<String>>()
+                        })
+                })
+                .unwrap_or_default();
+            let pinned = match crate::services::ssrf_guard::assert_safe_url(url, &allowed_cidrs)
+                .await
+            {
+                Ok(addrs) => addrs,
+                Err(reason) => {
+                    let msg = format!(
+                        "UNSAFE_URL: spec fetch blocked by SSRF guard ({reason}); configure system_config.network.allowedCidrs to allow internal ranges"
+                    );
+                    log::warn!("[{}] {}", self.server_name, msg);
+                    return Err(anyhow::anyhow!(msg));
+                }
+            };
+            let pinned_domain = url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string()));
+            // SSRF: no redirects at all — a public spec URL that 302s to an
+            // internal host would re-resolve through system DNS with no
+            // validation and no pin, fully bypassing the guard below
+            // (round-18 review; origin closes this with per-hop
+            // re-validation + 5-hop cap — desktop fails closed instead).
+            let mut builder = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none());
+            if let (Some(domain), addrs) = (&pinned_domain, pinned.as_slice()) {
+                if !addrs.is_empty() {
+                    builder = builder.resolve_to_addrs(domain, addrs);
+                }
+            }
+            // Fail closed: a builder failure on this security-relevant path
+            // must NOT fall back to an unpinned default client (round-18
+            // review).
+            let client = builder
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
+                .map_err(|e| anyhow::anyhow!("UNSAFE_URL: spec-fetch client build failed: {e}"))?;
             let mut req = client.get(url);
 
             // Add any configured headers (values redacted: they routinely

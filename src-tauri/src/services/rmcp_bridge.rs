@@ -1973,7 +1973,90 @@ impl ServerHandler for HubBridge {
                     result
                 })
             }
-            None => Err(Self::invalid_params(format!("Resource '{}' not found", uri))),
+            None => {
+                // MCP Apps #1303: dynamic `ui://` widget URIs are generated at
+                // tool-call time and never appear in `resources/list`, so the
+                // builtin miss is not final. Probe upstream candidates the
+                // same way origin does: a single-server scope goes straight
+                // to that server; group/multi-server scopes probe each
+                // connected candidate in order and take the first that
+                // answers. ($smart scopes already returned not-found above —
+                // no ui:// reads through the meta surface.)
+                if uri.starts_with("ui://") {
+                    let mut candidates: Vec<String> = self
+                        .scope_filters(&scope, bearer.as_ref())
+                        .await
+                        .into_iter()
+                        .map(|f| f.name)
+                        .collect();
+                    // Stable probe order for the root scope (origin iterates
+                    // its serverInfos in registration order) + disabled
+                    // servers are never probed.
+                    let all = crate::services::server_service::list_all()
+                        .await
+                        .unwrap_or_default();
+                    if scope.trim_start_matches('/').trim().is_empty() {
+                        candidates
+                            .sort_by_key(|n| all.iter().position(|s| &s.name == n).unwrap_or(usize::MAX));
+                    }
+                    candidates.retain(|n| all.iter().find(|s| &s.name == n).map(|s| s.enabled).unwrap_or(true));
+
+                    for name in &candidates {
+                        if name == crate::rag::service::BUILTIN_SERVER_NAME {
+                            continue;
+                        }
+                        let Some(st) = pool::get_status(name).await else {
+                            continue;
+                        };
+                        if !st.connected && !st.start_on_demand {
+                            continue;
+                        }
+                        let read = if st.start_on_demand {
+                            // Wake an idle on-demand upstream the same way the
+                            // tool-call path does; the read holds its idle
+                            // timer off for the whole duration (in_flight).
+                            crate::mcp::on_demand::read_resource_on_demand(name, &uri).await
+                        } else {
+                            pool::read_resource(name, &uri).await
+                        };
+                        match read {
+                            Ok(contents) => {
+                                log::debug!(
+                                    "[apps] ui:// resource '{}' served by upstream '{}'",
+                                    uri, name
+                                );
+                                let result: ReadResourceResponse =
+                                    ReadResourceResult::new(contents).into();
+                                // Same CacheableResult contract as the builtin
+                                // branch above (2026-07-28 resources/read).
+                                return Ok(if Self::is_2026_session(&context) {
+                                    match result {
+                                        ReadResourceResponse::Complete(res) => {
+                                            ReadResourceResponse::Complete(
+                                                res.with_ttl_ms(0)
+                                                    .with_cache_scope(rmcp::model::CacheScope::Private),
+                                            )
+                                        }
+                                        other => other,
+                                    }
+                                } else {
+                                    result
+                                });
+                            }
+                            Err(e) => {
+                                // This candidate doesn't own the resource (or
+                                // failed to wake); try the next one. Probe
+                                // details stay in debug logs only.
+                                log::debug!(
+                                    "[apps] ui:// probe '{}' on '{}' failed: {}",
+                                    uri, name, e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(Self::invalid_params(format!("Resource '{}' not found", uri)))
+            }
         }
     }
 

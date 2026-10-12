@@ -27,6 +27,18 @@ fn agents_lock() -> &'static tokio::sync::Mutex<()> {
 /// Serializes filesystem install mutations (export copy/unlink, uninstall,
 /// delete) on the same agent paths — concurrent remove_link vs
 /// copy_dir_recursive leaves a truncated install marked status='ok'.
+/// Testability note (R21): `skill_fs_lock` is intentionally private — no test
+/// asserts the lock write directly, because the protected writers
+/// (`reconcile_pending`, `import_skills`, `export_skills`, `uninstall_skill`,
+/// `delete_skill`) all require a real `AppHandle` + live DB pool and cannot be
+/// exercised in `cargo test --lib` without a full Tauri harness. Illustrative
+/// race being serialized: `reconcile_pending` (startup-only caller, lib.rs)
+/// concurrently with a user-driven `import_skills` on the same agent — without
+/// the lock the importer's freshly-INSERTed pending dir would pass exists(),
+/// copy_dir_inner would delete-then-copy, and reconcile_pending could remove
+/// the truncated tree / row mid-copy. Any future refactor that moves a skill
+/// FS mutation off `skill_fs_lock` should carry an integration test in the e2e
+/// suite instead of widening this fn's visibility.
 fn skill_fs_lock() -> &'static tokio::sync::Mutex<()> {
     static L: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     L.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -1079,6 +1091,14 @@ fn skill_fts_text(dir_name: &str, name: Option<&str>, description: Option<&str>)
 ///   row (+ exports via the orphan cleanup below) — DB stays in sync with FS.
 /// Only `ok` is treated as installed; pending never shows in list_library.
 pub async fn reconcile_pending(app: &AppHandle) -> Result<()> {
+    // FS write path (remove_link on crashed pending dirs + pending export
+    // installs): must hold skill_fs_lock like every other skill FS writer.
+    // Startup-only caller (lib.rs) runs concurrently with the HTTP server —
+    // without the lock an import/export racing the startup window could have
+    // its freshly-INSERTed pending dir removed underneath it. This function
+    // never touches agents_lock, so no ordering hazard with
+    // skill_fs_lock → agents_lock holders.
+    let _fs_guard = skill_fs_lock().lock().await;
     let lib = library_dir(app)?;
 
     // Crashed-pending skills: delete partial library dir + row.

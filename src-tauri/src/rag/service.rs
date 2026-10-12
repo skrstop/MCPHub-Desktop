@@ -1841,7 +1841,10 @@ pub async fn list_tags_paged(
     // LIKE pattern is case-insensitive for ASCII in SQLite by default for the
     // ASCII range; we also wrap the column in LOWER() so non-ASCII comparison
     // matches the trimmed-lowercased key.
-    let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!(
+        "%{}%",
+        key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
     let offset = (page as i64) * (page_size as i64);
 
     let total: i64 = if key.is_empty() {
@@ -2006,7 +2009,7 @@ async fn upsert_doc_sql(meta: &DocMeta) -> Result<()> {
 }
 
 /// 从 SQL 镜像表移除一个文档：其所有标签计数 -1（归零删行），删关联行 + rag_docs 行。
-async fn remove_doc_sql(doc_id: &str) -> Result<()> {
+async fn remove_doc_sql_inner(doc_id: &str) -> Result<()> {
     let pool = crate::db::pool();
     let mut tx = pool.begin().await?;
 
@@ -2039,6 +2042,33 @@ async fn remove_doc_sql(doc_id: &str) -> Result<()> {
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Busy-retry wrapper around `remove_doc_sql_inner`: the pool's 5s
+/// busy_timeout can be exceeded when a burst of activity-log writes holds the
+/// WAL writer, and a bare failure leaves an orphan `rag_docs` row whose
+/// `.meta` was already deleted (delete_doc reported `deleted: true`). The
+/// orphan would self-heal on the next list/search prune, but retrying here
+/// mirrors the `upsert_doc_sql` busy pattern and heals the mirror immediately.
+async fn remove_doc_sql(doc_id: &str) -> Result<()> {
+    for attempt in 1..=4 {
+        match remove_doc_sql_inner(doc_id).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let msg = format!("{}", e);
+                let busy = msg.contains("database is locked") || msg.contains("code: 5");
+                if !busy || attempt == 4 {
+                    return Err(e);
+                }
+                rag_log("warn", format!(
+                    "remove_doc_sql for '{}' busy (attempt {}/4), retrying: {}",
+                    doc_id, attempt, msg
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(150 * attempt as u64)).await;
+            }
+        }
+    }
+    unreachable!("retry loop always returns")
 }
 
 /// 定向对账：清除 `.meta` 文件已丢失的 SQL 镜像孤儿行（rag_docs /
@@ -2344,8 +2374,12 @@ pub async fn search_docs_paged(
     let page = page.min(10_000);
     let page_size = page_size.clamp(1, 200);
     let key = search_key.trim().to_lowercase();
-    // Escape LIKE wildcards in the user input (same rules as list_tags_paged).
-    let pattern = format!("%{}%", key.replace('%', "\\%").replace('_', "\\_"));
+    // Escape LIKE wildcards in the user input (same rules as list_tags_paged
+    // and smart_routing::esc_like — backslash first, then % and _).
+    let pattern = format!(
+        "%{}%",
+        key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
     let offset = (page as i64) * (page_size as i64);
     let want_tags: Vec<String> = tags
         .into_iter()

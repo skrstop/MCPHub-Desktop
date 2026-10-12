@@ -118,6 +118,15 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       // Ensure no other timers are running
       clearTimer();
 
+      // Generation token: a tick's in-flight fetch must not clobber state
+      // after a newer run (page/limit change, logout) took ownership.
+      // ⚠️ Advance the generation here — startNormalPolling is re-invoked on
+      // every page/limit/refreshKey change, and in-flight fetches from the
+      // previous invocation must see themselves as stale (only reading the
+      // counter left old-page data writing over the new page).
+      const myRun = ++pollRunRef.current;
+      const isStaleRun = () => pollRunRef.current !== myRun;
+
       const fetchServers = async () => {
         try {
           console.log('[ServerContext] Fetching servers from API...');
@@ -131,6 +140,10 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             apiGet(`/servers?${params.toString()}`),
             apiGet('/servers'), // Fetch all servers without pagination
           ]);
+
+          // A newer generation owns state now (page switch, logout, refresh)
+          // — drop this tick's stale payload instead of writing it back.
+          if (isStaleRun()) return;
 
           // Update last fetch time
           lastFetchTimeRef.current = Date.now();
@@ -166,6 +179,9 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           // Reset error state
           setError(null);
         } catch (err) {
+          // Stale tick: don't touch error state either (a newer generation
+          // may have just cleared it or started fresh).
+          if (isStaleRun()) return;
           console.error('Error fetching servers during normal polling', { err });
 
           // Use friendly error message
@@ -201,7 +217,12 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setRefreshKey((prevKey) => prevKey + 1);
     } else {
       console.log('[ServerContext] User not authenticated, clearing data and stopping polling');
-      // When user logs out, clear data and stop polling
+      // When user logs out, clear data and stop polling.
+      // Bump the generation FIRST: an in-flight fetch (initial or polling)
+      // that resolves after logout must see its run as stale — otherwise the
+      // unauthenticated early-return in the polling effect never re-arms and
+      // the stale fetch re-populates server data after logout.
+      pollRunRef.current += 1;
       clearTimer();
       setServers([]);
       setAllServers([]);
@@ -294,6 +315,9 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         phase = 'normal';
         return true;
       } catch (err) {
+        // Stale run: don't touch attemptsRef / error state — a newer run has
+        // already reset the counters and owns the UI.
+        if (isStaleRun()) return false;
         // Increment attempt count, use ref to avoid triggering effect rerun
         attemptsRef.current += 1;
         console.error('Initial loading attempt failed', {
@@ -311,15 +335,16 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           setError(t('errors.initialStartup'));
         }
 
-        // If maximum attempt count is exceeded, give up initialization and switch to normal polling
+        // If maximum attempt count is exceeded, give up initialization and switch to normal polling.
+        // setIsInitialLoading(false) re-runs this effect, whose !isInitialLoading
+        // branch calls startNormalPolling exactly once — do NOT also call it
+        // here (that fired two duplicate request pairs back-to-back).
         if (attemptsRef.current >= CONFIG.startup.maxAttempts) {
           if (isStaleRun()) return false;
           console.log('Maximum startup attempts reached, switching to normal polling');
           setIsInitialLoading(false);
           // Clear initialization polling
           clearTimer();
-          // Switch to normal polling mode
-          startNormalPolling();
         }
 
         return false;

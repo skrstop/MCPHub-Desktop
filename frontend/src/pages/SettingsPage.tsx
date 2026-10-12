@@ -746,6 +746,8 @@ const SettingsPage: React.FC = () => {
     betterAuthConfig,
     nameSeparator,
     enableSessionRebuild,
+    allowedCidrs,
+    updateAllowedCidrs,
     storeToolPayload,
     loading,
     bearerKeys,
@@ -768,6 +770,11 @@ const SettingsPage: React.FC = () => {
     deleteBearerKey,
     refreshBearerKeys,
   } = useSettingsData();
+
+  const [tempAllowedCidrs, setTempAllowedCidrs] = useState('');
+  useEffect(() => {
+    setTempAllowedCidrs(allowedCidrs.join('\n'));
+  }, [allowedCidrs]);
 
   // Smart routing resolves env vars first, so a value typed here can be shadowed
   // without any visible change: the form shows the key you just pasted while the
@@ -802,10 +809,30 @@ const SettingsPage: React.FC = () => {
     return (installConfig.baseUrl || '').replace(/\/+$/, '');
   })();
 
-  // Update local installConfig when savedInstallConfig changes
+  // Update local installConfig when savedInstallConfig changes.
+  // Draft protection: saving npmRegistry must not wipe an un-saved
+  // pythonIndexUrl draft (and vice versa) — track locally-touched keys and
+  // keep the draft value for them while merging the rest of the saved
+  // snapshot. Keys leave the touched set once their save resolves (saved
+  // value now equals the draft, so the rebuild is a no-op).
+  const installDraftKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (savedInstallConfig) {
-      setInstallConfig(savedInstallConfig);
+      const touched = installDraftKeysRef.current;
+      if (touched.size === 0) {
+        setInstallConfig(savedInstallConfig);
+      } else {
+        setInstallConfig((prev) => {
+          const merged = { ...savedInstallConfig };
+          for (const k of touched) {
+            if (k in prev) {
+              (merged as Record<string, unknown>)[k] =
+                (prev as Record<string, unknown>)[k];
+            }
+          }
+          return merged;
+        });
+      }
     }
   }, [savedInstallConfig]);
 
@@ -816,6 +843,10 @@ const SettingsPage: React.FC = () => {
   // handler clears the flag (saved == temp then, so the next rebuild is a
   // no-op anyway).
   const smartRoutingDirtyRef = useRef(false);
+  // Monotonic edit epoch: incremented on every dirty-marking edit. The save
+  // path records its epoch at start and only clears the dirty flag if no
+  // edits landed during the await.
+  const smartRoutingEditEpochRef = useRef(0);
   // Update local tempSmartRoutingConfig when smartRoutingConfig changes
   useEffect(() => {
     if (smartRoutingConfig && !smartRoutingDirtyRef.current) {
@@ -1124,6 +1155,7 @@ const SettingsPage: React.FC = () => {
     key: 'pythonIndexUrl' | 'npmRegistry' | 'baseUrl',
     value: string,
   ) => {
+    installDraftKeysRef.current.add(key);
     setInstallConfig({
       ...installConfig,
       [key]: value,
@@ -1132,6 +1164,9 @@ const SettingsPage: React.FC = () => {
 
   const saveInstallConfig = async (key: 'pythonIndexUrl' | 'npmRegistry' | 'baseUrl') => {
     await updateInstallConfig(key, installConfig[key]);
+    // Saved value now matches the draft — let future saved-snapshot rebuilds
+    // own this key again.
+    installDraftKeysRef.current.delete(key);
   };
 
   const handleClearCache = async () => {
@@ -1184,6 +1219,7 @@ const SettingsPage: React.FC = () => {
     // progressiveDisclosure toggle) rebuilds temp state from the saved config
     // and silently discards the un-saved slider drag (review round 8).
     smartRoutingDirtyRef.current = true;
+    smartRoutingEditEpochRef.current += 1;
     setTempSmartRoutingConfig({
       ...tempSmartRoutingConfig,
       [key]: String(v),
@@ -1219,6 +1255,7 @@ const SettingsPage: React.FC = () => {
     value: string | string[],
   ) => {
     smartRoutingDirtyRef.current = true;
+    smartRoutingEditEpochRef.current += 1;
     setTempSmartRoutingConfig({
       ...tempSmartRoutingConfig,
       [key]: value,
@@ -1235,6 +1272,7 @@ const SettingsPage: React.FC = () => {
     // discards the un-saved preset selection (same class as the other
     // smartRouting handlers; review round 9).
     smartRoutingDirtyRef.current = true;
+    smartRoutingEditEpochRef.current += 1;
     setTempSmartRoutingConfig({
       ...tempSmartRoutingConfig,
       embeddingProviderPreset: presetId,
@@ -1884,14 +1922,22 @@ const SettingsPage: React.FC = () => {
     }
 
     if (Object.keys(updates).length > 0) {
+      // Edit-epoch guard: keystrokes typed while the save is in flight must
+      // survive — unconditionally clearing the flag lets the rebuild effect
+      // (saved object updated) overwrite the temp draft the user just typed.
+      const epochAtSave = ++smartRoutingEditEpochRef.current;
       const ok = await updateSmartRoutingConfigBatch(updates);
       // Only clear the dirty flag on success — on failure the draft must stay
       // protected against the rebuild effect (saved object unchanged, but an
       // immediate-write toggle would otherwise wipe the failed edits).
-      if (ok !== false) {
+      if (ok !== false && smartRoutingEditEpochRef.current === epochAtSave) {
         smartRoutingDirtyRef.current = false;
       }
     } else {
+      // No-op save: clear the flag anyway so a subsequent refetch's saved
+      // config can reach the form again (flag stuck true = form frozen at
+      // the stale draft forever).
+      smartRoutingDirtyRef.current = false;
       showToast(t('settings.noChanges') || 'No changes to save', 'info');
     }
   };
@@ -4604,6 +4650,31 @@ const SettingsPage: React.FC = () => {
           管理入口（单实例，RAG / Smart Routing 共享）。Web 模式无本地运行时，
           不渲染。见 doc/smart_routing_port_plan_20260925.md §3.4。 */}
       {isTauri() && <ModelVectorSettings />}
+
+      {isAdmin && (
+        <div className="hub-card mb-6 p-5 space-y-3">
+          <label htmlFor="allowed-cidrs" className="block font-medium text-[var(--hub-ink)]">
+            {t('settings.allowedCidrs')}
+          </label>
+          <p className="text-sm text-[var(--hub-ink-2)]">{t('settings.allowedCidrsDescription')}</p>
+          <textarea
+            id="allowed-cidrs"
+            value={tempAllowedCidrs}
+            onChange={(event) => setTempAllowedCidrs(event.target.value)}
+            placeholder={'192.168.1.0/24\nfd00::/64'}
+            rows={4}
+            disabled={loading}
+            className="block w-full py-2 px-3 border border-gray-300 rounded-md form-input font-mono"
+          />
+          <button
+            className="hub-btn primary"
+            disabled={loading}
+            onClick={() => updateAllowedCidrs(tempAllowedCidrs.split(/\s+/).filter(Boolean))}
+          >
+            {t('common.save')}
+          </button>
+        </div>
+      )}
 
       {/* Route Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_ROUTE_CONFIG}>

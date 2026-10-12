@@ -877,11 +877,38 @@ pub async fn install_python_version(
         }
     });
 
-    let status = child.wait().await.map_err(|e| {
-        let msg = format!("等待 uv 进程失败: {e}");
-        emit_error(&app, "python", &version, &msg);
-        msg
-    })?;
+    // Overall timeout: a hung uv process (half-open network, wedged
+    // downloader) must not hold PYTHON_INSTALL_LOCK forever — that would
+    // deadlock every subsequent python install/uninstall until app restart.
+    // 30 min covers slow downloads of large CPython archives on bad links;
+    // on timeout kill the process tree and surface the recent log tail.
+    const UV_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    let wait_result = tokio::time::timeout(UV_INSTALL_TIMEOUT, child.wait()).await;
+    let status = match wait_result {
+        Ok(r) => r.map_err(|e| {
+            let msg = format!("等待 uv 进程失败: {e}");
+            emit_error(&app, "python", &version, &msg);
+            msg
+        })?,
+        Err(_) => {
+            let _ = child.start_kill();
+            let tail = recent_logs
+                .lock()
+                .map(|v| {
+                    let start = v.len().saturating_sub(MAX_RECENT);
+                    v[start..].join("\n")
+                })
+                .unwrap_or_default();
+            let msg = format!(
+                "uv 安装超时（{:.0} 分钟）— 进程已终止。最近日志：\n{}",
+                UV_INSTALL_TIMEOUT.as_secs_f64() / 60.0,
+                tail
+            );
+            emit_error(&app, "python", &version, &msg);
+            log::error!("[runtime] uv python install timed out for {version}");
+            return Err(msg.into());
+        }
+    };
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 

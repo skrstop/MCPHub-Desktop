@@ -672,6 +672,23 @@ impl McpTransport for RmcpStdioTransport {
             _ => Err(anyhow!("unexpected call_tool response")),
         }
     }
+
+    async fn read_resource(&self, uri: &str) -> Result<Vec<rmcp::model::ResourceContents>> {
+        let service = self
+            .service
+            .as_ref()
+            .ok_or_else(|| anyhow!("[{}] not connected", self.server_name))?;
+        let params = rmcp::model::ReadResourceRequestParams::new(uri);
+        let result = service
+            .peer()
+            .read_resource(params)
+            .await
+            .map_err(|e| {
+                self.mark_conn_loss(&e);
+                anyhow!("resources/read failed: {}", e)
+            })?;
+        Ok(result.contents)
+    }
 }
 
 impl RmcpStdioTransport {

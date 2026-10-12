@@ -118,11 +118,24 @@ type MockDocInfo = RagDocInfo;
 type MockUpdateCheck = RagUpdateCheck;
 
 /** 路径前缀判定：child == root 或 child 在 root 之下（与后端
-    is_excluded_sync 的 path_under_root 语义一致，忽略尾随斜杠）。 */
+    path_under_root 语义一致：忽略尾随斜杠 + 双侧 `\`→`/` 归一 +
+    Windows/macOS 大小写折叠——后端 src/rag/service.rs:524 起同规则，
+    缺归一化时 Windows 排除条目（`C:\dir` 形态）永不匹配）。 */
 export const pathUnderRoot = (child: string, root: string): boolean => {
   if (!root || !child) return false;
-  const c = child.replace(/\/+$/, '');
-  const r = root.replace(/\/+$/, '');
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+  // ASCII-only case fold, and ONLY on windows/macOS — parity with the
+  // backend's `cfg!(windows) || cfg!(target_os = "macos")` branch in
+  // service.rs path_under_root (Linux/ext4 is case-sensitive and must NOT
+  // fold). Full Unicode toLowerCase() would also disagree with the backend
+  // on non-ASCII paths (É vs é).
+  const fold = (p: string) => {
+    const plat = window.navigator.platform.toLowerCase();
+    if (!(plat.startsWith('win') || plat.startsWith('mac'))) return p;
+    return p.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
+  };
+  const c = fold(norm(child));
+  const r = fold(norm(root));
   return c === r || c.startsWith(r + '/');
 };
 
@@ -416,13 +429,15 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     // 排除的文件同时移出选择集：否则行渲染灰了、计数也减了，但
     // selectedPickedFiles 仍按 sel.has(path) 把它送进上传管线——
     // 用户明确标「不导入」的文件被静默导入。
-    setSelectedPaths((prev) => {
-      if (prev === null) return prev;
-      if (!prev.has(matchPath)) return prev;
-      const next = new Set(prev);
+    // ⚠️ 必须经 applySelected 写回：直接 setSelectedPaths 会让 selectedRef
+    // 留在旧值，下一次 toggleFileSelected 从 ref 起算会把刚排除的文件
+    // 重新选回来（ref/state 失步复活）。
+    const cur = resolveSelected(selectedRef.current);
+    if (cur.has(matchPath)) {
+      const next = new Set(cur);
       next.delete(matchPath);
-      return next;
-    });
+      applySelected(next);
+    }
   };
   const toggleGroupExcluded = (files: RagScanFile[]) => {
     const paths = files.map((f) => f.matchPath || f.path).filter(Boolean);
@@ -432,21 +447,35 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     const allExcluded = paths.every((p) => excludedUnion.has(p));
     const nextBase = new Set(excludedBase);
     const nextLocal = new Set(excludedLocal);
-    for (const p of paths) {
-      if (nextBase.has(p)) nextBase.delete(p);
-      else if (nextLocal.has(p)) nextLocal.delete(p);
-      else nextLocal.add(p);
+    if (allExcluded) {
+      // 方向语义：全部已排除 → 全部取消排除（与按钮「取消排除本组」一致）。
+      for (const p of paths) {
+        if (nextBase.has(p)) nextBase.delete(p);
+        else if (nextLocal.has(p)) nextLocal.delete(p);
+      }
+    } else {
+      // 未全排除 → 全部排除（对齐 toggleGroupSelected 的方向式实现）。
+      for (const p of paths) {
+        if (nextBase.has(p)) continue;
+        if (nextLocal.has(p)) continue;
+        nextLocal.add(p);
+      }
     }
     setExcludedBase(nextBase);
     setExcludedLocal(nextLocal);
-    if (allExcluded) {
-      // 全部已排除 → 全部取消：上面批量已处理（基线/本地各自移除）。
-      setSelectedPaths((prev) => {
-        if (prev === null) return prev;
-        const next = new Set(prev);
-        for (const p of paths) next.delete(p);
-        return next;
-      });
+    // 同步选择集（经 applySelected 保持 ref 一致）：排除动作把路径移出
+    // 选择集；整组取消排除不动选择集（用户此前未选中的不应被选中）。
+    if (!allExcluded) {
+      const cur = resolveSelected(selectedRef.current);
+      let changed = false;
+      const next = new Set(cur);
+      for (const p of paths) {
+        if (next.has(p)) {
+          next.delete(p);
+          changed = true;
+        }
+      }
+      if (changed) applySelected(next);
     }
   };
   // 打开弹框时拉取注册表快照；关闭时清空本地未持久化状态。
@@ -1358,9 +1387,22 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
       }
       if (allExcluded) {
         for (const p of paths) {
-          for (const e of [...current]) {
-            if (pathUnderRoot(p, e)) current.delete(e);
-          }
+          const covering = [...current].filter((e) => pathUnderRoot(p, e));
+          if (covering.length === 0) continue;
+          // 与单文件路径同语义：删除祖先条目前，为「同被覆盖、但不在本次
+          // 批量取消名单里」的文档补 per-file 条目——否则这些兄弟文件被
+          // 一并解除排除（用户只勾选了子集）。
+          const selected = new Set(paths);
+          const coveredOthers = (ragDocs || [])
+            .filter((d) => {
+              const op = d.originalPath;
+              return (
+                !!op && !selected.has(op) && covering.some((e) => pathUnderRoot(op, e))
+              );
+            })
+            .map((d) => d.originalPath as string);
+          for (const e of covering) current.delete(e);
+          for (const s of coveredOthers) current.add(s);
         }
       }
       const stored = await setRagExcludedPaths([...current]);

@@ -147,7 +147,8 @@
     "passwordRequireSpecial": "Şifre en az bir özel karakter içermelidir",
     "passwordStrengthHint": "Şifre en az 8 karakter olmalı ve harf, rakam ve özel karakter içermelidir",
     "defaultPasswordHint": "Default password: admin",
-    "user": "Kullanıcı"
+    "user": "Kullanıcı",
+    "passwordLoginDisabledNoSso": "Şifre girişi devre dışı ve SSO sağlayıcısı yapılandırılmamış. Giriş yapmak için sistem yapılandırmasından yeniden etkinleştirin."
   },
   "server": {
     "searchPlaceholder": "Ada veya açıklamaya göre ara",
@@ -315,6 +316,8 @@
     "oauth": {
       "sectionTitle": "OAuth Yapılandırması",
       "sectionDescription": "OAuth korumalı sunucular için istemci kimlik bilgilerini yapılandırın (isteğe bağlı).",
+      "allowInsecureTokenEndpoint": "HTTP OAuth token uç noktalarına izin ver",
+      "allowInsecureTokenEndpointHelp": "Yalnızca yönetici. Varsayılan olarak devre dışı. Bu üst sunucu için kimlik bilgilerini ve token'ları TLS olmadan gönderir. Yalnızca güvenilir bir ağda etkinleştirin; HTTPS önerilir. Etkinleştirildiğinde yalnızca yöneticiler bu sunucunun tüm yapılandırmasını düzenleyebilir; yönetici olmayan sahip düzenleyemez.",
       "clientId": "İstemci ID",
       "clientSecret": "İstemci Gizli Anahtarı",
       "authorizationEndpoint": "Yetkilendirme Uç Noktası",
@@ -324,8 +327,6 @@
       "resource": "Kaynak / Hedef Kitle",
       "accessToken": "Erişim Tokeni",
       "refreshToken": "Yenileme Tokeni",
-      "allowInsecureTokenEndpoint": "HTTP OAuth token uç noktalarına izin ver",
-      "allowInsecureTokenEndpointHelp": "Yalnızca yönetici. Varsayılan olarak devre dışı. Bu üst sunucu için kimlik bilgilerini ve token'ları TLS olmadan gönderir. Yalnızca güvenilir bir ağda etkinleştirin; HTTPS önerilir. Etkinleştirildiğinde yalnızca yöneticiler bu sunucunun tüm yapılandırmasını düzenleyebilir; yönetici olmayan sahip düzenleyemez.",
       "connectStarted": "Yetkilendirme başlatıldı — yeni açılan tarayıcı penceresinde onaylayın.",
       "connectFailed": "OAuth yetkilendirmesi başlatılamadı",
       "disconnected": "OAuth bağlantısı kesildi",
@@ -1210,6 +1211,9 @@
     "restoreDefaultFailed": "Varsayılan istek açıklamasına dönülemedi"
   },
   "settings": {
+    "allowedCidrs": "İzin verilen üst sunucu CIDR aralıkları",
+    "allowedCidrsDescription": "Her satıra bir IPv4 veya IPv6 CIDR girin. Tüm kullanıcılar bu aralıklardaki MCP, OpenAPI ve OAuth uç noktalarına erişebilir. Boş liste ek erişim sağlamaz. Yöneticiye ait sunucular iç ağ erişimini korur. Geniş aralıklardan, meta veri ve geri döngü adreslerinden kaçının. Değişiklikler yeni isteklere uygulanır; mevcut bağlantılar kapanmaz.",
+    "allowedCidrsUpdateFailed": "İzin verilen CIDR aralıkları güncellenemedi",
     "subtitle": "Sistem ayarlarını, kimlik doğrulamayı, yönlendirmeyi ve MCP sunucu entegrasyonlarını yapılandırın.",
     "enableGlobalRoute": "Global Yönlendirmeyi Etkinleştir",
     "enableGlobalRouteDescription": "Grup ID'si belirtmeden /sse uç noktasına bağlantıya izin ver",
@@ -1282,6 +1286,8 @@
     "betterAuthEnvNote": "İstemci kimlikleri ve gizli anahtarlar hâlâ ortam değişkenlerinden gelir. Better Auth ayarlarını değiştirmek uygulamanın yeniden başlatılmasını gerektirebilir; kurulum temel URL kaynağı da güvenilen kaynaklara otomatik olarak eklenir.",
     "enableBetterAuth": "Better Auth'u etkinleştir",
     "enableBetterAuthDescription": "Gerekli ortam değişkenleri yapılandırıldığında sosyal giriş ve OIDC girişini etkinleştirin.",
+    "disablePasswordLogin": "Şifreyle girişi devre dışı bırak",
+    "disablePasswordLoginDescription": "Yalnızca SSO sağlayıcılarıyla girişe izin ver: kullanıcı adı/şifre formu ve POST /api/auth/login kapatılır. En az bir sağlayıcı etkin olduğunda ve uygulama başlangıcında zaten etkin olduğunda geçerlidir. BETTER_AUTH_DISABLE_PASSWORD_LOGIN bu ayarı geçersiz kılar; kimlik sağlayıcısı kullanılamıyorsa false yapmak geri dönüş yoludur.",
     "betterAuthBaseUrl": "Temel URL",
     "betterAuthBaseUrlDescription": "Better Auth yönlendirme URI'lerini oluşturmak için kullanılan genel temel URL. Boş bırakılırsa kurulum temel URL'si kullanılır; BETTER_AUTH_URL ortam değişkeni önceliklidir.",
     "betterAuthBasePath": "Kimlik doğrulama temel yolu",
@@ -1556,8 +1562,6 @@
     "invalidSearchSettings": "{{fields}} için geçersiz değer. Benzerlik eşiği 0 ile 1 arasında, N ise 0 veya daha büyük bir tam sayı olmalıdır.",
     "toolDefinitionFields": "Sonuçlardaki araç alanları",
     "toolDefinitionFieldsDescription": "search_tools ve describe_tool sonuçlarının ad, açıklama ve inputSchema dışında içerdiği isteğe bağlı alanlar. Varsayılan: title ve annotations. Diğerleri çoğunlukla istemciler içindir ve büyük olabilir (simgeler base64 görsellerdir).",
-    "disablePasswordLogin": "Şifreyle girişi devre dışı bırak",
-    "disablePasswordLoginDescription": "Yalnızca SSO sağlayıcılarıyla girişe izin ver: kullanıcı adı/şifre formu ve POST /api/auth/login kapatılır. En az bir sağlayıcı etkin olduğunda ve uygulama başlangıcında zaten etkin olduğunda geçerlidir. BETTER_AUTH_DISABLE_PASSWORD_LOGIN bu ayarı geçersiz kılar; kimlik sağlayıcısı kullanılamıyorsa false yapmak geri dönüş yoludur.",
     "oauthClientRevokeConfirm": "Bu istemciyi iptal etmek tüm erişim ve yenileme jetonlarını geçersiz kılar. İstemcinin yeniden kaydolup yetkilendirmesi gerekir."
   },
   "mcpb": {
@@ -1664,6 +1668,7 @@
     "errors": {
       "readonly": "Demo ortamı için salt okunur",
       "invalid_credentials": "Geçersiz kullanıcı adı veya şifre",
+      "password_login_disabled": "Parola ile giriş devre dışı. SSO ile giriş yapın veya API erişimi için bir bearer anahtarı kullanın.",
       "serverNameRequired": "Sunucu adı gereklidir",
       "serverConfigRequired": "Sunucu yapılandırması gereklidir",
       "serverConfigInvalid": "Sunucu yapılandırması bir URL, OpenAPI şartname URL'si veya şema, ya da argümanlı komut içermelidir",

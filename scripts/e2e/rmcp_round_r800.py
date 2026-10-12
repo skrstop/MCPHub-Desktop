@@ -13,6 +13,9 @@ E  $smart meta tools visible on /mcp/$smart (SKIP if Smart Routing disabled).
 import http.client, json, os, re, socket, sys, time, hashlib, base64, secrets, sqlite3
 import urllib.parse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rmcp_round_r1100 import cleanup_oauth_clients
+
 HOST, PORT = "127.0.0.1", 23333
 BASE = f"http://{HOST}:{PORT}"
 DB = os.path.expanduser("~/Library/Application Support/app.mcphub.desktop/mcphub.db")
@@ -172,6 +175,15 @@ def section_a():
                 headers={"Authorization": f"Bearer {access}"})
             check("A5 replay revoked successor access (401)", st2 == 401, f"{st2}")
     finally:
+        # Suite-owned client cleanup: r800 registers via client_name='r800'
+        # each run; without this, repeated runs accumulate clients until the
+        # server hits 'too many registered clients'.
+        try:
+            con = sqlite3.connect(DB)
+            cleanup_oauth_clients(con, ["r800"])
+            con.close()
+        except Exception:
+            pass
         cfg0 = cfg_read()
         if orig is None:
             cfg0.pop("oauthServer", None)

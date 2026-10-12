@@ -57,6 +57,44 @@ META_2026 = {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
                        "io.modelcontextprotocol/clientCapabilities": {}}}
 
 
+def cleanup_oauth_clients(con, prefixes):
+    """Delete OAuth clients registered by e2e suites (by exact known name
+    prefix) plus their codes/tokens. NEVER pass user-facing prefixes here —
+    only suite-owned names like 'r800', 'r1100-e2e', 'r1700-e2e', 'r300'.
+
+    `con` is an open sqlite3 connection to the MCPHub DB. Deletes cascade
+    to oauth_codes/oauth_tokens by client_id, mirroring the inline cleanup
+    the r1100/r1700 suites already used. Errors are swallowed so a missing
+    table never fails a suite's finally block.
+    """
+    for prefix in prefixes:
+        # Escape LIKE wildcards so a future caller passing 'r_800' can't
+        # widen the delete set ('_' matches any single char).
+        esc = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        try:
+            cur = con.execute(
+                "SELECT client_id FROM oauth_clients WHERE name LIKE ? ESCAPE '\\'",
+                (esc + "%",))
+            ids = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[cleanup_oauth_clients] select '{prefix}': {e}", file=sys.stderr)
+            continue
+        for cid in ids:
+            for tbl in ("oauth_codes", "oauth_tokens"):
+                try:
+                    con.execute(f"DELETE FROM {tbl} WHERE client_id=?", (cid,))
+                except Exception as e:
+                    print(f"[cleanup_oauth_clients] {tbl} {cid}: {e}", file=sys.stderr)
+            try:
+                con.execute("DELETE FROM oauth_clients WHERE client_id=?", (cid,))
+            except Exception as e:
+                print(f"[cleanup_oauth_clients] oauth_clients {cid}: {e}", file=sys.stderr)
+    try:
+        con.commit()
+    except Exception as e:
+        print(f"[cleanup_oauth_clients] commit: {e}", file=sys.stderr)
+
+
 def check(name, cond, extra=""):
     global PASS, FAIL
     if cond:
@@ -411,11 +449,9 @@ def section_d():
     orig = cfg_get("oauthServer")
     con = sqlite3.connect(DB)
     try:
-        con.execute("DELETE FROM oauth_clients WHERE name LIKE 'r1100-e2e%'")
-    except Exception:
-        pass
-    con.commit()
-    con.close()
+        cleanup_oauth_clients(con, ["r1100-e2e"])
+    finally:
+        con.close()
     redirect = "http://127.0.0.1/callback"
     try:
         cfg = cfg_read()
@@ -543,16 +579,7 @@ def section_d():
         # Cleanup the r1100-e2e client + its codes/tokens.
         try:
             con = sqlite3.connect(DB)
-            cur = con.execute("SELECT client_id FROM oauth_clients WHERE name LIKE 'r1100-e2e%'")
-            ids = [r[0] for r in cur.fetchall()]
-            for cid in ids:
-                for tbl in ("oauth_codes", "oauth_tokens"):
-                    try:
-                        con.execute(f"DELETE FROM {tbl} WHERE client_id=?", (cid,))
-                    except Exception:
-                        pass
-                con.execute("DELETE FROM oauth_clients WHERE client_id=?", (cid,))
-            con.commit()
+            cleanup_oauth_clients(con, ["r1100-e2e"])
             con.close()
         except Exception:
             pass

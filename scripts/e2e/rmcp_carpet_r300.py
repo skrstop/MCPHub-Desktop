@@ -21,6 +21,9 @@ Sections:
 import json, http.client, sys, re, time, sqlite3, os, urllib.parse
 from urllib.parse import quote
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rmcp_round_r1100 import cleanup_oauth_clients
+
 HOST, PORT = "127.0.0.1", 23333
 DB = os.path.expanduser("~/Library/Application Support/app.mcphub.desktop/mcphub.db")
 PASS, FAIL = [], []
@@ -418,6 +421,15 @@ def section_g():
         st, reg = oauth_register()
         check("G5 dynamic registration disabled 400", st == 400, f"st={st}")
     finally:
+        # Suite-owned client cleanup: oauth_register() uses client_name='r300'
+        # and G1-G5 each register a fresh client; without this, repeated runs
+        # accumulate clients until 'too many registered clients'.
+        try:
+            con = sqlite3.connect(DB)
+            cleanup_oauth_clients(con, ["r300"])
+            con.close()
+        except Exception:
+            pass
         restore()
 
 def main():

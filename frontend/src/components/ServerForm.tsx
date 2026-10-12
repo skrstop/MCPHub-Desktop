@@ -101,7 +101,11 @@ const ServerForm = ({
     headers: [],
     passthroughHeaders: Array.isArray(initialData?.config?.passthroughHeaders)
       ? initialData.config.passthroughHeaders.join(', ')
-      : '',
+      : // Legacy configs may carry a plain string here — show it rather than
+        // silently dropping it on save (parity with the openapi branch below).
+        initialData?.config?.passthroughHeaders
+        ? String(initialData.config.passthroughHeaders)
+        : '',
     visibility: (initialData?.config?.visibility ?? 'public') as
       | 'private'
       | 'group'
@@ -168,9 +172,14 @@ const ServerForm = ({
             openIdConnectUrl: initialData.config.openapi.security?.openIdConnect?.url || '',
             openIdConnectToken: initialData.config.openapi.security?.openIdConnect?.token || '',
             // Passthrough headers initialization
-            passthroughHeaders: initialData.config.openapi.passthroughHeaders
+            // Guard: legacy configs may carry a plain string here — .join on
+            // a non-array throws inside this initializer and crashes the
+            // whole form.
+            passthroughHeaders: Array.isArray(initialData.config.openapi.passthroughHeaders)
               ? initialData.config.openapi.passthroughHeaders.join(', ')
-              : '',
+              : initialData.config.openapi.passthroughHeaders
+                ? String(initialData.config.openapi.passthroughHeaders)
+                : '',
           }
         : {
             inputMode: 'url',
@@ -1532,15 +1541,22 @@ const ServerForm = ({
 // `--header Content-Type: application/json`). Naive join(' ')/split(' ')
 // silently rewrites stored configs on every edit.
 const quoteArg = (arg: string): string =>
-  /[\s"]/.test(arg)
-    ? `"${arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    : arg;
+  arg === ''
+    ? '""' // empty argv entries must round-trip: bare join loses them
+    : /[\s"]/.test(arg)
+      ? `"${arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+      : arg;
 
 const splitArgs = (value: string): string[] => {
   const out: string[] = [];
   let cur = '';
   let inQuotes = false;
   let escaped = false;
+  // True once the current token has seen a quote — an empty quoted token
+  // ("" from quoteArg('')) is a real empty argv entry and must survive:
+  // without this flag `["", "--flag"]` silently rewrites to ["--flag"] on
+  // any edit of the args textarea.
+  let sawQuote = false;
   for (const ch of value) {
     if (escaped) {
       cur += ch;
@@ -1554,26 +1570,26 @@ const splitArgs = (value: string): string[] => {
         cur += ch;
       }
     } else if (ch === '"') {
+      sawQuote = true;
       inQuotes = !inQuotes;
-      if (!inQuotes && cur) {
+      if (!inQuotes) {
+        // Closing quote: the token is complete — push even if empty.
         out.push(cur);
         cur = '';
-      } else if (inQuotes && cur) {
-        // keep building quoted token
+        sawQuote = false;
       }
-      if (inQuotes && !cur) {
-        // opening quote of a token
-      }
+      // Opening quote: keep building the quoted token.
     } else if (ch === ' ' && !inQuotes) {
-      if (cur) {
+      if (cur || sawQuote) {
         out.push(cur);
         cur = '';
+        sawQuote = false;
       }
     } else {
       cur += ch;
     }
   }
-  if (cur) out.push(cur);
+  if (cur || sawQuote) out.push(cur);
   return out;
 };
 

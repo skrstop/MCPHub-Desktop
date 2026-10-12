@@ -45,6 +45,18 @@ pub trait McpTransport: Send + Sync {
         let _ = request_meta;
         self.call_tool(name, arguments).await
     }
+
+    /// Read an upstream resource by URI (MCP Apps #1303: dynamic `ui://`
+    /// widget URIs are not pre-registered in `resources/list`, so the hub
+    /// reads them straight from upstream). Default: not supported on this
+    /// transport (SSE/OpenAPI servers have no `resources/read` surface).
+    async fn read_resource(
+        &self,
+        uri: &str,
+    ) -> Result<Vec<rmcp::model::ResourceContents>> {
+        let _ = uri;
+        Err(anyhow::anyhow!("resources not supported on this transport"))
+    }
 }
 
 /// Thin wrapper that holds a boxed transport and the server name
@@ -97,5 +109,13 @@ impl McpClient {
         request_meta: Option<Value>,
     ) -> Result<ToolCallResult> {
         self.transport.call_tool_with_meta(name, arguments, request_meta).await
+    }
+
+    /// #1303: read an upstream resource (see [`McpTransport::read_resource`]).
+    pub async fn read_resource(
+        &self,
+        uri: &str,
+    ) -> Result<Vec<rmcp::model::ResourceContents>> {
+        self.transport.read_resource(uri).await
     }
 }

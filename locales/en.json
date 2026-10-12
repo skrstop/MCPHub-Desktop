@@ -147,7 +147,8 @@
     "passwordRequireNumber": "Password must contain at least one number",
     "passwordRequireSpecial": "Password must contain at least one special character",
     "passwordStrengthHint": "Password must be at least 8 characters and contain letters, numbers, and special characters",
-    "user": "User"
+    "user": "User",
+    "passwordLoginDisabledNoSso": "Password sign-in is disabled and no SSO provider is configured. Re-enable it in the system config to sign in."
   },
   "server": {
     "searchPlaceholder": "Search by name or description",
@@ -319,6 +320,8 @@
     "oauth": {
       "sectionTitle": "OAuth Configuration",
       "sectionDescription": "Configure client credentials for OAuth-protected servers (optional).",
+      "allowInsecureTokenEndpoint": "Allow HTTP OAuth token endpoints",
+      "allowInsecureTokenEndpointHelp": "Admin only. Disabled by default. Sends credentials and tokens without TLS for this upstream. Enable only on a trusted network; HTTPS is recommended. Once enabled, only administrators can edit this entire server configuration; a non-admin owner cannot edit it.",
       "clientId": "Client ID",
       "clientSecret": "Client Secret",
       "authorizationEndpoint": "Authorization Endpoint",
@@ -328,8 +331,6 @@
       "resource": "Resource / Audience",
       "accessToken": "Access Token",
       "refreshToken": "Refresh Token",
-      "allowInsecureTokenEndpoint": "Allow HTTP OAuth token endpoints",
-      "allowInsecureTokenEndpointHelp": "Admin only. Disabled by default. Sends credentials and tokens without TLS for this upstream. Enable only on a trusted network; HTTPS is recommended. Once enabled, only administrators can edit this entire server configuration; a non-admin owner cannot edit it.",
       "connectStarted": "Authorization started — approve it in the browser window that just opened.",
       "connectFailed": "Failed to start OAuth authorization",
       "disconnected": "OAuth disconnected",
@@ -1210,6 +1211,9 @@
     "restoreDefaultFailed": "Failed to restore the default prompt description"
   },
   "settings": {
+    "allowedCidrs": "Allowed upstream CIDR ranges",
+    "allowedCidrsDescription": "One IPv4 or IPv6 CIDR per line. All users can connect upstream MCP, OpenAPI and OAuth endpoints in these ranges. Empty means no additional access. Admin-owned servers retain unrestricted internal access. Avoid broad ranges and metadata or loopback addresses unless required. Changes apply to new requests; existing connections are not closed.",
+    "allowedCidrsUpdateFailed": "Failed to update allowed CIDR ranges",
     "subtitle": "Configure system settings, authentication, routing, and MCP server integrations.",
     "enableGlobalRoute": "Enable Global Route",
     "enableGlobalRouteDescription": "Allow connections to /sse endpoint without specifying a group ID",
@@ -1308,6 +1312,8 @@
     "betterAuthEnvNote": "Client IDs and secrets still come from environment variables. Changing Better Auth settings may require an application restart, and the install base URL origin is trusted automatically.",
     "enableBetterAuth": "Enable Better Auth",
     "enableBetterAuthDescription": "Enable social and OIDC login when the required environment variables are configured.",
+    "disablePasswordLogin": "Disable password login",
+    "disablePasswordLoginDescription": "Only allow sign-in through the SSO providers: the username/password form and POST /api/auth/login are turned off. Takes effect only while at least one provider is enabled and was already enabled when the application started. BETTER_AUTH_DISABLE_PASSWORD_LOGIN overrides this setting, and setting it to false is the way back in if the identity provider is unavailable.",
     "betterAuthBaseUrl": "Base URL",
     "betterAuthBaseUrlDescription": "Public base URL used to build Better Auth redirect URIs. Falls back to the install base URL when empty; the BETTER_AUTH_URL environment variable takes precedence.",
     "betterAuthBasePath": "Auth base path",
@@ -1556,8 +1562,6 @@
     "invalidSearchSettings": "Invalid value for {{fields}}. The similarity threshold must be between 0 and 1, and top N a whole number of 0 or more.",
     "toolDefinitionFields": "Tool fields in results",
     "toolDefinitionFieldsDescription": "Optional fields that search_tools and describe_tool results carry next to the name, description and inputSchema. Default: title and annotations. The others are mostly for clients and can be large (icons are base64 images).",
-    "disablePasswordLogin": "Disable password login",
-    "disablePasswordLoginDescription": "Only allow sign-in through the SSO providers: the username/password form and POST /api/auth/login are turned off. Takes effect only while at least one provider is enabled and was already enabled when the application started. BETTER_AUTH_DISABLE_PASSWORD_LOGIN overrides this setting, and setting it to false is the way back in if the identity provider is unavailable.",
     "oauthClientRevokeConfirm": "Revoking this client immediately invalidates all its access and refresh tokens. The client must register and authorize again."
   },
   "mcpb": {
@@ -1664,6 +1668,7 @@
     "errors": {
       "readonly": "Readonly for demo environment",
       "invalid_credentials": "Invalid username or password",
+      "password_login_disabled": "Password login is disabled. Sign in with SSO, or use a bearer key for API access.",
       "serverNameRequired": "Server name is required",
       "serverConfigRequired": "Server configuration is required",
       "serverConfigInvalid": "Server configuration must include either a URL, OpenAPI specification URL or schema, or command with arguments",

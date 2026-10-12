@@ -488,6 +488,14 @@ const ServerCard = ({
           onRefresh?.();
         }
       });
+      // Narrow-window leak: unmount landed between the second listen()
+      // resolving and the array assignment — unlisten immediately instead of
+      // leaving the handler registered on a dead card.
+      if (disposed) {
+        onConnected();
+        onError();
+        return;
+      }
       unlisteners = [onConnected, onError];
     })().catch(() => {});
     return () => {

@@ -147,7 +147,8 @@
     "passwordRequireSpecial": "Le mot de passe doit contenir au moins un caractère spécial",
     "passwordStrengthHint": "Le mot de passe doit contenir au moins 8 caractères et inclure des lettres, des chiffres et des caractères spéciaux",
     "defaultPasswordHint": "Default password: admin",
-    "user": "Utilisateur"
+    "user": "Utilisateur",
+    "passwordLoginDisabledNoSso": "La connexion par mot de passe est désactivée et aucun fournisseur SSO n'est configuré. Réactivez-la dans la configuration système pour vous connecter."
   },
   "server": {
     "searchPlaceholder": "Rechercher par nom ou description",
@@ -315,6 +316,8 @@
     "oauth": {
       "sectionTitle": "Configuration OAuth",
       "sectionDescription": "Configurez les identifiants client pour les serveurs protégés par OAuth (optionnel).",
+      "allowInsecureTokenEndpoint": "Autoriser les points de terminaison OAuth en HTTP",
+      "allowInsecureTokenEndpointHelp": "Admin uniquement. Désactivé par défaut. Envoie les identifiants et jetons sans TLS pour ce serveur en amont. À activer uniquement sur un réseau de confiance ; HTTPS est recommandé. Une fois activé, seuls les administrateurs peuvent modifier l'intégralité de la configuration de ce serveur ; un propriétaire non admin ne peut pas le faire.",
       "clientId": "Identifiant client",
       "clientSecret": "Secret client",
       "authorizationEndpoint": "Point de terminaison d'autorisation",
@@ -324,8 +327,6 @@
       "resource": "Ressource / Audience",
       "accessToken": "Jeton d'accès",
       "refreshToken": "Jeton d'actualisation",
-      "allowInsecureTokenEndpoint": "Autoriser les points de terminaison OAuth en HTTP",
-      "allowInsecureTokenEndpointHelp": "Admin uniquement. Désactivé par défaut. Envoie les identifiants et jetons sans TLS pour ce serveur en amont. À activer uniquement sur un réseau de confiance ; HTTPS est recommandé. Une fois activé, seuls les administrateurs peuvent modifier l'intégralité de la configuration de ce serveur ; un propriétaire non admin ne peut pas le faire.",
       "connectStarted": "Autorisation démarrée — approuvez-la dans la fenêtre du navigateur qui vient de s'ouvrir.",
       "connectFailed": "Échec du démarrage de l'autorisation OAuth",
       "disconnected": "OAuth déconnecté",
@@ -1210,6 +1211,9 @@
     "restoreDefaultFailed": "Échec de la restauration de la description par défaut de l'invite"
   },
   "settings": {
+    "allowedCidrs": "Plages CIDR autorisées pour les services en amont",
+    "allowedCidrsDescription": "Un CIDR IPv4 ou IPv6 par ligne. Tous les utilisateurs peuvent accéder aux services MCP, OpenAPI et OAuth de ces plages. Une liste vide ne donne aucun accès supplémentaire. Les serveurs appartenant aux administrateurs gardent leur accès interne. Évitez les plages larges et les adresses de métadonnées ou de boucle locale. Les changements concernent les nouvelles requêtes, sans fermer les connexions existantes.",
+    "allowedCidrsUpdateFailed": "Échec de la mise à jour des plages CIDR",
     "subtitle": "Configurez les paramètres système, l'authentification, le routage et les intégrations de serveurs MCP.",
     "enableGlobalRoute": "Activer la route globale",
     "enableGlobalRouteDescription": "Autoriser les connexions au point de terminaison /sse sans spécifier d'ID de groupe",
@@ -1283,6 +1287,8 @@
     "betterAuthEnvNote": "Les identifiants et secrets client proviennent toujours des variables d'environnement. Modifier les paramètres Better Auth peut nécessiter un redémarrage de l'application, et l'origine de l'URL de base d'installation est ajoutée automatiquement aux origines approuvées.",
     "enableBetterAuth": "Activer Better Auth",
     "enableBetterAuthDescription": "Activez la connexion sociale et OIDC lorsque les variables d'environnement requises sont configurées.",
+    "disablePasswordLogin": "Désactiver la connexion par mot de passe",
+    "disablePasswordLoginDescription": "Autoriser uniquement la connexion via les fournisseurs SSO : le formulaire utilisateur/mot de passe et POST /api/auth/login sont désactivés. Prend effet uniquement tant qu'au moins un fournisseur est activé et l'était déjà au démarrage de l'application. BETTER_AUTH_DISABLE_PASSWORD_LOGIN remplace ce paramètre ; le définir à false permet de retrouver l'accès si le fournisseur d'identité est indisponible.",
     "betterAuthBaseUrl": "URL de base",
     "betterAuthBaseUrlDescription": "URL de base publique utilisée pour construire les URI de redirection Better Auth. Si vide, l'URL de base d'installation est utilisée ; la variable d'environnement BETTER_AUTH_URL est prioritaire.",
     "betterAuthBasePath": "Chemin de base d'authentification",
@@ -1556,8 +1562,6 @@
     "invalidSearchSettings": "Valeur invalide pour {{fields}}. Le seuil de similarité doit être compris entre 0 et 1, et N un nombre entier supérieur ou égal à 0.",
     "toolDefinitionFields": "Champs d'outil dans les résultats",
     "toolDefinitionFieldsDescription": "Champs facultatifs que les résultats de search_tools et describe_tool incluent en plus du nom, de la description et de l'inputSchema. Par défaut : title et annotations. Les autres servent surtout aux clients et peuvent être volumineux (les icônes sont des images base64).",
-    "disablePasswordLogin": "Désactiver la connexion par mot de passe",
-    "disablePasswordLoginDescription": "Autoriser uniquement la connexion via les fournisseurs SSO : le formulaire utilisateur/mot de passe et POST /api/auth/login sont désactivés. Prend effet uniquement tant qu'au moins un fournisseur est activé et l'était déjà au démarrage de l'application. BETTER_AUTH_DISABLE_PASSWORD_LOGIN remplace ce paramètre ; le définir à false permet de retrouver l'accès si le fournisseur d'identité est indisponible.",
     "oauthClientRevokeConfirm": "La révocation de ce client invalide immédiatement tous ses jetons d'accès et de rafraîchissement. Le client devra se réenregistrer et se réautoriser."
   },
   "mcpb": {
@@ -1664,6 +1668,7 @@
     "errors": {
       "readonly": "Lecture seule pour l'environnement de démonstration",
       "invalid_credentials": "Nom d'utilisateur ou mot de passe invalide",
+      "password_login_disabled": "La connexion par mot de passe est désactivée. Connectez-vous via SSO, ou utilisez une clé bearer pour l'accès API.",
       "serverNameRequired": "Le nom du serveur est requis",
       "serverConfigRequired": "La configuration du serveur est requise",
       "serverConfigInvalid": "La configuration du serveur doit inclure une URL, une URL de spécification OpenAPI ou un schéma, ou une commande avec des arguments",

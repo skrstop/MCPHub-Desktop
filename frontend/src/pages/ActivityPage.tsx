@@ -122,7 +122,9 @@ const ActivityPage: React.FC = () => {
       console.error('Error fetching activity data:', err);
       setError(t('activity.fetchError'));
     } finally {
-      setIsLoading(false);
+      // Stale run must not unlock the spinner: a newer fetch is still in
+      // flight and its success path will clear loading itself.
+      if (seq === fetchSeqRef.current) setIsLoading(false);
     }
   }, [currentPage, itemsPerPage, appliedFilters, t]);
 
@@ -152,6 +154,10 @@ const ActivityPage: React.FC = () => {
     try {
       const response = await clearAllActivities();
       if (response?.success) {
+        // Invalidate any in-flight fetch: its response predates the cleanup
+        // and would otherwise match the current seq and re-install cleared
+        // (pre-cleanup) data.
+        fetchSeqRef.current += 1;
         // Immediately reset stats and list to zero — no waiting for refetch
         setStats({ totalCalls: 0, successCount: 0, errorCount: 0, avgDuration: 0 });
         setActivities([]);

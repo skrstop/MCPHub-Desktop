@@ -350,12 +350,23 @@ const LoginPage: React.FC = () => {
             </form>
             )}
 
-            <p
-              className="text-center mt-3"
-              style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}
-            >
-              {t('auth.defaultPasswordHint', '默认密码: admin')}
-            </p>
+            {passwordLoginDisabled && !(socialProviders.google || socialProviders.github || socialProviders.oidc) && (
+              <p
+                className="text-center"
+                style={{ fontSize: 13, color: 'var(--hub-ink-2)', padding: '12px 0' }}
+              >
+                {t('auth.passwordLoginDisabledNoSso', 'Password sign-in is disabled and no SSO provider is configured. Re-enable it in the system config to sign in.')}
+              </p>
+            )}
+
+            {!passwordLoginDisabled && (
+              <p
+                className="text-center mt-3"
+                style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}
+              >
+                {t('auth.defaultPasswordHint', '默认密码: admin')}
+              </p>
+            )}
 
             {(socialProviders.google || socialProviders.github || socialProviders.oidc) && (
               <div className="mt-5 space-y-3">

@@ -53,7 +53,7 @@ import rmcp_round_r1100 as base
 from rmcp_round_r1100 import (
     HOST, DB, LEGACY_VERSIONS, IP_SERVER, IP_TOOL, META_2026,
     req, sse_last, cfg_read, cfg_write, initialize, notify_initialized, rpc,
-    result_text, json_txt, valid_pub_ip,
+    result_text, json_txt, valid_pub_ip, cleanup_oauth_clients,
 )
 
 check = base.check
@@ -63,6 +63,7 @@ warn = base.warn
 FILES_DIR = os.path.expanduser(
     "~/Library/Application Support/app.mcphub.desktop/rag/files")
 SYNTH_DOCS = []  # (doc_id, content_path, meta_path)
+API_DELETED_IDS = []  # doc ids the suite deleted via the MCP tool (pre-sweep evidence scope)
 
 CAMPAIGN_STRICT_PATHS = [("top", "strictValidation"), ("mcp", "mcp.strictValidation")]
 
@@ -316,10 +317,13 @@ def section_a():
                   row_u is not None and row_u[0] == "r1700_uuid_a.txt",
                   f"row={row_u}")
         rag_file_delete(sid, 93, uid)
+        API_DELETED_IDS.append(uid)
         wait_row_gone(uid, secs=10.0)
 
     rag_file_delete(sid, 91, id_a)
+    API_DELETED_IDS.append(id_a)
     rag_file_delete(sid, 92, id_b)
+    API_DELETED_IDS.append(id_b)
     gone = wait_row_gone(id_a) and wait_row_gone(id_b)
     if gone:
         check("A9 cleanup: docs removed", True)
@@ -353,7 +357,9 @@ def section_b():
     check("B3 rag_search finds the CJK doc (shared decode path)",
           st == 200 and o is not None and ("R1700" in txt or "中文" in txt),
           f"st={st} {txt[:140]}")
-    rag_file_delete(sid, 22, doc_id)
+    st_d, o_d = rag_file_delete(sid, 22, doc_id)
+    API_DELETED_IDS.append(doc_id)
+    warn(f"B4 delete result: st={st_d} body={json_txt(o_d)[:160]}")
     if wait_row_gone(doc_id):
         check("B4 cleanup: CJK doc removed", True)
     else:
@@ -480,11 +486,9 @@ def section_g():
     orig = cfg_read().get("oauthServer")
     con = sqlite3.connect(DB)
     try:
-        con.execute("DELETE FROM oauth_clients WHERE name LIKE 'r1700-e2e%'")
-    except Exception:
-        pass
-    con.commit()
-    con.close()
+        cleanup_oauth_clients(con, ["r1700-e2e"])
+    finally:
+        con.close()
     redirect = "http://127.0.0.1/callback"
     try:
         cfg = cfg_read()
@@ -574,16 +578,7 @@ def section_g():
     finally:
         try:
             con = sqlite3.connect(DB)
-            cur = con.execute("SELECT client_id FROM oauth_clients WHERE name LIKE 'r1700-e2e%'")
-            ids = [r[0] for r in cur.fetchall()]
-            for cid in ids:
-                for tbl in ("oauth_codes", "oauth_tokens"):
-                    try:
-                        con.execute(f"DELETE FROM {tbl} WHERE client_id=?", (cid,))
-                    except Exception:
-                        pass
-                con.execute("DELETE FROM oauth_clients WHERE client_id=?", (cid,))
-            con.commit()
+            cleanup_oauth_clients(con, ["r1700-e2e"])
             con.close()
         except Exception:
             pass
@@ -631,6 +626,12 @@ def main():
     con = sqlite3.connect(DB)
     pins_before = con.execute(
         "SELECT count(*) FROM server_tool_config WHERE pinned=1").fetchone()[0]
+    pins_snapshot = []
+    if pins_before > 0:
+        cur = con.execute("SELECT rowid, * FROM server_tool_config "
+                          "WHERE pinned=1")
+        cols = [d[0] for d in cur.description]
+        pins_snapshot = [dict(zip(cols, row)) for row in cur.fetchall()]
     con.close()
 
     for name, why in SKIP_STUBS:
@@ -649,11 +650,27 @@ def main():
                 check(f"{fn.__name__} completed without crash", False, repr(e))
     finally:
         # Campaign baseline (NOT as-found restore): strict=false both levels,
-        # exposeHttp=true, pins=0, synthetic docs swept.
+        # exposeHttp=true, synthetic docs swept.
         force_campaign_baseline()
         con = sqlite3.connect(DB)
-        con.execute("UPDATE server_tool_config SET pinned=0")
-        con.commit()
+        if pins_before == 0:
+            # No pre-existing user pins: the wipe-to-0 baseline is safe.
+            con.execute("UPDATE server_tool_config SET pinned=0")
+            con.commit()
+        else:
+            # Pre-existing user pins: preserve them instead of wiping.
+            # 1) Re-pin any user rows the suite unpinned (pinned flipped 0).
+            snap_ids = [r["rowid"] for r in pins_snapshot]
+            qmarks = ",".join("?" * len(snap_ids))
+            for r in pins_snapshot:
+                con.execute(
+                    f"UPDATE server_tool_config SET pinned=1 WHERE rowid=?",
+                    (r["rowid"],))
+            # 2) Delete suite-created pin rows (pinned but not in snapshot).
+            con.execute(
+                f"DELETE FROM server_tool_config WHERE pinned=1 "
+                f"AND rowid NOT IN ({qmarks})", snap_ids)
+            con.commit()
         con.close()
         for doc_id, content_path, meta_path in SYNTH_DOCS:
             try:
@@ -664,6 +681,25 @@ def main():
                 os.remove(meta_path)
             except OSError:
                 pass
+        # Verify API-deleted suite docs are actually gone BEFORE the orphan
+        # sweep — otherwise sweep_r1700() makes the doc-count check
+        # self-fulfilling (sweep deletes exactly what the count counts).
+        # Scope: only docs the suite deleted via the MCP rag_file_delete
+        # tool (tracked in API_DELETED_IDS at delete time). The A-group
+        # synthetic fixtures are inserted via DB directly (no API delete
+        # exists) and legitimately remain until the sweep — counting them
+        # here was a false FAIL.
+        api_deleted_ids = [d for d in API_DELETED_IDS if d]
+        con2 = sqlite3.connect(DB)
+        marks = ",".join("?" * len(api_deleted_ids)) if api_deleted_ids else "''"
+        n_pre = con2.execute(
+            f"SELECT count(*) FROM rag_docs WHERE id IN ({marks})",
+            api_deleted_ids,
+        ).fetchone()[0]
+        con2.close()
+        check("RESTORE API-deleted r1700_* rag docs actually gone "
+              "(pre-sweep evidence, not self-fulfilling)", n_pre == 0,
+              f"n={n_pre}")
         sweep_r1700()
         time.sleep(0.5)
 
@@ -671,12 +707,22 @@ def main():
     con = sqlite3.connect(DB)
     pins_after = con.execute(
         "SELECT count(*) FROM server_tool_config WHERE pinned=1").fetchone()[0]
+    con.close()
+    if pins_before == 0:
+        check("RESTORE pins=0 (campaign baseline)", pins_after == 0,
+              f"before={pins_before} after={pins_after}")
+    else:
+        check("RESTORE user pins restored (count == pre-suite pins)",
+              pins_after == pins_before,
+              f"before={pins_before} after={pins_after}")
+    # Hygiene-only post-sweep assert (real evidence is the pre-sweep check
+    # above; this just confirms the orphan sweep left nothing behind).
+    con = sqlite3.connect(DB)
     n_left = con.execute(
         "SELECT count(*) FROM rag_docs WHERE name LIKE 'r1700%'").fetchone()[0]
     con.close()
-    check("RESTORE pins=0 (campaign baseline)", pins_after == 0,
-          f"before={pins_before} after={pins_after}")
-    check("RESTORE no r1700_* rag docs left", n_left == 0, f"n={n_left}")
+    check("RESTORE sweep left no r1700_* rag docs (hygiene)", n_left == 0,
+          f"n={n_left}")
     st, _, _ = req("GET", "/health", default_accept=False)
     check("RESTORE /health 200", st == 200, f"st={st}")
 

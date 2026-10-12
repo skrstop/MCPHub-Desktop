@@ -137,6 +137,6 @@
 
 1. **A1→A5**（上游客户端，用户价值最高，~3 天）：A1 模型/迁移 → A2 spike+核心 → A3 接线 → A4 UI → A5 测试。
 2. **B1→B5**（下游 Provider，~2.5 天）：B1 迁移/配置 → B2 端点 → B3 鉴权 → B4 UI → B5 测试。
-3. 收尾：changelog `doc/upgrade/1.1.1004.md`（OAuth 为主功能）、AGENTS.md §3 新节 + §6 待办、locales、53 套全量回归 + 2 新套件。
+3. 收尾：changelog `upgrade/1.1.3010.md`（OAuth 为主功能）、AGENTS.md §3 新节 + §6 待办、locales、53 套全量回归 + 2 新套件。
 
 每 Phase 完成即 cargo check / cargo test --lib / tsc / 相关套件增量验证；两 Feature 落地后按惯例做独立复核轮（修复自身引入的 bug 视角）。

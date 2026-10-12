@@ -148,6 +148,7 @@ interface SystemSettings {
     httpPort?: number;
     exposeHttp?: boolean;
     mcpStrictValidation?: boolean;
+    network?: { allowedCidrs?: string[] };
     mcp?: { strictValidation?: boolean };
   };
   bearerKeys?: BearerKey[];
@@ -210,6 +211,8 @@ interface SettingsContextValue {
   ) => Promise<boolean | undefined>;
   updateNameSeparator: (value: string) => Promise<boolean | undefined>;
   updateSessionRebuild: (value: boolean) => Promise<boolean | undefined>;
+  allowedCidrs: string[];
+  updateAllowedCidrs: (value: string[]) => Promise<boolean>;
   updateStoreToolPayload: (value: boolean) => Promise<boolean | undefined>;
   exportMCPSettings: (serverName?: string) => Promise<any>;
   // Bearer key management
@@ -440,6 +443,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
 
   const [nameSeparator, setNameSeparator] = useState<string>('-');
   const [enableSessionRebuild, setEnableSessionRebuild] = useState<boolean>(false);
+  // Upstream #1300: admin-managed upstream CIDR ranges (SSRF allow-list).
+  const [allowedCidrs, setAllowedCidrs] = useState<string[]>([]);
   const [storeToolPayload, setStoreToolPayload] = useState<boolean>(true);
   const [bearerKeys, setBearerKeys] = useState<BearerKey[]>([]);
 
@@ -487,6 +492,9 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
           npmRegistry: data.data.systemConfig.install.npmRegistry || '',
           baseUrl: data.data.systemConfig.install.baseUrl || 'http://localhost:23333',
         });
+      }
+      if (data.success) {
+        setAllowedCidrs(data.data?.systemConfig?.network?.allowedCidrs ?? []);
       }
       if (data.success && data.data?.systemConfig?.smartRouting) {
         setSmartRoutingConfig({
@@ -1108,6 +1116,30 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     }
   };
 
+  // Upstream #1300: admin-managed upstream CIDR ranges (SSRF allow-list).
+  const updateAllowedCidrs = async (value: string[]): Promise<boolean> => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiPut('/system-config', { network: { allowedCidrs: value } });
+      if (data.success) {
+        setAllowedCidrs(data.data?.network?.allowedCidrs ?? value);
+        showToast(t('settings.systemConfigUpdated'));
+        return true;
+      }
+      setError(data.error || 'Failed to update CIDR ranges');
+      showToast(data.error || t('settings.allowedCidrsUpdateFailed'));
+      return false;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : t('settings.allowedCidrsUpdateFailed');
+      setError(msg);
+      showToast(msg);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Update session rebuild flag
   const updateSessionRebuild = async (value: boolean) => {
     setLoading(true);
@@ -1309,6 +1341,8 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     updateBetterAuthConfigBatch,
     updateNameSeparator,
     updateSessionRebuild,
+    allowedCidrs,
+    updateAllowedCidrs,
     updateStoreToolPayload,
     exportMCPSettings,
     refreshBearerKeys,
