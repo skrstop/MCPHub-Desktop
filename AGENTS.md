@@ -578,7 +578,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 | --- | --- |
 | **当前已同步到 origin commit** | `0ee8100`（origin/main，= v1.1.3 后 2 commit，本轮仅评估 #1307） |
 | **对应 origin tag** | `v1.1.3`（后 2 commit，均未发布新 tag） |
-| **桌面端版本号** | `1.1.3001`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
+| **桌面端版本号** | `1.1.3010`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
 | **同步执行日期** | 2026-10-12（22539eb 后 3 commit 评估收口） |
 
 > 下次同步以 `0ee8100` 为基线起点（`git log --oneline 0ee8100..HEAD`）。
@@ -803,4 +803,4 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.1005**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.3010**。
