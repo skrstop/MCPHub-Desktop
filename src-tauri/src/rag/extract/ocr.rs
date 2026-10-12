@@ -243,7 +243,7 @@ mod windows_imp {
     pub fn status() -> OcrStatus {
         let (available, engine) = match engine_probe() {
             Ok(()) => (true, "Windows.Media.Ocr".to_string()),
-            Err(e) => (false, e),
+            Err(e) => (false, e.clone()),
         };
         OcrStatus {
             available,

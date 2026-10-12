@@ -269,7 +269,7 @@ impl McpTransport for RmcpStdioTransport {
             .kill_on_drop(true);
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
+            // tokio::process::Command 提供 Windows 原生 creation_flags（无需 std CommandExt）
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         #[cfg(unix)]
