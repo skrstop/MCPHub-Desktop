@@ -48,6 +48,18 @@ pub async fn smart_routing_status() -> Result<SmartRoutingStatus, String> {
 }
 
 #[tauri::command]
+/// Participant count for the model-swap dialog's confirm-phase meta
+/// ("N 个服务器"). Read-only; still gated for consistency with reindex.
+pub async fn smart_routing_reindex_participants(
+    session: tauri::State<'_, crate::commands::auth::SessionState>,
+) -> Result<(usize, usize), String> {
+    crate::commands::config::require_admin(&session).await?;
+    crate::smart_routing::index::reindex_participants()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn smart_routing_reindex(session: tauri::State<'_, crate::commands::auth::SessionState>) -> Result<usize, String> {
     // Triggers a full embedding re-index and can spin up the shared mv model
     // runtime — admin-only (review round 8, 2026-10-04).

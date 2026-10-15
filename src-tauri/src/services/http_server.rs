@@ -565,6 +565,61 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "mcphub-desktop" }))
 }
 
+/// POST /rag/reindex-all — re-embed every doc with the loaded model (deploy
+/// template changes / model-swap recovery). Scriptable trigger for the Tauri
+/// command of the same name; gated on bearer auth + admin/skipAuth so it is
+/// not a public DoS surface (reindex is expensive). Long-running: responds
+/// only when the whole reindex finishes (the Tauri command has identical
+/// semantics; the UI progress bar path is the preferred interactive route).
+async fn rag_reindex_all_route(headers: HeaderMap) -> Response {
+    if let Err(r) = check_bearer_auth(&headers).await {
+        return r;
+    }
+    // Mirrors require_admin: skipAuth (guest mode) allows, otherwise deny —
+    // the HTTP surface has no user session, and bearer keys never carry
+    // admin. fail-closed when the skipAuth flag cannot be read.
+    // is_skip_auth_enabled: fail-closed already (corrupt config => false).
+    let skip = crate::commands::auth::is_skip_auth_enabled().await;
+    if !skip {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(json!({ "error": "admin required (skipAuth disabled on HTTP surface)" })),
+        )
+            .into_response();
+    }
+    let Some(app) = crate::mcp::progress::get_app_handle() else {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "app handle unavailable" })),
+        )
+            .into_response();
+    };
+    // Detached task: a full reindex takes ~1-2h (9 mermaid copies × 6199
+    // chunks). Running it inline means a client disconnect (curl timeout,
+    // proxy idle cutoff) drops the handler future and CANCELS the reindex
+    // after the current embed — observed as "only the first few docs ever
+    // re-indexed" (2026-10-13). Spawn instead and acknowledge immediately;
+    // progress is observable via the `[RAG] indexed` log stream and the
+    // `reindexed all docs (N of M ok)` completion line.
+    tokio::spawn(async move {
+        match crate::rag::service::reindex_all(&app).await {
+            Ok(n) => crate::services::app_logger::log_to_db(
+                "info",
+                &format!("[RAG] reindex-all finished: {n} docs ok"),
+            ),
+            Err(e) => crate::services::app_logger::log_to_db(
+                "warn",
+                &format!("[RAG] reindex-all failed: {e:#}"),
+            ),
+        }
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        Json(json!({ "started": true, "note": "reindex running in background; watch app_log for '[RAG] reindex-all finished'" })),
+    )
+        .into_response()
+}
+
 async fn list_servers(headers: HeaderMap) -> Response {
     let bearer_key = match check_bearer_auth(&headers).await {
         Ok(k) => k,
@@ -3373,6 +3428,7 @@ fn build_router(body_limit_bytes: usize, sdk_cancel: tokio_util::sync::Cancellat
         .route("/servers/{server}/oauth/status", get(server_oauth_status))
         .route("/servers", get(list_servers))
         // Legacy REST API (moved to /rest prefix to avoid wildcard conflict)
+        .route("/rag/reindex-all", post(rag_reindex_all_route))
         .route("/rest/{server}/tools", get(list_server_tools))
         .route("/rest/{server}/call", post(call_server_tool))
         .route("/rest/group/{group}/tools", get(list_group_tools))

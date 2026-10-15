@@ -37,10 +37,14 @@
 }
 
 .dark {
+  /* 页面与卡片保持原中性暗色；配置项子块用 --hub-item 深蓝（#1f2937 系），
+     对齐 OAuth Server 卡片的视觉层次（深色卡片 + 深蓝配置项行）。 */
   --hub-bg: oklch(0.18 0.005 250);
   --hub-bg-2: oklch(0.21 0.005 250);
   --hub-surface: oklch(0.22 0.005 250);
   --hub-surface-hover: oklch(0.25 0.005 250);
+  --hub-item: oklch(0.278 0.028 250);
+  --hub-item-hover: oklch(0.31 0.032 250);
   --hub-switch-track-on: oklch(0.86 0.004 250);
   --hub-ink: oklch(0.97 0.005 250);
   --hub-ink-2: oklch(0.78 0.005 250);
@@ -531,17 +535,24 @@
 
 /* Generic Settings page field rows — flatten heavy gray bg to hair-line */
 /* Only inside the settings page body, scoped via .page-card descendants */
+/* 暗色下配置项行统一深蓝（--hub-item），亮色保持原浅灰 */
 .page-card .bg-gray-50,
 .page-card .dark\:bg-gray-800.rounded-md {
   background: var(--hub-bg-2) !important;
 }
+.dark .page-card .bg-gray-50,
+.dark .page-card .dark\:bg-gray-800.rounded-md,
+.dark .page-card .dark\:bg-\[var\(--hub-item\)\] {
+  background: var(--hub-item) !important;
+}
 
 /* Scoped redesign for Smart Routing form fields inside Settings */
+/* 配置项行统一深蓝（--hub-item），与设置页其他配置块一致 */
 .hub-sr-fields > div {
   padding: 12px 14px !important;
   border: 1px solid var(--hub-line) !important;
   border-radius: 8px !important;
-  background: var(--hub-bg-2) !important;
+  background: var(--hub-item) !important;
   box-shadow: none !important;
 }
 .hub-sr-fields h3 {
@@ -603,8 +614,12 @@
 
 /* Generic bg-white / dark:bg-gray-800 surface */
 .dark .bg-white,
-.dark .dark\:bg-gray-800 {
+.dark .dark\:bg-gray-800,
+.dark .dark\:bg-gray-900 {
   background: var(--hub-surface) !important;
+}
+.dark .dark\:bg-gray-700 {
+  background: var(--hub-surface-hover) !important;
 }
 
 /* Loading / empty-state / error containers */

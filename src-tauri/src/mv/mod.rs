@@ -294,12 +294,15 @@ async fn load_locked(app: &AppHandle) -> Result<MvInfo> {
         format!("[mv] model '{}' loaded (dim={}, RSS: {} MiB)", size, dim, rss),
     );
     // Model actually (re)loaded — the smart index may hold rows embedded by a
-    // previous model (same-dim swaps don't recreate the table). Purge + reindex
-    // in the background; no-op when Smart Routing is off.
+    // previous model (same-dim swaps don't recreate the table). Purge stale
+    // rows in the background; NO automatic reindex here — the reload flow
+    // (model-swap dialog) re-indexes explicitly AFTER the RAG re-embed so the
+    // two progress rows run in order. Other flows (smart enable, boot
+    // connect hooks) trigger their own reindex.
     {
         let size = size.clone();
         tokio::spawn(async move {
-            crate::smart_routing::index::on_model_reloaded(size).await;
+            crate::smart_routing::index::purge_stale_model_rows(&size).await;
         });
     }
     Ok(MvInfo {

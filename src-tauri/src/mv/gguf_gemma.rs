@@ -218,6 +218,20 @@ impl GgufArch for Gemma3EmbedArch {
 /// One Gemma3 layer:
 ///   residual + post_attn_norm(attn(input_norm(x)))
 ///   residual + post_ffn_norm(mlp(pre_ffn_norm(residual)))
+
+/// GQA head interleave: [b, seq, kv, hd] -> [b, seq, kv*rep, hd] with each kv
+/// head repeated `rep` times CONSECUTIVELY (q head j attends kv head j/rep).
+/// `Tensor::repeat` tiles block-wise (q head j -> kv j%kv), which scrambles
+/// the head mapping — verified against llama.cpp eval-callback fingerprints
+/// (post-wo sum: interleave -1.1795 vs llama -1.1785; tile -3.3579).
+fn repeat_kv(t: &Tensor, rep: usize) -> Result<Tensor> {
+    let (b, seq, kv, hd) = t.dims4()?;
+    Ok(t.reshape((b, seq, kv, 1, hd))?
+        .broadcast_as((b, seq, kv, rep, hd))?
+        .contiguous()?
+        .reshape((b, seq, kv * rep, hd))?)
+}
+
 fn forward_layer(
     l: &Gemma3Layer,
     x: &Tensor,
@@ -244,8 +258,8 @@ fn forward_layer(
     let k = apply_rope(&k, positions, head_dim, l.rope_base, device)?;
     // GQA: repeat k, v from n_kv_head to n_head.
     let rep = n_head / n_kv_head;
-    let k = k.repeat((1, 1, rep, 1))?;
-    let v = v.repeat((1, 1, rep, 1))?;
+    let k = repeat_kv(&k, rep)?;
+    let v = repeat_kv(&v, rep)?;
     let q = q.transpose(1, 2)?.contiguous()?;
     let k = k.transpose(1, 2)?.contiguous()?;
     let v = v.transpose(1, 2)?.contiguous()?;

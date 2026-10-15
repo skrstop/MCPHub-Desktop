@@ -86,6 +86,53 @@ pub struct DeployConfig {
     /// `chunkOverlap`). `None` if unset -> falls back to a built-in default
     /// (100). Used the same auto-vs-override way as `chunk_size`.
     pub chunk_overlap: Option<u32>,
+    /// Title field delimiter (deploy.json `docTitleDelimiter`, optional).
+    /// When the document template embeds a real title (`{title}`), the model's
+    /// field separator character (e.g. `|` for granite's `Title: {title} | ...`
+    /// format) must not appear INSIDE the title or a parser would split at the
+    /// wrong boundary. When set, occurrences of this string in the title are
+    /// replaced with "_" at render time. Per-model convention (granite-specific
+    /// `|`), NOT a global rule — models whose template has no field separator
+    /// simply leave this unset. None/missing -> no replacement.
+    pub doc_title_delimiter: Option<String>,
+}
+
+/// Render the embedding input for one document chunk from the deploy.json
+/// `importDocPrefix` TEMPLATE. Placeholder syntax (model-agnostic):
+/// - `{title}`   -> the doc's title (sanitized per `doc_title_delimiter`)
+/// - `{content}` -> the raw chunk text
+/// Back-compat: a template WITHOUT `{content}` is treated as a plain prefix
+/// (Qwen3/BGE style, e.g. "passage: ") — rendered (with `{title}` substituted
+/// if present) and concatenated before the content, exactly the pre-template
+/// behavior. Templates that DO contain `{content}` control the full layout
+/// (granite style: `"Title: {title} | {content}"`).
+pub fn render_doc_embed_text(
+    template: &str,
+    title: &str,
+    content: &str,
+    title_delimiter: Option<&str>,
+) -> String {
+    let safe_title = match title_delimiter {
+        Some(d) if !d.is_empty() && title.contains(d) => title.replace(d, "_"),
+        _ => title.to_string(),
+    };
+    if template.contains("{content}") {
+        template.replace("{title}", &safe_title).replace("{content}", content)
+    } else {
+        format!("{}{}", template.replace("{title}", &safe_title), content)
+    }
+}
+
+/// Render the embedding input for a search query from the deploy.json
+/// `searchQueryPrefix` TEMPLATE. `{query}` -> the raw query; a template
+/// without the placeholder keeps the plain-prefix behavior
+/// (`template + query`).
+pub fn render_query_embed_text(template: &str, query: &str) -> String {
+    if template.contains("{query}") {
+        template.replace("{query}", query)
+    } else {
+        format!("{}{}", template, query)
+    }
 }
 
 /// Read `size_dir/deploy.json`
@@ -104,6 +151,7 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
             import_doc_prefix: String::new(),
             chunk_size: None,
             chunk_overlap: None,
+            doc_title_delimiter: None,
         };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -117,6 +165,7 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
             import_doc_prefix: String::new(),
             chunk_size: None,
             chunk_overlap: None,
+            doc_title_delimiter: None,
         };
     };
     let platform = match v.get("platform").and_then(|p| p.as_str()) {
@@ -159,6 +208,13 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         .and_then(|n| n.as_u64())
         .filter(|&n| n <= u32::MAX as u64)
         .map(|n| n as u32);
+    // Title field delimiter for `{title}` templates (deploy.json
+    // `docTitleDelimiter`). Optional; missing/null/non-string -> None.
+    let doc_title_delimiter = v
+        .get("docTitleDelimiter")
+        .and_then(|d| d.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     DeployConfig {
         platform,
         description,
@@ -168,6 +224,7 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         import_doc_prefix,
         chunk_size,
         chunk_overlap,
+        doc_title_delimiter,
     }
 }
 
@@ -404,5 +461,62 @@ pub fn process_rss_mib() -> Option<u64> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::{render_doc_embed_text, render_query_embed_text};
+
+    #[test]
+    fn granite_template_with_title_and_content() {
+        let out = render_doc_embed_text(
+            "Title: {title} | {content}",
+            "消息配置与待办事项 - 迭代评审文档",
+            "本周待办事项：1. 完成版本发布",
+            Some("|"),
+        );
+        assert_eq!(
+            out,
+            "Title: 消息配置与待办事项 - 迭代评审文档 | 本周待办事项：1. 完成版本发布"
+        );
+    }
+
+    #[test]
+    fn title_delimiter_replaced() {
+        // 标题里含分隔符 | → 替换成 "；"，防止被模型按字段边界错误切分
+        let out = render_doc_embed_text(
+            "Title: {title} | {content}",
+            "A|B 评审",
+            "正文",
+            Some("|"),
+        );
+        assert_eq!(out, "Title: A_B 评审 | 正文");
+    }
+
+    #[test]
+    fn no_delimiter_configured_no_replacement() {
+        let out = render_doc_embed_text("Title: {title} | {content}", "A|B", "c", None);
+        assert_eq!(out, "Title: A|B | c");
+    }
+
+    #[test]
+    fn plain_prefix_template_back_compat() {
+        // 无 {content} 占位符 = 旧「前缀」语义（Qwen3/BGE 风格）
+        assert_eq!(
+            render_doc_embed_text("passage: ", "任意标题", "正文", None),
+            "passage: 正文"
+        );
+        assert_eq!(
+            render_doc_embed_text("passage: {title}\n", "T", "C", None),
+            "passage: T\nC"
+        );
+    }
+
+    #[test]
+    fn query_template() {
+        assert_eq!(render_query_embed_text("Query: {query}", "待办"), "Query: 待办");
+        // 无占位符 = 旧前缀拼接
+        assert_eq!(render_query_embed_text("query: ", "待办"), "query: 待办");
     }
 }

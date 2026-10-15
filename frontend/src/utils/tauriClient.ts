@@ -774,6 +774,10 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   // GET /smart-routing/status
   if (p === 'smart-routing/status' && m === 'GET')
     return { command: 'smart_routing_status', args: {} };
+  // GET /smart-routing/reindex-participants — model-swap dialog confirm-phase
+  // meta ("N 个服务器"); read-only count mirroring reindex_all's denominator.
+  if (p === 'smart-routing/reindex-participants' && m === 'GET')
+    return { command: 'smart_routing_reindex_participants', args: {} };
 
   if (segs[0] === 'rag') {
     // GET /rag/status — runtime status (switch state)

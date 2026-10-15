@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Boxes, Check, ChevronDown, Database, Loader2 } from 'lucide-react';
+import { Boxes, Check, ChevronDown, Database, Loader2, RefreshCw } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import ModelSelector, { type ModelDownloadProgress } from '@/components/ui/ModelSelector';
+import ReindexDialog from '@/components/ReindexDialog';
+import { reindexSmartRouting } from '@/services/smartRoutingService';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useToast } from '@/contexts/ToastContext';
 import {
@@ -37,7 +39,12 @@ const ModelVectorSettings: React.FC = () => {
   const [deviceOpen, setDeviceOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [reindexConfirmOpen, setReindexConfirmOpen] = useState(false);
-  const [reindexing, setReindexing] = useState(false);
+  // Model picked in the selector: parked until 开始重载 (no switch happens
+  // on pick; cancel just drops the parked choice with zero side effects).
+  const [pendingModel, setPendingModel] = useState<string | null>(null);
+  // Dialog copy mode: 'switch' (model swap) vs 'reload' (plain re-embed with
+  // the current model) — same shared ReindexDialog, different lead/done text.
+  const [reindexMode, setReindexMode] = useState<'switch' | 'reload'>('switch');
   const [sectionOpen, setSectionOpen] = useState(false);
   const deviceWrapRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
@@ -112,38 +119,62 @@ const ModelVectorSettings: React.FC = () => {
   }, []);
 
   const handleSelectModel = async (size: string) => {
+    if (size === currentModel) return;
+    setPendingModel(size);
+    setReindexMode('switch');
+    setReindexConfirmOpen(true);
+  };
+
+  // 重新载入 button: same dialog, 'reload' mode — no model switch, the
+  // current model re-embeds everything (pendingModel stays null so
+  // handleStartReindex skips the switch block).
+  const requestReload = () => {
+    setPendingModel(null);
+    setReindexMode('reload');
+    setReindexConfirmOpen(true);
+  };
+
+  // dialog 开始重载: perform the switch, then (only when the backend says
+  // the old embeddings are invalid) the doc re-embed + smart reload.
+  const handleStartReindex = async (): Promise<'reindexed' | 'clean'> => {
+    const size = pendingModel;
+    setPendingModel(null);
     setSwitching(true);
     try {
-      const st = await selectRagModel(size);
-      if (!mounted.current) return;
-      setCurrentModel(size);
-      setStatus(st);
-      if (st.needsReindex) {
-        setReindexConfirmOpen(true);
-      } else {
-        showToast(t('settings.mvModelSwitched'), 'success');
+      if (size) {
+        const st = await selectRagModel(size);
+        if (!mounted.current) return 'clean';
+        setCurrentModel(size);
+        setStatus(st);
+        if (!st.needsReindex) {
+          setReindexConfirmOpen(false);
+          showToast(t('settings.mvModelSwitched'), 'success');
+          void fetchAll();
+          return 'clean';
+        }
       }
+      await reindexAllRag();
+      if (smartRoutingConfig.enabled) await reindexSmartRouting();
+      if (mounted.current) {
+        showToast(t('settings.mvReindexDone'), 'success');
+        void fetchAll();
+      }
+      return 'reindexed';
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), 'error');
+      setReindexConfirmOpen(false);
+      return 'clean';
     } finally {
       if (mounted.current) setSwitching(false);
     }
   };
 
-  const handleConfirmReindex = async () => {
-    setReindexing(true);
-    try {
-      await reindexAllRag();
-      if (mounted.current) {
-        setReindexConfirmOpen(false);
-        showToast(t('settings.mvReindexDone'), 'success');
-        void fetchAll();
-      }
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : String(e), 'error');
-    } finally {
-      if (mounted.current) setReindexing(false);
-    }
+  // Cancel / 完成: close the dialog and drop the parked model choice. NO
+  // backend call — nothing visibly changes.
+  const dismissReindexDialog = () => {
+    setReindexConfirmOpen(false);
+    setPendingModel(null);
+    setReindexMode('switch');
   };
 
   const handleDeviceChange = async (d: MvDevice) => {
@@ -222,14 +253,25 @@ const ModelVectorSettings: React.FC = () => {
             RAG
           </span>
           {status?.initializing && <Loader2 size={12} className="animate-spin text-[var(--hub-ink-3)]" />}
+          {/* 重新载入：状态行尾部右对齐；Smart Routing 与 RAG 均开启时才可用 */}
+          <button
+            type="button"
+            className="hub-btn sm"
+            style={{ marginLeft: 'auto' }}
+            disabled={(!smartRoutingConfig.enabled && !ragEnabled) || !mvRunning || status?.initializing || switching}
+            onClick={requestReload}
+            title={t('pages.rag.reloadButtonHint')}
+          >
+            <RefreshCw size={12} /> {t('pages.rag.reloadButton')}
+          </button>
         </div>
         <p style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>{t('settings.mvHint')}</p>
 
         {/* 模型切换（唯一入口；未启动时禁用） */}
-        <div className={mvRunning ? '' : 'mv-disabled'}>
+        <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${mvRunning ? '' : 'mv-disabled'}`}>
           <div className="flex items-center gap-2 mb-2">
             <Database size={13} className="text-[var(--hub-ink-3)]" />
-            <h3 className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+            <h3 className="text-[13px] font-medium flex-1" style={{ color: 'var(--hub-ink)' }}>
               {t('settings.mvModelSwitch')}
             </h3>
           </div>
@@ -257,7 +299,7 @@ const ModelVectorSettings: React.FC = () => {
 
         {/* 运行设备（AUTO/GPU/CPU）：Phase 1 仅持久化 mv.device，后端 Phase 2 消费。
             样式与 ModelSelector 触发框对齐（同高/同字号/自定义箭头）。 */}
-        <div className={mvRunning ? '' : 'mv-disabled'}>
+        <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${mvRunning ? '' : 'mv-disabled'}`}>
           <div className="flex items-center gap-2 mb-2">
             <h3 className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
               {t('settings.mvDevice')}
@@ -331,40 +373,16 @@ const ModelVectorSettings: React.FC = () => {
       </div>
       )}
 
-      {/* 模型切换导致维度变化 → RAG 文档需重嵌确认（与 RagPage 同语义） */}
+      {/* 模型切换导致维度变化 → 重载数据弹框（v2 共享组件：双进度 + 取消回退） */}
       {reindexConfirmOpen && (
-        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4" style={{ pointerEvents: 'auto' }}>
-          <div
-            className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border"
-            style={{ borderColor: 'var(--hub-line-2)' }}
-          >
-            <div
-              className="flex items-center justify-between p-5 border-b"
-              style={{ borderColor: 'var(--hub-line-2)' }}
-            >
-              <h2 className="text-lg font-bold" style={{ color: 'var(--hub-ink)' }}>
-                {t('pages.rag.reindexConfirmTitle')}
-              </h2>
-            </div>
-            <div className="p-5 space-y-3">
-              <p className="text-[13px] leading-relaxed" style={{ color: 'var(--hub-ink-3)' }}>
-                {t('pages.rag.reindexConfirmMessage')}
-              </p>
-            </div>
-            <div
-              className="flex justify-end gap-2 p-5 pt-3 border-t"
-              style={{ borderColor: 'var(--hub-line-2)' }}
-            >
-              <button onClick={() => setReindexConfirmOpen(false)} className="hub-btn" disabled={reindexing}>
-                {t('pages.rag.cancel')}
-              </button>
-              <button onClick={handleConfirmReindex} className="hub-btn primary" disabled={reindexing}>
-                {reindexing ? <Loader2 size={13} className="animate-spin" /> : null}
-                {t('pages.rag.reindexConfirmButton')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ReindexDialog
+          open
+          mode={reindexMode}
+          targetModel={pendingModel ?? currentModel ?? ''}
+          smartEnabled={smartRoutingConfig.enabled}
+          onClose={dismissReindexDialog}
+          onStart={handleStartReindex}
+        />
       )}
     </div>
   );

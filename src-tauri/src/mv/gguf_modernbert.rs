@@ -2,7 +2,7 @@
 //! Multilingual R2, and any other `modern-bert` GGUF embedding).
 //!
 //! ## Architecture (verified against the GGUF metadata + tensor layout AND the
-//! HF reference: `ibm-granite/granite-embedding-97m-multilingual-r2`'
+//! HF reference: `ibm-granite/granite-embedding-97m-r2-multilingual-r2`'
 //! `config.json` / `1_Pooling/config.json` / `modules.json` + transformers'
 //! `modeling_modern_bert.py`)
 //! 12-layer BERT-style encoder, **pre-norm** RMSNorm (standard, NO +1 weight
@@ -47,7 +47,7 @@
 //! reference (pre-norm block, full-head_dim RoPE, GLU, CLS-pool + L2) and all
 //! architecture parameters are confirmed against the HF config. NOT numerically
 //! validated here (torch isn't installed in this sandbox) — validate cosine
-//! ~1.0 against `ibm-granite/granite-embedding-97m-multilingual-r2` once
+//! ~1.0 against `ibm-granite/granite-embedding-97m-r2-multilingual-r2` once
 //! running (a deferred `#[ignore]` probe, see the plan).
 
 use std::io::{Read, Seek};
@@ -355,7 +355,7 @@ mod tests {
     #[ignore]
     fn granite_loads_and_embeds() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m/model.gguf");
+            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: {} not present", gguf.display());
             return;
@@ -403,7 +403,7 @@ mod tests {
     fn granite_cosine_probe() {
         use crate::mv::embedder::Embedder;
         let size_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m");
+            .join("runtimes/rag/model/granite/97m-r2");
         if !size_dir.exists() {
             eprintln!("skipping: {} not present", size_dir.display());
             return;

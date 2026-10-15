@@ -879,6 +879,39 @@ pub fn auth_error(detail: impl std::fmt::Display) -> anyhow::Error {
     anyhow!("GIT_AUTH_REQUIRED:{}", scrub_credentials(&detail.to_string()))
 }
 
+/// gix surfaces "server answered but with a non-git content-type" as the
+/// cryptic smart-protocol error, DISCARDING the HTTP status and body — so a
+/// 401 with a text/plain body, an SSO login page (200 HTML), or a wrong URL
+/// pointing at a web page all produce the SAME text. When credentials were
+/// NOT supplied the overwhelmingly likely cause is auth (GitLab-style
+/// servers answer anonymous probes with "HTTP Basic: Access denied" text/plain;
+/// browser-gateways redirect to a login page) — map to GIT_AUTH_REQUIRED so
+/// the frontend shows the credential form. With credentials supplied the
+/// likely causes are: password auth rejected in favor of a token, or the URL
+/// is not a git endpoint — plain error with an actionable hint.
+pub(crate) fn classify_non_advertisement_error(
+    err: &anyhow::Error,
+    had_credentials: bool,
+) -> anyhow::Error {
+    let msg = format!("{err:#}");
+    let is_proto = msg.contains("x-git-upload-pack-advertisement")
+        || (msg.contains("smart' protocol") && msg.contains("dumb' protocol"));
+    if !is_proto {
+        return anyhow!("{msg}");
+    }
+    if had_credentials {
+        anyhow!(
+            "服务器未返回 git 智能协议响应。常见原因：①服务器要求 Token 而非密码（GitLab/Gitea 新版默认拒绝密码认证，请使用 Personal Access Token）②账号或密码错误 ③URL 指向的不是 git 仓库端点。原始错误：{}",
+            scrub_credentials(&msg)
+        )
+    } else {
+        auth_error(format!(
+            "服务器未返回 git 智能协议响应（常见于私有仓库需要账号密码/Token 认证，或网关重定向到登录页）。原始错误：{}",
+            scrub_credentials(&msg)
+        ))
+    }
+}
+
 /// Scrub userinfo credentials out of error text. reqwest/gix request errors
 /// embed the full request URL (`... for url (https://user:pass@host/...)`)
 /// and the url crate does NOT redact userinfo — logging such an error
@@ -1101,6 +1134,11 @@ pub async fn clone_to_temp(
         } => None, // cancelled: abandon the clone wait
     };
     unregister_abort(url).await;
+    let had_creds = username.map_or(false, |u| !u.trim().is_empty())
+        || password.map_or(false, |p| !p.is_empty());
+    let result = result.map(|r| {
+        r.map_err(|e| classify_non_advertisement_error(&e, had_creds))
+    });
     done_flag.store(true, std::sync::atomic::Ordering::Relaxed);
     // Terminal sample: emit the exact final byte count (100% when the total
     // is known) so the UI doesn't freeze at the last 120ms snapshot.
@@ -1249,6 +1287,8 @@ pub async fn refresh_persistent(
     let new_dir = persistent_root(app)?.join(format!("{hash}.persist-new-{attempt}"));
     let old_dir = persistent_root(app)?.join(format!("{hash}.old"));
     let clone_url = build_clone_url(url, username, password);
+    let had_creds = username.map_or(false, |u| !u.trim().is_empty())
+        || password.map_or(false, |p| !p.is_empty());
     let commit = match clone_async(
         &clone_url,
         new_dir.clone(),
@@ -1266,7 +1306,7 @@ pub async fn refresh_persistent(
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&new_dir);
-            return Err(e);
+            return Err(classify_non_advertisement_error(&e, had_creds));
         }
     };
     // Atomic-ish swap: main -> .old, .new -> main, delete .old. If the final

@@ -96,6 +96,11 @@ fn is_cjk(c: char) -> bool {
     )
 }
 
+/// `is_cjk` 的 crate 内公开入口（rag/service 跨语言惩罚用，避免复制判定表）。
+pub(crate) fn is_cjk_pub(c: char) -> bool {
+    is_cjk(c)
+}
+
 /// 词元是否含 CJK 字符
 fn has_cjk(s: &str) -> bool {
     s.chars().any(is_cjk)
@@ -274,6 +279,129 @@ fn extract_tokens(input: &str) -> Option<(Vec<String>, Vec<String>)> {
         return None; // 空输入 / 纯符号
     }
     Some((zh_tokens, ascii_tokens))
+}
+
+/// RAG 关键词通道的查询词元（`rag::vectordb::keyword_search` 与 `rag::service::search`
+/// 打分共用，保证 LIKE 过滤与打分口径一致）。
+///
+/// 中文不用词典分词而用**字符 bigram 滑窗**：jieba 会把「等待办的事情」切成
+/// 等待/办/的/事情，跨词边界的「待办」永远不产出 → 含「待办事项」的 chunk 词法零命中
+/// （用户实测 2026-10-12）；bigram「待办」天然覆盖该情形。词典分词对「待办事项」
+/// 这类非词典词同样不稳。ASCII 段仍按原词（lowercase）。
+/// CJK/ASCII 连续段内部的标点会切段，避免产生跨标点的假 bigram（如「项紧」）。
+/// 返回去重后的词元，CJK 段长度上限 32 个 bigram（超长查询截断防 LIKE 子句爆炸）。
+pub(crate) fn rag_query_terms(input: &str) -> Vec<String> {
+    fn push_unique(out: &mut Vec<String>, t: String) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    // 冲刷累积段：CJK 段产 bigram（单字降级为单字），ASCII 段产原词
+    fn flush(cjk: &mut Vec<char>, ascii: &mut String, out: &mut Vec<String>) {
+        if cjk.len() == 1 {
+            push_unique(out, cjk[0].to_string());
+        } else if cjk.len() >= 2 {
+            for w in cjk.windows(2) {
+                let t: String = w.iter().collect();
+                push_unique(out, t);
+            }
+        }
+        cjk.clear();
+        if !ascii.is_empty() {
+            let t = std::mem::take(ascii).to_lowercase();
+            push_unique(out, t);
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for raw in input.split_whitespace() {
+        let mut cjk_seg: Vec<char> = Vec::new();
+        let mut ascii_seg = String::new();
+        for c in raw.chars() {
+            if is_cjk(c) {
+                if !ascii_seg.is_empty() {
+                    let t = std::mem::take(&mut ascii_seg).to_lowercase();
+                    push_unique(&mut out, t);
+                }
+                cjk_seg.push(c);
+            } else if c.is_alphanumeric() {
+                if !cjk_seg.is_empty() {
+                    flush(&mut cjk_seg, &mut ascii_seg, &mut out);
+                }
+                ascii_seg.push(c);
+            } else {
+                // 标点/空白类：切段
+                flush(&mut cjk_seg, &mut ascii_seg, &mut out);
+            }
+        }
+        flush(&mut cjk_seg, &mut ascii_seg, &mut out);
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out.truncate(32);
+    out
+}
+
+#[cfg(test)]
+mod rag_terms_tests {
+    use super::rag_query_terms;
+
+    #[test]
+    fn cjk_bigram_crosses_word_boundary() {
+        // 用户实测场景（2026-10-12）：查询「等待办的事情」的 bigram「待办」
+        // 必须命中含「待办事项」的 chunk —— 词典分词（等待/办/的/事情）会漏。
+        let terms = rag_query_terms("等待办的事情");
+        assert!(terms.contains(&"待办".to_string()), "terms={terms:?}");
+        assert!(terms.contains(&"事情".to_string()), "terms={terms:?}");
+        // 打分一致性：chunk 含「待办」→ contains 命中
+        let chunk = "今天的待办事项：发版";
+        let matched = terms.iter().filter(|t| chunk.contains(t.as_str())).count();
+        assert!(matched > 0, "bigram must match chunk, terms={terms:?}");
+    }
+
+    #[test]
+    fn cjk_single_char_query_degrades_to_single_char() {
+        assert_eq!(rag_query_terms("办"), vec!["办".to_string()]);
+    }
+
+    #[test]
+    fn ascii_words_kept_lowercase() {
+        assert_eq!(
+            rag_query_terms("Deploy HTTP"),
+            vec!["deploy".to_string(), "http".to_string()]
+        );
+    }
+
+    #[test]
+    fn punctuation_breaks_segments() {
+        // 标点切段：不产「项紧」这类跨标点假 bigram
+        let terms = rag_query_terms("待办事项，紧急");
+        assert!(terms.contains(&"待办".to_string()));
+        assert!(terms.contains(&"事项".to_string()));
+        assert!(terms.contains(&"紧急".to_string()));
+        assert!(!terms.contains(&"项紧".to_string()), "terms={terms:?}");
+    }
+
+    #[test]
+    fn mixed_cjk_ascii() {
+        let terms = rag_query_terms("解析JSON文件");
+        assert!(terms.contains(&"解析".to_string()));
+        assert!(terms.contains(&"json".to_string()));
+        assert!(terms.contains(&"文件".to_string()));
+    }
+
+    #[test]
+    fn empty_and_symbols() {
+        assert!(rag_query_terms("").is_empty());
+        assert!(rag_query_terms("   ").is_empty());
+        assert!(rag_query_terms("!!!???").is_empty());
+    }
+
+    #[test]
+    fn long_input_capped_at_32() {
+        let long: String = (0..100).map(|i| char::from_u32(0x4E00 + i).unwrap()).collect();
+        assert_eq!(rag_query_terms(&long).len(), 32);
+    }
 }
 
 // ---------------------------------------------------------------------------

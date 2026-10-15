@@ -2,6 +2,8 @@ import React, { createContext, useContext, useState, useCallback, useRef, useEff
 import { useTranslation } from 'react-i18next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSettings } from '@/contexts/SettingsContext';
+import { reindexSmartRouting } from '@/services/smartRoutingService';
 import { useToast } from '@/contexts/ToastContext';
 import { isTauri } from '@/utils/tauriClient';
 import { BatchPreview, RagChunk, RagDoc, RagDocInfo, RagFolderScan, RagModelInfo, RagModelLimits, RagOcrStatus, RagPickedFile, RagSettings, RagSearchResult, RagUpdateCheck } from '@/types';
@@ -51,6 +53,8 @@ type RagDataValue = ReturnType<typeof useRagDataState>;
 const RagDataContext = createContext<RagDataValue | undefined>(undefined);
 
 const useRagDataState = () => {
+  const { smartRoutingConfig } = useSettings();
+  const smartEnabled = smartRoutingConfig.enabled;
   const { t } = useTranslation();
   const { auth } = useAuth();
   const { showToast } = useToast();
@@ -137,15 +141,11 @@ const useRagDataState = () => {
   // upload overlay (same bars) but switches the title text to "updating".
   const [updatingDoc, setUpdatingDoc] = useState(false);
   // When a model swap changes the embedding dim, the backend recreates the
-  // vector table (old embeddings gone). We DON'T auto-reindex - we set this
-  // flag so the page can prompt the user to confirm before re-embedding all
-  // docs (which is expensive). Confirm -> reindexAll; cancel -> leave docs
-  // un-reindexed (they show 0 chunks until manually re-uploaded/reindexed).
+  // vector table (old embeddings gone). The confirm dialog gates the switch:
+  // picking a model only PARKS the choice (`pendingModel`); the actual
+  // switch + re-embed runs on 开始重载 (`startReindex`); cancel drops the
+  // parked choice with zero side effects.
   const [reindexConfirm, setReindexConfirm] = useState(false);
-  // The model that was selected BEFORE a dim-changing switch (saved so a
-  // cancelled reindex confirm can revert to it). Set only by `selectModel`;
-  // cleared by confirm/cancel.
-  const [prevModel, setPrevModel] = useState<string | null>(null);
   // Model selection: available sizes (dropdown), the current size, and the
   // download progress for a size being fetched via its download.url.
   const [models, setModels] = useState<RagModelInfo[]>([]);
@@ -523,44 +523,74 @@ const useRagDataState = () => {
     }
   }, [fetchDocs, t, showToast]);
 
-  // User confirmed the reindex prompt (model dim changed) -> run it now.
-  const confirmReindex = useCallback(async () => {
-    setReindexConfirm(false);
-    setPrevModel(null);
-    await reindexAll();
-  }, [reindexAll]);
+  // Model picked in the selector: DO NOT switch yet — park the choice and
+  // open the confirm dialog. The switch itself happens in `startReindex`
+  // (开始重载); cancel just drops the parked choice (no backend call, no
+  // visible switch).
+  const [pendingModel, setPendingModel] = useState<string | null>(null);
+  // Dialog copy mode: 'switch' (model swap) vs 'reload' (plain re-embed with
+  // the current model). Drives the shared ReindexDialog's lead/done text.
+  const [reindexMode, setReindexMode] = useState<'switch' | 'reload'>('switch');
+  // Which rows/work the reload covers: 'rag' (RAG page entry), 'smart'
+  // (Smart Routing entry), 'both' (model swap). Drives the dialog's rows and
+  // which reindex calls startReindex performs.
+  const [reindexScope, setReindexScope] = useState<'both' | 'rag' | 'smart'>('both');
 
-  // User cancelled the reindex prompt (from a dim-changing model switch) ->
-  // REVERT to the model that was selected before the switch. Silent: no toast,
-  // and ignore the revert's own `needsReindex` (the user already declined
-  // reindexing, so we don't re-prompt - the docs stay at 0 chunks until
-  // manually re-uploaded/reindexed). Only reverts when this confirm came from
-  // `selectModel` (prevModel set); a confirm from `toggleEnabled` has no
-  // prevModel -> just dismiss.
-  const cancelReindex = useCallback(async () => {
-    setReindexConfirm(false);
-    const revertTo = prevModel;
-    setPrevModel(null);
-    if (!revertTo) return;
-    setInitializing(true);
+  // dialog 开始重载: perform the model switch, then (only when the backend
+  // says the old embeddings are invalid) the doc re-embed + smart reload.
+  // Returns 'reindexed' (dialog shows done) or 'clean' (nothing to reload —
+  // dialog closes; a success toast is shown here).
+  const startReindex = useCallback(async (): Promise<'reindexed' | 'clean'> => {
+    const size = pendingModel;
+    setPendingModel(null);
+    // The "切换中" overlay is only for an actual model switch — a plain
+    // reload (no pendingModel) must not trigger it (the dialog shows progress).
+    if (size) setSwitchingModel(true);
     try {
-      const st = await selectRagModel(revertTo);
-      if (!mounted.current) return;
-      setCurrentModel(revertTo);
-      setEnabled(st.enabled);
-      setInitializing(st.initializing);
-      if (st.enabled) fetchModelLimits();
-      // Deliberately ignore st.needsReindex for the revert (no re-prompt loop).
+      if (size) {
+        const st = await selectRagModel(size);
+        if (!mounted.current) return 'clean';
+        setCurrentModel(size);
+        setEnabled(st.enabled);
+        setInitializing(st.initializing);
+        if (st.enabled) fetchModelLimits();
+        if (!st.needsReindex) {
+          setReindexConfirm(false);
+          showToast(t('pages.rag.modelSelected', { name: `model_${size}` }), 'success');
+          return 'clean';
+        }
+      }
+      // Scope-driven work: model swap = both; plain reload = entry point only
+      // (RAG page reloads docs, Smart Routing entry reloads the index).
+      const scope = reindexMode === 'reload' ? reindexScope : 'both';
+      if (scope === 'both' || scope === 'rag') {
+        await reindexAll();
+      }
+      if (smartEnabled && (scope === 'both' || scope === 'smart')) {
+        await reindexSmartRouting();
+      }
+      return 'reindexed';
     } catch (err) {
-      if (mounted.current) setInitializing(false);
-      console.error('[RAG] revert to previous model failed', err);
+      showToast(err instanceof Error ? err.message : t('pages.rag.modelSelectFailed'), 'error');
+      setReindexConfirm(false);
+      return 'clean';
+    } finally {
+      if (mounted.current) setSwitchingModel(false);
     }
-  }, [prevModel, fetchModelLimits]);
+  }, [pendingModel, reindexMode, reindexScope, reindexAll, smartEnabled, fetchModelLimits, t, showToast]);
 
-  // Select a different model size: persist + auto-restart RAG (backend reloads
-  // the model). If the new model's embed dim differs from the old table,
-  // `status.needsReindex` comes back true and we trigger the reindex overlay
-  // (same as a model swap). No-op if the size isn't ready.
+  // Plain dismiss (cancel button or 完成 button): close the dialog and drop
+  // the parked model choice. NO backend call — nothing visibly changes.
+  const dismissReindex = useCallback(() => {
+    setReindexConfirm(false);
+    setPendingModel(null);
+    setReindexMode('switch');
+  }, []);
+
+  // Model picked in the selector: park the choice and open the confirm
+  // dialog. NO switch happens here — the switch (backend call) runs in
+  // `startReindex` when the user clicks 开始重载; cancel just drops the
+  // parked choice with zero side effects.
   const selectModel = useCallback(
     async (size: string) => {
       const m = models.find((x) => x.size === size);
@@ -569,38 +599,23 @@ const useRagDataState = () => {
         return;
       }
       if (size === currentModel) return;
-      setSwitchingModel(true);
-      // Remember the model before the switch so a cancelled reindex confirm
-      // can revert to it (no toast on the revert).
-      setPrevModel(currentModel);
-      try {
-        const st = await selectRagModel(size);
-        if (!mounted.current) return;
-        setCurrentModel(size);
-        setEnabled(st.enabled);
-        setSwitchingModel(false);
-        // The backend's stop+start may still be settling (e.g. async cleanup);
-        // mirror its initializing flag so the "开启中" state shows if needed.
-        setInitializing(st.initializing);
-        if (st.enabled) fetchModelLimits();
-        if (st.enabled && st.needsReindex) {
-          // Dim changed - show the confirm dialog (no success toast: the
-          // switch is pending the user's reindex decision; cancel reverts).
-          // Skip the prompt when there are no documents (nothing to re-embed).
-          if (ragDocs.length > 0) setReindexConfirm(true);
-          else showToast(t('pages.rag.modelSelected', { name: `model_${size}` }), 'success');
-          showToast(t('pages.rag.modelSelected', { name: `model_${size}` }), 'success');
-        }
-      } catch (err) {
-        if (mounted.current) {
-          setSwitchingModel(false);
-          setPrevModel(null);
-        }
-        showToast(err instanceof Error ? err.message : t('pages.rag.modelSelectFailed'), 'error');
-      }
+      setPendingModel(size);
+      setReindexMode('switch');
+      setReindexConfirm(true);
     },
-    [models, currentModel, ragDocs, fetchModelLimits, t, showToast],
+    [models, currentModel, t, showToast],
   );
+
+  // Plain data reload (RAG page 重新载入 button / Settings model card):
+  // opens the SAME dialog in 'reload' mode — no model switch, the current
+  // model re-embeds everything. `startReindex` skips the switch block when
+  // `pendingModel` is null, so no extra branching is needed.
+  const requestReload = useCallback((scope: 'rag' | 'smart' | 'both' = 'rag') => {
+    setPendingModel(null);
+    setReindexMode('reload');
+    setReindexScope(scope);
+    setReindexConfirm(true);
+  }, []);
 
   // Download a not-yet-ready model size via its download.url. The backend
   // streams the .zip + extracts, emitting `rag://model-download` progress
@@ -638,9 +653,9 @@ const useRagDataState = () => {
           // swapped, e.g. for a different context length).
           if (st.enabled) fetchModelLimits();
           // If the model swap recreated the table (embedding dim changed),
-          // prompt the user before re-embedding all docs (expensive) instead
-          // of auto-running it. Skip when there are no docs (nothing to re-embed).
-          if (st.enabled && st.needsReindex && ragDocs.length > 0) setReindexConfirm(true);
+          // prompt the user before re-embedding. Always prompt (even 0 docs):
+          // the dialog also reloads the Smart Routing index.
+          if (st.enabled && st.needsReindex) setReindexConfirm(true);
         }
       } catch (err) {
         // revert on error
@@ -1090,8 +1105,12 @@ const useRagDataState = () => {
     reindexing,
     updatingDoc,
     reindexConfirm,
-    confirmReindex,
-    cancelReindex,
+    reindexMode,
+    reindexScope,
+    requestReload,
+    startReindex,
+    dismissReindex,
+    pendingModel,
     models,
     currentModel,
     modelDownload,

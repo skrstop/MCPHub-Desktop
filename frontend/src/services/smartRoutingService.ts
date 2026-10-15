@@ -79,3 +79,27 @@ export const reindexSmartRouting = async (): Promise<SmartRoutingReindexResult> 
   }
   return response.data;
 };
+
+/** Participants that a smart reindex will cover (enabled + connected-or-
+ *  on-demand + non-empty tools + builtin). Read-only count used by the
+ *  model-swap dialog's confirm-phase meta ("N 个服务器"). */
+export interface SmartReindexParticipants {
+  servers: number;
+  tools: number;
+}
+
+/** Totals a smart reindex will cover — the model-swap dialog's confirm meta
+ *  "N 个服务器 M 个工具" (both are totals needing reload). */
+export const getSmartReindexParticipants = async (): Promise<SmartReindexParticipants> => {
+  const response = await apiGet<SmartRoutingApiResponse<{ 0: number; 1: number }>>(
+    '/smart-routing/reindex-participants',
+  );
+  if (!response.success) {
+    throw new Error(response.error || response.message || 'Failed to load smart routing participants');
+  }
+  // Rust tuple arrives as a JSON array [servers, tools].
+  const d = response.data as unknown;
+  if (Array.isArray(d)) return { servers: Number(d[0]) || 0, tools: Number(d[1]) || 0 };
+  const o = (d ?? {}) as { servers?: number; tools?: number };
+  return { servers: o.servers ?? 0, tools: o.tools ?? 0 };
+};

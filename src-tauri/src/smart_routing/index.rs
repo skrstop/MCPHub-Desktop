@@ -151,7 +151,7 @@ pub fn on_server_connected(server_name: String, tools: Vec<Tool>, description: O
     }
     tokio::spawn(async move {
         // (Locking happens inside save_server_embeddings.)
-        if let Err(e) = save_server_embeddings(&server_name, description.as_deref(), &tools).await {
+        if let Err(e) = save_server_embeddings(&server_name, description.as_deref(), &tools, None).await {
             log::warn!("[smart] index server '{}': {}", server_name, e);
         }
     });
@@ -167,7 +167,7 @@ pub fn on_server_updated(server_name: String, tools: Vec<Tool>, description: Opt
 pub async fn remove_server_embeddings(server_name: &str) -> Result<()> {
     // Lock INSIDE the function (not at hook call sites): every write path —
     // lifecycle hooks, reindex_all's direct callers (boot restore, manual
-    // reindex, $smart_reindex meta tool), on_model_reloaded — serializes here,
+    // reindex, $smart_reindex meta tool), purge_stale_model_rows — serializes here,
     // closing the reindex_all-bypasses-the-lock race. Callers must NOT hold
     // EMBED_WRITE_LOCK themselves (tokio Mutex is not reentrant → deadlock).
     let _g = EMBED_WRITE_LOCK.lock().await;
@@ -181,11 +181,14 @@ pub async fn remove_server_embeddings(server_name: &str) -> Result<()> {
 
 /// Index one server: skip-check → embed tools + server row → replace rows.
 /// Called from background hooks only (embedding a big tool list takes
-/// seconds; never on a request path).
+/// seconds; never on a request path). `progress` (done, total) fires after
+/// each tool embed — used by reindex_all to stream per-tool progress to the
+/// reload dialog; lifecycle hooks pass None.
 pub async fn save_server_embeddings(
     server_name: &str,
     description: Option<&str>,
     tools: &[Tool],
+    progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
 ) -> Result<()> {
     // Lock INSIDE the function (see remove_server_embeddings comment).
     let _g = EMBED_WRITE_LOCK.lock().await;
@@ -277,10 +280,14 @@ pub async fn save_server_embeddings(
     // ── Phase 1: embed everything under one mv lock hold (sync closure).
     let texts: Vec<String> = tools.iter().map(tool_searchable_text).collect();
     let texts_for_embed = texts.clone();
+    let tool_total = tools.len();
     let embeddings = crate::mv::with_model(move |model| -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(texts_for_embed.len());
-        for text in &texts_for_embed {
+        for (i, text) in texts_for_embed.iter().enumerate() {
             out.push(model.embed(text)?);
+            if let Some(p) = progress {
+                p(i + 1, tool_total);
+            }
         }
         Ok(out)
     })
@@ -341,6 +348,61 @@ pub async fn save_server_embeddings(
 
 /// Re-index every connected server (boot restore when SR is on / model swap /
 /// manual reindex). The per-server skip check makes repeated runs cheap.
+/// Number of servers that will produce rows in a reindex run (enabled AND
+/// connected-or-on-demand AND non-empty tools) + the builtin virtual server.
+/// Read-only mirror of reindex_all's denominator — the model-swap dialog
+/// shows "N 个服务器" in the confirm phase before any progress event exists.
+/// (server_count, total_tool_count) a reindex run will cover — the
+/// model-swap dialog's confirm-phase meta "N 个服务器 M 个工具" (both are
+/// totals needing reload).
+///
+/// Source-of-truth parity with the servers page: counts come from the same
+/// composition `commands::servers::list_servers` uses (pool tools +
+/// apply_tool_filters + the builtin virtual server), so every real server's
+/// number equals its card chip. The 3 Smart Routing meta tools are excluded
+/// from the tool total (they are the search UI, not re-embedded rows) — the
+/// builtin card shows them, so the dialog total is the page sum minus 3.
+pub async fn reindex_participants() -> Result<(usize, usize)> {
+    if !smart_enabled().await {
+        return Ok((0, 0));
+    }
+    let configs = crate::services::server_service::list_all().await?;
+    let mut n = 0usize;
+    let mut tools_total = 0usize;
+    for c in configs.iter() {
+        if !c.enabled {
+            continue;
+        }
+        let tools = match crate::mcp::pool::get_entry_info(&c.name).await {
+            Some((st, tools)) if (st.connected || st.start_on_demand) && !tools.is_empty() => tools,
+            _ => continue,
+        };
+        let tools = crate::services::server_tool_config_service::apply_tool_filters(&c.name, tools)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("[smart] participants apply_tool_filters({}): {}", c.name, e);
+                Vec::new()
+            });
+        n += 1;
+        tools_total += tools.iter().filter(|t| !crate::smart_routing::meta::is_meta_tool(&t.name)).count();
+    }
+    // Builtin virtual server — same source as the servers page card.
+    if let Some(info) = crate::rag::service::builtin_server_info().await {
+        if info.config.enabled {
+            let cnt = info
+                .tools
+                .iter()
+                .filter(|t| !crate::smart_routing::meta::is_meta_tool(&t.name))
+                .count();
+            if cnt > 0 {
+                n += 1;
+                tools_total += cnt;
+            }
+        }
+    }
+    Ok((n, tools_total))
+}
+
 pub async fn reindex_all() -> Result<usize> {
     if !smart_enabled().await {
         return Ok(0);
@@ -354,6 +416,35 @@ pub async fn reindex_all() -> Result<usize> {
         .map(|c| c.name.clone())
         .chain(std::iter::once(crate::rag::service::BUILTIN_SERVER_NAME.to_string()))
         .collect();
+    // Progress denominator = servers that will actually produce rows (enabled
+    // AND connected-or-on-demand AND non-empty) + the builtin virtual server.
+    // Emitted on `smart://reindex-progress` so the model-swap dialog (v2) can
+    // show a per-server bar alongside the RAG docs bar.
+    let mut participating: Vec<&crate::models::server::ServerConfig> = Vec::new();
+    for c in servers.iter() {
+        if !c.enabled {
+            continue;
+        }
+        let ok = matches!(
+            crate::mcp::pool::get_entry_info(&c.name).await,
+            Some((st, tools)) if (st.connected || st.start_on_demand) && !tools.is_empty()
+        );
+        if ok {
+            participating.push(c);
+        }
+    }
+    let total = participating.len() + 1; // + builtin
+    let mut done: u32 = 0;
+    let emit_prog = |cur: u32, tot: u32, name: &str, tools: usize, tool_done: usize| {
+        if let Some(app) = crate::mcp::progress::get_app_handle() {
+            use tauri::Emitter;
+            let _ = app.emit(
+                "smart://reindex-progress",
+                serde_json::json!({ "current": cur, "total": tot, "name": name, "tools": tools, "toolDone": tool_done, "toolTotal": tools }),
+            );
+        }
+    };
+    emit_prog(0, total as u32, "", 0, 0);
     let mut indexed = 0usize;
     for cfg in servers {
         if !cfg.enabled {
@@ -378,11 +469,17 @@ pub async fn reindex_all() -> Result<usize> {
             let _ = remove_server_embeddings(&cfg.name).await;
             continue;
         }
-        match save_server_embeddings(&cfg.name, cfg.description.as_deref(), &tools).await {
-            Ok(()) => indexed += 1,
+        match save_server_embeddings(&cfg.name, cfg.description.as_deref(), &tools, Some(&|done: usize, total: usize| emit_prog(done as u32, total as u32, &cfg.name, total, done))).await {
+            Ok(()) => {
+                indexed += 1;
+                done += 1;
+                emit_prog(done, total as u32, &cfg.name, tools.len(), tools.len());
+            }
             Err(e) => {
                 log::warn!("[smart] reindex '{}': {}", cfg.name, e);
                 crate::services::app_logger::log_to_db("warn", &format!("[smart] reindex '{}' failed: {e:#}", cfg.name));
+                done += 1;
+                emit_prog(done, total as u32, &cfg.name, tools.len(), tools.len());
             }
         }
     }
@@ -401,14 +498,18 @@ pub async fn reindex_all() -> Result<usize> {
         .filter(|t| !crate::smart_routing::meta::is_meta_tool(&t.name))
         .collect::<Vec<_>>();
     if !builtin_tools.is_empty() {
-        match save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, builtin_desc.as_deref(), &builtin_tools).await {
+        match save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, builtin_desc.as_deref(), &builtin_tools, Some(&|done: usize, total: usize| emit_prog(done as u32, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, total, done))).await {
             Ok(()) => {
                 indexed += 1;
+                done += 1;
+                emit_prog(done, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, builtin_tools.len(), builtin_tools.len());
                 crate::services::app_logger::log_to_db("info", &format!("[smart] reindex builtin: {} tools", builtin_tools.len()));
             }
             Err(e) => {
                 log::warn!("[smart] reindex builtin: {}", e);
                 crate::services::app_logger::log_to_db("warn", &format!("[smart] reindex builtin failed: {e:#}"));
+                done += 1;
+                emit_prog(done, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, builtin_tools.len(), builtin_tools.len());
             }
         }
     } else {
@@ -449,18 +550,16 @@ pub async fn reindex_all() -> Result<usize> {
 
 /// Model-reload hook: after mv loads a (possibly different) model, purge rows
 /// embedded by ANY OTHER model (same-dim swaps don't recreate the table, so
-/// stale rows would silently mix into searches) and re-index the connected
-/// servers under the new model. Fire-and-forget; failures logged.
-pub async fn on_model_reloaded(model: String) {
+/// stale rows would silently mix into searches). Purge ONLY — the caller
+/// (model-swap dialog flow) re-indexes explicitly after the RAG re-embed so
+/// the two progress rows run in order. Fire-and-forget; failures logged.
+pub async fn purge_stale_model_rows(model: &str) {
     if !smart_enabled().await {
         return;
     }
     // Purge under the global write lock: a lifecycle hook spawned before the
     // reload may still be embedding with the OLD model inside replace_server —
     // purging without the lock would race and leave old-model rows behind.
-    // The lock is RELEASED before reindex_all (each save/remove re-locks
-    // internally; holding it here would self-deadlock the non-reentrant
-    // tokio Mutex).
     {
         let _g = EMBED_WRITE_LOCK.lock().await;
         let embed_dim = crate::mv::embed_dim().unwrap_or(0);
@@ -471,13 +570,7 @@ pub async fn on_model_reloaded(model: String) {
         let stale_filter = format!("model != '{}'", model.replace('\'', "''"));
         if let Err(e) = store.delete_where(&stale_filter).await {
             log::warn!("[smart] purge stale rows after model reload: {}", e);
-            return;
         }
-    }
-    match reindex_all().await {
-        Ok(n) if n > 0 => log::info!("[smart] re-indexed {} server(s) after model reload", n),
-        Ok(_) => {}
-        Err(e) => log::warn!("[smart] reindex after model reload: {}", e),
     }
 }
 

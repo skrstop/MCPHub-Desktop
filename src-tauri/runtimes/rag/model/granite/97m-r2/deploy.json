@@ -3,8 +3,9 @@
   "default": true,
   "description": "",
   "sort": 1,
-  "searchQueryPrefix": "",
-  "importDocPrefix": "",
+  "searchQueryPrefix": "Query: {query}",
+  "importDocPrefix": "Title: {title} | {content}",
+  "docTitleDelimiter": "|",
   "chunkSize": 512,
   "chunkOverlap": 100
 }

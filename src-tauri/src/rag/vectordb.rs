@@ -14,7 +14,7 @@
 //!   - `delete_by_doc`   → remove all chunks of a document
 //!   - `drop_table`      → drop everything (for reset)
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use futures_util::TryStreamExt;
@@ -72,6 +72,10 @@ pub struct ChunkInput<'a> {
 
 pub struct VectorDb {
     conn: Connection,
+    /// Directory holding this lancedb (the `rag_chunk.lance` parent). Kept for
+    /// `sweep_index_residue` (LanceDB leaves empty `_indices` shells that it
+    /// never GCs — we clean them at open / after prune).
+    dir: PathBuf,
     /// Embedding dimension this DB was opened for (matches the loaded model's
     /// `embed_dim`). Drives the `FixedSizeList<f32, embed_dim>` column width
     /// and row slicing in `add_chunks`. Stored so callers don't have to thread
@@ -102,15 +106,19 @@ impl VectorDb {
             .await
             .map_err(|e| anyhow!("lancedb connect {}: {}", dir.display(), e))?;
         let needs_reindex = Self::ensure_table(&conn, embed_dim).await?;
-        Ok(Self { conn, embed_dim, needs_reindex })
+        // Startup sweep: clear historical empty `_indices` shells (LanceDB
+        // never GCs index dirs). Cheap — only touches truly empty dirs.
+        Self::sweep_index_residue(&dir.join(format!("{TABLE_NAME}.lance")));
+        Ok(Self { conn, dir: dir.to_path_buf(), embed_dim, needs_reindex })
     }
 
     /// Same as `open`, but on the SHARED mv connection (Phase 2): consumers
     /// must not open their own lancedb connections — the mv runtime owns the
     /// single connection process-wide. `dir` is only used for error messages.
-    pub async fn open_with_conn(conn: Connection, _dir: &Path, embed_dim: usize) -> Result<Self> {
+    pub async fn open_with_conn(conn: Connection, dir: &Path, embed_dim: usize) -> Result<Self> {
         let needs_reindex = Self::ensure_table(&conn, embed_dim).await?;
-        Ok(Self { conn, embed_dim, needs_reindex })
+        Self::sweep_index_residue(&dir.join(format!("{TABLE_NAME}.lance")));
+        Ok(Self { conn, dir: dir.to_path_buf(), embed_dim, needs_reindex })
     }
 
     /// Whether `open` invalidated existing embeddings (existing table dropped
@@ -231,13 +239,25 @@ impl VectorDb {
     }
 
     /// Create a LabelList scalar index on `tags` (accelerates tag filters).
-    /// Ignore errors (e.g. already exists or not yet supported on this build).
+    /// Idempotent: checks `list_indices` first and skips when a tags index
+    /// already exists. A redundant `create_index` leaves an orphan index
+    /// directory under `_indices/` (LanceDB never GCs them — 989 empty dirs
+    /// accumulated on a long-lived install, 2026-10-13), so the check is not
+    /// optional. Ignore stats errors (e.g. index not yet built).
     async fn ensure_index(conn: &Connection) -> Result<()> {
         let table = conn
             .open_table(TABLE_NAME)
             .execute()
             .await
             .map_err(|e| anyhow!("open table: {}", e))?;
+        if let Ok(indices) = table.list_indices().await {
+            if indices
+                .iter()
+                .any(|i| i.columns.iter().any(|c| c == "tags"))
+            {
+                return Ok(());
+            }
+        }
         let _ = table
             .create_index(
                 &["tags"],
@@ -246,6 +266,45 @@ impl VectorDb {
             .execute()
             .await;
         Ok(())
+    }
+
+    /// Physically remove empty residue under `{table_dir}/_indices/` (and any
+    /// fully-empty segment dirs). LanceDB never GCs index dirs: dropped/pruned
+    /// indices leave empty directory shells that accumulate forever. A shell
+    /// is a dir that contains no files at any depth. Best-effort: failures are
+    /// logged and never propagated (sweeping must not break the caller).
+    pub fn sweep_index_residue(table_dir: &Path) {
+        let indices = table_dir.join("_indices");
+        let Ok(rd) = std::fs::read_dir(&indices) else {
+            return;
+        };
+        let mut removed = 0usize;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let has_file = walkdir_has_file(&path);
+            if !has_file {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        log::warn!("[RAG] sweep index residue {} failed: {}", path.display(), e)
+                    }
+                }
+            }
+        }
+        // If the whole _indices dir ended up empty (fresh recreate), drop the
+        // shell itself too so a recreated table starts truly clean.
+        if removed > 0 {
+            let now_empty = std::fs::read_dir(&indices)
+                .map(|rd| rd.count() == 0)
+                .unwrap_or(true);
+            if now_empty {
+                let _ = std::fs::remove_dir(&indices);
+            }
+            log::info!("[RAG] swept {removed} empty index dir(s) under {}", indices.display());
+        }
     }
 
     /// Insert a batch of chunks for one document.
@@ -480,11 +539,14 @@ impl VectorDb {
     /// Keyword search: return chunks whose `chunk_text` contains any of the
     /// query terms (case-insensitive LIKE). `distance` is 0.0 (the service
     /// scores keyword hits by term frequency, not by vector distance).
+    ///
+    /// Terms come from `fts_service::rag_query_terms` (CJK char-bigram sliding
+    /// window, not whitespace split) — a whole-string `contains` can never
+    /// match Chinese because there are no spaces: query 「等待办的事情」 vs
+    /// chunk 「待办事项」 shares zero whitespace-tokens, but the bigram 「待办」
+    /// hits. Keep this in sync with the scoring side in `service::search`.
     pub async fn keyword_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        let terms: Vec<&str> = query
-            .split_whitespace()
-            .filter(|t| !t.is_empty())
-            .collect();
+        let terms = crate::services::fts_service::rag_query_terms(query);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -576,6 +638,7 @@ impl VectorDb {
             })
             .await
             .map_err(|e| anyhow!("optimize (prune): {}", e))?;
+        Self::sweep_index_residue(&self.dir.join(format!("{TABLE_NAME}.lance")));
         Ok(())
     }
 
@@ -585,8 +648,27 @@ impl VectorDb {
             .drop_table(TABLE_NAME, &[])
             .await
             .map_err(|e| anyhow!("drop table: {}", e))?;
+        Self::sweep_index_residue(&self.dir.join(format!("{TABLE_NAME}.lance")));
         Ok(())
     }
+}
+
+/// Walk `dir` depth-first; true iff any regular file (size > 0 not required —
+/// a 0-byte placeholder still counts as content LanceDB may rely on).
+fn walkdir_has_file(dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_file() {
+            return true;
+        }
+        if p.is_dir() && walkdir_has_file(&p) {
+            return true;
+        }
+    }
+    false
 }
 
 fn chunk_schema(embed_dim: usize) -> SchemaRef {

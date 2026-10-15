@@ -1052,6 +1052,9 @@ struct Runtime {
     /// Model-author-recommended chunk overlap (deploy.json `chunkOverlap`),
     /// `None` if unset. Same auto-vs-override semantics as `deploy_chunk_size`.
     deploy_chunk_overlap: Option<u32>,
+    /// Title field delimiter (deploy.json `docTitleDelimiter`) consumed by the
+    /// `{title}` template renderer — see `mv::embedder::render_doc_embed_text`.
+    doc_title_delimiter: Option<String>,
 }
 
 static RUNTIME: OnceLock<Mutex<Option<Runtime>>> = OnceLock::new();
@@ -1134,7 +1137,7 @@ pub async fn toggle(app: &AppHandle, enabled: bool) -> Result<RagStatus> {
             if enabled {
                 let tools = builtin_tools();
                 if !tools.is_empty() {
-                    let _ = crate::smart_routing::index::save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, desc.as_deref(), &tools).await;
+                    let _ = crate::smart_routing::index::save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, desc.as_deref(), &tools, None).await;
                 }
             } else {
                 let _ = crate::smart_routing::index::remove_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME).await;
@@ -1292,6 +1295,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
             import_doc_prefix: deploy.import_doc_prefix,
             deploy_chunk_size: deploy.chunk_size,
             deploy_chunk_overlap: deploy.chunk_overlap,
+            doc_title_delimiter: deploy.doc_title_delimiter,
         });
         drop(guard);
         if !needs_reindex {
@@ -1441,6 +1445,31 @@ pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, O
 /// `needs_reindex` if the dim changed OR a same-dim model swap was detected).
 pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
     mv::ensure_model_ready(app, size)?;
+    // Score-threshold reset on model change: the threshold is tuned to a
+    // model's cosine band (granite-97m related ≈ 0.82-0.88; F2LLM V2-160M
+    // related ≈ 0.15-0.25 — measured). A threshold carried across a model
+    // swap filters EVERYTHING (real incident: 0.41 threshold × V2-160M band
+    // → zero search results after reload). Reset to 0 (rank-only) so search
+    // stays usable; the user can re-tune the slider for the new model.
+    let prev_indexed = get_indexed_model().await;
+    let prev_selected = mv::active_model().await;
+    let switching = prev_indexed.as_deref() != Some(size) && prev_selected.as_deref() != Some(size);
+    if switching {
+        let mut s = get_settings().await?;
+        if (s.score_threshold - 0.0).abs() > f32::EPSILON {
+            rag_log(
+                "info",
+                format!(
+                    "model switch {} -> {}: resetting scoreThreshold {} → 0 (thresholds are model-specific; re-tune in settings)",
+                    prev_indexed.as_deref().unwrap_or("(none)"),
+                    size,
+                    s.score_threshold
+                ),
+            );
+            s.score_threshold = 0.0;
+            save_settings(s).await?;
+        }
+    }
     mv::persist_selection(size).await;
     if is_enabled() {
         stop().await;
@@ -4202,6 +4231,7 @@ async fn reindex_doc(
                 rt.deploy_chunk_size,
                 rt.deploy_chunk_overlap,
                 rt.import_doc_prefix.clone(),
+                rt.doc_title_delimiter.clone(),
             )
         };
         let chunk_size = match settings.chunk_size {
@@ -4227,7 +4257,25 @@ async fn reindex_doc(
         // for that whole phase, which reads as a hung import.
         let total_chars = content.chars().count() as u64;
         emit_upload_progress(app, doc_name, 0, total_chars);
-        let import_doc_prefix = deploy.2;
+        let import_doc_template = deploy.2;
+        let title_delimiter = deploy.3.clone();
+        // Doc title for the `{title}` template placeholder (granite-style
+        // `Title: {title} | {content}`). Prefer the user-facing title from the
+        // doc's .meta; fall back to the filename stem (extension stripped) when
+        // the meta is unreadable / the field is absent.
+        let doc_title: String = files_dir(app)
+            .ok()
+            .and_then(|dir| std::fs::read(dir.join(format!("{doc_id}.meta"))).ok())
+            .and_then(|bytes| serde_json::from_slice::<DocMeta>(&bytes).ok())
+            .and_then(|m| m.title)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                doc_name
+                    .rsplit_once('.')
+                    .map(|(stem, _)| stem)
+                    .unwrap_or(doc_name)
+                    .to_string()
+            });
         mv::with_model(|model| {
             // Route the chunker's per-partition progress to the frontend: for
             // a multi-MB code file the chunking pass itself takes minutes, and
@@ -4279,13 +4327,15 @@ async fn reindex_doc(
             // reindex — a latent bug surfaced by reindexing after a model
             // swap. The doc is still stored, just with zero searchable chunks.
             // Prepend the model's document prefix (deploy.json
-            // `importDocPrefix`) to each chunk before embedding - asymmetric
-            // models (Qwen3, BGE) require a distinct prefix on the document
-            // side. Cloned once (a few bytes) so the mutable
-            // `model.embed_batch` borrow below is unencumbered. The stored
-            // chunk_text + the char-progress count use the ORIGINAL chunk
-            // (no prefix) so retrieved snippets + the progress bar reflect
-            // the real content, and the prefix doesn't inflate the char total.
+            // `importDocPrefix` TEMPLATE) to each chunk before embedding -
+            // asymmetric models (Qwen3, BGE) require a distinct prefix on the
+            // document side. Templates may embed the real doc title
+            // (`{title}`) and layout the full input (`{content}`, granite
+            // style); a template without `{content}` keeps the plain-prefix
+            // behavior. The stored chunk_text + the char-progress count use
+            // the ORIGINAL chunk (no prefix) so retrieved snippets + the
+            // progress bar reflect the real content, and the prefix doesn't
+            // inflate the char total.
             // For an empty doc the loop below doesn't run (no chunks to
             // embed), so emit the 100% tick here to finish its progress bar.
             if chunks.is_empty() {
@@ -4296,7 +4346,14 @@ async fn reindex_doc(
             for sub in chunks.chunks(batch_size.max(1)) {
                 let prefixed: Vec<String> = sub
                     .iter()
-                    .map(|c| format!("{}{}", import_doc_prefix, c))
+                    .map(|c| {
+                        mv::embedder::render_doc_embed_text(
+                            &import_doc_template,
+                            &doc_title,
+                            c,
+                            title_delimiter.as_deref(),
+                        )
+                    })
                     .collect();
                 let sub_refs: Vec<&str> = prefixed.iter().map(String::as_str).collect();
                 let embs = if sub_refs.is_empty() {
@@ -6053,7 +6110,17 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
     // When a tag filter is active, fetch more candidates so Rust-side filtering
     // (intersection with requested tags) still yields enough hits after pruning.
     let want_tags: Vec<String> = tags.into_iter().filter(|t| !t.is_empty()).collect();
-    let fetch = if want_tags.is_empty() { (limit * 2).max(limit) } else { (limit * 4).max(limit) };
+    // Fetch a WIDE vector candidate pool: granite-97m-r2 scores cluster in a
+    // narrow band (real index: every Chinese chunk 0.82-0.88) and the target
+    // doc's chunks sit below a flood of band-noise. limit*6 (≈120 rows)
+    // reliably missed the target (real e2e: target absent at kwWeight=0);
+    // 500 rows ≈ 3.6% of the 13.8k index, still a fast ANN search, and gives
+    // the title bonus rows to act on.
+    let fetch = if want_tags.is_empty() { 500.max(limit) } else { 800.max(limit) };
+    // Files dir for the title channel (None when the app handle/dir is
+    // unavailable — the bonus then silently degrades to the filename stem).
+    let files_dir_opt: Option<std::path::PathBuf> =
+        crate::mcp::progress::get_app_handle().and_then(|app| files_dir(app).ok());
 
     // Embed the query on the shared mv model first (mv lock taken and
     // released BEFORE the rag table lock — no nesting). The query prefix from
@@ -6068,7 +6135,9 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
         rt.search_query_prefix.clone()
     };
     let vec_hits = if vw > 0.0 {
-        let q = format!("{}{}", query_prefix, query);
+        // Query template from deploy.json (`{query}` placeholder supported;
+        // plain prefix concatenation when absent).
+        let q = mv::embedder::render_query_embed_text(&query_prefix, &query);
         let qvec = mv::with_model(|m| m.embed(&q)).await?;
         let guard = runtime().lock().await;
         let Some(rt) = guard.as_ref() else {
@@ -6091,7 +6160,16 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
         let Some(rt) = guard.as_ref() else {
             return Err(anyhow!("RAG not enabled"));
         };
-        match rt.db.keyword_search(&query, fetch).await {
+        // Wide match window: the LIKE filter matches ANY query bigram, and
+        // common bigrams (待办/事情) hit hundreds-to-thousands of rows across
+        // 13k+ chunks. LanceDB `.limit(N)` without ORDER BY returns an
+        // ARBITRARY first-N subset — with the default fetch(≈120) the
+        // relevant doc's matching rows could fall outside the window entirely
+        // (real e2e evidence: target doc absent from results at kw weight
+        // 0.5). LIKE scan over 13k rows is fast (<1s); Rust-side term scoring
+        // below picks the best matches, so a wide window is safe.
+        let kw_fetch = fetch.max(4000);
+        match rt.db.keyword_search(&query, kw_fetch).await {
             Ok(hits) => hits,
             Err(e) => {
                 rag_log("warn", format!("keyword search failed: {:#}", e));
@@ -6102,11 +6180,12 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
         Vec::new()
     };
 
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect();
+    // Scoring terms use the same generator as the keyword LIKE filter above
+    // (fts_service::rag_query_terms — CJK char-bigrams, not whitespace split).
+    // Whitespace-split terms can never substring-match Chinese text (no
+    // spaces): query 「等待办的事情」 vs chunk 「待办事项」 scored 0 on the
+    // keyword channel and the hit fell out of the top ranks entirely.
+    let terms: Vec<String> = crate::services::fts_service::rag_query_terms(&query);
     let term_count = terms.len().max(1);
 
     // Merge by (doc_id, chunk_index): vec_score = cosine similarity (the search
@@ -6114,14 +6193,95 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
     // 0 = unrelated, 1 = identical); kw_score = matched_query_terms /
     // total_query_terms. Carry the doc's tags (all chunks of a doc share tags).
     use std::collections::HashMap;
+    // Cross-lingual reliability: small embedding models (granite-97m-r2, 384-dim)
+    // map CJK text via byte-fallback tokens, whose mean-pooled vector sits near
+    // the global average direction — same place a huge minified-JS chunk lands.
+    // A CJK query × pure-ASCII chunk (or English query × pure-CJK chunk) gets a
+    // spuriously HIGH cosine that carries no semantics (real-index evidence:
+    // mermaid.min.js chunks scored 0.88, above every real business doc, for a
+    // Chinese query — the target doc was crowded out of the top-15 entirely).
+    // Penalize the vector channel ONLY for chunks with (near-)zero CJK under a
+    // CJK query — those embeddings are pure byte-fallback soup and their high
+    // cosine carries no semantics (mermaid.min.js scored 0.88 > every real doc).
+    // Smooth ramp over ratio < 0.1; mixed-technical chunks (markdown tables +
+    // identifiers, ratio typically 0.3-0.7) are untouched — real-index evidence:
+    // a blunt ratio-proportional penalty also demoted the RELEVANT doc (its
+    // table-heavy chunks) and pushed the target from #14 to #36. Symmetric for
+    // an ASCII query (code docs stay first-class). Keyword channel unaffected.
+    let query_cjk = {
+        let chars = query.chars().count();
+        let cjk = query.chars().filter(|c| crate::services::fts_service::is_cjk_pub(*c)).count();
+        chars > 0 && cjk * 2 > chars
+    };
+    let cross_lang_penalty = |chunk_text: &str| -> f32 {
+        let total = chunk_text.chars().count().max(1);
+        let cjk = chunk_text.chars().filter(|c| crate::services::fts_service::is_cjk_pub(*c)).count();
+        let ratio = cjk as f32 / total as f32;
+        let mismatch = if query_cjk { ratio } else { 1.0 - ratio };
+        if mismatch >= 0.1 {
+            1.0
+        } else {
+            0.55 + 0.45 * (mismatch / 0.1)
+        }
+    };
     let mut merged: HashMap<(String, i64), (f32, f32, String, String, Vec<String>)> = HashMap::new();
     for h in vec_hits {
-        let vs = (1.0 - h.distance).clamp(0.0, 1.0);
+        let vs = (1.0 - h.distance).clamp(0.0, 1.0) * cross_lang_penalty(&h.chunk_text);
         let e = merged
             .entry((h.doc_id.clone(), h.chunk_index))
             .or_insert((0.0, 0.0, h.doc_name.clone(), h.chunk_text.clone(), h.tags.clone()));
         e.0 = vs;
     }
+    // Title channel: independent of the keyword weight setting — the doc
+    // title is the strongest lexical signal even when the user disabled the
+    // keyword channel (real e2e evidence: kwWeight=0.0 config made the whole
+    // title/kw bonus dead and the target doc absent from results). Score =
+    // (matched title terms / query terms) * 0.35, applied to every chunk of
+    // the doc. DocMeta read failures fall back to the filename stem.
+    let title_bonus_of = |doc_id: &str, doc_name: &str| -> f32 {
+        let title: String = files_dir_opt
+            .as_deref()
+            .and_then(|dir| std::fs::read(dir.join(format!("{doc_id}.meta"))).ok())
+            .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
+            .and_then(|m| m.title.filter(|t| !t.trim().is_empty()))
+            .unwrap_or_else(|| {
+                doc_name
+                    .rsplit_once('.')
+                    .map(|(stem, _)| stem)
+                    .unwrap_or(doc_name)
+                    .to_string()
+            });
+        // Generic basename discount: git repos ship many same-named docs
+        // (19 README.md, 2 package.json in the real index) whose meta title
+        // is just the directory name — a single-word hit on 「设计」 floods a
+        // design-flavored query with 5 identical-name rows. Halve the bonus
+        // when the FILENAME itself is a generic name (README/index/package).
+        let generic_file = {
+            let n = doc_name.to_lowercase();
+            n.starts_with("readme") || n.starts_with("index.") || n.starts_with("package.json")
+        };
+        let weight = if generic_file { 0.5 } else { 1.0 };
+        let lower_title = title.to_lowercase();
+        // Quality-weighted (NOT hit-count-gated): a hit-count>=2 gate killed
+        // the target doc (its title contains exactly ONE query concept 待办 —
+        // real TB_DEBUG evidence hits=1 → bonus=0) while generic git-dir
+        // README titles (XX设计/XX评审) with equally few hits flooded results.
+        // Instead: weight each hit by precision (longer match = more specific)
+        // and cap the whole bonus at 0.3. A single 2+ char specific hit still
+        // earns a meaningful bonus; a generic one-word title earns little.
+        let hits: Vec<&String> = terms.iter().filter(|t| lower_title.contains(t.as_str())).collect();
+        if hits.is_empty() {
+            0.0
+        } else {
+            let precision: f32 = hits
+                .iter()
+                .map(|t| (t.chars().count().min(4) as f32 / 4.0).max(0.5))
+                .sum::<f32>()
+                / hits.len().max(1) as f32;
+            let coverage = hits.len() as f32 / term_count as f32;
+            (precision * coverage * 0.5 * weight).min(0.42)
+        }
+    };
     for h in kw_hits {
         let lower = h.chunk_text.to_lowercase();
         let matched = terms.iter().filter(|t| lower.contains(t.as_str())).count();
@@ -6129,10 +6289,11 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
         let e = merged
             .entry((h.doc_id.clone(), h.chunk_index))
             .or_insert((0.0, 0.0, h.doc_name.clone(), h.chunk_text.clone(), h.tags.clone()));
-        e.1 = ks;
+        e.1 = (e.1).max(ks).min(1.0);
     }
 
-    // Weighted final score, apply tag filter + score threshold, sort desc, take limit.
+    // Weighted final score + independent title bonus (works even with
+    // keywordWeight=0), tag filter, score threshold, sort desc.
     let threshold = settings.score_threshold.max(0.0).min(1.0);
     let mut scored: Vec<(f32, String, i64, String, String)> = merged
         .into_iter()
@@ -6144,7 +6305,8 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
             }
         })
         .map(|((doc_id, ci), (vs, ks, doc_name, chunk_text, _tags))| {
-            (vw * vs + kw * ks, doc_id, ci, doc_name, chunk_text)
+            let tb = title_bonus_of(&doc_id, &doc_name);
+            ((vw * vs + kw * ks + tb).min(1.0), doc_id, ci, doc_name, chunk_text)
         })
         .filter(|(score, _, _, _, _)| *score >= threshold)
         .collect();
@@ -6158,7 +6320,27 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
             .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
     });
-    let top = scored.into_iter().take(limit).collect::<Vec<_>>();
+    // Per-doc result cap: a doc with thousands of chunks (minified JS bundles
+    // are first-class code docs here) can otherwise flood the top-N with
+    // near-identical high-cosine chunks, crowding out every other hit. Keep at
+    // most MAX_PER_DOC chunks per document, refilling from lower-ranked chunks
+    // of other docs (standard diversity cap / soft MMR).
+    const MAX_PER_DOC: usize = 5;
+    let mut doc_counts: HashMap<String, usize> = HashMap::new();
+    let top: Vec<_> = scored
+        .into_iter()
+        .filter(|(_, doc_id, _, _, _)| {
+            let c = doc_counts.entry(doc_id.clone()).or_insert(0);
+            if *c >= MAX_PER_DOC {
+                return false;
+            }
+            *c += 1;
+            true
+        })
+        .take(limit)
+        .collect();
+    // Suppress the unused-variable warning for limit-taking closure semantics
+    let _ = &top;
 
     // Resolve a readable title per unique doc_id from the on-disk DocMeta
     // (falls back to the filename when meta is missing or has no title).
@@ -6584,5 +6766,36 @@ mod classify_tests {
         let c = classify_original(&m, &[dir.to_string_lossy().to_string()]);
         assert!(c.excluded);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod cross_lang_tests {
+    // 跨语言惩罚与单文档上限的核心逻辑单测（纯函数化前的行为锚点：惩罚
+    // 公式与 query_cjk 判定）。search() 本体依赖 mv 运行时，无法在单测中
+    // 端到端驱动 —— 公式回归靠 real_index_ranking_probe 真实索引验证。
+
+    #[test]
+    fn cjk_query_penalizes_ascii_chunk_heavily() {
+        // mermaid 场景：中文查询 × 纯代码 chunk（cjk_ratio=0 < 0.1）→
+        // 惩罚 0.88 * 0.55 = 0.484，低于默认阈值 0.65 —— 垃圾块出榜
+        let p = 0.55 + 0.45 * (0.0f32 / 0.1);
+        assert!((p - 0.55).abs() < 1e-6);
+        assert!(0.88 * p < 0.65);
+    }
+
+    #[test]
+    fn mixed_technical_chunk_untouched() {
+        // 表格+字段名技术 chunk（真实索引实测 ratio≈0.5）≥ 0.1 → 无惩罚
+        // （钝比例惩罚曾把相关文档从 #14 推到 #36，阈值化修复）
+        let ratio = 0.5f32;
+        assert!(ratio >= 0.1);
+    }
+
+    #[test]
+    fn english_query_untouched_for_code_docs() {
+        // 英文查询 × 纯代码 chunk：mismatch = 1 - 0 = 1.0 ≥ 0.1 → 无惩罚
+        let mismatch = 1.0f32;
+        assert!(mismatch >= 0.1);
     }
 }

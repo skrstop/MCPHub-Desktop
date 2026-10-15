@@ -236,8 +236,8 @@ impl Lfm2Arch {
         // [b, seq, n_kv, head_dim], repeating dim 2 = n_kv). Repeating after the
         // transpose would multiply the seq dim instead.
         let rep = self.n_head / self.n_kv;
-        let k = k.repeat((1, 1, rep, 1))?;
-        let v = v.repeat((1, 1, rep, 1))?;
+        let k = repeat_kv(&k, rep)?;
+        let v = repeat_kv(&v, rep)?;
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
         let v = v.transpose(1, 2)?.contiguous()?;
@@ -316,6 +316,20 @@ impl GgufArch for Lfm2Arch {
 /// Depthwise conv1d, non-causal (symmetric zero padding), via shifts. `bx`
 /// `[B, H, T]`, `conv_w` `[H, k]`. Output `[B, H, T]`. For k=3: out[t] =
 /// w0*bx[t-1] + w1*bx[t] + w2*bx[t+1] (zero-padded at the boundaries).
+
+/// GQA head interleave: [b, seq, kv, hd] -> [b, seq, kv*rep, hd] with each kv
+/// head repeated `rep` times CONSECUTIVELY (q head j attends kv head j/rep).
+/// `Tensor::repeat` tiles block-wise (q head j -> kv j%kv), which scrambles
+/// the head mapping — verified against llama.cpp eval-callback fingerprints
+/// (post-wo sum: interleave -1.1795 vs llama -1.1785; tile -3.3579).
+fn repeat_kv(t: &Tensor, rep: usize) -> Result<Tensor> {
+    let (b, seq, kv, hd) = t.dims4()?;
+    Ok(t.reshape((b, seq, kv, 1, hd))?
+        .broadcast_as((b, seq, kv, rep, hd))?
+        .contiguous()?
+        .reshape((b, seq, kv * rep, hd))?)
+}
+
 fn depthwise_conv1d_noncausal(bx: &Tensor, conv_w: &Tensor) -> Result<Tensor> {
     let (b, h, t) = bx.dims3()?;
     let k = conv_w.dim(1)?;

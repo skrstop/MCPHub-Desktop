@@ -132,7 +132,11 @@ impl GgufEmbedder {
 
         // Special-token convention from the GGUF (manual prepend/append).
         let add_bos = meta_bool(md, "tokenizer.ggml.add_bos_token").unwrap_or(false);
-        let add_eos = meta_bool(md, "tokenizer.ggml.add_eos_token").unwrap_or(true);
+        // Honor the GGUF's explicit flag; default FALSE to match llama.cpp
+        // (its add_special never auto-appends EOS). The previous `true`
+        // default appended an unrequested EOS — for last-token pooling that
+        // pools the EOS position and shifts every vector.
+        let add_eos = meta_bool(md, "tokenizer.ggml.add_eos_token").unwrap_or(false);
         let bos_id = meta_u32(md, "tokenizer.ggml.bos_token_id").unwrap_or(0);
         let eos_id = meta_u32(md, "tokenizer.ggml.eos_token_id").unwrap_or(0);
 
@@ -695,6 +699,477 @@ fn pick_gpu() -> Option<(Device, &'static str)> {
     // DirectML on Windows; Linux CUDA is disabled, see Cargo.toml). Falls
     // through to None -> CPU.
     None
+}
+
+#[cfg(test)]
+mod semantic_probe_tests {
+    use super::*;
+    use crate::mv::embedder::Embedder;
+
+    /// 真实加载捆绑的 granite-97m-r2 模型，测量「需要办的事情 / 等待办的事情 /
+    /// 待办事项」对含「待办事项」chunk 的余弦相似度（用户实测检索失败场景，
+    /// 2026-10-12）。`#[ignore]`（需要真实 GGUF + 模型加载 ~10s）：
+    /// `cargo test --lib semantic_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn granite_97m_semantic_similarity_probe() {
+        let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+        if !gguf.exists() {
+            eprintln!("skipping: {} not present", gguf.display());
+            return;
+        }
+        let mut emb = GgufEmbedder::load_with_user_platform(&gguf, Some(crate::mv::embedder::Platform::Cpu))
+            .expect("load granite 97m-r2");
+
+        let chunk = "本周待办事项：1. 完成版本发布 2. 更新文档 3. 修复登录问题。";
+        let queries = [
+            "待办事项",       // 字面全命中（词法上限）
+            "等待办的事情",   // bigram 部分重叠
+            "需要办的事情",   // 零字面重叠，纯语义
+            "需要处理的工作", // 同义改写
+            "今天天气很好",   // 无关对照组
+        ];
+        let cv = emb.embed(chunk).expect("embed chunk");
+        println!("\nchunk = {chunk:?}");
+        println!("dim = {}", emb.embed_dim());
+        for q in queries {
+            let qv = emb.embed(q).expect("embed query");
+            let dot: f32 = qv.iter().zip(&cv).map(|(a, b)| a * b).sum();
+            println!("cos({q:>10?}, chunk) = {dot:.4}");
+        }
+
+        // 模拟真实语料排名：chunk 混入 8 个干扰 chunk，看「需要办的事情」
+        // 能否排进前 5（用户场景）。
+        let distractors = [
+            "项目周会纪要：评审了数据库迁移方案，下周开始压测。",
+            "Python 数据处理脚本：读取 CSV，清洗缺失值，输出统计图表。",
+            "服务器运维手册：Nginx 反向代理配置与证书续期步骤。",
+            "会议记录：市场部 Q4 预算讨论，广告投放渠道优化方案。",
+            "前端组件文档：Table 分页、排序与虚拟滚动的使用说明。",
+            " Reiseplan: Flug nach Tokio, Hotel buchen, Visa beantragen.",
+            "机器学习笔记：交叉验证、过拟合与正则化超参数调优。",
+            "git 工作流：feature branch 命名规范与 code review 流程。",
+        ];
+        let mut texts: Vec<&str> = vec![chunk];
+        texts.extend(distractors.iter());
+        let vecs = emb.embed_batch(&texts).expect("embed batch");
+        println!("\n=== ranking probe (query embedding vs 9 chunks) ===");
+        for q in ["需要办的事情", "等待办的事情", "Query: 需要办的事情"] {
+            let qv = emb.embed(q).expect("embed q");
+            let mut scored: Vec<(f32, &str)> = texts
+                .iter()
+                .zip(&vecs)
+                .map(|(t, v)| (qv.iter().zip(v).map(|(a, b)| a * b).sum::<f32>(), *t))
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            println!("\nquery = {q:?}");
+            for (i, (s, t)) in scored.iter().take(4).enumerate() {
+                let short: String = t.chars().take(24).collect();
+                println!("  #{i} {s:.4}  {short}");
+            }
+        }
+    }
+    /// 打开用户真实 lancedb 索引 + 真实模型，输出「等待办的事情」的完整
+    /// 排名（doc_name + cos + chunk 片段），并标注目标文档
+    /// 181db8ce（迭代评审-消息配置与待办事项.md）的真实排位。
+    /// `#[ignore]`：需要真实索引与模型；应用运行中并发只读一般安全。
+    /// `cargo test --lib real_index_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_index_ranking_probe() {
+        use crate::mv::embedder::Embedder;
+        use lancedb::connect;
+        use lancedb::query::{ExecutableQuery, QueryBase};
+
+        let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+        if !gguf.exists() {
+            eprintln!("skipping: model not present");
+            return;
+        }
+        let db_dir = std::env::var("PROBE_DB").unwrap_or_else(|_| {
+            format!(
+                "{}/Library/Application Support/app.mcphub.desktop/rag/lancedb",
+                std::env::var("HOME").unwrap()
+            )
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let mut emb = GgufEmbedder::load_with_user_platform(
+                &gguf,
+                Some(crate::mv::embedder::Platform::Cpu),
+            )
+            .expect("load model");
+            let db = connect(&db_dir).execute().await.expect("open lancedb");
+            let table = db.open_table("rag_chunk").execute().await.expect("open table");
+            println!("total rows: {}", table.count_rows(None).await.unwrap());
+
+            // ============ 前后对比 benchmark（真实数据，真实标题） ============
+            // 8 篇真实文档（含目标），各取前 3 个 700 字块，按两种格式嵌入：
+            //   OLD: 裸 chunk（当前索引的格式）
+            //   NEW: "Title: {真实标题} | {chunk}"（新模板）+ "Query: {q}"
+            // 排名 = 同格式内部对比（旧查询 vs 旧文档 / 新查询 vs 新文档），
+            // 完全等价于重索引前后的真实差异（mermaid 垃圾块除外——它们
+            // 无标题概念，NEW 格式下按 "Title: mermaid.min.js | ..." 处理）。
+            let docs: &[(&str, &str, &str)] = &[
+                ("181db8ce-206a-4296-a452-09612986f8ea", "迭代评审-消息配置与待办事项.md", "消息配置与待办事项 - 迭代评审文档"),
+                ("38c94be0-a5c2-4ac8-9f5b-eb1e88c133f3", "镁信入组状态.md", "镁信入组状态 — 业务理解"),
+                ("7c13b5c9-3572-4f90-8951-6ee95befdeb2", "hislite-centre-bff-architecture-review.md", "Hislite 与 Centre-BFF 整体架构"),
+                ("21482dc7-b503-4431-952c-afd7576db9c0", "直连门诊_多机构多门诊多厂商_架构改造设计.md", "直连门诊多机构多门诊多厂商架构改造设计"),
+                ("95e0e268-bedc-4674-aa12-a43fbddf3875", "A流程.md", "A流程"),
+                ("2c671ee4-fe92-4440-9981-5608d24c6240", "rws架构设计说明.md", "rws 架构设计说明"),
+                ("e5ee555d-b023-4b0c-b351-00ea511be57d", "门诊排班V2-技术评审文档.md", "门诊排班V2 - 技术评审文档"),
+                ("daf1be10-1d6f-48e1-ae09-ff33da9c4340", "YNW易诺卫用户中心整体架构设计.md", "YNW易诺卫用户中心整体架构设计"),
+                ("c6e915e5-6a3b-4379-913f-80baf3fb0d71", "mermaid.min.js", "mermaid.min.js"),
+            ];
+            let files_dir = format!(
+                "{}/Library/Application Support/app.mcphub.desktop/rag/files",
+                std::env::var("HOME").unwrap()
+            );
+            let query = "等待做的事情，这个功能的设计";
+
+            // 收集所有 (doc_idx, chunk_text)；每篇取前 3 块（700 字步进 600）
+            let mut all_chunks: Vec<(usize, String)> = Vec::new();
+            for (di, (id, _, _)) in docs.iter().enumerate() {
+                let base = format!("{files_dir}/{id}");
+                let path = [".md", ".js", ".txt", ".log"]
+                    .iter()
+                    .map(|e| format!("{base}{e}"))
+                    .find(|p| std::path::Path::new(p).exists())
+                    .expect("doc content file");
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    println!("!! cannot read {}", path);
+                    continue;
+                };
+                let chars: Vec<char> = content.chars().collect();
+                let mut i = 0;
+                let mut taken = 0;
+                while i < chars.len() && taken < 2 {
+                    let end = (i + 700).min(chars.len());
+                    let piece: String = chars[i..end].iter().collect();
+                    if piece.trim().len() > 20 {
+                        all_chunks.push((di, piece));
+                        taken += 1;
+                    }
+                    i += 600;
+                }
+            }
+            println!("benchmark chunks: {}", all_chunks.len());
+
+            // OLD 格式：query 裸文本，chunk 裸文本
+            let qv_old = emb.embed(query).expect("embed q old");
+            // NEW 格式：Query: {q}，Title: {title} | {content}
+            let q_new = format!("Query: {query}");
+            let qv_new = emb.embed(&q_new).expect("embed q new");
+
+            let mut old_scored: Vec<(f32, usize, usize)> = Vec::new();
+            let mut new_scored: Vec<(f32, usize, usize)> = Vec::new();
+            for (ci, (di, text)) in all_chunks.iter().enumerate() {
+                let v_old = emb.embed(text).expect("embed old");
+                let cos_old: f32 = qv_old.iter().zip(&v_old).map(|(a, b)| a * b).sum();
+                old_scored.push((cos_old, *di, ci));
+                let title = docs[*di].2;
+                let rendered =
+                    crate::mv::embedder::render_doc_embed_text("Title: {title} | {content}", title, text, Some("|"));
+                let v_new = emb.embed(&rendered).expect("embed new");
+                let cos_new: f32 = qv_new.iter().zip(&v_new).map(|(a, b)| a * b).sum();
+                new_scored.push((cos_new, *di, ci));
+            }
+            let name = |di: usize| docs[di].1;
+            for (label, mut scored) in [("OLD (无前缀, 当前索引格式)", old_scored), ("NEW (Title: {title} | {content} + Query: 前缀)", new_scored)] {
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                println!("\n===== {label} =====");
+                let mut target_rank = None;
+                for (r, (s, di, ci)) in scored.iter().enumerate() {
+                    if *di == 0 && target_rank.is_none() {
+                        target_rank = Some(r + 1);
+                    }
+                    if r < 20 {
+                        let short: String = all_chunks[*ci].1.chars().take(30).collect();
+                        println!("#{:<2} cos={s:.4} [{:<28}] {} …", r + 1, name(*di), short);
+                    }
+                }
+                let best_target = scored
+                    .iter()
+                    .filter(|(_, di, _)| *di == 0)
+                    .map(|(s, _, _)| *s)
+                    .fold(f32::MIN, f32::max);
+                println!("TARGET 最佳 chunk cos={best_target:.4}, 排名 = {target_rank:?}");
+            // ===== 生产管线优化验证：真实索引 top-100 + 惩罚公式 =====
+            let qv_cur = emb.embed("等待办的事情").expect("embed cur");
+            let mut stream = table
+                .query()
+                .nearest_to(qv_cur.clone())
+                .expect("nearest")
+                .limit(100)
+                .execute()
+                .await
+                .expect("search100");
+            use futures_util::TryStreamExt;
+            use lancedb::arrow::arrow::array::{Float32Array as FA, Int64Array as IA};
+            fn gcol(batch: &lancedb::arrow::arrow_array::RecordBatch, col: &str, i: usize) -> String {
+                lancedb::arrow::arrow::array::AsArray::as_string::<i32>(
+                    batch.column_by_name(col).unwrap(),
+                )
+                .value(i)
+                .to_string()
+            }
+            let mut rows: Vec<(f32, String, i64, String, String)> = Vec::new();
+            while let Some(batch) = stream.try_next().await.unwrap() {
+                let n = batch.num_rows();
+                for i in 0..n {
+                    let d = batch
+                        .column_by_name("_distance")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<FA>()
+                        .unwrap()
+                        .value(i);
+                    let ci = batch
+                        .column_by_name("chunk_index")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<IA>()
+                        .unwrap()
+                        .value(i);
+                    rows.push((1.0 - d, gcol(&batch, "doc_id", i), ci, gcol(&batch, "doc_name", i), gcol(&batch, "chunk_text", i)));
+                }
+            }
+            let mut raw = rows.clone();
+            raw.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            println!("\n===== REALIDX-RAW top-8 =====");
+            for (r, (s, _, _, nm, tx)) in raw.iter().take(8).enumerate() {
+                let short: String = tx.chars().take(28).collect();
+                println!("#{:<2} cos={s:.4} {:<26} {}", r + 1, nm, short);
+            }
+            let penalty = |t: &str| -> f32 {
+                let total = t.chars().count().max(1);
+                let cjk = t.chars().filter(|c| crate::services::fts_service::is_cjk_pub(*c)).count();
+                let ratio = cjk as f32 / total as f32;
+                if ratio >= 0.1 { 1.0 } else { 0.55 + 0.45 * (ratio / 0.1) }
+            };
+            let mut pen = rows.clone();
+            for row in pen.iter_mut() {
+                row.0 *= penalty(&row.4);
+            }
+            pen.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            println!("\n===== REALIDX-PENALIZED top-8 =====");
+            for (r, (s, _, _, nm, tx)) in pen.iter().take(8).enumerate() {
+                let short: String = tx.chars().take(28).collect();
+                println!("#{:<2} cos={s:.4} {:<26} {}", r + 1, nm, short);
+            }
+            let traw = raw.iter().position(|(_, id, _, _, _)| id.starts_with("181db8ce")).map(|p| p + 1);
+            let tpen = pen.iter().position(|(_, id, _, _, _)| id.starts_with("181db8ce")).map(|p| p + 1);
+            println!("TARGET-rank raw={traw:?} penalized={tpen:?}");
+            }
+        });
+    }
+
+    /// 重索引后存储向量格式验证：目标块向量应与 NEW(Title 模板)渲染一致。
+    /// `cargo test --lib stored_vec_format -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn stored_vec_format_probe() {
+        use crate::mv::embedder::Embedder;
+        use futures_util::TryStreamExt;
+        use lancedb::connect;
+        use lancedb::query::{ExecutableQuery, QueryBase};
+        let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+        if !gguf.exists() {
+            eprintln!("skipping: model not present");
+            return;
+        }
+        let db_dir = format!(
+            "{}/Library/Application Support/app.mcphub.desktop/rag/lancedb",
+            std::env::var("HOME").unwrap()
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let doc_id_prefix = std::env::var("PROBE_DOC").unwrap_or_else(|_| "181db8ce".into());
+            let mut m = GgufEmbedder::load_with_user_platform(
+                &gguf,
+                Some(crate::mv::embedder::Platform::Cpu),
+            )
+            .expect("load model");
+            let db = connect(&db_dir).execute().await.expect("open lancedb");
+            let table = db.open_table("rag_chunk").execute().await.expect("table");
+            let mut stream = table.query().limit(30000).execute().await.expect("scan");
+            use lancedb::arrow::arrow::array::{AsArray, FixedSizeListArray, Float32Array as FA};
+            let mut stored: Option<(String, Vec<f32>)> = None;
+            while let Some(b) = stream.try_next().await.unwrap() {
+                let idc = b
+                    .column_by_name("doc_id")
+                    .unwrap()
+                    .as_string::<i32>();
+                let txc = b
+                    .column_by_name("chunk_text")
+                    .unwrap()
+                    .as_string::<i32>();
+                let emb = b
+                    .column_by_name("embedding")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .unwrap();
+                for i in 0..b.num_rows() {
+                    if idc.value(i).starts_with(&doc_id_prefix) {
+                        let vals = emb.value(i);
+                        let fa = vals.as_any().downcast_ref::<FA>().unwrap();
+                        let v: Vec<f32> = (0..fa.len()).map(|j| fa.value(j)).collect();
+                        stored = Some((txc.value(i).to_string(), v));
+                        break;
+                    }
+                }
+                if stored.is_some() {
+                    break;
+                }
+            }
+            let (text, sv) = stored.expect("no target chunk");
+            let title = if doc_id_prefix == "181db8ce" {
+                "消息配置与待办事项 - 迭代评审文档".to_string()
+            } else {
+                // README's real .meta title (read from the full-id meta file)
+                let meta_path = std::fs::read_dir(format!(
+                    "{}/Library/Application Support/app.mcphub.desktop/rag/files",
+                    std::env::var("HOME").unwrap()
+                ))
+                .ok()
+                .and_then(|rd| {
+                    rd.flatten()
+                        .map(|e| e.path())
+                        .find(|p| {
+                            p.extension().and_then(|e| e.to_str()) == Some("meta")
+                                && p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|n| n.starts_with(&doc_id_prefix))
+                                    .unwrap_or(false)
+                        })
+                });
+                meta_path
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from))
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| "README".to_string())
+            };
+            let new = crate::mv::embedder::render_doc_embed_text(
+                "Title: {title} | {content}",
+                &title,
+                &text,
+                Some("|"),
+            );
+            let vo = m.embed(&text).expect("embed old");
+            let vn = m.embed(&new).expect("embed new");
+            let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+            println!("cos(stored, OLD bare) = {:.4}", cos(&sv, &vo));
+            println!("cos(stored, NEW title) = {:.4}", cos(&sv, &vn));
+            println!("cos(OLD, NEW)          = {:.4}", cos(&vo, &vn));
+            // Same-backend (Metal/Auto) reference to remove CPU-vs-GPU numeric noise
+            if let Ok(mut mg) = GgufEmbedder::load_with_user_platform(
+                &gguf,
+                Some(crate::mv::embedder::Platform::Gpu),
+            ) {
+                let go = mg.embed(&text).expect("gpu old");
+                let gn = mg.embed(&new).expect("gpu new");
+                println!("cos(stored, GPU OLD) = {:.4}", cos(&sv, &go));
+                println!("cos(stored, GPU NEW) = {:.4}", cos(&sv, &gn));
+                let tnew = crate::mv::embedder::render_doc_embed_text("Title: {title} | {content}", &title, &text, Some("|"));
+                let gt = mg.embed(&tnew).expect("gpu realtitle");
+                println!("cos(stored, GPU REALTITLE) = {:.4}", cos(&sv, &gt));
+                println!("REALTITLE text head: {:?}", tnew.chars().take(60).collect::<String>());
+            }
+        });
+    }
+
+    /// 查询 2/3 回归定位：生产一致格式（Query: 前缀）下，真实索引纯向量
+    /// 通道中目标文档 181db8ce 的排名。`cargo test --lib query23_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_index_query23_probe() {
+        use crate::mv::embedder::Embedder;
+        use futures_util::TryStreamExt;
+        use lancedb::connect;
+        use lancedb::query::{ExecutableQuery, QueryBase};
+
+        let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+        if !gguf.exists() {
+            eprintln!("skipping: model not present");
+            return;
+        }
+        let db_dir = std::env::var("PROBE_DB").unwrap_or_else(|_| {
+            format!(
+                "{}/Library/Application Support/app.mcphub.desktop/rag/lancedb",
+                std::env::var("HOME").unwrap()
+            )
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let mut emb = GgufEmbedder::load_with_user_platform(
+                &gguf,
+                Some(crate::mv::embedder::Platform::Cpu),
+            )
+            .expect("load model");
+            let db = connect(&db_dir).execute().await.expect("open lancedb");
+            let table = db.open_table("rag_chunk").execute().await.expect("open table");
+            use lancedb::arrow::arrow::array::{Float32Array as FA, Int64Array as IA};
+            fn gstr(b: &lancedb::arrow::arrow_array::RecordBatch, col: &str, i: usize) -> String {
+                lancedb::arrow::arrow::array::AsArray::as_string::<i32>(
+                    b.column_by_name(col).unwrap(),
+                )
+                .value(i)
+                .to_string()
+            }
+            for q in ["需要办的事情", "等待做的事情，这个功能的设计"] {
+                let qtext = crate::mv::embedder::render_query_embed_text("Query: {query}", q);
+                let qv = emb.embed(&qtext).expect("embed q");
+                let mut stream = table
+                    .query()
+                    .nearest_to(qv.clone())
+                    .expect("nearest")
+                    .limit(300)
+                    .execute()
+                    .await
+                    .expect("search");
+                let mut rows: Vec<(f32, String, String, String)> = Vec::new();
+                while let Some(batch) = stream.try_next().await.unwrap() {
+                    let n = batch.num_rows();
+                    for i in 0..n {
+                        let d = batch
+                            .column_by_name("_distance")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<FA>()
+                            .unwrap()
+                            .value(i);
+                        rows.push((
+                            1.0 - d,
+                            gstr(&batch, "doc_id", i),
+                            gstr(&batch, "doc_name", i),
+                            gstr(&batch, "chunk_text", i),
+                        ));
+                    }
+                }
+                rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                println!("\n===== q={q:?} (Query: 前缀) =====");
+                for (r, (s, id, nm, tx)) in rows.iter().take(6).enumerate() {
+                    let short: String = tx.chars().take(26).collect();
+                    println!("#{:<2} cos={s:.4} {:<26} {}", r + 1, nm, short);
+                }
+                let target_first = rows.iter().position(|(_, id, _, _)| id.starts_with("181db8ce"));
+                match target_first {
+                    Some(p) => {
+                        let (s, _, _, tx) = &rows[p];
+                        let short: String = tx.chars().take(26).collect();
+                        println!("TARGET rank={} cos={s:.4}  {}", p + 1, short);
+                    }
+                    None => println!("TARGET 不在前 300！"),
+                }
+            }
+        });
+    }
 }
 
 #[cfg(test)]

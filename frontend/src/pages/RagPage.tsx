@@ -49,6 +49,8 @@ import { isTauri } from '@/utils/tauriClient';
 import { useToast } from '@/contexts/ToastContext';
 
 import { useRagData } from '@/hooks/useRagData';
+import ReindexDialog from '@/components/ReindexDialog';
+import { useSettingsData } from '@/hooks/useSettingsData';
 import { getRagTools, ragDocSearchPaged, ragTagSearchPaged, getOcrStatus, pickRagGitRepo, cancelRagGitPick, getGitSourceErrors, listRagExcludedPaths, setRagExcludedPaths, refreshRagSource, previewRagSourceUpdate, getRagGitCloneDir, setRagSourceAlias } from '@/services/ragService';
 import RagDocTree, { type RagDocTreeHandle } from '@/components/ui/RagDocTree';
 import { RagDoc, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, RagOcrStatus, BatchPreview, DocSource, GitSourceError } from '@/types';
@@ -286,8 +288,13 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     reindexing,
     updatingDoc,
     reindexConfirm,
-    confirmReindex,
-    cancelReindex,
+    reindexMode,
+    reindexScope,
+    requestReload,
+    startReindex,
+    dismissReindex,
+    pendingModel,
+    currentModel,
     toggleEnabled,
     upload,
     updateDoc,
@@ -322,6 +329,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     docsVersion,
     refresh: refreshDocs,
   } = useRagData();
+  const { smartRoutingConfig } = useSettingsData();
 
   // 顶部「刷新」按钮（同服务器页）：重新拉取文档列表，转圈提示。
   const [refreshingDocs, setRefreshingDocs] = useState(false);
@@ -1783,6 +1791,10 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
             {batchUpdateRunning ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {batchUpdateRunning ? t('pages.rag.batchViewProgress', '查看进度') : t('pages.rag.batchUpdate', '批量更新')}
           </button>
+          {/* 重新载入：用当前模型重建全部文档向量（复用模型切换弹框，reload 模式，仅 RAG 行） */}
+          <button onClick={() => requestReload('rag')} className="hub-btn" disabled={disabled} title={t('pages.rag.reloadButtonHint')}>
+            <RefreshCw size={13} /> {t('pages.rag.reloadButton')}
+          </button>
           <button onClick={() => setShowSettings(true)} className="hub-btn" disabled={disabled}>
             <SlidersHorizontal size={13} /> {t('pages.rag.searchSettings')}
           </button>
@@ -2357,35 +2369,21 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           rag_get / rag_tag_search) with their description + input schema. */}
       {showTools && <ToolsDialog onClose={() => setShowTools(false)} />}
 
-      {/* Reindex confirmation: a model swap changed the embedding dim, so the
-          old vector table was dropped (old embeddings gone). Ask the user
-          before re-embedding all docs (expensive) instead of auto-running. */}
+      {/* Reindex dialog (v2, shared with Settings model card): a model swap
+          changed the embedding dim, so the old vector table was dropped. Runs
+          the doc re-embed + Smart Routing index reload with live progress;
+          cancel reverts to the previous model. */}
       {reindexConfirm && (
-        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
-          <div
-            className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 border"
-            style={{ borderColor: 'var(--hub-line-2)' }}
-          >
-            <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: 'var(--hub-line-2)' }}>
-              <h2 className="text-lg font-bold" style={{ color: 'var(--hub-ink)' }}>
-                {t('pages.rag.reindexConfirmTitle')}
-              </h2>
-            </div>
-            <div className="p-5 space-y-3">
-              <p className="text-[13px] leading-relaxed" style={{ color: 'var(--hub-ink-3)' }}>
-                {t('pages.rag.reindexConfirmMessage')}
-              </p>
-            </div>
-            <div className="flex justify-end gap-2 p-5 pt-3 border-t" style={{ borderColor: 'var(--hub-line-2)' }}>
-              <button onClick={cancelReindex} className="hub-btn">
-                {t('pages.rag.cancel')}
-              </button>
-              <button onClick={confirmReindex} className="hub-btn primary">
-                {t('pages.rag.reindexConfirmButton')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ReindexDialog
+          open
+          mode={reindexMode}
+          scope={reindexScope}
+          targetModel={pendingModel ?? currentModel ?? ''}
+          smartEnabled={smartRoutingConfig.enabled}
+          ragDocCount={Math.max(ragDocs.length, pageTotal)}
+          onClose={dismissReindex}
+          onStart={startReindex}
+        />
       )}
 
       {/* Upload progress overlay */}

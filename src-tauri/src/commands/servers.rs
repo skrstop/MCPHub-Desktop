@@ -364,7 +364,7 @@ pub async fn update_server(
                 if tools.is_empty() {
                     let _ = crate::smart_routing::index::remove_server_embeddings(&n).await;
                 } else {
-                    let _ = crate::smart_routing::index::save_server_embeddings(&n, desc.as_deref(), &tools).await;
+                    let _ = crate::smart_routing::index::save_server_embeddings(&n, desc.as_deref(), &tools, None).await;
                 }
             } else {
                 // Entry genuinely absent (server never connected / already

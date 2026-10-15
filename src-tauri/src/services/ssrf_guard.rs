@@ -143,9 +143,19 @@ fn cidr_matches(ip: IpAddr, cidr: &str) -> bool {
     }
 }
 
-/// Is `ip` disallowed, given the per-request CIDR allow-list? Origin reads
-/// the system config at each call so config edits apply to live clients.
+/// Is `ip` disallowed, given the per-request CIDR allow-list? Reads config at
+/// each call so config edits apply to live clients.
+///
+/// Desktop semantics (user decision 2026-10-13): the allow-list is the ONLY
+/// gate — no identity/admin distinction at call time. An EMPTY list means
+/// "allow all" (default single-user posture: local tool, admin is the only
+/// editor of this config), so the default deployment never blocks. A
+/// NON-EMPTY list opts into enforcement: internal ranges are blocked unless
+/// carved out; a malformed list still fails closed.
 pub fn is_disallowed_ip(ip: IpAddr, allowed_cidrs: &[String]) -> bool {
+    if allowed_cidrs.is_empty() {
+        return false;
+    }
     let blocked = match ip {
         IpAddr::V4(v4) => is_blocked_ipv4(v4),
         IpAddr::V6(v6) => is_blocked_ipv6(v6),
@@ -241,14 +251,19 @@ mod tests {
 
     #[tokio::test]
     async fn assert_safe_url_blocks_internal_and_allows_exceptions() {
-        assert!(assert_safe_url("http://127.0.0.1:1/x", &[]).await.is_err());
-        assert!(assert_safe_url("http://169.254.169.254/latest", &[]).await.is_err());
-        assert!(assert_safe_url("http://10.0.0.5/x", &[]).await.is_err());
+        // Desktop semantics: EMPTY allow-list = allow all (default posture).
+        assert!(assert_safe_url("http://127.0.0.1:1/x", &[]).await.is_ok());
+        assert!(assert_safe_url("http://169.254.169.254/latest", &[]).await.is_ok());
+        assert!(assert_safe_url("http://10.0.0.5/x", &[]).await.is_ok());
+        // Non-empty list opts into enforcement: internal blocked unless carved out.
+        assert!(assert_safe_url("http://10.0.0.5/x", &["192.168.0.0/16".to_string()])
+            .await
+            .is_err());
         // Carve-out via allowedCidrs.
         assert!(assert_safe_url("http://10.0.0.5/x", &["10.0.0.0/8".to_string()])
             .await
             .is_ok());
-        // Scheme fail-closed.
+        // Scheme fail-closed regardless of list.
         assert!(assert_safe_url("file:///etc/passwd", &[]).await.is_err());
     }
 }

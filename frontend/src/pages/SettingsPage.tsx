@@ -24,6 +24,7 @@ import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import SmartRoutingIndexPanel from '@/components/SmartRoutingIndexPanel';
 import ModelVectorSettings from '@/components/ModelVectorSettings';
 import { reindexSmartRouting } from '@/services/smartRoutingService';
+import ReindexDialog from '@/components/ReindexDialog';
 import { apiDelete, apiGet, apiPost, apiPut } from '@/utils/fetchInterceptor';
 import {
   filterBearerKeysByScopeFilter,
@@ -171,7 +172,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
     return (
       <tr>
         <td colSpan={5} className="p-0 border-b border-gray-200 dark:border-gray-700">
-          <div className="bg-gray-50 dark:bg-gray-800 p-5">
+          <div className="bg-gray-50 dark:bg-[var(--hub-item)] p-5">
             <div className="grid grid-cols-1 md:grid-cols-12 gap-4 mb-4">
               <div className="md:col-span-3">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -198,7 +199,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {t('settings.bearerKeyEnabled') || 'Status'}
                 </label>
-                <div className="flex items-center h-[38px] px-3 bg-white dark:bg-gray-800 border border-gray-300 rounded-md">
+                <div className="flex items-center h-[38px] px-3 bg-white dark:bg-[var(--hub-item)] border border-gray-300 rounded-md">
                   <span
                     className={`text-sm mr-3 ${enabled ? 'text-green-600 font-medium' : 'text-gray-500'}`}
                   >
@@ -217,7 +218,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                   {t('settings.bearerKeyAccessType') || 'Access scope'}
                 </label>
                 <select
-                  className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                  className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
                   value={accessType}
                   onChange={(e) =>
                     setAccessType(e.target.value as 'all' | 'groups' | 'servers' | 'custom')
@@ -297,7 +298,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsEditing(false)}
-                  className="px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
+                  className="px-4 py-2 bg-white dark:bg-[var(--hub-item)] border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 dark:hover:bg-[var(--hub-item-hover)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
                 >
                   {t('common.cancel') || 'Cancel'}
                 </button>
@@ -318,7 +319,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
   }
 
   return (
-    <tr className="hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700">
+    <tr className="hover:bg-gray-50 dark:bg-[var(--hub-item)] dark:hover:bg-[var(--hub-item-hover)]">
       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
         {keyData.name}
       </td>
@@ -1039,6 +1040,7 @@ const SettingsPage: React.FC = () => {
     password: false,
     exportConfig: false,
     bearerKeys: false,
+    allowedCidrs: false,
   });
 
   const toggleSection = (
@@ -1053,7 +1055,8 @@ const SettingsPage: React.FC = () => {
       | 'nameSeparator'
       | 'password'
       | 'exportConfig'
-      | 'bearerKeys',
+      | 'bearerKeys'
+      | 'allowedCidrs',
   ) => {
     setSectionsVisible((prev) => {
       const next = { ...prev, [section]: !prev[section] };
@@ -1542,21 +1545,12 @@ const SettingsPage: React.FC = () => {
     return invalid.length > 0;
   };
 
-  const [srReindexing, setSrReindexing] = useState(false);
-  const handleSmartRoutingReindex = async () => {
-    if (srReindexing) return;
-    setSrReindexing(true);
-    try {
-      await reindexSmartRouting();
-      showToast(t('settings.smartReindexDone') || 'Smart routing index rebuilt', 'success');
-    } catch (e) {
-      showToast(
-        `${t('settings.smartReindexFailed') || 'Failed to rebuild smart routing index'}: ${e instanceof Error ? e.message : String(e)}`,
-        'error',
-      );
-    } finally {
-      setSrReindexing(false);
-    }
+  const [srReloadOpen, setSrReloadOpen] = useState(false);
+  // 重新载入: unified with the model-swap dialog (reload mode, smart scope) —
+  // only the Smart Routing index reloads here; the dialog owns progress.
+  const handleSrReloadStart = async (): Promise<'reindexed' | 'clean'> => {
+    await reindexSmartRouting();
+    return 'reindexed';
   };
   const handleSmartRoutingEnabledChange = async (value: boolean) => {
     // Desktop local mode: no external provider fields required — enable directly
@@ -2283,7 +2277,7 @@ const SettingsPage: React.FC = () => {
           {sectionsVisible.bearerKeys && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
               {isAdmin && <>
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableBearerAuth') || 'Enable Bearer Authentication'}
@@ -2303,7 +2297,7 @@ const SettingsPage: React.FC = () => {
               </div>
               </>}
 
-              {isAdmin && <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              {isAdmin && <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.bearerAuthHeaderName')}
@@ -2350,7 +2344,7 @@ const SettingsPage: React.FC = () => {
                       placeholder={t('common.search') || 'Search...'}
                       value={bearerKeySearch}
                       onChange={(e) => setBearerKeySearch(e.target.value)}
-                      className="block w-40 py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
+                      className="block w-40 py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-input"
                     />
                   )}
                   {bearerKeys.length > 0 && bearerKeyScopeFilterOptions.length > 1 && (
@@ -2360,7 +2354,7 @@ const SettingsPage: React.FC = () => {
                       </label>
                       <select
                         id="bearer-key-scope-filter"
-                        className="block min-w-48 py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                        className="block min-w-48 py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
                         value={bearerKeyScopeFilter}
                         onChange={(e) => setBearerKeyScopeFilter(e.target.value as BearerKeyScopeFilterValue)}
                       >
@@ -2404,7 +2398,7 @@ const SettingsPage: React.FC = () => {
               ) : (
                 <div className="mt-2 overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-                    <thead className="bg-gray-50 dark:bg-gray-800">
+                    <thead className="bg-gray-50 dark:bg-[var(--hub-item)]">
                       <tr>
                         <th
                           scope="col"
@@ -2438,7 +2432,7 @@ const SettingsPage: React.FC = () => {
                         </th>
                       </tr>
                     </thead>
-                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    <tbody className="bg-white dark:bg-[var(--hub-item)] divide-y divide-gray-200 dark:divide-gray-700">
                       {filteredBearerKeys.map((key) => (
                         <BearerKeyRow
                           key={key.id}
@@ -2460,7 +2454,7 @@ const SettingsPage: React.FC = () => {
               {/* New key form */}
               {showAddBearerKeyForm && (
                 <div className="mt-6 border-t border-gray-200 dark:border-gray-700 pt-6">
-                  <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
+                  <div className="bg-gray-50 dark:bg-[var(--hub-item)] rounded-lg p-5 border border-gray-200 dark:border-gray-700">
                     <h3 className="font-medium text-gray-900 mb-4 flex items-center gap-2">
                       <span className="bg-blue-100 text-blue-600 p-1 rounded">
                         <svg
@@ -2502,7 +2496,7 @@ const SettingsPage: React.FC = () => {
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           {t('settings.bearerKeyEnabled') || 'Status'}
                         </label>
-                        <div className="flex items-center h-[38px] px-3 bg-white dark:bg-gray-800 border border-gray-300 rounded-md">
+                        <div className="flex items-center h-[38px] px-3 bg-white dark:bg-[var(--hub-item)] border border-gray-300 rounded-md">
                           <span
                             className={`text-sm mr-3 ${newBearerKey.enabled ? 'text-green-600 font-medium' : 'text-gray-500'}`}
                           >
@@ -2526,7 +2520,7 @@ const SettingsPage: React.FC = () => {
                           {t('settings.bearerKeyAccessType') || 'Access scope'}
                         </label>
                         <select
-                          className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                          className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
                           value={newBearerKey.accessType}
                           onChange={(e) =>
                             setNewBearerKey((prev) => ({
@@ -2622,7 +2616,7 @@ const SettingsPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => setShowAddBearerKeyForm(false)}
-                          className="px-4 py-2 bg-white dark:bg-gray-800 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
+                          className="px-4 py-2 bg-white dark:bg-[var(--hub-item)] border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 dark:hover:bg-[var(--hub-item-hover)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 h-[38px]"
                         >
                           {t('common.cancel') || 'Cancel'}
                         </button>
@@ -2789,20 +2783,16 @@ const SettingsPage: React.FC = () => {
                         onCheckedChange={(checked) => handleSmartRoutingEnabledChange(checked)}
                       />
                     </div>
-                    {/* Rebuild index — directly below the enable switch. Disabled
-                        while Smart Routing is off (nothing to rebuild). */}
+                    {/* 重新载入 — opens the shared model-swap dialog in reload
+                        mode (unified progress UI; copy differs per mode).
+                        Disabled while Smart Routing is off. */}
                     <button
                       type="button"
                       className="hub-btn"
-                      disabled={!smartRoutingConfig.enabled || srReindexing}
-                      onClick={handleSmartRoutingReindex}
+                      disabled={!smartRoutingConfig.enabled}
+                      onClick={() => setSrReloadOpen(true)}
                     >
-                      {srReindexing && (
-                        <Loader2 size={14} className="animate-spin" />
-                      )}
-                      {srReindexing
-                        ? t('settings.smartReindexing') || 'Rebuilding index...'
-                        : t('settings.smartReindex') || 'Rebuild Index'}
+                      {t('settings.smartReindex') || 'Reload'}
                     </button>
                   </div>
                 </div>
@@ -2906,7 +2896,7 @@ const SettingsPage: React.FC = () => {
 
               {/* hide when DB_URL env is set; hidden entirely on desktop (local runtime) */}
               {!isTauri() && smartRoutingConfig.dbUrl !== '${DB_URL}' && (
-                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                   <div className="mb-2">
                     <h3 className="font-medium text-gray-700">
                       <span className="text-red-500 px-1">*</span>
@@ -2932,7 +2922,7 @@ const SettingsPage: React.FC = () => {
                 <></>
               ) : (
                 <>
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingProvider') || 'Embedding Provider'}
@@ -2940,7 +2930,7 @@ const SettingsPage: React.FC = () => {
                 </div>
                 <div className="flex items-center gap-3">
                   <select
-                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
+                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
                     value={tempSmartRoutingConfig.embeddingProvider}
                     onChange={(e) =>
                       handleSmartRoutingConfigChange(
@@ -2958,7 +2948,7 @@ const SettingsPage: React.FC = () => {
 
               {tempSmartRoutingConfig.embeddingProvider === 'openai' ? (
                 <>
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.embeddingProviderPreset') || 'Provider Preset'}
@@ -2976,7 +2966,7 @@ const SettingsPage: React.FC = () => {
                             e.target.value as EmbeddingProviderPresetId,
                           )
                         }
-                        className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
+                        className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
                         disabled={loading}
                       >
                         <option value="openai">
@@ -3001,7 +2991,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3023,7 +3013,7 @@ const SettingsPage: React.FC = () => {
                     {renderEnvOverrideWarning('llmProviderApiKey')}
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3046,7 +3036,7 @@ const SettingsPage: React.FC = () => {
                     {renderEnvOverrideWarning('llmProviderBaseUrl')}
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3071,7 +3061,7 @@ const SettingsPage: React.FC = () => {
                 </>
               ) : (
                 <>
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3096,7 +3086,7 @@ const SettingsPage: React.FC = () => {
                     {renderEnvOverrideWarning('azureOpenaiEndpoint')}
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3118,7 +3108,7 @@ const SettingsPage: React.FC = () => {
                     {renderEnvOverrideWarning('azureOpenaiApiKey')}
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3141,7 +3131,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3169,7 +3159,7 @@ const SettingsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         <span className="text-red-500 px-1">*</span>
@@ -3206,7 +3196,7 @@ const SettingsPage: React.FC = () => {
               )}
 
               {!isTauri() && (
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingDimensions') || 'Embedding Dimensions'}
@@ -3255,7 +3245,7 @@ const SettingsPage: React.FC = () => {
               )}
 
               {!isTauri() && (
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.basePacingDelayMs')}
@@ -3298,7 +3288,7 @@ const SettingsPage: React.FC = () => {
               )}
 
               {!isTauri() && (
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingEncodingFormat')}
@@ -3330,7 +3320,7 @@ const SettingsPage: React.FC = () => {
               )}
 
               {!isTauri() && (
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.embeddingMaxTokens')}
@@ -3377,7 +3367,7 @@ const SettingsPage: React.FC = () => {
 
               {/* Embedding task prefixes: desktop local model handles this internally — web/external-provider only */}
               {!isTauri() && (
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.embeddingPrefixes')}</h3>
                   <p className="text-xs text-gray-500 mt-1">
@@ -3423,7 +3413,7 @@ const SettingsPage: React.FC = () => {
               {/* Search-results settings: origin backend search_tools tuning; desktop
                   smart_routing uses its own hybrid retrieval sliders, keys not consumed */}
               {!isTauri() && (
-                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                   <div className="mb-2">
                     <h3 className="font-medium text-gray-700">{t('settings.searchResults')}</h3>
                     <p className="text-xs text-gray-500 mt-1">
@@ -3471,7 +3461,7 @@ const SettingsPage: React.FC = () => {
               {/* Origin #1286: configurable optional tool fields in $smart
                   search/describe results. Consumed by the desktop smart_routing
                   backend too, so this is NOT web-only. */}
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md mt-3">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md mt-3">
                 <p className="block text-xs text-gray-600">
                   {t('settings.toolDefinitionFields')}
                 </p>
@@ -3509,7 +3499,7 @@ const SettingsPage: React.FC = () => {
 
               {/* Desktop: tool description verbosity for the meta-tool catalog */}
               {isTauri() && (
-                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                   <div className="mb-2">
                     <h3 className="font-medium text-gray-700">
                       {t('settings.serverDescriptionMode')}
@@ -3526,7 +3516,7 @@ const SettingsPage: React.FC = () => {
                         e.target.value as 'names' | 'full',
                       )
                     }
-                    className="w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
+                    className="w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
                     disabled={loading}
                   >
                     <option value="names">{t('settings.serverDescriptionModeNames')}</option>
@@ -3537,7 +3527,7 @@ const SettingsPage: React.FC = () => {
 
               {/* Desktop: hybrid retrieval settings (RAG-style sliders + manual input, replaces origin's three-tier thresholds) */}
               {isTauri() && (
-                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                   <div className="mb-3">
                     <h3 className="font-medium text-gray-700">{t('settings.srSearchSection')}</h3>
                   </div>
@@ -3599,7 +3589,7 @@ const SettingsPage: React.FC = () => {
                   padding: '12px 14px',
                   border: '1px solid var(--hub-line)',
                   borderRadius: 8,
-                  background: 'var(--hub-bg-2)',
+                  background: 'var(--hub-item)',
                 }}
               >
                 <div>
@@ -3692,7 +3682,7 @@ const SettingsPage: React.FC = () => {
                   padding: '12px 14px',
                   border: '1px solid var(--hub-line)',
                   borderRadius: 8,
-                  background: 'var(--hub-bg-2)',
+                  background: 'var(--hub-item)',
                 }}
               >
                 <div>
@@ -3714,7 +3704,7 @@ const SettingsPage: React.FC = () => {
               </div>
 
               <div className="space-y-3">
-                <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                   <div className="mb-2">
                     <h3 className="font-medium text-gray-700">
                       {t('settings.toolResultCompressionStrategy') || 'Strategy'}
@@ -3732,7 +3722,7 @@ const SettingsPage: React.FC = () => {
                         e.target.value as any,
                       )
                     }
-                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-gray-800 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
+                    className="flex-1 mt-1 block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
                     disabled={loading}
                   >
                     <option value="auto">Auto</option>
@@ -3745,7 +3735,7 @@ const SettingsPage: React.FC = () => {
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-2">
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.toolResultCompressionMinTokens') || 'Minimum tokens'}
@@ -3767,7 +3757,7 @@ const SettingsPage: React.FC = () => {
                     />
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.toolResultCompressionMaxOutputTokens') ||
@@ -3826,7 +3816,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.oauthServerConfig && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableOauthServer')}</h3>
                   <p className="text-sm text-gray-500">
@@ -3845,7 +3835,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.requireClientSecret')}</h3>
                   <p className="text-sm text-gray-500">
@@ -3861,7 +3851,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.requireState')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.requireStateDescription')}</p>
@@ -3873,7 +3863,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.accessTokenLifetime')}</h3>
                   <p className="text-sm text-gray-500">
@@ -3901,7 +3891,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.refreshTokenLifetime')}
@@ -3931,7 +3921,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.authorizationCodeLifetime')}
@@ -3961,7 +3951,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.allowedScopes')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.allowedScopesDescription')}</p>
@@ -3985,7 +3975,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md space-y-4">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md space-y-4">
                 <div className="flex justify-between items-center">
                   <div>
                     <h3 className="font-medium text-gray-700">
@@ -4107,7 +4097,7 @@ const SettingsPage: React.FC = () => {
                 </div>
 
                 {isTauri() && (
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">{t('settings.oauthClients')}</h3>
                       <p className="text-sm text-gray-500">{t('settings.oauthClientsDescription')}</p>
@@ -4182,7 +4172,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.mcpRouterConfig && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpRouterApiKey')}</h3>
                   <p className="text-sm text-gray-500">
@@ -4208,7 +4198,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpRouterBaseUrl')}</h3>
                   <p className="text-sm text-gray-500">
@@ -4274,7 +4264,7 @@ const SettingsPage: React.FC = () => {
                 </span>
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableBetterAuth') || 'Enable Better Auth'}
@@ -4291,7 +4281,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.disablePasswordLogin')}
@@ -4309,7 +4299,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.betterAuthBaseUrl') || 'Base URL'}
@@ -4329,7 +4319,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.betterAuthBasePath') || 'Auth base path'}
@@ -4349,7 +4339,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">
                     {t('settings.betterAuthTrustedOrigins') || 'Trusted origins'}
@@ -4369,7 +4359,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md space-y-4">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md space-y-4">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.betterAuthProviders') || 'Providers'}
@@ -4446,7 +4436,7 @@ const SettingsPage: React.FC = () => {
 
               {betterAuthConfig.providers.oidc.enabled && (
                 <>
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.betterAuthOidcProviderId') || 'OIDC provider ID'}
@@ -4468,7 +4458,7 @@ const SettingsPage: React.FC = () => {
                     />
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.betterAuthOidcDiscoveryUrl') || 'OIDC discovery URL'}
@@ -4490,7 +4480,7 @@ const SettingsPage: React.FC = () => {
                     />
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.betterAuthOidcScopes') || 'OIDC scopes'}
@@ -4510,7 +4500,7 @@ const SettingsPage: React.FC = () => {
                     />
                   </div>
 
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div className="mb-2">
                       <h3 className="font-medium text-gray-700">
                         {t('settings.betterAuthOidcPrompt') || 'OIDC prompt'}
@@ -4530,7 +4520,7 @@ const SettingsPage: React.FC = () => {
                     />
                   </div>
 
-                  <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+                  <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                     <div>
                       <h3 className="font-medium text-gray-700">
                         {t('settings.betterAuthOidcPkce') || 'Enable PKCE'}
@@ -4585,7 +4575,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.nameSeparator && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.nameSeparatorLabel')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.nameSeparatorDescription')}</p>
@@ -4610,7 +4600,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableSessionRebuild')}
@@ -4626,7 +4616,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.storeToolPayload')}
@@ -4651,31 +4641,6 @@ const SettingsPage: React.FC = () => {
           不渲染。见 doc/smart_routing_port_plan_20260925.md §3.4。 */}
       {isTauri() && <ModelVectorSettings />}
 
-      {isAdmin && (
-        <div className="hub-card mb-6 p-5 space-y-3">
-          <label htmlFor="allowed-cidrs" className="block font-medium text-[var(--hub-ink)]">
-            {t('settings.allowedCidrs')}
-          </label>
-          <p className="text-sm text-[var(--hub-ink-2)]">{t('settings.allowedCidrsDescription')}</p>
-          <textarea
-            id="allowed-cidrs"
-            value={tempAllowedCidrs}
-            onChange={(event) => setTempAllowedCidrs(event.target.value)}
-            placeholder={'192.168.1.0/24\nfd00::/64'}
-            rows={4}
-            disabled={loading}
-            className="block w-full py-2 px-3 border border-gray-300 rounded-md form-input font-mono"
-          />
-          <button
-            className="hub-btn primary"
-            disabled={loading}
-            onClick={() => updateAllowedCidrs(tempAllowedCidrs.split(/\s+/).filter(Boolean))}
-          >
-            {t('common.save')}
-          </button>
-        </div>
-      )}
-
       {/* Route Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_ROUTE_CONFIG}>
         <div className="hub-card mb-6 overflow-hidden">
@@ -4692,7 +4657,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.routingConfig && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.enableGlobalRoute')}</h3>
                   <p className="text-sm text-gray-500">
@@ -4708,7 +4673,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">
                     {t('settings.enableGroupNameRoute')}
@@ -4726,7 +4691,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.skipAuth')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.skipAuthDescription')}</p>
@@ -4738,7 +4703,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.jsonBodyLimit')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.jsonBodyLimitDescription')}</p>
@@ -4762,7 +4727,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.exposeHttp', '启用 HTTP 服务')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.exposeHttpDescription', '启用后，MCP 服务将通过 HTTP 暴露给外部客户端')}</p>
@@ -4774,7 +4739,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div>
                   <h3 className="font-medium text-gray-700">{t('settings.mcpStrictValidation', '严格协议校验')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.mcpStrictValidationDescription', '开启后按 MCP 规范严格校验请求头与参数；默认关闭，宽容不完整请求以兼容未跟进新规范的客户端')}</p>
@@ -4786,7 +4751,7 @@ const SettingsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.httpPort', 'HTTP 服务端口')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.httpPortDescription', 'MCP HTTP 服务监听端口，修改后需重启应用生效')}</p>
@@ -4822,6 +4787,35 @@ const SettingsPage: React.FC = () => {
                   ⚠️ {t('settings.httpPortWarning', '修改端口后需要重启应用才能生效')}
                 </p>
               </div>
+
+              {/* 允许访问的上游 CIDR 范围（安全配置子项，桌面语义）：无身份
+                  判断，管理员与游客模式均可编辑，调用时只看配置。留空 =
+                  允许全部（默认）；非空 = 内网段默认拦截、列表内放行。 */}
+              <div className="rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)]">
+                <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-3 flex items-center gap-2">
+                  <ShieldCheck size={15} className="text-[var(--hub-ink-2)]" />
+                  {t('settings.allowedCidrs')}
+                </h3>
+                <div className="space-y-3">
+                  <p className="text-sm text-[var(--hub-ink-2)]">{t('settings.allowedCidrsDescription')}</p>
+                  <textarea
+                    id="allowed-cidrs"
+                    value={tempAllowedCidrs}
+                    onChange={(event) => setTempAllowedCidrs(event.target.value)}
+                    placeholder={'192.168.1.0/24\nfd00::/64'}
+                    rows={4}
+                    disabled={loading}
+                    className="block w-full py-2 px-3 border border-gray-300 rounded-md form-input font-mono"
+                  />
+                  <button
+                    className="hub-btn primary"
+                    disabled={loading}
+                    onClick={() => updateAllowedCidrs(tempAllowedCidrs.split(/\s+/).filter(Boolean))}
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -4844,7 +4838,7 @@ const SettingsPage: React.FC = () => {
           {sectionsVisible.installConfig && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
               {/* Base URL hidden in desktop client - port is configured in route config */}
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.pythonIndexUrl')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.pythonIndexUrlDescription')}</p>
@@ -4868,7 +4862,7 @@ const SettingsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.npmRegistry')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.npmRegistryDescription')}</p>
@@ -4893,7 +4887,7 @@ const SettingsPage: React.FC = () => {
               </div>
 
               {/* Node.js Runtime Version */}
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.nodeVersion', 'Node.js Version')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.nodeVersionDescription', 'Select or install a specific Node.js version for running MCP servers')}</p>
@@ -4902,7 +4896,7 @@ const SettingsPage: React.FC = () => {
               </div>
 
               {/* Python Runtime Version */}
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.pythonVersion', 'Python Version')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.pythonVersionDescription', 'Select or install a specific Python version for running MCP servers')}</p>
@@ -4911,7 +4905,7 @@ const SettingsPage: React.FC = () => {
               </div>
 
               {/* Clear runner caches */}
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.clearCache')}</h3>
                   <p className="text-sm text-gray-500">{t('settings.clearCacheDescription')}</p>
@@ -4969,7 +4963,7 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.exportConfig && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
-              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-4">
                   <h3 className="font-medium text-gray-700">{t('settings.mcpSettingsJson')}</h3>
                   <p className="text-sm text-gray-500">
@@ -4997,7 +4991,7 @@ const SettingsPage: React.FC = () => {
                   </div>
                   {mcpSettingsJson && (
                     <div className="mt-3">
-                      <pre className="bg-gray-900 text-gray-100 p-4 rounded-md overflow-x-auto text-xs max-h-96">
+                      <pre className="p-4 rounded-md overflow-x-auto text-xs max-h-96" style={{ background: 'var(--hub-bg-2)', color: 'var(--hub-ink)' }}>
                         {mcpSettingsJson}
                       </pre>
                     </div>
@@ -5021,6 +5015,19 @@ const SettingsPage: React.FC = () => {
         confirmText={t('settings.clearCache')}
         variant="warning"
       />
+
+      {/* 智能路由「重新载入」→ 统一复用模型切换弹框（reload 模式：不同文案，无模型切换） */}
+      {srReloadOpen && (
+        <ReindexDialog
+          open
+          mode="reload"
+          scope="smart"
+          targetModel=""
+          smartEnabled={smartRoutingConfig.enabled}
+          onClose={() => setSrReloadOpen(false)}
+          onStart={handleSrReloadStart}
+        />
+      )}
     </div>
   );
 };

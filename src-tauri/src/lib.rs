@@ -488,6 +488,7 @@ pub fn run() {
             commands::config::get_public_config,
             commands::smart_routing::smart_routing_status,
             commands::smart_routing::smart_routing_reindex,
+            commands::smart_routing::smart_routing_reindex_participants,
             commands::smart_routing::smart_routing_performance,
             commands::config::import_settings,
             commands::config::export_settings,
