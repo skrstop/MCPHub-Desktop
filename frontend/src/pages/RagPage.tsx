@@ -88,10 +88,6 @@ const formatElapsed = (ms: number): string => {
   return m > 0 ? `${m}m${s.toString().padStart(2, '0')}s` : `${s}s`;
 };
 
-// 「大文件」提示阈值：与后端 chunker 的 >1MB 源码警告同一量级——超过该大小的
-// 文件提取/分片/嵌入耗时显著（数十秒级），导入浮层显示「耗时较长请耐心等待」。
-const LARGE_FILE_HINT_BYTES = 1024 * 1024;
-
 // SSH 远程识别（与后端 git.rs::validate_url 同口径）：`ssh://[user@]host/...`
 // 或 SCP 风格 `[user@]host:path`（显式 user@ 才算，避免误吞本地路径）。
 // SSH 认证走本机 ssh key/agent，账密表单不适用。
@@ -284,8 +280,6 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     uploading,
     uploadProgress,
     charProgress,
-    uploadTiming,
-    reindexing,
     updatingDoc,
     reindexConfirm,
     reindexMode,
@@ -381,6 +375,27 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   const [updateCheck, setUpdateCheck] = useState<MockUpdateCheck | null>(null); // 检查原始文件结果
   const [updateChecking, setUpdateChecking] = useState(false); // 检查中
   const [updateActionPhase, setUpdateActionPhase] = useState<'idle' | 'reindexing' | 'done' | 'error'>('idle'); // 执行更新阶段
+  // 导入/更新统一进度弹框（ReindexDialog import 模式）的完成阶段：批次结束
+  // （uploading 翻 false）后保持弹框打开显示 done，用户点「完成」关闭。
+  const [importDone, setImportDone] = useState(false);
+  // Mount latch: uploading flips false one render BEFORE importDone turns
+  // true (the prevUploadingRef effect runs post-render), which unmounted the
+  // dialog for a frame — remount reset every stat to 0/0 + 0s on completion.
+  // The latch holds the dialog mounted across that gap until explicit close.
+  const importLatchRef = useRef(false);
+  if (uploading) importLatchRef.current = true;
+  const prevUploadingRef = useRef(false);
+  useEffect(() => {
+    const was = prevUploadingRef.current;
+    prevUploadingRef.current = uploading;
+    if (uploading) {
+      setImportDone(false);
+      return;
+    }
+    // uploading 翻 false：模型重载流程（reindexConfirm）由 ReindexDialog 自身
+    // 的 done 阶段负责，不弹导入完成；仅导入/单文档更新批次显示 done。
+    if (was && !reindexConfirm) setImportDone(true);
+  }, [uploading, reindexConfirm]);
   const [showBatchUpdateDialog, setShowBatchUpdateDialog] = useState(false); // 进度弹框（可关闭）
   const [batchConfirm, setBatchConfirm] = useState<BatchPreview | null>(null); // 批量更新前置确认弹框
   const [batchConfirmChecking, setBatchConfirmChecking] = useState(false); // 确认弹框「预扫描」中
@@ -2386,197 +2401,21 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
         />
       )}
 
-      {/* Upload progress overlay */}
-      {uploading && uploadProgress && (
-        <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
-          <div
-            className="hub-card w-full max-w-sm p-6 flex flex-col items-center gap-4 shadow-2xl"
-            style={{ background: 'var(--hub-surface)' }}
-          >
-            <Loader2 size={22} className="animate-spin" style={{ color: 'var(--hub-ink-2)' }} />
-            <div className="text-[13px] text-center" style={{ color: 'var(--hub-ink)' }}>
-              {reindexing
-                ? uploadProgress.name
-                  ? t('pages.rag.reindexingFile', {
-                      current: uploadProgress.current + 1,
-                      total: uploadProgress.total,
-                      name: uploadProgress.name,
-                    })
-                  : t('pages.rag.reindexingDone', { total: uploadProgress.total })
-                : updatingDoc
-                ? uploadProgress.name
-                  ? t('pages.rag.updatingFile', { name: uploadProgress.name })
-                  : t('pages.rag.update')
-                : uploadProgress.name
-                ? t('pages.rag.uploadingFile', {
-                    current: uploadProgress.current + 1,
-                    total: uploadProgress.total,
-                    name: uploadProgress.name,
-                  })
-                : t('pages.rag.uploadingDone', { total: uploadProgress.total })}
-            </div>
-            {/* file-level progress bar (current/total files) */}
-            <div className="w-full" style={{ height: 6, borderRadius: 3, background: 'var(--hub-line)', overflow: 'hidden' }}>
-              <div
-                style={{
-                  width: `${uploadProgress.total > 0 ? (uploadProgress.current / uploadProgress.total) * 100 : 0}%`,
-                  height: '100%',
-                  background: 'var(--hub-ink)',
-                  transition: 'width 0.2s ease',
-                }}
-              />
-            </div>
-            <div className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
-              {uploadProgress.current}/{uploadProgress.total}
-            </div>
-
-            {/* 耗时行：总耗时（本批开始至今）+ 单文件耗时（当前文件开始至今）。
-                uploadTiming.tick 每秒 +1 驱动重渲染（见 useRagData）；null 时
-                （理论不可达——overlay 只在 timing 存在时显示）不渲染。 */}
-            {uploadTiming &&
-              (() => {
-                const now = Date.now();
-                const totalMs = now - uploadTiming.startedAt;
-                const fileMs = now - uploadTiming.fileStartedAt;
-                return (
-                  <div className="flex items-center justify-center gap-3 hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
-                    <span>
-                      {t('pages.rag.totalElapsed', '总耗时')} {formatElapsed(totalMs)}
-                    </span>
-                    <span style={{ color: 'var(--hub-line-2, var(--hub-line))' }}>|</span>
-                    <span>
-                      {t('pages.rag.fileElapsed', '单文件')} {formatElapsed(fileMs)}
-                    </span>
-                  </div>
-                );
-              })()}
-
-            {/* Per-document (character-based) progress bar — always shown while a
-                file is actively being indexed (uploadProgress.name is non-empty),
-                so the second bar is visible immediately rather than waiting for
-                the first backend tick. The percentage/char counts come from the
-                `rag://upload-progress` events (charProgress); until the first
-                tick lands the bar sits at 0%. The fill uses --hub-accent with a
-                --hub-ink fallback (the accent var is undefined in dark mode). */}
-            {uploadProgress.name &&
-              (() => {
-                const matches = charProgress && charProgress.name === uploadProgress.name;
-                const charsDone = matches ? charProgress!.charsDone : 0;
-                const charsTotal = matches ? charProgress!.charsTotal : 0;
-                const pct =
-                  charsTotal > 0
-                    ? Math.min(100, Math.round((charsDone / charsTotal) * 100))
-                    : 0;
-                // Chunk-level progress (third bar): total is 0 while still
-                // chunking (the count is unknown until chunk_document returns),
-                // so the bar only renders once embedding has begun.
-                const chunksDone = matches ? charProgress!.chunksDone : 0;
-                const chunksTotal = matches ? charProgress!.chunksTotal : 0;
-                const chunkPct =
-                  chunksTotal > 0
-                    ? Math.min(100, Math.round((chunksDone / chunksTotal) * 100))
-                    : 0;
-                // Chunking-phase fill: chars scanned by the chunker (per code
-                // AST partition) — drives "分片中… N%" so the long chunking
-                // pass isn't a static label.
-                const chunkingDone = matches ? charProgress!.chunkingDone : 0;
-                const chunkingTotal = matches ? charProgress!.chunkingTotal : 0;
-                const chunkingPct =
-                  chunkingTotal > 0
-                    ? Math.min(100, Math.round((chunkingDone / chunkingTotal) * 100))
-                    : 0;
-                return (
-                  <div className="w-full flex flex-col gap-1" style={{ marginTop: 2 }}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
-                        {t('pages.rag.docProgress')}
-                      </span>
-                      <span className="hub-mono text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
-                        {pct}%
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        height: 6,
-                        borderRadius: 3,
-                        background: 'var(--hub-line)',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${pct}%`,
-                          height: '100%',
-                          background: 'var(--hub-accent, var(--hub-ink))',
-                          transition: 'width 0.15s ease',
-                        }}
-                      />
-                    </div>
-                    <div className="hub-mono text-[10px]" style={{ color: 'var(--hub-ink-3)' }}>
-                      {charsTotal > 0
-                        ? `${charsDone.toLocaleString()} / ${charsTotal.toLocaleString()} ${t('pages.rag.chars')}`
-                        : t('pages.rag.docProgressPreparing')}
-                    </div>
-                    {/* 分片进度（第三条）：分片完成后（chunksTotal>0）显示
-                        「已嵌入分片 / 总分片」计数；仍在分片时显示「分片中… N%」
-                        （chunkingPct 由后端逐分区上报，分片正是最久、此前最无
-                        反馈的阶段）。下方填充条贯穿两阶段：分片期按 chunkingPct、
-                        嵌入期按 chunkPct 填充。 */}
-                    <div className="flex items-center justify-between" style={{ marginTop: 2 }}>
-                      <span className="text-[11px]" style={{ color: 'var(--hub-ink-3)' }}>
-                        {t('pages.rag.chunkProgress', '分片进度')}
-                      </span>
-                      <span className="hub-mono text-[10px]" style={{ color: 'var(--hub-ink-3)' }}>
-                        {chunksTotal > 0
-                         ? `${chunksDone.toLocaleString()} / ${chunksTotal.toLocaleString()} · ${chunkPct}%`
-                         : chunkingTotal > 0
-                         ? `${t('pages.rag.chunkingInProgress', '分片中…')} ${chunkingPct}%`
-                         : t('pages.rag.chunkingInProgress', '分片中…')}
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        height: 6,
-                        borderRadius: 3,
-                        background: 'var(--hub-line)',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      <div
-                        style={{
-                         width: `${chunksTotal > 0 ? chunkPct : chunkingPct}%`,
-                         height: '100%',
-                         background: 'var(--hub-accent, var(--hub-ink))',
-                         transition: 'width 0.15s ease',
-                        }}
-                      />
-                    </div>
-                    {/* 大文件提示（通用，不分入口）：优先用扫描结果的 fileSize
-                        （导入）；没有 size 的入口（单文档更新/模型重载）退化为
-                        用 charTotal（字符数≈内容量）判断。分片阶段（charsTotal=0
-                        但 timing 已知大）同样显示——这正是最久的一段。 */}
-                    {(() => {
-                      const sizeBytes = uploadTiming?.fileSize ?? 0;
-                      // 无 fileSize 时用字符数近似（UTF-8 中文 ~3B/字、ASCII 1B/字，
-                      // 取 1 字符 ≈ 1.5 字节的保守折中，只用于提示不用于逻辑）。
-                      const approxBytes =
-                        sizeBytes > 0 ? sizeBytes : Math.round(charsTotal * 1.5);
-                      if (approxBytes < LARGE_FILE_HINT_BYTES) return null;
-                      return (
-                        <div className="flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--hub-ink-3)', marginTop: 2 }}>
-                          <span>
-                            {t('pages.rag.largeFileHint', '大文件导入耗时较长（分片与向量化），请耐心等待')}
-                            {' · '}
-                            {formatBytes(approxBytes)}
-                          </span>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                );
-              })()}
-          </div>
-        </div>
+      {/* Import / single-doc update progress — unified with the model-reload
+          dialog UI (ReindexDialog import mode): same running/done phases and
+          sub-bars, import-specific texts. Replaces the legacy two-bar overlay.
+          Suppressed while the model-swap ReindexDialog owns the flow. */}
+      {(uploading || importDone || importLatchRef.current) && !reindexConfirm && (
+        <ReindexDialog
+          open
+          mode="import"
+          targetModel=""
+          smartEnabled={false}
+          importRowLabel={updatingDoc ? t('pages.rag.update') : t('pages.rag.importRowDocs', '导入文档')}
+          importProgress={uploadProgress}
+          importFinished={!uploading && importDone}
+          onClose={() => { setImportDone(false); importLatchRef.current = false; }}
+        />
       )}
 
     </div>
@@ -2952,6 +2791,40 @@ const UploadDialog: React.FC<{
                 <Switch checked={recursive} onCheckedChange={onRecursiveChange} size="compact" />
                 {t('pages.rag.recursive', '包含子文件夹')}
               </span>
+            </div>
+          )}
+          {/* Import method (symlink / copy) — applies to every file in this
+              batch. Hidden for git (clone dir is already a copy → forced
+              copy) and when the parent doesn't pass a method (legacy). */}
+          {showMethod && dataSource !== 'git' && (
+            <div>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <Link2 size={13} style={{ color: 'var(--hub-ink-3)' }} />
+                <label className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+                  {t('pages.rag.importMethod', '导入方式')}
+                </label>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => onMethodChange('symlink')}
+                  className="hub-btn flex-1 flex items-center justify-center gap-1.5"
+                  style={method === 'symlink' ? { borderColor: 'var(--hub-accent)', color: 'var(--hub-accent)' } : undefined}
+                  title={t('pages.rag.symlinkHelp', '只记录文件原始地址，不拷贝实体文件；原始文件修改后可通过更新同步向量，删除不会动原始文件。')}
+                >
+                  <Link2 size={13} />
+                  {t('pages.rag.symlink', '软链接')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onMethodChange('copy')}
+                  className="hub-btn flex-1 flex items-center justify-center gap-1.5"
+                  style={method === 'copy' ? { borderColor: 'var(--hub-accent)', color: 'var(--hub-accent)' } : undefined}
+                >
+                  <CopyIcon size={13} />
+                  {t('pages.rag.methodFileCopy', '拷贝')}
+                </button>
+              </div>
             </div>
           )}
           {/* Git 表单（数据源 = Git 时显示）：仓库地址/分支 + 可选账密。

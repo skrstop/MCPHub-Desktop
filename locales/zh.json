@@ -653,7 +653,7 @@
       "reindexConfirmButton": "重新载入全部",
       "modelSelect": "模型尺寸",
       "modelDownload": "下载",
-      "modelDownloadHint": "下载 {{name}}",
+      "modelDownloadHint": "选择数据源下载 {{name}}",
       "modelSelected": "已切换到 {{name}}",
       "modelSelectFailed": "切换模型失败",
       "modelNotReady": "模型未就绪,请先下载",
@@ -931,7 +931,17 @@
       "reembedDoneHintReload": "全部完成，数据已重新载入。",
       "reloadButton": "重新载入",
       "reloadButtonHint": "用当前模型重新载入全部文档向量与智能路由索引",
-      "rowElapsed": "耗时"
+      "rowElapsed": "耗时",
+      "modelNotReadyHint": "模型未下载，请先下载",
+      "modelSelectSource": "选择下载源",
+      "modelDefaultSource": "默认",
+      "importDialogTitle": "导入文档",
+      "importDialogLead": "正在导入所选文件并建立向量索引，大文件可能耗时较长。",
+      "importRowDocs": "导入文档",
+      "importRunning": "导入中…",
+      "importDoneHint": "导入完成。",
+      "chunkedCount": "已分片 {{n}} 块",
+      "importDialogLeadDone": "所选文件已导入并建立向量索引。"
     }
   },
   "logs": {
@@ -1589,7 +1599,11 @@
     "invalidSearchSettings": "{{fields}} 的值无效。相似度阈值必须在 0 到 1 之间，N 必须是大于或等于 0 的整数。",
     "toolDefinitionFields": "结果中的工具字段",
     "toolDefinitionFieldsDescription": "search_tools 和 describe_tool 结果在名称、描述和 inputSchema 之外附带的可选字段。默认：title 和 annotations。其余字段主要供客户端使用，可能很大（图标是 base64 图片）。",
-    "oauthClientRevokeConfirm": "撤销该客户端将立即使其全部访问令牌与刷新令牌失效。客户端需重新注册并授权。"
+    "oauthClientRevokeConfirm": "撤销该客户端将立即使其全部访问令牌与刷新令牌失效。客户端需重新注册并授权。",
+    "mvRedownload": "重新下载",
+    "mvRedownloadHint": "重新下载当前模型（防止文件损坏，可重试）",
+    "mvDownloadCancel": "取消下载",
+    "mvDownloadCancelled": "下载已取消"
   },
   "mcpb": {
     "upload": "上传",

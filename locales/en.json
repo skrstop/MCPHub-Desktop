@@ -651,7 +651,7 @@
       "reindexConfirmButton": "Re-embed all",
       "modelSelect": "Model size",
       "modelDownload": "download",
-      "modelDownloadHint": "Download {{name}}",
+      "modelDownloadHint": "Choose a source to download {{name}}",
       "modelSelected": "Switched to {{name}}",
       "modelSelectFailed": "Failed to switch model",
       "modelNotReady": "Model not ready - download it first",
@@ -931,7 +931,17 @@
       "reembedDoneHintReload": "All done — data has been reloaded.",
       "reloadButton": "Reload",
       "reloadButtonHint": "Re-embed all document vectors and the Smart Routing index with the current model",
-      "rowElapsed": "Elapsed"
+      "rowElapsed": "Elapsed",
+      "modelNotReadyHint": "Model not downloaded - download it first",
+      "modelSelectSource": "Choose a download source",
+      "modelDefaultSource": "Default",
+      "importDialogTitle": "Import documents",
+      "importDialogLead": "Importing the selected files and building the vector index. Large files may take a while.",
+      "importRowDocs": "Importing documents",
+      "importRunning": "Importing…",
+      "importDoneHint": "Import complete.",
+      "chunkedCount": "{{n}} chunks created",
+      "importDialogLeadDone": "Selected files have been imported and indexed."
     }
   },
   "logs": {
@@ -1589,7 +1599,11 @@
     "invalidSearchSettings": "Invalid value for {{fields}}. The similarity threshold must be between 0 and 1, and top N a whole number of 0 or more.",
     "toolDefinitionFields": "Tool fields in results",
     "toolDefinitionFieldsDescription": "Optional fields that search_tools and describe_tool results carry next to the name, description and inputSchema. Default: title and annotations. The others are mostly for clients and can be large (icons are base64 images).",
-    "oauthClientRevokeConfirm": "Revoking this client immediately invalidates all its access and refresh tokens. The client must register and authorize again."
+    "oauthClientRevokeConfirm": "Revoking this client immediately invalidates all its access and refresh tokens. The client must register and authorize again.",
+    "mvRedownload": "Re-download",
+    "mvRedownloadHint": "Re-download the current model (retry in case of file corruption)",
+    "mvDownloadCancel": "Cancel",
+    "mvDownloadCancelled": "Download cancelled"
   },
   "mcpb": {
     "upload": "Upload",

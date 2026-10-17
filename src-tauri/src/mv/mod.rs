@@ -42,8 +42,9 @@ use tauri::{AppHandle, Manager};
 
 pub use embedder::Embedder;
 pub use models::{
-    current_model, download_model, ensure_model_ready, list_models, model_chunk_recommendation,
-    model_max_context, persist_selection, RagModelInfo,
+    cancel_download, current_model, download_model, download_status, ensure_model_ready,
+    list_models, model_chunk_recommendation, model_defaults, model_max_context, persist_selection,
+    RagModelDownloadProgress, RagModelInfo,
 };
 
 /// The shared runtime: one embedding model + one lancedb connection.

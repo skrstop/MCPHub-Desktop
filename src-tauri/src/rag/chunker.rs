@@ -95,7 +95,7 @@ impl ChunkSizer for TokenChunkSizer<'_> {
 
 /// A chunking strategy: turn one document's text into an ordered list of chunks.
 ///
-/// `on_progress(chunking_chars_done, chunking_chars_total)` is fired by
+/// `on_progress(chunking_chars_done, chunking_chars_total, chunks_so_far)` is fired by
 /// strategies that process large inputs in observable stages — currently the
 /// code strategy, once per AST partition on the >64KB path (the phase the UI
 /// shows as "分片中…"). Single-pass strategies ignore it.
@@ -103,7 +103,7 @@ trait ChunkStrategy {
     fn chunks(
         &self,
         text: &str,
-        on_progress: Option<&dyn Fn(u64, u64)>,
+        on_progress: Option<&dyn Fn(u64, u64, u32)>,
     ) -> Vec<String>;
 }
 
@@ -122,8 +122,8 @@ impl<'a> TextChunkStrategy<'a> {
 }
 
 impl ChunkStrategy for TextChunkStrategy<'_> {
-    fn chunks(&self, text: &str, _on_progress: Option<&dyn Fn(u64, u64)>) -> Vec<String> {
-        self.splitter.chunks(text).map(String::from).collect()
+    fn chunks(&self, text: &str, on_progress: Option<&dyn Fn(u64, u64, u32)>) -> Vec<String> {
+        chunk_with_char_progress(text, on_progress, |c| Box::new(self.splitter.chunks(c)))
     }
 }
 
@@ -142,9 +142,34 @@ impl<'a> MarkdownChunkStrategy<'a> {
 }
 
 impl ChunkStrategy for MarkdownChunkStrategy<'_> {
-    fn chunks(&self, text: &str, _on_progress: Option<&dyn Fn(u64, u64)>) -> Vec<String> {
-        self.splitter.chunks(text).map(String::from).collect()
+    fn chunks(&self, text: &str, on_progress: Option<&dyn Fn(u64, u64, u32)>) -> Vec<String> {
+        chunk_with_char_progress(text, on_progress, |c| Box::new(self.splitter.chunks(c)))
     }
+}
+
+/// Drive a lazy chunk iterator while reporting scanned-char progress per
+/// chunk. text_splitter's `chunks()` is lazy — each `next()` performs the
+/// semantic scan for that chunk — so per-chunk ticks give real progress
+/// during the (potentially minutes-long) chunking pass. The char sum can
+/// exceed the doc total (chunks share `chunk_overlap` tails), hence the
+/// `min(total)` cap; the last tick lands exactly at 100%.
+fn chunk_with_char_progress<'a>(
+    text: &'a str,
+    on_progress: Option<&dyn Fn(u64, u64, u32)>,
+    iter: impl FnOnce(&'a str) -> Box<dyn Iterator<Item = &'a str> + 'a>,
+) -> Vec<String> {
+    use std::iter::Iterator;
+    let total = text.chars().count() as u64;
+    let mut out = Vec::new();
+    let mut done: u64 = 0;
+    for c in iter(text) {
+        done = done.saturating_add(c.chars().count() as u64);
+        out.push(c.to_string());
+        if let Some(cb) = on_progress {
+            cb(done.min(total), total, out.len() as u32);
+        }
+    }
+    out
 }
 
 /// Code splitter (tree-sitter AST depth boundaries via `text_splitter::CodeSplitter`).
@@ -277,13 +302,13 @@ fn trailing_gap(children: &[tree_sitter::Node], s: usize, e: usize) -> Option<(u
 }
 
 impl ChunkStrategy for CodeChunkStrategy<'_> {
-    fn chunks(&self, text: &str, on_progress: Option<&dyn Fn(u64, u64)>) -> Vec<String> {
+    fn chunks(&self, text: &str, on_progress: Option<&dyn Fn(u64, u64, u32)>) -> Vec<String> {
         // Small files: single pass, byte-for-byte the historical behavior.
         if text.len() <= CODE_PARTITION_BYTES {
-            let out = self.splitter.chunks(text).map(String::from).collect();
+            let out: Vec<String> = self.splitter.chunks(text).map(String::from).collect();
             if let Some(cb) = on_progress {
                 let total = text.chars().count() as u64;
-                cb(total, total);
+                cb(total, total, out.len() as u32);
             }
             return out;
         }
@@ -302,10 +327,10 @@ impl ChunkStrategy for CodeChunkStrategy<'_> {
                 // Grammar failed to parse (or produced no atoms): fall back to
                 // the historical single pass so an import never errors here.
                 log::warn!("[RAG] AST partitioning failed; single-pass code chunking");
-                let out = self.splitter.chunks(text).map(String::from).collect();
+                let out: Vec<String> = self.splitter.chunks(text).map(String::from).collect();
                 if let Some(cb) = on_progress {
                     let total = text.chars().count() as u64;
-                    cb(total, total);
+                    cb(total, total, out.len() as u32);
                 }
                 return out;
             }
@@ -323,7 +348,7 @@ impl ChunkStrategy for CodeChunkStrategy<'_> {
             out.extend(self.splitter.chunks(part).map(String::from));
             if let Some(cb) = on_progress {
                 done += part.chars().count() as u64;
-                cb(done.min(total), total);
+                cb(done.min(total), total, out.len() as u32);
             }
         }
         out
@@ -418,17 +443,18 @@ pub fn chunk_document<'a>(
 }
 
 /// `chunk_document` with a chunking-phase progress callback
-/// `on_progress(chars_scanned, total_chars)`, fired per code AST partition on
-/// the >64KB path (tests / single-pass strategies never see it). The service
-/// layer routes this to `rag://upload-progress` so the UI can show a fill for
-/// the otherwise-static "分片中…" phase.
+/// `on_progress(chars_scanned, total_chars, chunks_so_far)`, fired per chunk
+/// (per code AST partition on the >64KB path; tests / single-pass strategies
+/// only see the final tick). The service layer routes this to
+/// `rag://upload-progress` so the UI can show a fill for the otherwise-static
+/// "分片中…" phase plus a live chunk count.
 pub fn chunk_document_with_progress<'a>(
     doc_name: &str,
     text: &str,
     embedder: &'a dyn Embedder,
     chunk_size: u32,
     chunk_overlap: u32,
-    on_progress: &dyn Fn(u64, u64),
+    on_progress: &dyn Fn(u64, u64, u32),
 ) -> Vec<String> {
     chunk_document_inner(
         doc_name,
@@ -446,7 +472,7 @@ fn chunk_document_inner<'a>(
     embedder: &'a dyn Embedder,
     chunk_size: u32,
     chunk_overlap: u32,
-    on_progress: Option<&dyn Fn(u64, u64)>,
+    on_progress: Option<&dyn Fn(u64, u64, u32)>,
 ) -> Vec<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -521,7 +547,7 @@ fn split_oversized_chunks(chunks: Vec<String>, max_bytes: usize) -> Vec<String> 
 /// plain-text splitter fails to init (previously an early `return Vec::new()`).
 struct EmptyChunkStrategy;
 impl ChunkStrategy for EmptyChunkStrategy {
-    fn chunks(&self, _text: &str, _on_progress: Option<&dyn Fn(u64, u64)>) -> Vec<String> {
+    fn chunks(&self, _text: &str, _on_progress: Option<&dyn Fn(u64, u64, u32)>) -> Vec<String> {
         Vec::new()
     }
 }
@@ -844,5 +870,82 @@ mod tests {
         for c in &chunks {
             assert!(md.contains(c));
         }
+    }
+}
+
+#[cfg(test)]
+mod chunking_progress_tests {
+    use super::*;
+    use crate::mv::embedder::Embedder;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn stub() -> impl Embedder {
+        struct S;
+        impl Embedder for S {
+            fn embed(&mut self, _t: &str) -> anyhow::Result<Vec<f32>> { Ok(vec![]) }
+            fn embed_batch(&mut self, ts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> { Ok(ts.iter().map(|_| vec![]).collect()) }
+            fn embed_dim(&self) -> usize { 1 }
+            fn max_context(&self) -> u32 { 2048 }
+            fn tokenize_offsets(&self, text: &str) -> Vec<(usize, usize)> {
+                text.char_indices().map(|(i, c)| (i, i + c.len_utf8())).collect()
+            }
+            fn ep_label(&self) -> &str { "stub" }
+            fn backend(&self) -> &str { "stub" }
+        }
+        S
+    }
+
+    #[test]
+    fn markdown_strategy_fires_chunking_progress() {
+        let embedder = stub();
+        let md = "# Title\n\n".to_string() + &"hello world content ".repeat(4000);
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let last = Arc::new(std::sync::Mutex::new((0u64, 0u64)));
+        {
+            let ticks = ticks.clone();
+            let last = last.clone();
+            let chunks = chunk_document_with_progress("doc.md", &md, &embedder, 64, 8, &move |d, t, _n| {
+                ticks.fetch_add(1, Ordering::SeqCst);
+                *last.lock().unwrap() = (d, t);
+            });
+            assert!(!chunks.is_empty());
+        }
+        let n = ticks.load(Ordering::SeqCst);
+        let (d, t) = *last.lock().unwrap();
+        assert!(n > 0, "markdown strategy must fire chunking ticks");
+        assert_eq!(d, t, "last tick reaches 100%");
+        assert!(t > 0);
+    }
+
+    #[test]
+    fn text_strategy_fires_chunking_progress() {
+        let embedder = stub();
+        let txt = "plain text content ".repeat(4000);
+        let ticks = Arc::new(AtomicUsize::new(0));
+        {
+            let ticks = ticks.clone();
+            let chunks = chunk_document_with_progress("doc.txt", &txt, &embedder, 64, 8, &move |d, t, _n| {
+                assert!(t > 0);
+                ticks.fetch_add(1, Ordering::SeqCst);
+            });
+            assert!(!chunks.is_empty());
+        }
+        assert!(ticks.load(Ordering::SeqCst) > 0, "text strategy must fire chunking ticks");
+    }
+
+    #[test]
+    fn code_strategy_fires_chunking_progress() {
+        let embedder = stub();
+        let code = "fn a() {}\n".repeat(20000);
+        let ticks = Arc::new(AtomicUsize::new(0));
+        {
+            let ticks = ticks.clone();
+            let chunks = chunk_document_with_progress("doc.rs", &code, &embedder, 64, 8, &move |_d, _t, _n| {
+                ticks.fetch_add(1, Ordering::SeqCst);
+            });
+            assert!(!chunks.is_empty());
+        }
+        assert!(ticks.load(Ordering::SeqCst) > 0, "code strategy must fire chunking ticks");
     }
 }

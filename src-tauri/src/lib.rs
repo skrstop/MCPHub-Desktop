@@ -620,6 +620,8 @@ pub fn run() {
             commands::rag::rag_current_model,
             commands::rag::rag_select_model,
             commands::rag::rag_download_model,
+            commands::rag::rag_model_download_status,
+            commands::rag::rag_model_download_cancel,
             commands::rag::check_rag_update,
             commands::rag::preview_batch_update,
             commands::rag::get_git_source_errors,

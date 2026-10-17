@@ -627,7 +627,7 @@
       "reindexConfirmButton": "Tout ré-encoder",
       "modelSelect": "Taille du modèle",
       "modelDownload": "télécharger",
-      "modelDownloadHint": "Télécharger {{name}}",
+      "modelDownloadHint": "Choisissez une source pour télécharger {{name}}",
       "modelSelected": "Basculé vers {{name}}",
       "modelSelectFailed": "Échec du changement de modèle",
       "modelNotReady": "Modèle non prêt - téléchargez-le d'abord",
@@ -928,7 +928,17 @@
       "reembedDoneHintReload": "Terminé — les données ont été rechargées.",
       "reloadButton": "Recharger",
       "reloadButtonHint": "Recalcule les vecteurs de tous les documents et l'index Smart Routing avec le modèle actuel",
-      "rowElapsed": "Durée"
+      "rowElapsed": "Durée",
+      "modelNotReadyHint": "Modèle non téléchargé - téléchargez-le d'abord",
+      "modelSelectSource": "Choisir une source de téléchargement",
+      "modelDefaultSource": "Par défaut",
+      "importDialogTitle": "Importer des documents",
+      "importDialogLead": "Importation des fichiers sélectionnés et construction de l’index vectoriel. Les fichiers volumineux peuvent prendre du temps.",
+      "importRowDocs": "Import des documents",
+      "importRunning": "Import en cours…",
+      "importDoneHint": "Importation terminée.",
+      "chunkedCount": "{{n}} fragments créés",
+      "importDialogLeadDone": "Les fichiers sélectionnés ont été importés et indexés."
     },
     "skills": {
       "title": "Skills"
@@ -1589,7 +1599,11 @@
     "invalidSearchSettings": "Valeur invalide pour {{fields}}. Le seuil de similarité doit être compris entre 0 et 1, et N un nombre entier supérieur ou égal à 0.",
     "toolDefinitionFields": "Champs d'outil dans les résultats",
     "toolDefinitionFieldsDescription": "Champs facultatifs que les résultats de search_tools et describe_tool incluent en plus du nom, de la description et de l'inputSchema. Par défaut : title et annotations. Les autres servent surtout aux clients et peuvent être volumineux (les icônes sont des images base64).",
-    "oauthClientRevokeConfirm": "La révocation de ce client invalide immédiatement tous ses jetons d'accès et de rafraîchissement. Le client devra se réenregistrer et se réautoriser."
+    "oauthClientRevokeConfirm": "La révocation de ce client invalide immédiatement tous ses jetons d'accès et de rafraîchissement. Le client devra se réenregistrer et se réautoriser.",
+    "mvRedownload": "Retélécharger",
+    "mvRedownloadHint": "Retélécharger le modèle actuel (réessai en cas de fichier corrompu)",
+    "mvDownloadCancel": "Annuler",
+    "mvDownloadCancelled": "Téléchargement annulé"
   },
   "mcpb": {
     "upload": "Télécharger",

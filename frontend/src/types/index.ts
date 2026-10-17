@@ -534,6 +534,9 @@ export interface RagModelInfo {
   /** True if this size's deploy.json has "default": true (the out-of-box +
    *  fallback model). */
   default?: boolean;
+  /** Download source names (deploy.json downloadUrls keys, default first).
+   *  Non-empty for downloadable sizes; >1 shows a source picker. */
+  downloadSources?: string[];
 }
 
 // Result of an upload batch.

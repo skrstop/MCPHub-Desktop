@@ -163,6 +163,16 @@ npm run build                     # 生产构建
 - **上下文占用**：`get_server_costs`/`get_group_costs`（约 4 字符 = 1 token）。
 - **stdio stderr**：`stderr_tail` 32KB 滚动缓存，连接失败拼进 error 便于排查；单行日志截断 2000 字符。
 
+#### 3.4.6 RAG 模型下载体系（deploy.json downloadUrls，2026-10-13）
+
+- **ready 判定（严格）**：size 目录（下载副本优先，否则 bundled）存在 **精确 `model.gguf`** 才算已下载；任意其他 `*.gguf` 名（如用户改名的 `model.gguf`）不算 → 只显示「下载」按钮。`detect_format`/`load_embedder`/`model_file_size` 全部收窄到 `model.gguf`。
+- **downloadUrls**：deploy.json 对象 `{"源名":"地址"}`（serde_json Map = 字母序，首项为默认源，失败按序回退）；旧 `download.url` 机制已删除。
+- **后台下载**：`mv::download_model(app, size, source)` spawn 后台任务立即返回（`source` 可选指定下载源名，缺省/未知=首项）；写 `model.gguf.downloadtemp`，成功后 rename `model.gguf`（防中断损坏）；进度存进程内存 `DOWNLOAD_STATE`（`rag_model_download_status` 查询，done 快照 10s 后过期）+ `rag://model-download` 事件；**取消 = 协作标志 + JoinHandle::abort 双保险**（连接停滞无 chunk 时也能立即停），abort 后由 cancel 线程清理临时文件并发 cancelled 事件。命令均 require_admin；tauriClient 映射 `/rag/download-status|download-cancel`。
+- **下载源选择**：`RagModelInfo.downloadSources`（源名列表，默认源在前）暴露给前端；多源时点「下载」展开行内源选择弹层（默认源打标），单源直接下载。
+- **bundle 打包**：deploy.json `bundle: true`（legacy `default: true` 兼容回退）才随安装包分发——**无 staging 目录**：`scripts/gen-model-resources.mjs` 扫描 deploy.json 生成 `src-tauri/tauri.models.json`（Tauri `--config` 合并片段，替换 `bundle.resources` 为「基础资源 + 全量 `deploy.json` glob + bundle 尺寸 `**` glob」），`npm run build` = `gen-model-resources.mjs && tauri build --config src-tauri/tauri.models.json`；非 bundle 尺寸只带 deploy.json（下拉可见、可下载；GGUF 自带 tokenizer 元数据，下载目录无需 aux 文件）。生成物已 gitignore。
+- **模型默认参数**：deploy.json `defaultScore`/`defaultWeightVector`/`defaultWeightKeyword`（默认 0/0.5/0.5）；`select_model` 切换模型时丢弃用户调参、重置为新模型默认值（`mv::model_defaults`）。
+- **model_root 资源回退**：打包环境回退 `runtimes/rag/model` 资源目录（bundle 裁剪由 tauri.models.json 的 resources glob 控制，目录结构不变）。
+
 ### 3.5 MCP 连接机制（桌面端独有/镜像）
 
 #### 3.5.1 stdio 包下载进度 / 更新检测 / 非阻塞连接
@@ -190,7 +200,8 @@ npm run build                     # 生产构建
 | 特性 | 关键落点 | 要点 |
 | --- | --- | --- |
 | MCP 文件工具（`rag_file_create`/`rag_file_update`） | `rag/service.rs`, http_server dispatch_mcp | create 用 `{docName}.{docType}` 命名、`content_path_for` 兼容多命名；update 对 symlink 只读 |
-| 导入方式 symlink/copy + md5 更新检测 + 批量更新 | `DocMeta{method, original_path, md5}`（meta JSON，无 DB 迁移） | `classify_original` 兼容旧 meta；**META_LOCK 顺序锁**（锁序恒为 meta → runtime，严禁反向 ABBA）；`write_meta_atomic` tmp+rename；坏 meta skip 不拖垮列表 |
+| 导入方式 symlink/copy + md5 更新检测 + 批量更新 | `DocMeta{method, original_path, md5, raw_ext}`（meta JSON，无 DB 迁移） | `classify_original` 兼容旧 meta；**META_LOCK 顺序锁**（锁序恒为 meta → runtime，严禁反向 ABBA）；`write_meta_atomic` tmp+rename；坏 meta skip 不拖垮列表 |
+| 可提取格式双文件语义（md-仅缓存/直连源文件） | `raw_content_path_for`/`open_source_path_for`（service.rs） | PDF/Office/图片**不再强制 copy**——method 跟随用户选择；copy 落盘原始拷贝 `{id}{raw_ext}` + 提取缓存 `{id}.md`（仅分片/展示）；symlink 只有缓存。更新/重提取读内容源（symlink→original_path；copy→外部 original 优先、丢失回退归档拷贝）；「查看源文件」copy 打开归档拷贝（自包含）；`content_path_for` 可提取文档 {id}.md 缓存优先（否则解析到二进制）；reindex_all/MCP update_doc 的 symlink 可提取分支读缓存（外部 original 是二进制会被 text sniff 跳过/清空向量）；delete_doc symlink 也删 {id}.md 缓存；`raw_ext` 记录归档扩展防改名孤儿化 |
 | 自动定时更新 + 文档/分片分页 | RagSettings{autoUpdateEnabled, interval(≥60s), docLoadChunkKb} | 自动 tick 与手动批量共用 `BATCH_UPDATE_RUNNING` CAS；空转放行条件含 added/removed；空转但有 lost 时发 `rag://docs-invalidated` 轻量刷新 |
 | PDF/Office 提取 + 图片 OCR | `rag/extract/{pdf,office,image,text,ocr}.rs` | pdf_oxide + office_oxide；OCR 自研三平台（macOS Vision / Windows WinRT / Linux tesseract chi_sim+eng）；提取文档强制 `method=copy`；扫描件无文字层报 `EXTRACT_FAILED` |
 | 数据源统一 + Git 数据源 + 树形视图 | `rag/git.rs`（gix 0.73）、`RagDocTree.tsx` | 支持 https/http/SSH（含密码 askpass wrapper、BatchMode、setsid、stderr 过滤 wrapper）；凭证存 `<app_data>/rag/git-credentials.json` 0600（弃用 keyring——会弹授权框打断无人值守流程）；`canonicalize_url`（`.no_proxy()`，处理 http→https 重定向剥凭证）；数据源级同步（新增导入/删除移除，双重条件防误删）；删除后引用归零自动清 clone+凭证 |
@@ -199,9 +210,9 @@ npm run build                     # 生产构建
 | 数据源级手动更新/排除/别名 | `refresh_rag_source` / `preview_rag_source_update` / `set_rag_source_alias` | 树形数据源/目录行刷新按钮走批量同流程（确认框→进度弹框）；tauriClient 路由 `/rag/source-update` 分支须 `segs.length === 2` |
 | 导入会话守卫 | `IMPORT_SESSION: AtomicBool` + `rag://import-cancel-requested` | 导入期间 git 刷新/自动 tick 全 defer；**关窗 = 取消剩余导入**（`CloseRequested` 请求取消，完成的文件保留） |
 | 列表⟺向量一致性 | `vectordb.rs::count_rows` + `start()` 检查 | lancedb 空表但有已索引 meta → 判定向量丢失，重走 needs_reindex |
-| 分片路由与防挂死 | `chunker.rs` | 路由：提取产物(md)→Markdown、`.md`→Markdown、代码→CodeSplitter、其余→Text；**无定长窗口、无降级、无外部格式化**（linthis 已撤回）。防挂死三件套：①`TokenChunkSizer` 快速否决（len > capacity×64）；②超长 chunk 安全阀硬切（`split_oversized_chunks`）；③CodeSplitter **AST 预分区**（>256KB 按最浅可分节点切分区，release 实测 mermaid.min.js 3.3MB 从数小时挂死 → 37s）。单条 `embed()` 与 `embed_batch` 均按 max_context 截断 |
+| 分片路由与防挂死 | `chunker.rs` | 路由：提取产物(md)→Markdown、`.md`→Markdown、代码→CodeSplitter、其余→Text；**无定长窗口、无降级、无外部格式化**（linthis 已撤回）。防挂死三件套：①`TokenChunkSizer` 快速否决（len > capacity×64）；②超长 chunk 安全阀硬切（`split_oversized_chunks`）；③CodeSplitter **AST 预分区**（>256KB 按最浅可分节点切分区，release 实测 mermaid.min.js 3.3MB 从数小时挂死 → 37s）。单条 `embed()` 与 `embed_batch` 均按 max_context 截断。**分片进度**：三策略全量上报 `on_progress`（Code=逐 AST 分区；Markdown/Text=逐 chunk 惰性扫描累计字符，`chunk_with_char_progress`，overlap 致字符和>total 用 min 封顶）→ `emit_chunking_progress` → `rag://upload-progress` 的 `chunkingDone/chunkingTotal`（RagPage「分片中…N%」+ ReindexDialog 分段处理条消费） |
 | 嵌入性能 | `gguf.rs::embed_batch` 长度分桶 | 按长度排序分桶 forward（零语义变化），padding 浪费 6x→1.1x；`GIT_REFRESH_TTL_SECS=600` 防 git 刷新风暴 |
-| 导入进度 UI | `rag://upload-progress` + `batchTiming` | 字符/分片/嵌入多进度条 + 耗时显示；字符条分母 = chunk 字符和（与累加口径一致）；分片期显示「分片中…」占位 |
+| 导入进度 UI | `ReindexDialog mode='import'`（统一重载框 UI） | 导入/单文档更新复用重载框设计（running/done 两阶段 + 三子条两行布局 + 大文件提示），仅文案不同（importDialogTitle/Lead/RowDocs/Running/DoneHint ×5 语言）；跳过确认阶段直接 running，父组件 `importFinished` 信号切 done；旧两条形浮层已删除；模型重载流程（reindexConfirm）由 switch/reload 模式自身负责，导入弹框以 `!reindexConfirm` 抑制避免双弹框 |
 | 文件类型图标/查看 | `utils/fileIcon.tsx`、`FileTypeRenderer.tsx` | Markdown/代码高亮/纯文本按类型渲染；tree 渲染顺序 = 直属文件在前、子目录在后 |
 | 前端勾选状态 | `RagPage.tsx` 统一 `applySelected` 入口 | **Set/Map state 必须不可变更新**（先 `new Set()` 复制再增删）——原地突变会被 React `Object.is` 吞掉更新（曾深挖钉死）；ref 同步 + 绝对写入双保险 |
 

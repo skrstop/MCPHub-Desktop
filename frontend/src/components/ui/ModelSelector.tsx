@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Check, ChevronDown, Download, Loader2 } from 'lucide-react';
 import type { RagModelInfo } from '@/types';
@@ -32,33 +33,74 @@ export interface ModelDownloadProgress {
   message?: string;
 }
 
-/** Local embedding model selector dropdown (used by the RAG page toolbar and
- *  the Settings "模型和向量" section). Lists every model size: ready sizes are
- *  selectable, downloadable ones show a Download button with a rich progress
- *  bar (percent / speed / ETA / file index) driven by `rag://model-download`
- *  events handled by the parent. */
+/** Local embedding model selector dropdown (used by the Settings "模型和向量"
+ *  section). Lists every model size; each row carries its own actions:
+ *  ready -> 使用 (disabled for the current model) + 重新下载; downloadable ->
+ *  使用 (disabled until downloaded) + 下载 / 取消 (while downloading), with a
+ *  rich progress bar under the downloading row driven by
+ *  `rag://model-download` events handled by the parent. */
 const ModelSelector: React.FC<{
   models: RagModelInfo[];
   currentModel: string | null;
   modelDownload: ModelDownloadProgress | null;
   disabled: boolean;
   onSelect: (size: string) => void;
-  onDownload: (size: string) => void;
+  onDownload: (size: string, source?: string) => void;
+  onCancel: (size: string) => void;
   onRefresh: () => void;
-}> = ({ models, currentModel, modelDownload, disabled, onSelect, onDownload, onRefresh }) => {
+}> = ({ models, currentModel, modelDownload, disabled, onSelect, onDownload, onCancel, onRefresh }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  // 下载源下拉：记录触发按钮的视口矩形，用 portal 渲染到 body（fixed 定位），
+  // 避免被模型面板的 overflow 滚动容器裁剪/遮挡。
+  const [sourceFor, setSourceFor] = useState<{ size: string; rect: DOMRect } | null>(null);
+  const sourceMenuRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // Close the panel on click-outside.
+  const openSourcePicker = (m: RagModelInfo, btn: HTMLElement) => {
+    setSourceFor({ size: m.size, rect: btn.getBoundingClientRect() });
+  };
+  // 多源 → 弹出源选择；单源 → 直接下载。
+  const handleDownloadClick = (m: RagModelInfo, btn: HTMLElement) => {
+    if ((m.downloadSources?.length ?? 0) > 1) {
+      setSourceFor((v) => (v?.size === m.size ? null : { size: m.size, rect: btn.getBoundingClientRect() }));
+    } else {
+      onDownload(m.size);
+    }
+  };
+
+  // Close the panel on click-outside; the source dropdown follows the panel.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSourceFor(null);
+      return;
+    }
     const onDown = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
   }, [open]);
+
+  // Source menu (portal): close on outside click / scroll / resize so the
+  // floating menu never detaches from its trigger.
+  useEffect(() => {
+    if (!sourceFor) return;
+    const onDown = (e: MouseEvent) => {
+      if (sourceMenuRef.current && !sourceMenuRef.current.contains(e.target as Node)) {
+        setSourceFor(null);
+      }
+    };
+    const close = () => setSourceFor(null);
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [sourceFor]);
 
   if (models.length === 0) {
     return (
@@ -167,34 +209,81 @@ const ModelSelector: React.FC<{
                     </div>
                   </div>
 
-                  {/* Right action: ready -> select (clickable row); downloadable
-                      -> Download button. */}
+                  {/* Right actions (per item): ready -> 使用 + 重新下载;
+                      downloadable -> 使用(置灰) + 下载; downloading -> 取消. */}
                   {m.ready ? (
-                    <button
-                      type="button"
-                      disabled={disabled || isCurrent}
-                      onClick={() => {
-                        if (!isCurrent) onSelect(m.size);
-                        setOpen(false);
-                      }}
-                      className="hub-btn sm"
-                      style={{ height: 24, fontSize: 11, opacity: isCurrent ? 0.5 : 1 }}
-                      title={t('pages.rag.modelSelect')}
-                    >
-                      {isCurrent ? t('pages.rag.modelCurrent') : t('pages.rag.modelUse')}
-                    </button>
+                    <div className="flex items-center gap-1.5" style={{ flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        disabled={disabled || isCurrent}
+                        onClick={() => {
+                          if (!isCurrent) onSelect(m.size);
+                          setOpen(false);
+                        }}
+                        className="hub-btn sm"
+                        style={{
+                          height: 24,
+                          fontSize: 11,
+                          opacity: isCurrent ? 0.4 : 1,
+                          cursor: isCurrent ? 'not-allowed' : undefined,
+                        }}
+                        title={isCurrent ? t('pages.rag.modelCurrent') : t('pages.rag.modelSelect')}
+                      >
+                        {isCurrent ? t('pages.rag.modelCurrent') : t('pages.rag.modelUse')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={downloading}
+                        onClick={(e) => handleDownloadClick(m, e.currentTarget)}
+                        className="hub-btn sm"
+                        style={{ height: 24, fontSize: 11 }}
+                        title={t('settings.mvRedownloadHint')}
+                      >
+                        {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+                        {t('settings.mvRedownload')}
+                        {(m.downloadSources?.length ?? 0) > 1 && (
+                          <ChevronDown size={10} style={{ opacity: 0.6, marginLeft: 2 }} />
+                        )}
+                      </button>
+                    </div>
                   ) : m.downloadable ? (
-                    <button
-                      type="button"
-                      disabled={downloading}
-                      onClick={() => onDownload(m.size)}
-                      className="hub-btn sm"
-                      style={{ height: 24, fontSize: 11 }}
-                      title={t('pages.rag.modelDownloadHint', { name: m.label })}
-                    >
-                      {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
-                      {t('pages.rag.modelDownload')}
-                    </button>
+                    <div className="flex items-center gap-1.5 relative" style={{ flexShrink: 0 }}>
+                      {/* 未下载的模型不可选用：使用按钮置灰（下载完成后可用）。 */}
+                      <button
+                        type="button"
+                        disabled
+                        className="hub-btn sm"
+                        style={{ height: 24, fontSize: 11, opacity: 0.4, cursor: 'not-allowed' }}
+                        title={t('pages.rag.modelNotReadyHint')}
+                      >
+                        {t('pages.rag.modelUse')}
+                      </button>
+                      {downloading ? (
+                        <button
+                          type="button"
+                          onClick={() => onCancel(m.size)}
+                          className="hub-btn sm"
+                          style={{ height: 24, fontSize: 11 }}
+                          title={t('settings.mvDownloadCancel')}
+                        >
+                          {t('settings.mvDownloadCancel')}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => handleDownloadClick(m, e.currentTarget)}
+                          className="hub-btn sm"
+                          style={{ height: 24, fontSize: 11 }}
+                          title={t('pages.rag.modelDownloadHint', { name: m.label })}
+                        >
+                          <Download size={11} />
+                          {t('pages.rag.modelDownload')}
+                          {(m.downloadSources?.length ?? 0) > 1 && (
+                            <ChevronDown size={10} style={{ opacity: 0.6, marginLeft: 2 }} />
+                          )}
+                        </button>
+                      )}
+                    </div>
                   ) : null}
                 </div>
 
@@ -239,6 +328,54 @@ const ModelSelector: React.FC<{
           })}
         </div>
       )}
+
+      {/* 下载源下拉弹框：portal 渲染到 body（fixed 定位 + 高 z-index），
+          避免被模型面板的 overflow 滚动容器裁剪或被其他浮层遮挡。 */}
+      {sourceFor &&
+        createPortal(
+          <div
+            ref={sourceMenuRef}
+            className="fixed z-[9999] rounded-md shadow-2xl border overflow-hidden"
+            style={{
+              top: sourceFor.rect.bottom + 4,
+              left: Math.max(8, sourceFor.rect.right - 200),
+              minWidth: 200,
+              background: 'var(--hub-surface)',
+              borderColor: 'var(--hub-line-2)',
+            }}
+          >
+            <div className="px-2.5 pt-1.5 pb-1" style={{ fontSize: 10, color: 'var(--hub-ink-3)' }}>
+              {t('pages.rag.modelSelectSource')}
+            </div>
+            {(models.find((m) => m.size === sourceFor.size)?.downloadSources ?? []).map((s, i) => (
+              <button
+                key={s}
+                type="button"
+                className="w-full text-left px-2.5 py-1.5 flex items-center gap-1.5 hover:opacity-80"
+                style={{
+                  fontSize: 11,
+                  color: 'var(--hub-ink)',
+                  borderTop: '1px solid var(--hub-line)',
+                }}
+                onClick={() => {
+                  setSourceFor(null);
+                  onDownload(sourceFor.size, s);
+                }}
+              >
+                <span className="truncate flex-1">{s}</span>
+                {i === 0 && (
+                  <span
+                    className="rounded px-1"
+                    style={{ fontSize: 9, background: 'var(--hub-line)', color: 'var(--hub-ink-3)', flexShrink: 0 }}
+                  >
+                    {t('pages.rag.modelDefaultSource')}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 };

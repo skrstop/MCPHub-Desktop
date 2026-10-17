@@ -711,16 +711,43 @@ pub async fn rag_select_model(
     service::select_model(&app, &size).await.map_err(|e| e.to_string())
 }
 
-/// Download a model size via its `download.url` (a GGUF model file). Streams
-/// with progress on `rag://model-download` into
-/// `<app_data>/rag/models/<family>/<size>/`. After success the size is ready.
+/// Download a model size in the BACKGROUND from the selected source (deploy.json
+/// `downloadUrls`; `source` = source name, omitted/unknown = the first/default
+/// source, remaining entries act as fallbacks). Returns immediately; progress
+/// streams on `rag://model-download` and is queryable via
+/// `rag_model_download_status`. The file lands as `model.gguf` (temp
+/// `model.gguf.downloadtemp` renamed on success). Re-downloading a ready size
+/// is allowed (repair path).
 #[tauri::command]
 pub async fn rag_download_model(
     session: State<'_, SessionState>,
     app: AppHandle,
     size: String,
+    source: Option<String>,
 ) -> Result<(), String> {
     // Admin-gated: triggers an external network download into the app data dir.
     crate::commands::config::require_admin(&session).await?;
-    service::download_model(&app, &size).await.map_err(|e| e.to_string())
+    service::download_model(&app, &size, source.as_deref()).map_err(|e| e.to_string())
+}
+
+/// In-memory progress snapshot of a background model download (null when no
+/// download has run this session / the done snapshot expired). Lets the
+/// settings page restore the progress bar after being revisited.
+#[tauri::command]
+pub async fn rag_model_download_status(
+    size: String,
+) -> Result<Option<crate::mv::RagModelDownloadProgress>, String> {
+    Ok(service::download_model_status(&size))
+}
+
+/// Cancel a running background model download; the temp file is cleaned up
+/// and phase "cancelled" is reported. Returns true when a download was
+/// actually running.
+#[tauri::command]
+pub async fn rag_model_download_cancel(
+    session: State<'_, SessionState>,
+    size: String,
+) -> Result<bool, String> {
+    crate::commands::config::require_admin(&session).await?;
+    Ok(service::cancel_model_download(&size))
 }

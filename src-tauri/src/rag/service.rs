@@ -86,17 +86,28 @@ struct RagUploadProgress {
     /// Total document chars for the chunking phase (matches `chars_total`).
     #[serde(default)]
     chunking_total: u64,
+    /// Actual source-file size in bytes (from DocMeta.size, captured at
+    /// import time). Lets the UI show the real file size in the large-file
+    /// hint instead of a char-count approximation. 0 = unknown.
+    #[serde(default)]
+    bytes_total: u64,
+    /// Document char total (NOT the embed-phase chunk-sum denominator). Lets
+    /// the frontend heal a missed chunking phase (listener registered late):
+    /// on the first embed tick it can mark 内容读取/分段处理 complete.
+    #[serde(default)]
+    doc_chars: u64,
 }
 
 const UPLOAD_PROGRESS_EVENT: &str = "rag://upload-progress";
 
-fn emit_upload_progress(app: &AppHandle, name: &str, chars_done: u64, chars_total: u64) {
-    emit_upload_progress_chunks(app, name, chars_done, chars_total, 0, 0);
+fn emit_upload_progress(app: &AppHandle, name: &str, chars_done: u64, chars_total: u64, bytes_total: u64) {
+    emit_upload_progress_chunks(app, name, chars_done, chars_total, 0, 0, bytes_total, chars_total);
 }
 
 /// Same event with chunk counts filled in (embed-loop ticks). `chunks_total=0`
 /// means "not yet known" (still chunking); the frontend hides the chunk bar
-/// until the total is positive.
+/// until the total is positive. `bytes_total` carries the source file's real
+/// size (0 = unknown) for the large-file hint.
 fn emit_upload_progress_chunks(
     app: &AppHandle,
     name: &str,
@@ -104,6 +115,8 @@ fn emit_upload_progress_chunks(
     chars_total: u64,
     chunks_done: u32,
     chunks_total: u32,
+    bytes_total: u64,
+    doc_chars: u64,
 ) {
     let payload = RagUploadProgress {
         name: name.to_string(),
@@ -113,6 +126,8 @@ fn emit_upload_progress_chunks(
         chunks_total,
         chunking_done: 0,
         chunking_total: 0,
+        bytes_total,
+        doc_chars,
     };
     if let Err(e) = app.emit(UPLOAD_PROGRESS_EVENT, &payload) {
         log::warn!("[RAG] emit upload-progress failed: {e}");
@@ -123,15 +138,24 @@ fn emit_upload_progress_chunks(
 /// scanned-chars progress (fired per code AST partition). `chars_done` stays 0
 /// so the embed bar doesn't move yet; `chars_total` mirrors the document total
 /// for a consistent bar denominator across the phase switch.
-fn emit_chunking_progress(app: &AppHandle, name: &str, chunking_done: u64, chunking_total: u64) {
+fn emit_chunking_progress(
+    app: &AppHandle,
+    name: &str,
+    chunking_done: u64,
+    chunking_total: u64,
+    chunks_so_far: u32,
+    bytes_total: u64,
+) {
     let payload = RagUploadProgress {
         name: name.to_string(),
         chars_done: 0,
         chars_total: chunking_total,
-        chunks_done: 0,
+        chunks_done: chunks_so_far,
         chunks_total: 0,
         chunking_done: chunking_done.min(chunking_total),
         chunking_total,
+        bytes_total,
+        doc_chars: chunking_total,
     };
     if let Err(e) = app.emit(UPLOAD_PROGRESS_EVENT, &payload) {
         log::warn!("[RAG] emit upload-progress failed: {e}");
@@ -1422,8 +1446,19 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<crate::mv::RagModelInfo>> {
     mv::list_models(app)
 }
 
-pub async fn download_model(app: &AppHandle, size: &str) -> Result<()> {
-    mv::download_model(app, size).await
+pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Result<()> {
+    mv::download_model(app, size, source)
+}
+
+/// In-memory progress snapshot of a background model download (None when no
+/// download has run this session / the done snapshot expired).
+pub fn download_model_status(size: &str) -> Option<mv::RagModelDownloadProgress> {
+    mv::download_status(size)
+}
+
+/// Request cancellation of a running background model download.
+pub fn cancel_model_download(size: &str) -> bool {
+    mv::cancel_download(size)
 }
 
 pub async fn current_model() -> Option<String> {
@@ -1445,28 +1480,43 @@ pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, O
 /// `needs_reindex` if the dim changed OR a same-dim model swap was detected).
 pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
     mv::ensure_model_ready(app, size)?;
-    // Score-threshold reset on model change: the threshold is tuned to a
-    // model's cosine band (granite-97m related ≈ 0.82-0.88; F2LLM V2-160M
-    // related ≈ 0.15-0.25 — measured). A threshold carried across a model
-    // swap filters EVERYTHING (real incident: 0.41 threshold × V2-160M band
-    // → zero search results after reload). Reset to 0 (rank-only) so search
-    // stays usable; the user can re-tune the slider for the new model.
+    // Per-model retrieval defaults (deploy.json `defaultScore` /
+    // `defaultWeightVector` / `defaultWeightKeyword`): thresholds and
+    // weights are tuned to a model's cosine band, so a model switch drops
+    // the user's per-model tuning and restores the NEW model's defaults
+    // (0 / 0.5 / 0.5 when deploy.json omits them).
     let prev_indexed = get_indexed_model().await;
     let prev_selected = mv::active_model().await;
     let switching = prev_indexed.as_deref() != Some(size) && prev_selected.as_deref() != Some(size);
     if switching {
         let mut s = get_settings().await?;
-        if (s.score_threshold - 0.0).abs() > f32::EPSILON {
+        // Per-model retrieval defaults (deploy.json `defaultScore` /
+        // `defaultWeightVector` / `defaultWeightKeyword`): thresholds and
+        // weights are tuned to a model's cosine band, so a model switch drops
+        // the user's per-model tuning and restores the NEW model's defaults
+        // (0 / 0.5 / 0.5 when deploy.json omits them).
+        let defaults = mv::model_defaults(app, size);
+        let threshold_changed = (s.score_threshold - defaults.0).abs() > f32::EPSILON;
+        let weights_changed = (s.vector_weight - defaults.1).abs() > f32::EPSILON
+            || (s.keyword_weight - defaults.2).abs() > f32::EPSILON;
+        if threshold_changed || weights_changed {
             rag_log(
                 "info",
                 format!(
-                    "model switch {} -> {}: resetting scoreThreshold {} → 0 (thresholds are model-specific; re-tune in settings)",
+                    "model switch {} -> {}: resetting scoreThreshold {} → {}, weights ({}, {}) → ({}, {}) (model-specific; re-tune in settings)",
                     prev_indexed.as_deref().unwrap_or("(none)"),
                     size,
-                    s.score_threshold
+                    s.score_threshold,
+                    defaults.0,
+                    s.vector_weight,
+                    s.keyword_weight,
+                    defaults.1,
+                    defaults.2,
                 ),
             );
-            s.score_threshold = 0.0;
+            s.score_threshold = defaults.0;
+            s.vector_weight = defaults.1;
+            s.keyword_weight = defaults.2;
             save_settings(s).await?;
         }
     }
@@ -1809,6 +1859,15 @@ struct DocMeta {
     /// read time so the tree view groups them under the "file pick" node.
     #[serde(default)]
     source: Option<crate::models::rag::DocSource>,
+    /// Extension (with dot, e.g. ".pdf") of the on-disk RAW copy for "copy"
+    /// imports of extractable formats (PDF/Office/image): the archived
+    /// original bytes live at `{id}{raw_ext}` while the extracted Markdown
+    /// cache is `{id}.md`. Recorded at import so a later display-name rename
+    /// (which changes the `name`-derived extension) can still locate the raw
+    /// copy. `None` for text docs (raw == content file) / symlink docs (no
+    /// copy) / legacy metas.
+    #[serde(default)]
+    raw_ext: Option<String>,
 }
 
 /// Default content version for a freshly-uploaded doc + back-compat fallback
@@ -3094,6 +3153,17 @@ async fn write_doc_and_index(
     // Data-source provenance (file/folder/git/tool). `None` on legacy paths —
     // `classify_source` falls back to kind "file" at read time.
     source: Option<crate::models::rag::DocSource>,
+    // RAW original copy for extractable "copy" imports: `Some((file_stem,
+    // bytes))` writes the archived original at `dir/{file_stem}` (e.g.
+    // `{id}.pdf`) alongside the extracted-Markdown cache (`file_stem` above =
+    // `{id}.md`). The cache is only used for chunking + detail display; the
+    // raw copy is the doc's real content source (updates / open-source /
+    // md5 detection). `None` for text docs (content file IS the raw) and
+    // symlink docs (no copy).
+    raw_copy: Option<(String, Vec<u8>)>,
+    // Extension (with dot) of the raw copy above, recorded in meta so renames
+    // of the display name can't orphan the raw file lookup.
+    raw_ext: Option<String>,
 ) -> Result<u32> {
     let meta_path = dir.join(format!("{}.meta", doc_id));
     let uploaded_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
@@ -3107,6 +3177,12 @@ async fn write_doc_and_index(
         let tmp_path = dir.join(format!(".{}.tmp", file_stem));
         std::fs::write(&tmp_path, content)?;
         std::fs::rename(&tmp_path, &content_path)?;
+    }
+    if let Some((raw_stem, raw_bytes)) = &raw_copy {
+        let raw_path = dir.join(raw_stem);
+        let tmp_path = dir.join(format!(".{}.tmp", raw_stem));
+        std::fs::write(&tmp_path, raw_bytes)?;
+        std::fs::rename(&tmp_path, &raw_path)?;
     }
     let chunk_count = reindex_doc(app, doc_id, display_name, content, tags.clone()).await? as u32;
     let title = extract_title(content, display_name);
@@ -3124,6 +3200,7 @@ async fn write_doc_and_index(
         original_path,
         md5,
         source,
+        raw_ext,
     };
     write_meta_atomic(&meta_path, &meta)?;
     // 增量同步 SQL 镜像（rag_docs / rag_doc_tags / rag_tags）。镜像失败不阻断
@@ -3202,12 +3279,13 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     // failing mid-write/reindex would leave the doc listable with no content
     // file on disk and stale vectors — a silently corrupted doc. The exists()
     // + path-difference check handles same-name same-ext updates and symlink
-    // docs (no copy on disk).
+    // docs (no copy on disk). For extractable docs the OLD raw copy
+    // (`{id}{old_ext}`) is cleaned up the same way.
     let old_content = content_path_for(&dir, id, &old_meta.name);
+    let old_raw = raw_content_path_for(&dir, &old_meta);
 
-    // New on-disk filename: `{id}{ext}` with the NEW file's extension for
-    // text sources; `{id}.md` for extractable sources (content is derived
-    // Markdown — see upload_one_path_inner).
+    // New on-disk naming: `{id}.md` cache for extractable sources (content is
+    // derived Markdown); `{id}{ext}` for text sources (content IS the raw).
     let extractable = crate::rag::extract::can_extract(&name);
     let ext = path
         .extension()
@@ -3227,17 +3305,20 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     // Manual-upload update path records the NEW file as the original source
     // (this is the legacy-compat path: old docs without original_path get one
     // now, so future update detection works). MD5 of the new source is stored
-    // as the baseline. Method: extractable sources are always "copy" (the
-    // content file is derived Markdown); otherwise keep the doc's existing
-    // method — a legacy doc (method None) becomes "copy" since manual upload
-    // now has a copy + a recorded source.
-    let new_method = if extractable {
-        Some("copy".to_string())
+    // as the baseline. Method: keep the doc's existing method (a legacy doc
+    // with method None becomes "copy" since manual upload now has a copy + a
+    // recorded source) — extractable docs follow the same rule, archiving the
+    // raw original when the method is copy.
+    let new_method = old_meta.method.clone().or_else(|| Some("copy".to_string()));
+    let is_copy = new_method.as_deref() != Some("symlink");
+    let (new_raw_copy, new_raw_ext) = if extractable && is_copy {
+        (Some((format!("{id}{ext}"), raw.clone())), Some(ext.clone()))
     } else {
-        old_meta.method.clone().or_else(|| Some("copy".to_string()))
+        (None, None)
     };
     let new_original_path = Some(file_path.to_string());
     let new_md5 = Some(compute_md5(&raw));
+    let new_raw_path = new_raw_copy.as_ref().map(|(s, _)| dir.join(s));
     // Manual file update REPLACES the provenance: the doc's content no longer
     // comes from its recorded source (e.g. a git repo). Dropping `source`
     // re-classifies at read time from the NEW original_path's parent dir
@@ -3264,14 +3345,31 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
         new_md5,
         // Manual file update replaces provenance (see comment above).
         new_source,
+        new_raw_copy,
+        new_raw_ext,
     )
     .await?;
 
     // New content is durable + indexed; now drop the old content file if it
-    // has a different path (different extension/name case).
+    // has a different path (different extension/name case), plus the old raw
+    // copy for extractable docs (ext may have changed).
     if old_content.exists() && old_content != dir.join(&file_stem) {
         if let Err(e) = std::fs::remove_file(&old_content) {
             rag_log("warn", format!("update: remove old {} failed: {}", old_content.display(), e));
+        }
+    }
+    // Only clean up raw copies INSIDE rag/files — for symlink docs
+    // raw_content_path_for resolves to the external original, which must
+    // never be deleted by an update.
+    let old_raw_in_dir = old_raw.starts_with(&dir);
+    if old_raw_in_dir
+        && old_raw.exists()
+        && Some(&old_raw) != new_raw_path.as_ref()
+        && old_raw != old_content
+        && old_raw != dir.join(&file_stem)
+    {
+        if let Err(e) = std::fs::remove_file(&old_raw) {
+            rag_log("warn", format!("update: remove old raw {} failed: {}", old_raw.display(), e));
         }
     }
 
@@ -3299,21 +3397,27 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         .original_path
         .as_deref()
         .filter(|p| !p.is_empty())
-        .ok_or_else(|| anyhow!("no original path recorded for this document"))?;
-    let path = Path::new(original_path);
+        .ok_or_else(|| anyhow!("no original path recorded for this document"))?
+        .to_string();
     // Keep the doc's DISPLAY name (old_meta.name) rather than re-deriving it
     // from the source file name: the display name may have been changed via
     // MCP rag_file_update, and re-deriving would silently revert the rename.
     // It also keeps charProgress.name (reindex_doc's doc_name) in sync with
     // batchProgress.name (meta.name) for the frontend progress sub-bar.
     let name = old_meta.name.clone();
-    if !path.exists() {
-        return Err(anyhow!("original file does not exist: {}", original_path));
+    // Content source: symlink docs read the external original live; copy docs
+    // prefer the external original (picks up source changes) and fall back to
+    // the archived raw copy when the external file is gone. The extracted-md
+    // cache is never a re-extraction source.
+    let source_path = raw_content_path_for(&dir, &old_meta);
+    let source_display = source_path.display().to_string();
+    if !source_path.exists() {
+        return Err(anyhow!("original file does not exist: {}", source_display));
     }
 
     // Read + validate the source (same rules as upload — extractable formats
     // are re-extracted to Markdown, text via sniff+decode).
-    let raw = std::fs::read(path).map_err(|e| anyhow!("read failed for {}: {}", name, e))?;
+    let raw = std::fs::read(&source_path).map_err(|e| anyhow!("read failed for {}: {}", name, e))?;
     if raw.len() > MAX_UPLOAD_BYTES {
         return Err(anyhow!(
             "file too large: {} ({} bytes, max {} bytes)",
@@ -3322,30 +3426,31 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
             MAX_UPLOAD_BYTES
         ));
     }
-    // Dispatch by the ORIGINAL PATH (the true source), not the display name:
+    // Dispatch by the SOURCE PATH (the true content), not the display name:
     // the display name is user-renameable via MCP rag_file_update and may no
     // longer carry the source extension — a renamed "report.pdf" must still
     // re-extract, not fall into the text sniff (which would reject the bytes).
-    let (content, _encoding) = content_from_source(original_path, &raw).await?;
+    let (content, _encoding) = content_from_source(&source_display, &raw).await?;
     let size = raw.len() as u64;
     let tags = old_meta.tags.clone();
 
-    // Remove the OLD copied file for "copy" docs if its name/extension changed
-    // (symlink docs have no copy). For "copy" docs the on-disk name is
-    // `{id}{ext}`; recompute it from the OLD meta name.
-    let is_symlink = old_meta.method.as_deref() == Some("symlink");
     // Old content file removal happens AFTER the write+index below
     // (delete-after-write): failing mid-write with the old copy already gone
     // would leave a listable doc with no content file. Symlink docs have no
     // copy to remove.
+    let is_symlink = old_meta.method.as_deref() == Some("symlink");
     let old_content = if is_symlink { None } else { Some(content_path_for(&dir, id, &old_meta.name)) };
+    let old_raw_in_dir = {
+        let p = raw_content_path_for(&dir, &old_meta);
+        if p.starts_with(&dir) { Some(p) } else { None }
+    };
 
-    // On-disk filename: `{id}{ext}` for text sources, `{id}.md` for
-    // extractable sources (derived Markdown — see upload_one_path_inner).
-    // Extractable decision follows the source file (original_path), not the
-    // renameable display name.
-    let extractable = crate::rag::extract::can_extract(original_path);
-    let ext = path
+    // On-disk naming: `{id}.md` cache for extractable sources (derived
+    // Markdown); `{id}{ext}` for text sources (content IS the raw).
+    // Extractable decision follows the SOURCE file, not the renameable
+    // display name.
+    let extractable = crate::rag::extract::can_extract(&source_display);
+    let ext = source_path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()))
@@ -3359,6 +3464,15 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
     rag_log("info", format!("updating '{}' from original ({} bytes) -> id {}", name, raw.len(), id));
     let version = old_meta.version.saturating_add(1);
     let new_md5 = Some(compute_md5(&raw));
+    // Copy extractable docs refresh the archived raw copy from the source we
+    // just read (keeps the archive in sync with the external original).
+    let is_copy = !is_symlink;
+    let (new_raw_copy, new_raw_ext) = if extractable && is_copy {
+        (Some((format!("{id}{ext}"), raw.clone())), Some(ext.clone()))
+    } else {
+        (None, None)
+    };
+    let new_raw_path = new_raw_copy.as_ref().map(|(s, _)| dir.join(s));
     let chunk_count = write_doc_and_index(
         app,
         &dir,
@@ -3370,20 +3484,34 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         size,
         old_meta.file_type.clone(),
         version,
-        // Extractable sources are always "copy" (derived content file).
-        if extractable { Some("copy".to_string()) } else { old_meta.method.clone() },
+        // Method is preserved as-is (the user's import choice).
+        old_meta.method.clone(),
         Some(original_path.to_string()),
         new_md5,
         // "From original" update: refresh content but keep the source record.
         old_meta.source.clone(),
+        new_raw_copy,
+        new_raw_ext,
     )
     .await?;
 
     // Content durable + indexed; drop the old copy if it has a different path.
-    if let Some(old_content) = old_content {
-        if old_content.exists() && old_content != dir.join(&file_stem) {
-            if let Err(e) = std::fs::remove_file(&old_content) {
+    if let Some(old_content) = &old_content {
+        if old_content.exists() && *old_content != dir.join(&file_stem) {
+            if let Err(e) = std::fs::remove_file(old_content) {
                 rag_log("warn", format!("update-from-original: remove old {} failed: {}", old_content.display(), e));
+            }
+        }
+    }
+    // Stale archived raw copy with a different extension (ext changed).
+    if let Some(old_raw) = old_raw_in_dir {
+        if old_raw.exists()
+            && Some(&old_raw) != new_raw_path.as_ref()
+            && old_raw != dir.join(&file_stem)
+            && Some(&old_raw) != old_content.as_ref()
+        {
+            if let Err(e) = std::fs::remove_file(&old_raw) {
+                rag_log("warn", format!("update-from-original: remove old raw {} failed: {}", old_raw.display(), e));
             }
         }
     }
@@ -3468,10 +3596,13 @@ async fn upload_one_path_inner(
             name, raw.len(), char_count, encoding
         ),
     );
-    // On-disk filename: `{id}{ext}` for text sources (uuid + original
-    // extension — unique across same-named uploads, shows its type in the OS
-    // file manager); `{id}.md` for extractable sources (PDF/Office/image),
-    // because the stored content is the DERIVED Markdown, not the raw bytes.
+    // On-disk naming: extractable sources (PDF/Office/image) store the
+    // DERIVED Markdown cache at `{id}.md` (chunking + detail display only);
+    // text sources store content at `{id}{ext}` (which IS the raw file).
+    // The import method follows the user's choice for BOTH kinds: "copy"
+    // additionally archives the raw original at `{id}{ext}` (the doc's real
+    // content source for updates / open-source / md5 detection), "symlink"
+    // reads the original live via original_path.
     let extractable = crate::rag::extract::can_extract(&name);
     let ext = path
         .extension()
@@ -3488,6 +3619,14 @@ async fn upload_one_path_inner(
         format!("{id}.md")
     } else {
         format!("{id}{ext}")
+    };
+    // Raw original copy: only for extractable "copy" imports (text copies
+    // already write their raw bytes as the content file; symlinks don't copy).
+    let is_copy = method.as_deref() != Some("symlink");
+    let (raw_copy, raw_ext) = if extractable && is_copy {
+        (Some((format!("{id}{ext}"), raw.clone())), Some(ext.clone()))
+    } else {
+        (None, None)
     };
     // MD5 of the source bytes — captured at import for update detection
     // (symlink: live source; copy: the original that was copied). For symlink
@@ -3508,17 +3647,19 @@ async fn upload_one_path_inner(
         size,
         None,
         1,
-        // Extractable sources ALWAYS import as "copy": the content file is
-        // derived Markdown, so the symlink/copy distinction (about the raw
-        // source bytes) doesn't apply — all read paths then treat it as a
-        // plain copy document with zero special-casing.
-        if extractable { Some("copy".to_string()) } else { method.clone() },
+        // Import method follows the user's choice for ALL kinds: extractable
+        // "copy" archives the raw original at `{id}{ext}` (raw_copy below) and
+        // keeps the extracted Markdown as a chunking/display cache; "symlink"
+        // keeps only the cache and reads the original live.
+        method.clone(),
         original_path_str,
         md5_hex,
         // Data source provenance: caller-supplied (folder scan root + rel dir
         // chain for folder/git imports; parent dir for single-file picks;
         // None on legacy callers -> classify as "file" at read time).
         source,
+        raw_copy,
+        raw_ext,
     )
     .await?;
 
@@ -3567,6 +3708,24 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_ascii_lowercase()));
+    // Extractable imports (PDF/Office/image) store the DERIVED Markdown cache
+    // at `{id}.md` — and, for "copy" imports, ALSO the raw original at
+    // `{id}{ext}`. The cache must win here: callers of content_path_for read
+    // text content for chunking/display, and the raw copy is binary. Only
+    // when the cache is missing do we fall through (legacy extractable docs
+    // may only have the raw copy — reading it is wrong, but the old
+    // candidate order had the same flaw; the cache is written on every
+    // import/update since this scheme).
+    let source_ext_is_extractable = ext
+        .as_deref()
+        .map(crate::rag::extract::can_extract)
+        .unwrap_or(false);
+    if source_ext_is_extractable {
+        let by_id_md = dir.join(format!("{id}.md"));
+        if by_id_md.exists() {
+            return by_id_md;
+        }
+    }
     // Candidate 1: {id}{ext} (current scheme). Only when there IS an ext,
     // and never the meta file itself ({id}.meta is always a meta JSON —
     // a collision here means legacy corruption, not content).
@@ -3595,6 +3754,91 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
     } else {
         dir.join(meta_name)
     }
+}
+
+/// Resolve the doc's RAW content source for re-processing (updates /
+/// re-extraction). For extractable imports (PDF/Office/image) the extracted
+/// Markdown at `{id}.md` is only a chunking/display cache; the real content
+/// lives at:
+/// - symlink docs: the external `original_path` (read live);
+/// - copy docs: the external `original_path` when it still exists (so a
+///   changed source is picked up by update-from-original), else the archived
+///   original copy `{id}{raw_ext}` inside rag/files (the doc stays
+///   re-processable even after the external source moved);
+/// - text docs / legacy: falls back to `content_path_for` (the content file
+///   IS the raw file).
+/// Returns the first candidate that exists, else the last candidate so
+/// callers get a sensible path to error on.
+fn raw_content_path_for(dir: &Path, meta: &DocMeta) -> std::path::PathBuf {
+    let is_symlink = meta.method.as_deref() == Some("symlink");
+    let external = meta
+        .original_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+    if is_symlink {
+        if let Some(p) = external {
+            return p;
+        }
+    } else if let Some(p) = &external {
+        if p.exists() {
+            return p.clone();
+        }
+    }
+    // Copy with lost external (or symlink with no original recorded): the
+    // archived raw copy.
+    let raw_ext = meta
+        .raw_ext
+        .clone()
+        .or_else(|| {
+            std::path::Path::new(&meta.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        });
+    if let Some(ext) = raw_ext {
+        let p = dir.join(format!("{}{}", meta.id, ext));
+        if p.exists() && p != dir.join(format!("{}.meta", meta.id)) {
+            return p;
+        }
+    }
+    // Legacy bare {id}.
+    let bare = dir.join(&meta.id);
+    if bare.exists() {
+        return bare;
+    }
+    // Last resort: the external original even if missing (callers error on it
+    // with a sensible path), else the content-path resolution.
+    if let Some(p) = external {
+        return p;
+    }
+    content_path_for(dir, &meta.id, &meta.name)
+}
+
+/// Resolve the path "view source file" opens. Self-contained preference:
+/// copy docs open the ARCHIVED original copy inside rag/files (the doc's
+/// associated original — survives external moves), symlink docs open the
+/// external original (read live). Falls back to `raw_content_path_for`.
+fn open_source_path_for(dir: &Path, meta: &DocMeta) -> std::path::PathBuf {
+    let is_symlink = meta.method.as_deref() == Some("symlink");
+    if !is_symlink {
+        let raw_ext = meta
+            .raw_ext
+            .clone()
+            .or_else(|| {
+                std::path::Path::new(&meta.name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| format!(".{}", e.to_ascii_lowercase()))
+            });
+        if let Some(ext) = raw_ext {
+            let p = dir.join(format!("{}{}", meta.id, ext));
+            if p.exists() && p != dir.join(format!("{}.meta", meta.id)) {
+                return p;
+            }
+        }
+    }
+    raw_content_path_for(dir, meta)
 }
 
 /// Compute the MD5 hex digest of `bytes`. Used to fingerprint imported file
@@ -3886,6 +4130,9 @@ pub async fn create_doc_from_content(
             rel_path: None,
             git: None,
         }),
+        // MCP tool creation writes text content only — no raw copy.
+        None,
+        None,
     )
     .await?;
 
@@ -4012,7 +4259,11 @@ pub async fn update_doc(
                 .original_path
                 .as_deref()
                 .map(|p| !p.is_empty() && !Path::new(p).exists())
-                .unwrap_or(false);
+                .unwrap_or(false)
+            // Extractable symlink docs chunk from the `{id}.md` cache, which
+            // lives inside rag/files — a lost external original doesn't block
+            // a tag-only re-index.
+            && !dir.join(format!("{}.md", doc_id)).exists();
         if symlink_lost && content.is_none() {
             rag_log(
                 "warn",
@@ -4020,12 +4271,27 @@ pub async fn update_doc(
             );
         } else {
         let content_path = if is_symlink {
-            meta.original_path
-                .as_deref()
-                .filter(|p| !p.is_empty())
-                .map(Path::new)
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| content_path.clone())
+            // Extractable symlink imports (PDF/Office/image): the external
+            // original is binary — read/write the extracted-Markdown cache
+            // (`{id}.md`) instead, which is the chunking/display source.
+            // Writing MCP content updates the cache (never the user's
+            // original binary file).
+            let source_ext = std::path::Path::new(&meta.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{}", e.to_ascii_lowercase()))
+                .unwrap_or_default();
+            let md_cache = dir.join(format!("{}.md", doc_id));
+            if crate::rag::extract::can_extract(&format!("x{source_ext}")) && md_cache.exists() {
+                md_cache
+            } else {
+                meta.original_path
+                    .as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(Path::new)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| content_path.clone())
+            }
         } else {
             content_path.clone()
         };
@@ -4256,7 +4522,20 @@ async fn reindex_doc(
         // without this the bar sits in "Preparing…" with no visible total
         // for that whole phase, which reads as a hung import.
         let total_chars = content.chars().count() as u64;
-        emit_upload_progress(app, doc_name, 0, total_chars);
+        // Real source-file size (captured in DocMeta at import time) for the
+        // large-file hint; fall back to the in-memory content byte length.
+        let bytes_total = files_dir(app)
+            .ok()
+            .and_then(|dir| {
+                let bytes = std::fs::read(dir.join(format!("{doc_id}.meta"))).ok()?;
+                let meta: DocMeta = serde_json::from_slice(&bytes).ok()?;
+                if meta.size > 0 {
+                    return Some(meta.size);
+                }
+                Some(content.len() as u64)
+            })
+            .unwrap_or(content.len() as u64);
+        emit_upload_progress(app, doc_name, 0, total_chars, bytes_total);
         let import_doc_template = deploy.2;
         let title_delimiter = deploy.3.clone();
         // Doc title for the `{title}` template placeholder (granite-style
@@ -4287,7 +4566,7 @@ async fn reindex_doc(
                 model,
                 chunk_size as u32,
                 chunk_overlap as u32,
-                &|done, total| emit_chunking_progress(app, doc_name, done, total),
+                &|done, total, n| emit_chunking_progress(app, doc_name, done, total, n, bytes_total),
             );
             // Progress denominator for the embed loop: the SUM of chunk char
             // counts, not the document char count. Consecutive chunks share
@@ -4339,7 +4618,7 @@ async fn reindex_doc(
             // For an empty doc the loop below doesn't run (no chunks to
             // embed), so emit the 100% tick here to finish its progress bar.
             if chunks.is_empty() {
-                emit_upload_progress(app, doc_name, progress_total_chars, progress_total_chars);
+                emit_upload_progress(app, doc_name, progress_total_chars, progress_total_chars, bytes_total);
             }
             let total_chunks = chunks.len() as u32;
             let mut chunks_done: u32 = 0;
@@ -4374,6 +4653,8 @@ async fn reindex_doc(
                     progress_total_chars,
                     chunks_done,
                     total_chunks,
+                    bytes_total,
+                    total_chars,
                 );
             }
             let embed_ms = t_embed.elapsed().as_millis() as u64;
@@ -4549,7 +4830,29 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
         // For "symlink" docs there's no copy — read live from original_path.
         let is_symlink = meta.method.as_deref() == Some("symlink");
         let content = if is_symlink {
-            match meta
+            // Extractable symlink imports (PDF/Office/image via symlink) have
+            // an extracted-Markdown cache at `{id}.md` — the external original
+            // is binary and would be skipped by the text sniff below. The
+            // cache IS the extraction result, so chunk from it directly.
+            let source_ext = std::path::Path::new(&meta.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{}", e.to_ascii_lowercase()))
+                .unwrap_or_default();
+            let md_cache = dir.join(format!("{}.md", meta.id));
+            if crate::rag::extract::can_extract(&format!("x{source_ext}")) && md_cache.exists() {
+                match std::fs::read_to_string(&md_cache) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        rag_log(
+                            "warn",
+                            format!("reindex: symlink '{}' md cache unreadable: {e}, skipped", meta.name),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                match meta
                 .original_path
                 .as_deref()
                 .filter(|p| !p.is_empty())
@@ -4625,6 +4928,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                     );
                     continue;
                 }
+            }
             }
         } else {
             let content_path = content_path_for(&dir, &meta.id, &meta.name);
@@ -4862,9 +5166,9 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
     // failure (rather than `let _ =`) so a permissions/path bug surfaces in the
     // Logs page instead of silently leaving the file on disk.
     //
-    // For "symlink" docs there is NO copied content file (the source lives at
-    // original_path and is never owned by RAG) — only the `.meta` + vectors are
-    // removed; the original file is left untouched.
+    // For "symlink" docs the external original is never owned by RAG and is
+    // left untouched — but extractable symlink imports DO have an extracted-
+    // Markdown cache at `{id}.md` (chunking/display only), which is removed.
     let meta_opt = std::fs::read(dir.join(format!("{}.meta", id)))
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok());
@@ -4873,7 +5177,16 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
         .as_ref()
         .map(|m| m.method.as_deref() == Some("symlink"))
         .unwrap_or(false);
-    if !is_symlink {
+    if is_symlink {
+        // Remove only the extracted-md cache (if any); never the original.
+        let cache = dir.join(format!("{id}.md"));
+        if cache.exists() {
+            if let Err(e) = std::fs::remove_file(&cache) {
+                rag_log("warn", format!("delete_doc: remove {} failed: {}", cache.display(), e));
+            }
+        }
+        rag_log("info", format!("delete_doc: symlink doc {} — original left untouched", id));
+    } else {
         // Remove every candidate on-disk path (current `{id}{ext}` upload scheme,
         // legacy bare-`{id}` upload, and `{meta_name}` for rag_file_create) so no
         // content file is orphaned regardless of which scheme wrote it.
@@ -4904,8 +5217,6 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
                 }
             }
         }
-    } else {
-        rag_log("info", format!("delete_doc: symlink doc {} — original left untouched", id));
     }
     let meta_path = dir.join(format!("{}.meta", id));
     if meta_path.exists() {
@@ -5032,7 +5343,11 @@ pub async fn open_file_location(app: &AppHandle, id: &str, target: Option<String
     // view for extractable imports). Default: symlink docs -> original,
     // copy docs -> the rag/files copy / extracted Markdown.
     let want_source = target.as_deref() == Some("source");
-    let (resolved, is_source) = if want_source || is_symlink {
+    let (resolved, is_source) = if want_source {
+        // Copy docs reveal the ARCHIVED original copy (self-contained);
+        // symlink docs the external original.
+        (open_source_path_for(&dir, &meta), true)
+    } else if is_symlink {
         let op = meta
             .original_path
             .as_deref()
@@ -5063,12 +5378,11 @@ pub async fn open_doc_source(app: &AppHandle, id: &str) -> Result<()> {
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
         .ok_or_else(|| anyhow!("document not found: {}", id))?;
-    let op = meta
-        .original_path
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .ok_or_else(|| anyhow!("no original path recorded for this document"))?;
-    let file = PathBuf::from(op);
+    // Copy docs open the ARCHIVED original copy inside rag/files (the doc's
+    // associated original — self-contained, survives external moves);
+    // symlink docs open the external original live. The extracted-md cache is
+    // never the "source".
+    let file = open_source_path_for(&dir, &meta);
     if !file.exists() {
         return Err(anyhow!("original file does not exist: {}", file.display()));
     }

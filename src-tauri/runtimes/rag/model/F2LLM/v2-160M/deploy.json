@@ -1,0 +1,18 @@
+{
+  "platform": "AUTO",
+  "default": false,
+  "description": "",
+  "sort": 1,
+  "searchQueryPrefix": "Instruct: Given a question, retrieve passages that can help answer the question.\nQuery: {query}",
+  "importDocPrefix": "",
+  "docTitleDelimiter": "",
+  "chunkSize": 512,
+  "chunkOverlap": 100,
+  "defaultScore": 0,
+  "defaultWeightVector": 0.5,
+  "defaultWeightKeyword": 0.5,
+  "downloadUrls": {
+    "HuggingFace": "https://huggingface.co/hotchpotch/bekko-embedding-v1-a25m-GGUF/resolve/main/bekko-embedding-v1-a25m-Q8_0.gguf",
+    "hf-mirror": "https://hf-mirror.com/hotchpotch/bekko-embedding-v1-a25m-GGUF/resolve/main/bekko-embedding-v1-a25m-Q8_0.gguf"
+  }
+}

@@ -95,6 +95,26 @@ pub struct DeployConfig {
     /// `|`), NOT a global rule — models whose template has no field separator
     /// simply leave this unset. None/missing -> no replacement.
     pub doc_title_delimiter: Option<String>,
+    /// True when this size's model files ship inside the installer
+    /// (deploy.json `bundle: true`; legacy `default: true` honored as
+    /// fallback). Non-bundled sizes ship only their deploy.json and are
+    /// downloaded on demand via `download_urls`.
+    pub bundle: bool,
+    /// Default relevance score threshold (deploy.json `defaultScore`, default
+    /// 0). Applied on first load when the user has never set a value, and
+    /// restored on model switch (user's per-model tuning is dropped).
+    pub default_score: f32,
+    /// Default semantic (vector) weight (deploy.json `defaultWeightVector`,
+    /// default 0.5). Same first-load / model-switch semantics as
+    /// `default_score`.
+    pub default_weight_vector: f32,
+    /// Default keyword weight (deploy.json `defaultWeightKeyword`, default
+    /// 0.5). Same first-load / model-switch semantics as `default_score`.
+    pub default_weight_keyword: f32,
+    /// Ordered download sources (deploy.json `downloadUrls`, an object of
+    /// `{"source name": "url"}`). Empty = not downloadable. The FIRST entry is
+    /// the default source; the rest are fallbacks.
+    pub download_urls: Vec<(String, String)>,
 }
 
 /// Render the embedding input for one document chunk from the deploy.json
@@ -141,32 +161,28 @@ pub fn render_query_embed_text(template: &str, query: &str) -> String {
 /// `is_default=false`. One file read; both `resolve_platform` (at load) and
 /// `list_models` (for the dropdown + default selection) use this.
 pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
+    let empty = || DeployConfig {
+        platform: Platform::Auto,
+        description: String::new(),
+        is_default: false,
+        sort: 0,
+        search_query_prefix: String::new(),
+        import_doc_prefix: String::new(),
+        chunk_size: None,
+        chunk_overlap: None,
+        doc_title_delimiter: None,
+        bundle: false,
+        default_score: 0.0,
+        default_weight_vector: 0.5,
+        default_weight_keyword: 0.5,
+        download_urls: Vec::new(),
+    };
     let Ok(text) = std::fs::read_to_string(size_dir.join("deploy.json")) else {
-        return DeployConfig {
-            platform: Platform::Auto,
-            description: String::new(),
-            is_default: false,
-            sort: 0,
-            search_query_prefix: String::new(),
-            import_doc_prefix: String::new(),
-            chunk_size: None,
-            chunk_overlap: None,
-            doc_title_delimiter: None,
-        };
+        return empty();
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         log::warn!("[RAG] deploy.json in {} is not valid JSON - using AUTO", size_dir.display());
-        return DeployConfig {
-            platform: Platform::Auto,
-            description: String::new(),
-            is_default: false,
-            sort: 0,
-            search_query_prefix: String::new(),
-            import_doc_prefix: String::new(),
-            chunk_size: None,
-            chunk_overlap: None,
-            doc_title_delimiter: None,
-        };
+        return empty();
     };
     let platform = match v.get("platform").and_then(|p| p.as_str()) {
         Some(s) => Platform::parse(s),
@@ -177,7 +193,14 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         .and_then(|d| d.as_str())
         .unwrap_or("")
         .to_string();
-    let is_default = v.get("default").and_then(|d| d.as_bool()).unwrap_or(false);
+    // Bundle flag: `bundle: true` ships the model files in the installer;
+    // legacy `default: true` is honored as a fallback (older deploy.json
+    // files). Either marks the size as the out-of-box model.
+    let is_default = v
+        .get("bundle")
+        .and_then(|d| d.as_bool())
+        .or_else(|| v.get("default").and_then(|d| d.as_bool()))
+        .unwrap_or(false);
     let sort = v.get("sort").and_then(|s| s.as_i64()).unwrap_or(0) as i32;
     // Asymmetric embedding prefixes (deploy.json `searchQueryPrefix` /
     // `importDocPrefix`). Missing field / JSON null / non-string -> "" (symmetric
@@ -215,6 +238,38 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         .and_then(|d| d.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    // Model-default retrieval params (deploy.json `defaultScore` /
+    // `defaultWeightVector` / `defaultWeightKeyword`). Applied on first model
+    // load when the user has never tuned them, and restored on model switch
+    // (per-model tuning is dropped — thresholds/weights are model-specific).
+    let num = |key: &str, fallback: f32| -> f32 {
+        v.get(key)
+            .and_then(|n| n.as_f64())
+            .filter(|n| n.is_finite())
+            .map(|n| n as f32)
+            .unwrap_or(fallback)
+    };
+    let default_score = num("defaultScore", 0.0);
+    let default_weight_vector = num("defaultWeightVector", 0.5);
+    let default_weight_keyword = num("defaultWeightKeyword", 0.5);
+    // Ordered download sources (deploy.json `downloadUrls`, an object of
+    // `{"source name": "url"}`). serde_json's Map preserves insertion order
+    // only with the `preserve_order` feature, so sort is NOT guaranteed —
+    // keep the object's natural iteration order and let the first entry be
+    // the default source (documented behavior).
+    let download_urls: Vec<(String, String)> = v
+        .get("downloadUrls")
+        .and_then(|d| d.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| {
+                    val.as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| (k.clone(), s.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     DeployConfig {
         platform,
         description,
@@ -225,6 +280,11 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         chunk_size,
         chunk_overlap,
         doc_title_delimiter,
+        bundle: is_default,
+        default_score,
+        default_weight_vector,
+        default_weight_keyword,
+        download_urls,
     }
 }
 
@@ -302,12 +362,13 @@ pub trait Embedder: Send + Sync {
     fn backend(&self) -> &str;
 }
 
-/// Load the `Embedder` for `size_dir` by probing for a `*.gguf` model file.
-/// `size_dir` is self-contained (per the stage-18 dir layout): it holds the
-/// model file + `tokenizer.json` + `config.json`. GGUF = any `*.gguf` file
-/// (bundled names like `model.gguf` and the downloaded `model.gguf` are both
-/// accepted). Returns an error if none is present (the size isn't ready - the
-/// caller should have checked via `list_models`).
+/// Load the `Embedder` for `size_dir` by probing for the `model.gguf` model
+/// file. `size_dir` is self-contained (per the stage-18 dir layout): it holds
+/// the model file + `tokenizer.json` + `config.json`. STRICT: only
+/// `model.gguf` is accepted (matches `detect_format`'s ready rule — a
+/// user-renamed `model.gguf` is not a downloaded model). Returns an error if
+/// it is absent (the size isn't ready - the caller should have checked via
+/// `list_models`).
 pub fn load_embedder(size_dir: &Path) -> Result<Box<dyn Embedder>> {
     load_embedder_with_user_platform(size_dir, None)
 }
@@ -318,11 +379,12 @@ pub fn load_embedder_with_user_platform(
     size_dir: &Path,
     user: Option<Platform>,
 ) -> Result<Box<dyn Embedder>> {
-    if let Some(gguf) = find_gguf(size_dir) {
+    let gguf = size_dir.join("model.gguf");
+    if gguf.is_file() {
         GgufEmbedder::load_with_user_platform(&gguf, user).map(|m| Box::new(m) as Box<dyn Embedder>)
     } else {
         Err(anyhow!(
-            "no model file in '{}' (need a *.gguf file) - download it first",
+            "no model.gguf in '{}' - download the model first",
             size_dir.display()
         ))
     }
@@ -330,28 +392,15 @@ pub fn load_embedder_with_user_platform(
 
 /// Detect the format of a ready size dir by file presence: "gguf" | "" (not
 /// ready). Used by `list_models` to populate `RagModelInfo.format` without
-/// loading the model. GGUF is any `*.gguf` file (so bundled `model.gguf` and
-/// downloaded `model.gguf` both register).
+/// loading the model. STRICT: only a `model.gguf` file counts as downloaded —
+/// any other `*.gguf` name (e.g. a user-renamed `model.gguf`) does NOT make
+/// the size ready (the download flow publishes exactly `model.gguf`).
 pub fn detect_format(size_dir: &Path) -> &'static str {
-    if find_gguf(size_dir).is_some() {
+    if size_dir.join("model.gguf").is_file() {
         "gguf"
     } else {
         ""
     }
-}
-
-/// Find the (first) `*.gguf` file in a dir, or None. Used by `load_embedder` /
-/// `detect_format` so bundled GGUF files keep their descriptive names (e.g.
-/// `model.gguf`) instead of being forced to `model.gguf`.
-fn find_gguf(dir: &Path) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension().and_then(|x| x.to_str()).map(|s| s.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
-            return Some(p);
-        }
-    }
-    None
 }
 
 /// Read the model's max context window (tokens). Resolution order:

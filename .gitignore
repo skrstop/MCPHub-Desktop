@@ -13,3 +13,5 @@ src-tauri/.codegraph
 **/.playwright-mcp
 .claude
 doc/test
+# generated tauri config override (gen-model-resources.mjs)
+src-tauri/tauri.models.json

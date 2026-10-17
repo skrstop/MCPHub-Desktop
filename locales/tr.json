@@ -627,7 +627,7 @@
       "reindexConfirmButton": "Tümünü yeniden göm",
       "modelSelect": "Model boyutu",
       "modelDownload": "indir",
-      "modelDownloadHint": "{{name}} indir",
+      "modelDownloadHint": "{{name}} modelini indirmek için kaynak seçin",
       "modelSelected": "{{name}} modeline geçildi",
       "modelSelectFailed": "Model değiştirilemedi",
       "modelNotReady": "Model hazır değil - önce indirin",
@@ -928,7 +928,17 @@
       "reembedDoneHintReload": "Tamamlandı — veriler yeniden yüklendi.",
       "reloadButton": "Yeniden yükle",
       "reloadButtonHint": "Tüm belge vektörlerini ve Smart Routing indeksini geçerli modelle yeniden hesaplar",
-      "rowElapsed": "Süre"
+      "rowElapsed": "Süre",
+      "modelNotReadyHint": "Model indirilmedi - önce indirin",
+      "modelSelectSource": "İndirme kaynağı seçin",
+      "modelDefaultSource": "Varsayılan",
+      "importDialogTitle": "Belgeleri içe aktar",
+      "importDialogLead": "Seçilen dosyalar içe aktarılıyor ve vektör dizini oluşturuluyor. Büyük dosyalar uzun sürebilir.",
+      "importRowDocs": "Belgeler içe aktarılıyor",
+      "importRunning": "İçe aktarılıyor…",
+      "importDoneHint": "İçe aktarma tamamlandı.",
+      "chunkedCount": "{{n}} parça oluşturuldu",
+      "importDialogLeadDone": "Seçilen dosyalar içe aktarıldı ve dizine eklendi."
     },
     "skills": {
       "title": "Skills"
@@ -1589,7 +1599,11 @@
     "invalidSearchSettings": "{{fields}} için geçersiz değer. Benzerlik eşiği 0 ile 1 arasında, N ise 0 veya daha büyük bir tam sayı olmalıdır.",
     "toolDefinitionFields": "Sonuçlardaki araç alanları",
     "toolDefinitionFieldsDescription": "search_tools ve describe_tool sonuçlarının ad, açıklama ve inputSchema dışında içerdiği isteğe bağlı alanlar. Varsayılan: title ve annotations. Diğerleri çoğunlukla istemciler içindir ve büyük olabilir (simgeler base64 görsellerdir).",
-    "oauthClientRevokeConfirm": "Bu istemciyi iptal etmek tüm erişim ve yenileme jetonlarını geçersiz kılar. İstemcinin yeniden kaydolup yetkilendirmesi gerekir."
+    "oauthClientRevokeConfirm": "Bu istemciyi iptal etmek tüm erişim ve yenileme jetonlarını geçersiz kılar. İstemcinin yeniden kaydolup yetkilendirmesi gerekir.",
+    "mvRedownload": "Yeniden indir",
+    "mvRedownloadHint": "Geçerli modeli yeniden indirin (dosya bozulmasına karşı yeniden deneme)",
+    "mvDownloadCancel": "İptal",
+    "mvDownloadCancelled": "İndirme iptal edildi"
   },
   "mcpb": {
     "upload": "Yükle",

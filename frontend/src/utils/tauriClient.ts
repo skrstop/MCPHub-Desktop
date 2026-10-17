@@ -895,10 +895,27 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       const b = body as { size?: string } | null;
       return { command: 'rag_select_model', args: { size: b?.size ?? '' } };
     }
-    // POST /rag/download-model - stream-download a model .zip + extract.
+    // POST /rag/download-model - start a BACKGROUND model download (selected
+    // or first downloadUrls source; temp model.gguf.downloadtemp renamed on
+    // success).
     if (segs[1] === 'download-model' && m === 'POST') {
+      const b = body as { size?: string; source?: string } | null;
+      return {
+        command: 'rag_download_model',
+        args: { size: b?.size ?? '', source: b?.source ?? null },
+      };
+    }
+    // GET /rag/download-status?size= - in-memory progress snapshot of a
+    // background model download (null when none / expired done snapshot).
+    if (segs[1] === 'download-status' && m === 'GET') {
+      const qsi = endpoint.indexOf('?');
+      const qs = qsi >= 0 ? new URLSearchParams(endpoint.slice(qsi + 1)) : new URLSearchParams();
+      return { command: 'rag_model_download_status', args: { size: qs.get('size') ?? '' } };
+    }
+    // POST /rag/download-cancel - cancel a running background model download.
+    if (segs[1] === 'download-cancel' && m === 'POST') {
       const b = body as { size?: string } | null;
-      return { command: 'rag_download_model', args: { size: b?.size ?? '' } };
+      return { command: 'rag_model_download_cancel', args: { size: b?.size ?? '' } };
     }
     // POST /rag/docs/pick — OS multi-file picker (plain-text), returns paths
     if (segs[1] === 'docs' && segs[2] === 'pick' && m === 'POST')

@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiPut } from '../utils/fetchInterceptor';
+import type { ModelDownloadProgress } from '@/components/ui/ModelSelector';
 import {
   RagDoc,
   RagDocInfo,
@@ -502,9 +503,30 @@ export const selectRagModel = async (size: string): Promise<RagStatus> => {
   return response.data ?? { enabled: false, initializing: false };
 };
 
-/** Stream-download a model .zip (from its download.url) + extract. Emits
- *  `rag://model-download` progress events. Resolves when extracted + ready. */
-export const downloadRagModel = async (size: string): Promise<void> => {
-  const response: ApiResponse = await apiPost('/rag/download-model', { size });
+/** Start a background model download (deploy.json `downloadUrls`, first
+ *  source). Returns immediately; progress streams on `rag://model-download`
+ *  and is queryable via `modelDownloadStatus`. The file lands as `model.gguf`
+ *  (temp `model.gguf.downloadtemp` renamed on success). */
+export const downloadRagModel = async (size: string, source?: string): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/download-model', { size, source });
   if (!response.success) throw new Error(response.message || 'Failed to download RAG model');
+};
+
+/** In-memory progress of a background model download (null = none this
+ *  session). Restores the progress bar after the settings page is revisited. */
+export const modelDownloadStatus = async (
+  size: string,
+): Promise<ModelDownloadProgress | null> => {
+  const response: ApiResponse<ModelDownloadProgress | null> = await apiGet(
+    `/rag/download-status?size=${encodeURIComponent(size)}`,
+  );
+  if (!response.success) return null;
+  return response.data ?? null;
+};
+
+/** Cancel a running background model download; the temp file is cleaned up. */
+export const cancelModelDownload = async (size: string): Promise<boolean> => {
+  const response: ApiResponse<boolean> = await apiPost('/rag/download-cancel', { size });
+  if (!response.success) throw new Error(response.message || 'Failed to cancel download');
+  return response.data ?? false;
 };

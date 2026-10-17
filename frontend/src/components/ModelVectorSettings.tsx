@@ -13,6 +13,8 @@ import {
   currentRagModel,
   selectRagModel,
   downloadRagModel,
+  modelDownloadStatus,
+  cancelModelDownload,
   reindexAllRag,
 } from '@/services/ragService';
 import { apiGet, apiPut } from '@/utils/fetchInterceptor';
@@ -23,8 +25,7 @@ const DEVICES: MvDevice[] = ['auto', 'gpu', 'cpu'];
 
 /** 设置页【模型和向量】卡片（桌面端专属）：共享的本地 embedding 模型与向量库
  *  运行时的统一管理入口。RAG 与 Smart Routing 是当前的两个消费方——任一开启
- *  即自动加载模型（全局单实例），全部关闭后释放。Phase 1 仅 UI + 配置持久化；
- *  运行状态判定暂用 ragStatus.enabled（Phase 2 改为共享运行时状态）。 */
+ *  即自动加载模型（全局单实例），全部关闭后释放。 */
 const ModelVectorSettings: React.FC = () => {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -45,17 +46,13 @@ const ModelVectorSettings: React.FC = () => {
   // Dialog copy mode: 'switch' (model swap) vs 'reload' (plain re-embed with
   // the current model) — same shared ReindexDialog, different lead/done text.
   const [reindexMode, setReindexMode] = useState<'switch' | 'reload'>('switch');
-  const [sectionOpen, setSectionOpen] = useState(false);
+  const [sectionOpen, setSectionOpen] = useState(true);
   const deviceWrapRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
 
-  // Phase 2：mvRunning = 共享运行时存活（RAG 或 Smart Routing 任一驱动）；
-  // 回退 status.enabled 兼容旧后端。维度来自模型加载时读的真实 embed_dim。
-  const mvRunning = status?.mvRunning ?? !!status?.enabled;
   // RAG feature toggle (server-side is_enabled) — distinct from the mv
   // runtime running state; the RAG tag reflects the switch, not the model.
-  // ragStatus here is the fetch FUNCTION (the prop slot is a misnomer); the
-  // fetched status lands in `status`, whose `enabled` field is the toggle.
+  const mvRunning = status?.mvRunning ?? !!status?.enabled;
   const ragEnabled = status?.enabled ?? mvRunning;
 
   // 设备自定义下拉的点击外部关闭。
@@ -81,6 +78,12 @@ const ModelVectorSettings: React.FC = () => {
       setModels(m);
       setCurrentModel(cur);
       setStatus(st);
+      // 恢复后台下载进度（下载在后台进行，设置页可被切走；进度缓存在
+      // 后端内存中，切回来时查询恢复）。
+      if (cur) {
+        const p = await modelDownloadStatus(cur);
+        if (mounted.current && p && p.phase === 'downloading') setModelDownload(p);
+      }
     } catch (e) {
       console.warn('[mv] failed to load model/vector status', e);
     }
@@ -89,7 +92,7 @@ const ModelVectorSettings: React.FC = () => {
   useEffect(() => {
     mounted.current = true;
     void fetchAll();
-    // 运行设备：读共享配置 mv.device（deep-merge 持久化；后端 Phase 2 才消费）。
+    // 运行设备：读共享配置 mv.device（deep-merge 持久化）。
     apiGet<Record<string, any>>('config')
       .then((res) => {
         if (!mounted.current) return;
@@ -102,7 +105,7 @@ const ModelVectorSettings: React.FC = () => {
       const p = event.payload;
       if (!p || !mounted.current) return;
       setModelDownload({ ...p });
-      if (p.phase === 'done' || p.phase === 'error') {
+      if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
         void fetchAll();
         if (p.phase === 'done') {
           setTimeout(() => {
@@ -128,23 +131,21 @@ const ModelVectorSettings: React.FC = () => {
   // 重新载入 button: same dialog, 'reload' mode — no model switch, the
   // current model re-embeds everything (pendingModel stays null so
   // handleStartReindex skips the switch block).
-  const requestReload = () => {
+  const handleReloadClick = () => {
     setPendingModel(null);
     setReindexMode('reload');
     setReindexConfirmOpen(true);
   };
 
-  // dialog 开始重载: perform the switch, then (only when the backend says
-  // the old embeddings are invalid) the doc re-embed + smart reload.
-  const handleStartReindex = async (): Promise<'reindexed' | 'clean'> => {
-    const size = pendingModel;
+  const handleStartReindex = async (): Promise<'clean' | 'reindexed'> => {
+    const target = pendingModel;
     setPendingModel(null);
     setSwitching(true);
     try {
-      if (size) {
-        const st = await selectRagModel(size);
+      if (target) {
+        const st = await selectRagModel(target);
         if (!mounted.current) return 'clean';
-        setCurrentModel(size);
+        setCurrentModel(target);
         setStatus(st);
         if (!st.needsReindex) {
           setReindexConfirmOpen(false);
@@ -169,9 +170,7 @@ const ModelVectorSettings: React.FC = () => {
     }
   };
 
-  // Cancel / 完成: close the dialog and drop the parked model choice. NO
-  // backend call — nothing visibly changes.
-  const dismissReindexDialog = () => {
+  const handleReindexCancel = () => {
     setReindexConfirmOpen(false);
     setPendingModel(null);
     setReindexMode('switch');
@@ -190,8 +189,7 @@ const ModelVectorSettings: React.FC = () => {
   };
 
   const currentInfo = models.find((m) => m.size === currentModel);
-  // 维度来自后端真实值（模型加载时读 GGUF embed_dim；未加载时无）。Phase 2
-  // mv::status() 落地后同一字段由共享运行时提供，前端逻辑不变。
+  // 维度来自后端真实值（模型加载时读 GGUF embed_dim；未加载时无）。
   const statusText = mvRunning
     ? t('settings.mvStatusRunning', {
         model: currentInfo?.label || currentModel || '—',
@@ -230,36 +228,31 @@ const ModelVectorSettings: React.FC = () => {
               {statusText}
             </span>
           </span>
-          {/* Capability tags: green when the feature is enabled, grayed when
-              off — consistent with the running-status dot above. */}
           <span
             className="hub-tag"
-            style={
-              smartRoutingConfig.enabled
-                ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
-                : { opacity: 0.45 }
-            }
+            style={smartRoutingConfig.enabled
+              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
+              : { opacity: 0.45 }}
           >
             {t('settings.mvSourceSmartRouting')}
           </span>
           <span
             className="hub-tag"
-            style={
-              ragEnabled
-                ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
-                : { opacity: 0.45 }
-            }
+            style={ragEnabled
+              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
+              : { opacity: 0.45 }}
           >
             RAG
           </span>
-          {status?.initializing && <Loader2 size={12} className="animate-spin text-[var(--hub-ink-3)]" />}
-          {/* 重新载入：状态行尾部右对齐；Smart Routing 与 RAG 均开启时才可用 */}
+          {status?.initializing && (
+            <Loader2 size={12} className="animate-spin text-[var(--hub-ink-3)]" />
+          )}
           <button
             type="button"
             className="hub-btn sm"
             style={{ marginLeft: 'auto' }}
             disabled={(!smartRoutingConfig.enabled && !ragEnabled) || !mvRunning || status?.initializing || switching}
-            onClick={requestReload}
+            onClick={handleReloadClick}
             title={t('pages.rag.reloadButtonHint')}
           >
             <RefreshCw size={12} /> {t('pages.rag.reloadButton')}
@@ -281,8 +274,13 @@ const ModelVectorSettings: React.FC = () => {
             modelDownload={modelDownload}
             disabled={!mvRunning || status?.initializing || switching}
             onSelect={handleSelectModel}
-            onDownload={(size) => {
-              downloadRagModel(size).catch((e) =>
+            onDownload={(size, source) => {
+              downloadRagModel(size, source).catch((e) =>
+                showToast(e instanceof Error ? e.message : String(e), 'error'),
+              );
+            }}
+            onCancel={(size) => {
+              cancelModelDownload(size).catch((e) =>
                 showToast(e instanceof Error ? e.message : String(e), 'error'),
               );
             }}
@@ -292,13 +290,14 @@ const ModelVectorSettings: React.FC = () => {
             <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
               {modelDownload.phase === 'error'
                 ? modelDownload.message || t('settings.mvDownloadFailed')
+                : modelDownload.phase === 'cancelled'
+                ? t('settings.mvDownloadCancelled')
                 : t('settings.mvDownloadDone')}
             </p>
           )}
         </div>
 
-        {/* 运行设备（AUTO/GPU/CPU）：Phase 1 仅持久化 mv.device，后端 Phase 2 消费。
-            样式与 ModelSelector 触发框对齐（同高/同字号/自定义箭头）。 */}
+        {/* 运行设备（AUTO/GPU/CPU）：样式与 ModelSelector 触发框对齐。 */}
         <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${mvRunning ? '' : 'mv-disabled'}`}>
           <div className="flex items-center gap-2 mb-2">
             <h3 className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
@@ -317,7 +316,7 @@ const ModelVectorSettings: React.FC = () => {
                 padding: '0 6px',
                 background: 'var(--hub-surface)',
                 color: 'var(--hub-ink)',
-                cursor: !mvRunning ? 'not-allowed' : 'pointer',
+                cursor: mvRunning ? 'pointer' : 'not-allowed',
               }}
             >
               <span className="flex-1 text-left truncate">
@@ -341,7 +340,7 @@ const ModelVectorSettings: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setDeviceOpen(false);
-                      if (d !== device) void handleDeviceChange(d);
+                      if (d !== device) handleDeviceChange(d);
                     }}
                     className="flex items-center justify-between w-full text-left"
                     style={{
@@ -372,15 +371,13 @@ const ModelVectorSettings: React.FC = () => {
         </div>
       </div>
       )}
-
-      {/* 模型切换导致维度变化 → 重载数据弹框（v2 共享组件：双进度 + 取消回退） */}
       {reindexConfirmOpen && (
         <ReindexDialog
           open
           mode={reindexMode}
-          targetModel={pendingModel ?? currentModel ?? ''}
+          targetModel={models.find((m) => m.size === (pendingModel ?? currentModel))?.label ?? pendingModel ?? currentModel ?? ''}
           smartEnabled={smartRoutingConfig.enabled}
-          onClose={dismissReindexDialog}
+          onClose={handleReindexCancel}
           onStart={handleStartReindex}
         />
       )}
