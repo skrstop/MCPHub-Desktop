@@ -151,6 +151,8 @@
     "passwordLoginDisabledNoSso": "账密登录已禁用，且未配置任何 SSO 提供商。请在系统配置中重新启用以登录。"
   },
   "server": {
+    "localExecutionRequiresAdmin": "本地命令执行需要管理员权限。",
+    "httpOAuthRequiresAdmin": "允许 HTTP OAuth 令牌端点需要管理员权限。",
     "searchPlaceholder": "搜索名称或描述",
     "startOnDemand": "按需启动",
     "startOnDemandDescription": "跳过启动时连接，仅在收到工具调用时才启动此服务器。进程在空闲超时后自动关闭，下次调用时再重新启动。可减少不常用服务器的常驻内存占用。",

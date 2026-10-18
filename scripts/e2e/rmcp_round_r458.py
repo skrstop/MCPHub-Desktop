@@ -110,12 +110,20 @@ def g2():
           f"st={st} progressive={prog} {names}")
     # Round-8 pin parity: seed the pin the G2 search targets
     pin("本机公网ip查询", "getPublicIp")
-    # search_tools for the IP tool
+    # search_tools for the IP tool. The upstream openapi spec describes the
+    # tool in English ("Get Public IP Address"); a Chinese query only matches
+    # when the description contains Chinese, so probe both wordings.
     st2, _, obj2, _, _ = req("POST", base, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "smart_route_search", "arguments": {"query": "公网 ip"},
                    "_meta": {PV: "2026-07-28", **CLIENT_META}}})
     body = (obj2 or {}).get("result", {})
     txt = json.dumps(body, ensure_ascii=False)
+    if "getPublicIp" not in txt:
+        st2, _, obj2, _, _ = req("POST", base, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "smart_route_search", "arguments": {"query": "public ip address"},
+                       "_meta": {PV: "2026-07-28", **CLIENT_META}}})
+        body = (obj2 or {}).get("result", {})
+        txt = json.dumps(body, ensure_ascii=False)
     check("G2 $smart smart_route_search (2026)", st2 == 200 and "getPublicIp" in txt, f"st={st2} {txt[:120]}")
     # resolve the prefixed tool name from search results, then call
     m = re.search(r'"name"\s*:\s*"([^"]*getPublicIp)"', txt)

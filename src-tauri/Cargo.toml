@@ -1,7 +1,7 @@
 [package]
 name = "mcphub"
 default-run = "mcphub"
-version = "1.1.4001"
+version = "1.1.5001"
 description = "MCPHub Desktop - A unified hub for MCP servers"
 authors = ["MCPHub Contributors"]
 license = "ISC"

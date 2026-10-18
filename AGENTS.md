@@ -587,12 +587,27 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `0ee8100`（origin/main，= v1.1.3 后 2 commit，本轮仅评估 #1307） |
-| **对应 origin tag** | `v1.1.3`（后 2 commit，均未发布新 tag） |
-| **桌面端版本号** | `1.1.3010`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
-| **同步执行日期** | 2026-10-12（22539eb 后 3 commit 评估收口） |
+| **当前已同步到 origin commit** | `cc22b8b`（origin/main，= v1.1.5 后 1 commit） |
+| **对应 origin tag** | `v1.1.5`（后 1 commit，未发布新 tag） |
+| **桌面端版本号** | `1.1.5001`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
+| **同步执行日期** | 2026-10-17（0ee8100 后 11 commit 评估收口） |
 
-> 下次同步以 `0ee8100` 为基线起点（`git log --oneline 0ee8100..HEAD`）。
+> 下次同步以 `cc22b8b` 为基线起点（`git log --oneline cc22b8b..HEAD`）。
+
+#### 2026-10-17：`0ee8100` -> `cc22b8b`（11 commit，跨 v1.1.4/v1.1.5）
+
+- **前端/locales 已同步**：
+  - `3fb2254` #1328 西班牙语本地化：`locales/es.json` 重合并改造（HEAD 桌面西语 ∪ origin 西语词条，缺失键以 en 兜底，与 en.json 递归对账零缺失）+ `i18n.ts` + `LanguageSwitch.tsx` 新增 es 接线。
+  - `5dfc530` #1330 市场安装权限对齐：`serverPermissions.ts` 补 `getServerConfigPermissionError` + locales 2 键 ×5；**UI 门控未镜像**（桌面 `create_server` 后端 require_admin 已强制，前端门控为死代码；与 visibility 移除裁定一致）。
+- **Rust 镜像**：`5a979cd` #1322 路径感知 protected resource metadata——`/.well-known/oauth-protected-resource/{*resource_path}` 通配路由 + handler 按请求路径返回对应 `resource`（仅 `/mcp`/`/mcp/*` 合法，其余 404；根端点行为不变）。桌面无 basePath/installBaseUrl 概念，简化为路径直映射；`/mcp` 通道 401 挑战同步路径感知（见下方修复 ②），REST 面保持根 metadata URL。
+- **评估无需同步/镜像**：`cc22b8b` #1331 SMART_ROUTING_PATH env（桌面 `$smart` 硬编码产品形态，`$` 前缀名拒绝已覆盖）；`ac3b710` #1324 分组移除服务器通知（桌面 update_group 每次更新已通知）；`bc3bc1d` #1325 非数字 page/limit 400（Tauri IPC serde 已拒绝，无 /api/servers REST 面）；`b3ec898` #1314 MCPB（无该功能）；`3e1176d` #1318 个人上游 OAuth 绑定（无 per-user 体系）；`8125141` #1320 MCP Apps 聚合路由（桌面无 apps route context 机制）；`fd30d57` #1313 stdio 参数凭证槽（桌面未采用凭证槽 UI）；`dcb7a21` 测试配置。
+- 版本 `1.1.4001 → 1.1.5001`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5001.md`。
+- **影响功能点与结果**：新增西班牙语界面；OAuth 客户端可按资源路径获取精确 metadata。**用户需重启生效**。
+- **同步后独立复核（3 波 6 代理 + 亲核修复 + 全量回归）**：
+  - **修复 4 项**：①[H] es.json 首版合并覆盖了 HEAD 既有 689 条西语翻译（误以为新文件）→ 重合并（HEAD 西语 ∪ origin 西语 ∪ en 兜底，递归对账零缺失；代理报的「689 回退」经逐键核验系 en.json 既有 `runtimePhase.*` 点号字面键遮蔽 flat 比较的假阳性，真实回归 6 键已还原）；②[M] `build_oauth_401` 未路径感知（与 #1322 同 commit 的 origin sseService 行为缺失）→ `build_oauth_401_at`/`check_bearer_auth_at(headers, path)`，mcp_bearer_middleware 传请求路径，REST 面保持根 URL 不变；③[L] 通配端点裸 `/` 后缀 404（origin regex parity）+ 单尾斜杠容忍；④[L] es.json 质量修复（usted→tú 统一 14 键、`{{parámetro}}` 占位符继承 bug、pull 英文动词 ×2、`password_login_disabled` 缺冠词、占位符 parity ×2（updateAvailable 补 {{version}}/cleanupSuccess 去 {{count}}）、origin-only 11 键剪除）。
+  - **套件治理**：oauth_provider_e2e P5c 大小写敏感 header 查找在 Python HTTPMessage 键大写化下恒败（环境漂移非回归）→ 大小写无关查找 + P5c-2 路径感知 URL 精确断言 + 新增 P9a-e per-path metadata 端点覆盖（42/42）；r458 G2 中文查询「公网 ip」对英文工具描述 0 命中（上游 spec 描述语言变化，非回归）→ 中英双查询兜底（16/16）。
+  - **验证**：cargo check 0 错 0 警；cargo test --lib **178 passed**（+8 `protected_resource_transport_path` 纯函数单测，新代码分支全覆盖）；tsc 0 错；npm build ✓；契约脚本 0 mismatch；**74 套 E2E 全绿**（oauth_provider 42 + r458 16 复跑确认，其余 72 套首跑即绿）。
+  - **复核波次记录**：W1 4 代理（Rust diff 逐行全清 / 前端+locales 全量对账 / 版本文档一致性 / E2E 断言审计）→ 修复 6 Low；W2 fix-of-fixes 1 代理（修复自身全清，抓出 es `password_login_disabled` 缺冠词 + AGENTS 计数不符 → 已修）。
 
 #### 2026-10-12：`22539eb` -> `0ee8100`（3 commit，v1.1.3 后未发布）
 
@@ -814,4 +829,4 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.3010**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.5001**。

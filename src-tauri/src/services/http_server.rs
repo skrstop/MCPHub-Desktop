@@ -41,17 +41,50 @@ use tower_http::cors::CorsLayer;
 use tauri::Emitter;
 
 fn build_resource_metadata_url(headers: &HeaderMap) -> Option<String> {
-    let host = headers.get("host").and_then(|v| v.to_str().ok())?;
-    Some(format!("http://{}/.well-known/oauth-protected-resource", host))
+    build_resource_metadata_url_at(headers, "")
 }
 
-fn build_oauth_401(headers: &HeaderMap, reason: &str) -> Response {
+/// Extracts the MCP transport path from a protected-resource metadata request
+/// path (origin #1322 parity). Returns:
+/// - `Some("")` for the root metadata endpoint (resource = deployment origin);
+/// - `Some("/mcp")` / `Some("/mcp/...")` for MCP transport paths (trailing
+///   slashes are trimmed, matching the desktop route-gate/scope convention);
+/// - `None` for anything else (bare-slash suffix, non-MCP paths) → 404.
+fn protected_resource_transport_path(full_path: &str) -> Option<String> {
+    const PREFIX: &str = "/.well-known/oauth-protected-resource";
+    let suffix = full_path.strip_prefix(PREFIX)?;
+    if suffix == "/" {
+        return None;
+    }
+    let transport_path = suffix.trim_end_matches('/');
+    if transport_path.is_empty()
+        || transport_path == "/mcp"
+        || transport_path.starts_with("/mcp/")
+    {
+        Some(transport_path.to_string())
+    } else {
+        None
+    }
+}
+
+/// Path-aware variant (origin #1322 parity): MCP transport paths advertise
+/// their own per-path metadata URL; other faces keep the root URL.
+fn build_resource_metadata_url_at(headers: &HeaderMap, path: &str) -> Option<String> {
+    let host = headers.get("host").and_then(|v| v.to_str().ok())?;
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        Some(format!("http://{host}/.well-known/oauth-protected-resource{path}"))
+    } else {
+        Some(format!("http://{host}/.well-known/oauth-protected-resource"))
+    }
+}
+
+fn build_oauth_401_at(headers: &HeaderMap, path: &str, reason: &str) -> Response {
     let description = if reason == "missing" {
         "No authorization provided"
     } else {
         "Invalid bearer token"
     };
-    let resource_metadata_url = build_resource_metadata_url(headers);
+    let resource_metadata_url = build_resource_metadata_url_at(headers, path);
     let mut www_auth_parts = vec![
         "error=\"invalid_token\"".to_string(),
         format!("error_description=\"{}\"", description),
@@ -391,6 +424,15 @@ struct SmartCallRequest {
 /// `Ok(Some(key))` when auth is enabled and the token is valid,
 /// `Err(response)` when auth is enabled but the token is missing or invalid.
 pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<BearerKey>, Response> {
+    check_bearer_auth_at(headers, "").await
+}
+
+/// Path-aware variant: `path` (request path) only affects the advertised
+/// resource_metadata URL in 401 challenges (origin #1322 parity).
+pub(crate) async fn check_bearer_auth_at(
+    headers: &HeaderMap,
+    path: &str,
+) -> Result<Option<BearerKey>, Response> {
     // Dynamically read config so changes take effect without restarting the HTTP server.
     // Read failure must FAIL CLOSED: a transient DB error must not bypass bearer auth.
     // get_strict: corrupt stored JSON must fail closed too — get() maps
@@ -399,7 +441,7 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
         Ok(c) => c,
         Err(e) => {
             log::warn!("[http] config read failed during bearer auth check: {e}; failing closed (401)");
-            return Err(build_oauth_401(headers, "invalid"));
+            return Err(build_oauth_401_at(headers, path, "invalid"));
         }
     };
     let enabled = config
@@ -434,7 +476,7 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
     if !auth.starts_with("Bearer ")
         && !auth.get(..7).map(|p| p.eq_ignore_ascii_case("bearer ")).unwrap_or(false)
     {
-        return Err(build_oauth_401(headers, "missing"));
+        return Err(build_oauth_401_at(headers, path, "missing"));
     }
     // Case-insensitive scheme per OAuth 2.0 (RFC 6750); the token starts
     // after the first space.
@@ -479,20 +521,20 @@ pub(crate) async fn check_bearer_auth(headers: &HeaderMap) -> Result<Option<Bear
             Ok(None) => {}
             Err(e) => {
                 log::warn!("[http] oauth token validation error: {e}; failing closed");
-                return Err(build_oauth_401(headers, "invalid"));
+                return Err(build_oauth_401_at(headers, path, "invalid"));
             }
         }
         // OAuth enabled but token isn't one of ours: still allow bearer keys
         // when bearer auth is on (dual-track), otherwise reject.
         if !enabled {
-            return Err(build_oauth_401(headers, "invalid"));
+            return Err(build_oauth_401_at(headers, path, "invalid"));
         }
     }
 
     // Track 2 — bearer key.
     match bearer_key_service::find_by_token(token).await {
         Ok(Some(key)) if key.enabled => Ok(Some(key)),
-        _ => Err(build_oauth_401(headers, "invalid")),
+        _ => Err(build_oauth_401_at(headers, path, "invalid")),
     }
 }
 
@@ -1178,10 +1220,25 @@ pub(crate) fn builtin_allowed(selection: &Option<Vec<String>>, key: &str) -> boo
 
 
 
-async fn oauth_protected_resource(headers: HeaderMap) -> Response {
+async fn oauth_protected_resource(headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    // Path-aware metadata (origin #1322 parity): a client whose resource is
+    // e.g. http://host/mcp/GroupA fetches
+    // /.well-known/oauth-protected-resource/mcp/GroupA and must get back that
+    // exact URL as `resource`. Only MCP transport paths are valid resources.
+    let transport_path = match protected_resource_transport_path(uri.path()) {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Protected resource not found"})),
+            )
+                .into_response()
+        }
+    };
     let base_url = build_resource_metadata_url(&headers)
         .map(|url| url.replace("/.well-known/oauth-protected-resource", ""))
         .unwrap_or_else(|| "http://localhost:23333".to_string());
+    let resource = format!("{base_url}{transport_path}");
     // When the OAuth provider is enabled we ARE the authorization server —
     // point clients at ourselves instead of the placeholder.
     let provider_on = oauth_provider::provider_config().await.enabled;
@@ -1191,7 +1248,7 @@ async fn oauth_protected_resource(headers: HeaderMap) -> Response {
         vec![base_url.clone()]
     };
     let body = json!({
-        "resource": base_url,
+        "resource": resource,
         "authorization_servers": auth_servers,
         // Advertise what the AS will actually grant — advertising ["read","write"]
         // made clients request scopes the provider's scope_allowed rejects.
@@ -3320,7 +3377,7 @@ async fn mcp_bearer_middleware(
         return next.run(req).await;
     }
     let headers = req.headers().clone();
-    match check_bearer_auth(&headers).await {
+    match check_bearer_auth_at(&headers, path).await {
         Ok(_) => next.run(req).await,
         Err(resp) => resp,
     }
@@ -3417,6 +3474,12 @@ fn build_router(body_limit_bytes: usize, sdk_cancel: tokio_util::sync::Cancellat
     Router::new()
         .route("/health", get(health))
         .route("/.well-known/oauth-protected-resource", get(oauth_protected_resource))
+        // Path-aware metadata (origin #1322): per-resource metadata for
+        // /mcp, /mcp/{group} and /mcp/{server} resource URLs.
+        .route(
+            "/.well-known/oauth-protected-resource/{*resource_path}",
+            get(oauth_protected_resource),
+        )
         // OAuth Provider (active only when oauthServer.enabled; each handler
         // self-gates so the routes can sit unconditionally in the router).
         .route("/.well-known/oauth-authorization-server", get(oauth_authorization_server_metadata))
@@ -4607,5 +4670,83 @@ mod limit_and_version_tests {
         assert!(!is_known_protocol_version("1999-01-01"));
         assert!(!is_known_protocol_version("garbage"));
         assert!(!is_known_protocol_version(""));
+    }
+}
+
+#[cfg(test)]
+mod protected_resource_metadata_tests {
+    use super::protected_resource_transport_path;
+
+    #[test]
+    fn root_metadata_endpoint_yields_empty_transport_path() {
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource"),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn bare_slash_suffix_is_rejected() {
+        assert_eq!(protected_resource_transport_path("/.well-known/oauth-protected-resource/"), None);
+    }
+
+    #[test]
+    fn mcp_root_path_is_valid() {
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/mcp"),
+            Some("/mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_group_path_is_valid() {
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/mcp/GroupA"),
+            Some("/mcp/GroupA".to_string())
+        );
+    }
+
+    #[test]
+    fn single_trailing_slash_on_mcp_path_is_tolerated() {
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/mcp/GroupA/"),
+            Some("/mcp/GroupA".to_string())
+        );
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/mcp/"),
+            Some("/mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn non_mcp_paths_are_rejected() {
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/rest/foo"),
+            None
+        );
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/oauth/authorize"),
+            None
+        );
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/mcpx"),
+            None
+        );
+    }
+
+    #[test]
+    fn multiple_trailing_slashes_are_trimmed() {
+        // Desktop route-gate/scope convention trims all trailing slashes.
+        assert_eq!(
+            protected_resource_transport_path("/.well-known/oauth-protected-resource/mcp/GroupA//"),
+            Some("/mcp/GroupA".to_string())
+        );
+    }
+
+    #[test]
+    fn unrelated_paths_are_rejected() {
+        assert_eq!(protected_resource_transport_path("/mcp"), None);
+        assert_eq!(protected_resource_transport_path("/"), None);
+        assert_eq!(protected_resource_transport_path(""), None);
     }
 }

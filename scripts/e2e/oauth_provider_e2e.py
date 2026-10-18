@@ -211,8 +211,15 @@ def run(original):
     # Note: bearer auth may be off and this request ran before provider enabled;
     # now provider is ON so unauthenticated /mcp must 401.
     check("P5b unauthenticated /mcp 401", st == 401, f"got {st}")
-    www = h.get("www-authenticate", "") or h.get("WWW-Authenticate", "")
+    www = next((v for k, v in h.items() if k.lower() == "www-authenticate"), "")
+    # Path-aware contract (origin #1322 parity): the /mcp challenge must
+    # advertise the per-path metadata URL, not the root form.
+    import re as _re
+    m_meta = _re.search(r'resource_metadata="([^"]+)"', www)
     check("P5c WWW-Authenticate has resource_metadata", "resource_metadata" in www, www[:120])
+    check("P5c-2 challenge advertises path-aware metadata URL",
+          m_meta is not None and m_meta.group(1).rstrip("/").endswith("/.well-known/oauth-protected-resource/mcp"),
+          www[:160])
 
     # ── P6. $smart channel reachable with the token ──
     st, _, b = req("GET", "/mcp/$smart", headers={**auth, "Accept": "text/event-stream"})
@@ -252,6 +259,34 @@ def run(original):
     time.sleep(0.3)
     st, _, _ = req("POST", "/mcp", body=init_body, headers={**{"Authorization": f"Bearer {access2}"}, "Accept": "application/json, text/event-stream"})
     check("P8 revoked client 401", st == 401, f"got {st}")
+
+    # ── P9. Path-aware protected resource metadata (origin #1322 parity) ──
+    # Provider is ON at this point (restored in main's finally).
+    st, _, b = req("GET", "/.well-known/oauth-protected-resource/mcp")
+    try:
+        d9 = json.loads(b)
+        ok9 = st == 200 and d9.get("resource", "").rstrip("/").endswith("/mcp")
+    except Exception:
+        ok9 = False
+    check("P9a per-path metadata /mcp resource", ok9, f"st={st} {b[:120]}")
+    st, _, b = req("GET", "/.well-known/oauth-protected-resource/mcp/GroupA")
+    try:
+        d9 = json.loads(b)
+        ok9 = st == 200 and d9.get("resource", "").endswith("/mcp/GroupA")
+    except Exception:
+        ok9 = False
+    check("P9b per-path metadata /mcp/GroupA resource", ok9, f"st={st} {b[:120]}")
+    st, _, _ = req("GET", "/.well-known/oauth-protected-resource/rest/foo")
+    check("P9c non-MCP path 404", st == 404, f"got {st}")
+    st, _, _ = req("GET", "/.well-known/oauth-protected-resource/")
+    check("P9d bare-slash suffix 404", st == 404, f"got {st}")
+    st, _, b = req("GET", "/.well-known/oauth-protected-resource")
+    try:
+        d9 = json.loads(b)
+        ok9 = st == 200 and d9.get("resource", "").rstrip("/") == BASE.rstrip("/")
+    except Exception:
+        ok9 = False
+    check("P9e root metadata unchanged", ok9, f"st={st} {b[:120]}")
 
 if __name__ == "__main__":
     main()

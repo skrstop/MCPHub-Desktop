@@ -151,6 +151,8 @@
     "passwordLoginDisabledNoSso": "Şifre girişi devre dışı ve SSO sağlayıcısı yapılandırılmamış. Giriş yapmak için sistem yapılandırmasından yeniden etkinleştirin."
   },
   "server": {
+    "localExecutionRequiresAdmin": "Yerel komut yürütme bir yönetici gerektirir.",
+    "httpOAuthRequiresAdmin": "HTTP OAuth token uç noktalarına izin vermek bir yönetici gerektirir.",
     "searchPlaceholder": "Ada veya açıklamaya göre ara",
     "startOnDemand": "Talep üzerine başlat",
     "startOnDemandDescription": "Başlangıçtaki bağlantıyı atla ve bu sunucuyu yalnızca bir araç çağrısı geldiğinde başlat. İşlem, boşta kalma zaman aşımından sonra otomatik olarak kapatılır ve bir sonraki çağrıda yeniden başlatılır. Seyrek kullanılan sunucularda kalıcı bellek kullanımını azaltır.",
