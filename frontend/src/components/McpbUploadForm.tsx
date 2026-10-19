@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { apiPost, apiGet, apiPut, fetchWithInterceptors } from '@/utils/fetchInterceptor';
-import { getApiUrl } from '@/utils/runtime';
+import { invoke } from '@tauri-apps/api/core';
+import { apiPost, apiGet, apiPut } from '@/utils/fetchInterceptor';
+import { convertMcpbToMcpConfig } from '@/utils/mcpbConvert';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 interface McpbUploadFormProps {
@@ -9,13 +10,9 @@ interface McpbUploadFormProps {
   onCancel: () => void;
 }
 
-interface McpbUploadResponse {
-  success: boolean;
-  data?: {
-    manifest: any;
-    extractDir: string;
-  };
-  message?: string;
+interface McpbUploadData {
+  manifest: any;
+  extractDir: string;
 }
 
 const McpbUploadForm: React.FC<McpbUploadFormProps> = ({ onSuccess, onCancel }) => {
@@ -70,35 +67,21 @@ const McpbUploadForm: React.FC<McpbUploadFormProps> = ({ onSuccess, onCancel }) 
   };
 
   const handleUpload = async () => {
-    if (!selectedFile) {
-      setError(t('mcpb.noFileSelected'));
-      return;
-    }
-
     setIsUploading(true);
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append('mcpbFile', selectedFile);
+      // Desktop: the native file picker + ZIP extraction + manifest validation
+      // all happen inside the Rust command (the webview cannot stream
+      // FormData). `null` means the user cancelled the picker — stay silent.
+      // The drop zone above only previews the chosen file; the actual file is
+      // picked in the native dialog.
+      const result = await invoke<McpbUploadData | null>('upload_mcpb');
 
-      const response = await fetchWithInterceptors(getApiUrl('/mcpb/upload'), {
-        method: 'POST',
-        body: formData,
-      });
-
-      const result: McpbUploadResponse = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.message || `HTTP error! Status: ${response.status}`);
-      }
-
-      if (result.success && result.data) {
-        setManifestData(result.data.manifest);
-        setExtractDir(result.data.extractDir);
+      if (result) {
+        setManifestData(result.manifest);
+        setExtractDir(result.extractDir);
         setShowServerForm(true);
-      } else {
-        throw new Error(result.message || t('mcpb.uploadFailed'));
       }
     } catch (err) {
       console.error('MCPB upload error:', err);
@@ -172,31 +155,6 @@ const McpbUploadForm: React.FC<McpbUploadFormProps> = ({ onSuccess, onCancel }) 
     setShowConfirmDialog(false);
     setPendingServerName('');
     setIsUploading(false);
-  };
-
-  const convertMcpbToMcpConfig = (manifest: any, extractPath: string, _serverName: string) => {
-    const mcpConfig = manifest.server?.mcp_config || {};
-
-    // Convert MCPB manifest to MCPHub stdio configuration
-    const config: any = {
-      type: 'stdio',
-      command: mcpConfig.command || 'node',
-      args: (mcpConfig.args || []).map((arg: string) => arg.replace('${__dirname}', extractPath)),
-    };
-
-    // Add environment variables if they exist
-    if (mcpConfig.env && Object.keys(mcpConfig.env).length > 0) {
-      config.env = { ...mcpConfig.env };
-
-      // Replace ${__dirname} in environment variables
-      Object.keys(config.env).forEach((key) => {
-        if (typeof config.env[key] === 'string') {
-          config.env[key] = config.env[key].replace('${__dirname}', extractPath);
-        }
-      });
-    }
-
-    return config;
   };
 
   if (showServerForm && manifestData) {
@@ -422,7 +380,7 @@ const McpbUploadForm: React.FC<McpbUploadFormProps> = ({ onSuccess, onCancel }) 
           </button>
           <button
             onClick={handleUpload}
-            disabled={!selectedFile || isUploading}
+            disabled={isUploading}
             className="hub-btn primary flex items-center"
           >
             {isUploading ? (

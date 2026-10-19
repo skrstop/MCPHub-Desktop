@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1792380145972" clover="3.2.0">
+  <project timestamp="1792380145972" name="All files">
+    <metrics statements="12" coveredstatements="12" conditionals="16" coveredconditionals="16" methods="3" coveredmethods="3" elements="31" coveredelements="31" complexity="0" loc="12" ncloc="12" packages="1" files="1" classes="1"/>
+    <file name="mcpbConvert.ts" path="/Users/jphoebe/opt/code/IdeaProjects/github/mcphub-desktop/frontend/src/utils/mcpbConvert.ts">
+      <metrics statements="12" coveredstatements="12" conditionals="16" coveredconditionals="16" methods="3" coveredmethods="3"/>
+      <line num="13" count="1" type="stmt"/>
+      <line num="18" count="11" type="cond" truecount="2" falsecount="0"/>
+      <line num="23" count="11" type="cond" truecount="4" falsecount="0"/>
+      <line num="24" count="2" type="stmt"/>
+      <line num="32" count="9" type="stmt"/>
+      <line num="35" count="8" type="cond" truecount="2" falsecount="0"/>
+      <line num="39" count="11" type="cond" truecount="4" falsecount="0"/>
+      <line num="40" count="3" type="stmt"/>
+      <line num="43" count="3" type="stmt"/>
+      <line num="44" count="7" type="cond" truecount="2" falsecount="0"/>
+      <line num="45" count="4" type="stmt"/>
+      <line num="50" count="9" type="stmt"/>
+    </file>
+  </project>
+</coverage>

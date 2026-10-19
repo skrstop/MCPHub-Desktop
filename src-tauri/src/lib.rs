@@ -467,6 +467,8 @@ pub fn run() {
             commands::oauth::get_server_oauth_status,
             commands::oauth::list_oauth_clients,
             commands::oauth::revoke_oauth_client,
+            // MCPB bundle upload & install
+            commands::mcpb::upload_mcpb,
             // Group commands
             commands::groups::list_groups,
             commands::groups::search_groups,

@@ -363,12 +363,8 @@ export default function ReindexDialog({
         if (p.total > 0 && p.current >= p.total && smartEndRef.current == null) {
           smartEndRef.current = Date.now();
         }
-        // Mockup form: "当前: Idea-mcp-server（62 个工具）"
-        const name = p.tools && p.tools > 0 && p.name
-          ? `${p.name}（${p.tools} ${t('pages.rag.reembedUnitTools')}）`
-          : p.name || null;
-        // Per-tool progress within the current server (remembered across
-        // server transitions; reset when the next server starts at 0/total).
+        // No per-server name text in the dialog (user request): the row shows
+        // only the progress bar, per-tool sub-bar and elapsed time.
         if (p.toolTotal != null) {
           smartToolRef.current = { done: p.toolDone ?? 0, total: p.toolTotal };
         }
@@ -376,7 +372,7 @@ export default function ReindexDialog({
         setSmart({
           current: p.current,
           total: p.total,
-          currentName: name,
+          currentName: null,
           subs: st.total != null
             ? [{ label: t('pages.rag.reembedBarToolEmbed'), done: st.done, total: st.total, tone: 'green' as const }]
             : [],
@@ -505,11 +501,6 @@ export default function ReindexDialog({
             {s === 'run' && r?.currentName && (
               <div className="text-[11.5px] truncate" style={{ color: 'var(--hub-ink-3)' }}>
                 {t('pages.rag.reembedCurrent')}: <b style={{ color: 'var(--hub-ink-2)', fontWeight: 500 }}>{r.currentName}</b>
-              </div>
-            )}
-            {key === 'smart' && s === 'ok' && r?.currentName && (
-              <div className="text-[11.5px] truncate" style={{ color: 'var(--hub-ink-3)' }}>
-                {r.currentName}
               </div>
             )}
             {s === 'run' && r && r.subs.length > 0 && (
@@ -649,7 +640,7 @@ export default function ReindexDialog({
               smartStartRef.current,
               smartEndRef.current,
             )}
-          {phase === 'running' && runStartRef.current != null && (
+          {(phase === 'running' || phase === 'done') && runStartRef.current != null && (
             <div className="text-[11.5px] text-right" style={{ color: 'var(--hub-ink-3)' }}>
               {t('pages.rag.totalElapsed', '总耗时')} {formatElapsed(Math.max(0, Date.now() - runStartRef.current))}
             </div>

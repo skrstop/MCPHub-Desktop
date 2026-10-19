@@ -525,6 +525,19 @@ npm run build                     # 生产构建
 - **测试**：lib 115 passed（+provider 单测：PKCE RFC7636 附录 B 向量、注册/撤销/token 生命周期、配置默认值；flow E2E：mock AS + mock 上游 + 浏览器重定向链模拟跑通 discovery→注册→PKCE→token 全链）；新套件 `oauth_provider_e2e.py` 35/35（负路径：disabled 404×3、坏 redirect scheme、deny、未注册 redirect、缺 nonce、PKCE 重放、refresh 轮换 + 重放吊销、revoke 401）。**54 套 E2E 全绿零回归**；cargo check 0 错 0 警；tsc 0 错；build ✓。
 - **OAuth 复核轮（2026-10-08 晚，独立 code-review 代理 + 亲核）**：修复 3 项——①[H] redirect_uri 白名单**前缀匹配**（`http://localhost.evil.com` 可注册）→ `url::Url` 精确 host 校验（loopback= localhost/127.0.0.1/::1 允许 http，其余强制 https）+ CRLF/反斜杠拒收；②[M] consent 表单无 CSRF（任意网页可跨站 POST approve 直取授权码）→ 一次性 nonce（内存 Map，5min TTL，GET 渲染 POST 必验）；③[M] refresh 重放无检测（旧 token 轮换后可静默重放，BCP 违规）→ 轮换改 `refresh_used` 标记制（1h 保留 + cleanup_expired 清理），重放检测 → **整族吊销**（含 successor access，E2E N7b 钉死）+ 轮换时同步删同族旧 access；④[M] `oauth_authorize_submit` 误用 `validate_client(None)` → secret 客户端永远无法同意授权 → 改 find_client + revoked 检查（authorize 端点不做 client 认证，OAuth 语义）；⑤ cleanup_expired 接入 6h 日志清理循环（原为死代码）。**游客模式确认**：`require_admin` 在 skipAuth 下放行系全仓统一设计——游客模式可操作全部 OAuth 命令（本地单用户工具语义）。
 
+### 3.11 MCPB（.mcpb 文件安装，2026-10-19）
+
+> 计划：`doc/mcpb_implementation_plan_20261018.md`（含 origin 逐处扫描结论）。DXT 无独立逻辑（origin dxtController 仅 1 行 shim）。
+
+- **Rust**：`services/mcpb_service.rs` + `commands/mcpb.rs`，命令 `upload_mcpb`——原生文件选择器（`.mcpb` 过滤，spawn_blocking）→ 解压到 `app_data_dir()/uploads/mcpb/temp-extracted-{ms}` → manifest 校验（`manifest_version`/`name`/`version`/`server` 四必填，JS-truthiness 语义）→ 名称校验（origin charset `[A-Za-z0-9._-]`/≤128/拒 `..`，文案 "Invalid manifest: name contains unsafe characters"）→ `server-{name}` 目录（path-escape 复查）→ `cleanup_old_mcpb_server`（删前缀目录，warn 不阻断）→ rename 前 exists 复查（Windows EPERM）→ 返回 `{ manifest, extractDir }`（serde camelCase）；取消返回 `Ok(None)` 前端静默。
+- **安全加固（origin 无，桌面标准）**：500MB 文件帽（metadata 预检）+ **1GB 累计解压尺寸帽（逐 entry 实际写入字节计数，防 zip bomb/谎报 header）** + zip-slip 双守卫（`enclosed_name()` + 拒绝任何 ParentDir/RootDir/Prefix 组件，对齐 runtime.rs tar 守卫）；解压/校验失败清理 temp 目录。
+- **类型校验（origin 无，2026-10-19 补）**：`validate_server_section`——`server.type` 存在时必须 ∈ `{node, python, binary, uv}`（未知类型上传即拒，明确文案 "Unsupported server type '{x}' (supported: ...)"，非字符串 type 同拒）；node/python/binary 必须有非空 `mcp_config.command`（替代 origin 静默 `|| 'node'` 默认值——那会启动挂死的 node REPL）；uv 类型 mcp_config 可选（规范如此）但须有 `entry_point`；无 type 但有 command 放行（origin parity）。
+- **uv 类型自动合成（桌面增强）**：前端 `convertMcpbToMcpConfig` 对 `type=uv` 且无 mcp_config 的包合成 `uv run --directory {extractDir} {extractDir}/{entry_point}`（桌面捆绑 uv 0.11.24，uv 包开箱即用）。
+- **门控（桌面差异，用户裁定）**：**登录用户（任意角色）+ 游客均可用**——`require_authenticated`（skipAuth 放行 / 否则验 JWT 任意角色），非 origin 的 admin-only。
+- **前端**：`McpbUploadForm.tsx` 仅改 `handleUpload`（FormData fetch → `invoke('upload_mcpb')`，null 静默）+ Upload 按钮 disabled 去掉 `!selectedFile`（选择动作移到原生对话框，拖拽区保留作预览）；其余流程（manifest 展示/服务器名输入/重名 ConfirmDialog/apiPost·apiPut /servers）零改动——tauriClient 已透明路由到 create_server/update_server。tauriClient:461 mcpb stub 保留作防御兜底。
+- **桌面差异**：不删除用户原始 .mcpb（origin 删的是服务端 upload 目录副本）。
+- **测试（2026-10-19 补齐每类型覆盖）**：**Rust 15 个单测**——每类型端到端安装（node/python/binary 各 1 + uv 双形态：显式 mcp_config / entry_point-only）+ 重装覆盖旧文件 + 缺 manifest + 缺必填 ×4 + 非法名称 ×9 + zip-slip 实证（writer 接受 `../evil.txt`、读取侧拒绝且不落盘）+ manifest truthiness + escape check + 未知类型拒绝（含大小写与非字符串）+ 缺 mcp_config.command（node·python·binary + 空白 command）+ uv 三态 + 无 type 有 command 放行 + 端到端未知类型上传即拒；**前端 vitest 11 个**（`utils/mcpbConvert.test.ts`，转换逻辑抽为纯函数 `utils/mcpbConvert.ts`）——node/python/binary/uv(显式)/uv(合成)/uv(空 command+entry_point)/origin parity 默认 node ×2/env 非字符串值不替换/env 浅拷贝不突变/`${__dirname}` 仅首现替换（String.replace 语义）——**覆盖率 100%（12/12 语句、16/16 分支、3/3 函数、12/12 行）**；`npm test` 脚本接入（vitest + @vitest/coverage-v8 devDeps）。未覆盖（不可 headless 单测）：Rust 原生对话框 glue（pick_mcpb_file/upload_mcpb/upload_root_dir 需 AppHandle/HOME）。cargo check 0 错 0 警；lib **193 passed**；tsc 0 错；build ✓。
+
 ## 4. 上游 mcphub-origin 同步记录（重要）
 
 ### 4.1 同步策略
@@ -821,7 +834,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 - [x] OAuth（服务器级上游客户端 + MCPHub 作为 OAuth Provider，3.10；登录 SSO 不做）
 - [ ] Better Auth 登录集成（不做——本地工具维持账密 + skipAuth）
 - [ ] Tool Result Compression
-- [ ] MCPB/DXT 文件安装
+- [x] ~~MCPB/DXT 文件安装~~（已于 2026-10-19 完成，见 §3.11）
 - [ ] Templates（配置模板）
 - [ ] CI/CD 打包配置
 - [ ] proxy（Proxychains4）运行时接入

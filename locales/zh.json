@@ -1611,7 +1611,7 @@
     "upload": "上传",
     "uploadTitle": "上传 MCPB 文件",
     "dropFileHere": "将 .mcpb 文件拖拽到此处",
-    "orClickToSelect": "或点击从计算机选择",
+    "orClickToSelect": "或点击从文件选择",
     "invalidFileType": "请选择有效的 .mcpb 文件",
     "noFileSelected": "请选择要上传的 .mcpb 文件",
     "uploading": "上传中...",

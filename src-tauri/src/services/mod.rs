@@ -22,3 +22,4 @@ pub mod ssrf_guard;
 pub mod oauth_provider;
 pub mod skill_service;
 pub mod fts_service;
+pub mod mcpb_service;
