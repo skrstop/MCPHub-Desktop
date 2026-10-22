@@ -13,6 +13,11 @@ pub struct ServerToolConfig {
     /// across servers; `$smart/{group}` unions them with group-member pins.
     #[serde(default)]
     pub pinned: bool,
+    /// Top-level input-schema parameters models do not see (#1343 parity).
+    /// Removed from the schema models receive and dropped from their calls;
+    /// required parameters are never hidden. NULL = setting absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_params: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
 }

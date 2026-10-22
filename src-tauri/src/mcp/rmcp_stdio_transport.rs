@@ -457,6 +457,7 @@ impl McpTransport for RmcpStdioTransport {
         Ok(all
             .into_iter()
             .map(|t| Tool {
+                hidden_params: None,
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()),
                 input_schema: Value::Object(t.input_schema.as_ref().clone()),

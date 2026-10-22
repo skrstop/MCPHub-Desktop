@@ -174,8 +174,18 @@ pub async fn update(patch: &Value) -> Result<Value> {
     }
 }
 
+// Serialize the config-mutating tests: they snapshot/restore the same
+// system_config row on the shared file-backed pool, and parallel runs
+// race (one test's restore can interleave with another's snapshot,
+// producing spurious decode panics — seen twice in full-suite runs).
+// Module-level + cfg(test) so other files' tests (e.g. tool_call_guard)
+// can share the same serialization.
+#[cfg(test)]
+pub(crate) static CONFIG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
+    use super::CONFIG_TEST_LOCK;
     use super::merge_json;
     use super::{get, get_strict};
     use crate::db;
@@ -239,12 +249,7 @@ mod tests {
         }
     }
 
-    // Serialize the config-mutating tests: they snapshot/restore the same
-    // system_config row on the shared file-backed pool, and parallel runs
-    // race (one test's restore can interleave with another's snapshot,
-    // producing spurious decode panics — seen twice in full-suite runs).
-    static CONFIG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // Serialize the config-mutating tests: see CONFIG_TEST_LOCK above.
     #[tokio::test]
     async fn get_strict_null_row_is_ok_empty_config() {
         let _g = CONFIG_TEST_LOCK.lock().unwrap();

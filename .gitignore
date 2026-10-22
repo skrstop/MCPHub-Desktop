@@ -15,3 +15,4 @@ src-tauri/.codegraph
 doc/test
 # generated tauri config override (gen-model-resources.mjs)
 src-tauri/tauri.models.json
+__pycache__/

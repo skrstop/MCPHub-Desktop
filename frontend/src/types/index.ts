@@ -134,6 +134,7 @@ export interface Tool {
   description: string;
   defaultDescription?: string;
   hasDescriptionOverride?: boolean;
+  hiddenParams?: string[];
   inputSchema: ToolInputSchema;
   annotations?: Record<string, unknown>;
   _meta?: Record<string, unknown>;
@@ -797,6 +798,7 @@ export interface Group {
   id: string;
   name: string;
   description?: string;
+  instructions?: string;
   servers: string[] | IGroupServerConfig[]; // Supports both old and new format
 }
 
@@ -890,6 +892,7 @@ export interface ServerFormData {
 export interface GroupFormData {
   name: string;
   description: string;
+  instructions: string;
   servers: string[] | IGroupServerConfig[]; // Updated to support new format
 }
 

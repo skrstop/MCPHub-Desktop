@@ -485,6 +485,7 @@ impl McpTransport for OpenapiTransport {
                 let input_schema = serde_json::to_value(&*t.input_schema)
                     .unwrap_or(json!({"type": "object"}));
                 Tool {
+                    hidden_params: None,
                     name: t.name.into_owned(),
                     description,
                     input_schema,

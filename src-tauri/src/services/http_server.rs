@@ -782,6 +782,10 @@ async fn call_server_tool(
         Err(_) => true,
     };
     let args = req.arguments.unwrap_or(json!({}));
+    // #1299 parity: opt-in pre-call guard for high-risk arguments.
+    if let Err(msg) = crate::services::tool_call_guard::assert_safe(&args).await {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+    }
     let rest_call_start = std::time::Instant::now();
     match crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &req.tool, args.clone())).await {
         Ok(result) => {
@@ -991,6 +995,10 @@ async fn call_group_tool(
         }
     }
     let args = req.arguments.unwrap_or(json!({}));
+    // #1299 parity: opt-in pre-call guard for high-risk arguments.
+    if let Err(msg) = crate::services::tool_call_guard::assert_safe(&args).await {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+    }
     // Activity parity with call_server_tool (R24 semantics).
     let source_ip = client_ip_of(&headers);
     let group_call_start = std::time::Instant::now();
@@ -2524,6 +2532,10 @@ async fn execute_openapi_impl(
         }
     }
     let start = std::time::Instant::now();
+    // #1299 parity: opt-in pre-call guard for high-risk arguments.
+    if let Err(msg) = crate::services::tool_call_guard::assert_safe(&args).await {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+    }
     let result = crate::mcp::time::timeout_tool_call(pool::call_tool(&server_name, &actual_name, args.clone())).await;
     let duration_ms = start.elapsed().as_millis() as i64;
     match result {
@@ -4231,6 +4243,7 @@ mod openapi_tests {
     #[test]
     fn coerce_query_args_converts_schema_types() {
         let tool = Tool {
+            hidden_params: None,
             name: "t".to_string(),
             description: None,
             input_schema: json!({
@@ -4292,6 +4305,7 @@ mod openapi_tests {
     #[test]
     fn spec_shape_routes_simple_tools_to_get_and_complex_to_post() {
         let mk = |schema: serde_json::Value| Tool {
+            hidden_params: None,
             name: "echo".to_string(),
             description: None,
             input_schema: schema,
@@ -4335,6 +4349,7 @@ mod openapi_tests {
     #[test]
     fn spec_operation_ids_are_unique_across_servers() {
         let mk_tool = |name: &str| Tool {
+            hidden_params: None,
             name: name.to_string(),
             description: None,
             input_schema: json!({"type": "object", "properties": {"q": {"type": "number"}}}),
@@ -4575,6 +4590,11 @@ async fn smart_rest_call(
     // construction, matching client_ip_of's contract); a fabricated
     // "127.0.0.1" would poison activity-log source_ip data.
     let ip = client_ip_of(&headers);
+    // #1299 parity: opt-in pre-call guard for high-risk arguments (same
+    // semantics as the other REST call surfaces).
+    if let Err(msg) = crate::services::tool_call_guard::assert_safe(&args).await {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+    }
     let start = std::time::Instant::now();
     match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None, None).await {
         Ok(v) => {

@@ -432,7 +432,11 @@ pub async fn handle_search_tools(
     // hot discovery path (round 10 review).
     let overrides_exist =
         crate::services::server_tool_config_service::any_description_override().await;
-    if !tool_fields.is_empty() || overrides_exist {
+    // #1343: hidden parameters change the model-visible schema too — the
+    // fetch must not be skipped when any exist.
+    let hidden_exist =
+        crate::services::server_tool_config_service::any_hidden_params().await;
+    if !tool_fields.is_empty() || overrides_exist || hidden_exist {
         for sn in results
             .iter()
             .filter(|r| !r.tool_name.is_empty())
@@ -516,6 +520,12 @@ pub async fn handle_search_tools(
                     let from_live = live_tools.get(&r.server_name).and_then(|ts| {
                         ts.iter().find(|t| t.name == r.tool_name)
                     });
+                    // #1343: the live (post-filter) schema already has hidden
+                    // parameters removed — prefer it over the indexed
+                    // snapshot, which still carries the full schema.
+                    if let Some(t) = from_live {
+                        obj.insert("inputSchema".to_string(), t.input_schema.clone());
+                    }
                     // Origin re-reads the live (post-override) description on
                     // every request; the indexed snapshot can go stale after a
                     // description-override edit (toolsetHash excludes
@@ -1022,6 +1032,7 @@ pub async fn builtin_meta_tools() -> Vec<crate::models::server::Tool> {
     build_meta_tools(scope_desc, "", settings.progressive_disclosure, full_n)
         .into_iter()
         .map(|v| crate::models::server::Tool {
+                hidden_params: None,
             name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
             description: v.get("description").and_then(|d| d.as_str()).map(String::from),
             input_schema: v.get("inputSchema").cloned().unwrap_or(json!({})),

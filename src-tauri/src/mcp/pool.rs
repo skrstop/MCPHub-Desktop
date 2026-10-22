@@ -705,12 +705,31 @@ pub async fn get_entry_info(name: &str) -> Option<(ServerStatus, Vec<Tool>)> {
 /// A2/A9: call_tool variant forwarding request-level `_meta` upstream
 /// (MRTR inputResponses retry, OTel trace keys). Falls back to the plain
 /// path for builtin/on-demand/isolated routing (they drop _meta).
+/// The cached input schema of a tool (bare name) from the shared pool cache;
+/// None when the server or tool is unknown (cache empty / sleeping).
+pub(crate) async fn cached_tool_schema(server_name: &str, tool_name: &str) -> Option<Value> {
+    let map = pool().read().await;
+    let entry = map.get(server_name)?;
+    entry
+        .tools
+        .iter()
+        .find(|t| t.name == tool_name)
+        .map(|t| t.input_schema.clone())
+}
+
 pub async fn call_tool_with_meta(
     server_name: &str,
     tool_name: &str,
     arguments: Value,
     request_meta: Option<Value>,
 ) -> Result<ToolCallResult> {
+    // #1343: hidden parameters are dropped once, here, so every downstream
+    // call path (bridge, $smart meta lane, on-demand delegation) funnels
+    // through this single choke point — origin strips inside
+    // callToolWithReconnect for the same reason.
+    let arguments =
+        crate::services::server_tool_config_service::strip_hidden_arguments(server_name, tool_name, arguments)
+            .await;
     // NOTE: `request_meta` is consumed further down by the shared-pool path
     // (forwarded to transports via call_tool_with_meta); the builtin/on-demand
     // early returns below take no meta — those paths simply don't carry one.
@@ -796,6 +815,11 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
             .ok_or_else(|| anyhow!("app handle unavailable"))?;
         return crate::rag::service::call_builtin_tool(&app, tool_name, &arguments).await;
     }
+    // #1343: drop hidden parameters before any real-client path (shared or
+    // on-demand delegation below).
+    let arguments =
+        crate::services::server_tool_config_service::strip_hidden_arguments(server_name, tool_name, arguments)
+            .await;
     // On-demand stdio servers keep their live client in the on-demand store
     // (the pool entry is a sleeping shadow). Route there so the call lazily
     // spawns the process on first use.

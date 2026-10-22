@@ -81,7 +81,7 @@ pub async fn login(
         crate::models::user::UserRole::Guest => "guest",
     };
 
-    let token = auth_util::issue_token(&user.id, &user.username, role_str)
+    let token = auth_util::issue_token(&user.id, &user.username, role_str, &user.password_hash)
         .map_err(|e| e.to_string())?;
 
     let mut guard = session.0.lock().await;
@@ -134,7 +134,7 @@ pub async fn get_current_user(session: State<'_, SessionState>) -> Result<Option
         }
         return Ok(None);
     };
-    let claims = auth_util::verify_token(&token_str).map_err(|e| e.to_string())?;
+    let claims = auth_util::verify_token_fresh(&token_str).await.map_err(|e| e.to_string())?;
     let user = user_service::find_by_username(&claims.username)
         .await
         .map_err(|e| e.to_string())?;
@@ -152,7 +152,7 @@ pub async fn change_password(
         let guard = session.0.lock().await;
         guard.as_ref().ok_or("Not authenticated")?.token.clone()
     };
-    let claims = auth_util::verify_token(&token_str).map_err(|e| e.to_string())?;
+    let claims = auth_util::verify_token_fresh(&token_str).await.map_err(|e| e.to_string())?;
 
     let user = user_service::find_by_username(&claims.username)
         .await

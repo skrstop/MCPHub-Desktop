@@ -3394,6 +3394,17 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
@@ -7469,7 +7480,7 @@ dependencies = [
 
 [[package]]
 name = "mcphub"
-version = "1.1.5001"
+version = "1.1.5006"
 dependencies = [
  "ahash",
  "anyhow",
@@ -7485,6 +7496,7 @@ dependencies = [
  "chrono",
  "encoding_rs",
  "env_logger",
+ "fancy-regex 0.14.0",
  "flate2",
  "futures-util",
  "gix",
@@ -8054,7 +8066,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http 1.5.0",

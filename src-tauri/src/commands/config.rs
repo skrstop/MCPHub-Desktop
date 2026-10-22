@@ -40,7 +40,10 @@ pub(crate) async fn require_admin(session: &SessionState) -> Result<(), String> 
         let guard = session.0.lock().await;
         guard.as_ref().ok_or("Not authenticated")?.token.clone()
     };
-    let claims = auth_util::verify_token(&token_str).map_err(|e| e.to_string())?;
+    // Fresh verify: re-check the session_version claim against the live user
+    // row so password changes / user deletion invalidate outstanding tokens
+    // (origin #4d1e84a parity).
+    let claims = auth_util::verify_token_fresh(&token_str).await.map_err(|e| e.to_string())?;
     if claims.role != "admin" {
         return Err("Admin access required".to_string());
     }

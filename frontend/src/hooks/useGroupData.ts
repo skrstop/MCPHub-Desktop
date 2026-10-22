@@ -42,12 +42,14 @@ export const useGroupData = () => {
     name: string,
     description?: string,
     servers: string[] | IGroupServerConfig[] = [],
+    instructions?: string,
   ) => {
     try {
       const result: ApiResponse<Group> = await apiPost('/groups', {
         name,
         description,
         servers,
+        instructions,
       });
       console.log('Group created successfully:', result);
 
@@ -70,6 +72,7 @@ export const useGroupData = () => {
     data: {
       name?: string;
       description?: string;
+      instructions?: string;
       servers?: string[] | IGroupServerConfig[];
     },
   ) => {

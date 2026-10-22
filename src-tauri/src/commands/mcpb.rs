@@ -25,7 +25,7 @@ async fn require_authenticated(session: &State<'_, SessionState>) -> Result<(), 
             .token
             .clone()
     };
-    auth_util::verify_token(&token_str).map_err(|e| e.to_string())?;
+    auth_util::verify_token_fresh(&token_str).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 

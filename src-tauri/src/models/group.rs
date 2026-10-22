@@ -26,6 +26,10 @@ pub struct Group {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    /// Optional instructions sent to MCP clients on initialize when they
+    /// connect through this group's route (#1340 parity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     pub servers: Vec<JsonValue>,  // Can be string[] or GroupServerConfig[]
     pub created_at: String,
 }
@@ -35,6 +39,8 @@ pub struct Group {
 pub struct GroupPayload {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
     pub servers: Vec<JsonValue>,  // Can be string[] or GroupServerConfig[]
 }
 

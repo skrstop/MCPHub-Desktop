@@ -545,6 +545,7 @@ pub fn run() {
             commands::server_tool_config::update_server_item_description,
             commands::server_tool_config::reset_server_item_description,
             commands::server_tool_config::set_server_tool_pinned,
+            commands::server_tool_config::update_server_tool_hidden_params,
             commands::server_tool_config::list_server_tool_pins,
             commands::server_tool_config::list_server_item_configs,
             // HTTP server management

@@ -905,6 +905,7 @@ impl McpTransport for SseTransport {
         let tools = raw_tools
             .into_iter()
             .map(|t| Tool {
+                hidden_params: None,
                 name: t["name"].as_str().unwrap_or("").to_string(),
                 description: t["description"].as_str().map(|s| s.to_string()),
                 input_schema: t["inputSchema"].clone(),

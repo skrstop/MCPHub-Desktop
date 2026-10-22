@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Server, ApiResponse } from '@/types';
+import { createServerPollingPolicy } from '@/utils/serverPolling';
 import { disconnectServerOAuth as disconnectServerOAuthRequest } from '@/services/serverOAuthService';
 import { apiGet, apiPost, apiDelete } from '../utils/fetchInterceptor';
 import { useAuth } from './AuthContext';
@@ -23,19 +24,6 @@ const getInitialServersPerPage = (): number => {
   return VALID_PAGE_SIZES.has(parsed) ? parsed : DEFAULT_SERVERS_PER_PAGE;
 };
 
-// Configuration options
-const CONFIG = {
-  // Initialization phase configuration
-  startup: {
-    maxAttempts: 60, // Maximum number of attempts during initialization
-    pollingInterval: 3000, // Polling interval during initialization (3 seconds)
-  },
-  // Normal operation phase configuration
-  normal: {
-    pollingInterval: 10000, // Polling interval during normal operation (10 seconds)
-  },
-};
-
 // Pagination info type
 interface PaginationInfo {
   page: number;
@@ -45,6 +33,11 @@ interface PaginationInfo {
   hasNextPage: boolean;
   hasPrevPage: boolean;
 }
+
+type ServerListResponse = ApiResponse<Server[]> & {
+  pagination?: PaginationInfo;
+  allServers?: Server[];
+};
 
 // Context type definition
 interface ServerContextType {
@@ -87,17 +80,8 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [currentPage, setCurrentPage] = useState(1);
   const [serversPerPage, setServersPerPage] = useState(getInitialServersPerPage);
 
-  // Timer reference for polling
-  const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Track current attempt count to avoid dependency cycles
-  const attemptsRef = useRef<number>(0);
-  // Monotonic effect-run generation: guards async continuations from a STALE
-  // effect invocation (deps include currentPage/serversPerPage/isInitialLoading,
-  // so the whole startup loop is torn down and recreated on those changes). A
-  // late-resolving fetch from the old run must not write state or call
-  // startNormalPolling with its outdated closures (which would kill the new
-  // run's interval and re-install polling pinned to the old page params).
-  const pollRunRef = useRef<number>(0);
+  // Schedule the next poll only after the current request completes.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track last fetch time to implement smart refresh
   const lastFetchTimeRef = useRef<number>(0);
   // Minimum interval between manual refreshes (5 seconds in dev, 3 seconds in prod)
@@ -105,273 +89,110 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Clear the timer
   const clearTimer = () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
     }
   };
 
-  // Start normal polling
-  const startNormalPolling = useCallback(
-    (options?: { immediate?: boolean }) => {
-      const immediate = options?.immediate ?? true;
-      // Ensure no other timers are running
-      clearTimer();
-
-      // Generation token: a tick's in-flight fetch must not clobber state
-      // after a newer run (page/limit change, logout) took ownership.
-      // ⚠️ Advance the generation here — startNormalPolling is re-invoked on
-      // every page/limit/refreshKey change, and in-flight fetches from the
-      // previous invocation must see themselves as stale (only reading the
-      // counter left old-page data writing over the new page).
-      const myRun = ++pollRunRef.current;
-      const isStaleRun = () => pollRunRef.current !== myRun;
-
-      const fetchServers = async () => {
-        try {
-          console.log('[ServerContext] Fetching servers from API...');
-          // Build query parameters for pagination
-          const params = new URLSearchParams();
-          params.append('page', currentPage.toString());
-          params.append('limit', serversPerPage.toString());
-
-          // Fetch both paginated servers and all servers in parallel
-          const [paginatedData, allData] = await Promise.all([
-            apiGet(`/servers?${params.toString()}`),
-            apiGet('/servers'), // Fetch all servers without pagination
-          ]);
-
-          // A newer generation owns state now (page switch, logout, refresh)
-          // — drop this tick's stale payload instead of writing it back.
-          if (isStaleRun()) return;
-
-          // Update last fetch time
-          lastFetchTimeRef.current = Date.now();
-
-          // Handle paginated response
-          if (paginatedData && paginatedData.success && Array.isArray(paginatedData.data)) {
-            setServers(paginatedData.data);
-            // Update pagination info if available
-            if (paginatedData.pagination) {
-              setPagination(paginatedData.pagination);
-            } else {
-              setPagination(null);
-            }
-          } else if (paginatedData && Array.isArray(paginatedData)) {
-            // Compatibility handling for non-paginated responses
-            setServers(paginatedData);
-            setPagination(null);
-          } else {
-            console.error('Invalid server data format', { paginatedData });
-            setServers([]);
-            setPagination(null);
-          }
-
-          // Handle all servers response
-          if (allData && allData.success && Array.isArray(allData.data)) {
-            setAllServers(allData.data);
-          } else if (allData && Array.isArray(allData)) {
-            setAllServers(allData);
-          } else {
-            setAllServers([]);
-          }
-
-          // Reset error state
-          setError(null);
-        } catch (err) {
-          // Stale tick: don't touch error state either (a newer generation
-          // may have just cleared it or started fresh).
-          if (isStaleRun()) return;
-          console.error('Error fetching servers during normal polling', { err });
-
-          // Use friendly error message
-          if (!navigator.onLine) {
-            setError(t('errors.network'));
-          } else if (
-            err instanceof TypeError &&
-            (err.message.includes('NetworkError') || err.message.includes('Failed to fetch'))
-          ) {
-            setError(t('errors.serverConnection'));
-          } else {
-            setError(t('errors.serverFetch'));
-          }
-        }
-      };
-
-      // Execute immediately unless explicitly skipped
-      if (immediate) {
-        fetchServers();
+  const applyServerResponse = useCallback(
+    (paginatedData: ServerListResponse | Server[], allData: ServerListResponse | Server[]) => {
+      if (
+        paginatedData &&
+        !Array.isArray(paginatedData) &&
+        paginatedData.success &&
+        Array.isArray(paginatedData.data)
+      ) {
+        setServers(paginatedData.data);
+        setPagination(paginatedData.pagination ?? null);
+      } else if (Array.isArray(paginatedData)) {
+        setServers(paginatedData);
+        setPagination(null);
+      } else {
+        console.error('Invalid server data format', { paginatedData });
+        setServers([]);
+        setPagination(null);
       }
 
-      // Set up regular polling
-      intervalRef.current = setInterval(fetchServers, CONFIG.normal.pollingInterval);
+      if (allData && !Array.isArray(allData) && allData.success && Array.isArray(allData.data)) {
+        setAllServers(allData.data);
+      } else if (Array.isArray(allData)) {
+        setAllServers(allData);
+      } else {
+        setAllServers([]);
+      }
     },
-    [t, currentPage, serversPerPage],
+    [],
   );
 
-  // Watch for authentication status changes
   useEffect(() => {
-    if (auth.isAuthenticated) {
-      console.log('[ServerContext] User authenticated, triggering refresh');
-      // When user logs in, trigger a refresh to load servers
-      setRefreshKey((prevKey) => prevKey + 1);
-    } else {
-      console.log('[ServerContext] User not authenticated, clearing data and stopping polling');
-      // When user logs out, clear data and stop polling.
-      // Bump the generation FIRST: an in-flight fetch (initial or polling)
-      // that resolves after logout must see its run as stale — otherwise the
-      // unauthenticated early-return in the polling effect never re-arms and
-      // the stale fetch re-populates server data after logout.
-      pollRunRef.current += 1;
-      clearTimer();
+    if (!auth.isAuthenticated) {
       setServers([]);
       setAllServers([]);
       setIsInitialLoading(false);
       setError(null);
-    }
-  }, [auth.isAuthenticated]);
-
-  useEffect(() => {
-    // If not authenticated, don't poll
-    if (!auth.isAuthenticated) {
-      console.log('[ServerContext] User not authenticated, skipping polling setup');
       return;
     }
 
-    // Reset attempt count
-    if (refreshKey > 0) {
-      attemptsRef.current = 0;
-      setFetchAttempts(0);
-    }
+    let active = true;
+    const controller = new AbortController();
+    const policy = createServerPollingPolicy();
+    setFetchAttempts(0);
 
-    // Initialization phase request function
-    // Overlapping-tick guard: the startup interval can fire while an earlier
-    // fetchInitialData is still in flight (backend latency > interval), and a
-    // late resolving tick would re-enter startNormalPolling after another
-    // invocation already transitioned — replacing timers and clobbering fresh
-    // state with stale startup-attempt data. Bail if the phase advanced.
-    let phase = 'startup';
-    // Claim this effect run's generation — async continuations compare before
-    // touching state / timers.
-    const myRun = ++pollRunRef.current;
-    const isStaleRun = () => pollRunRef.current !== myRun;
-    const fetchInitialData = async () => {
-      if (phase !== 'startup' || isStaleRun()) return;
+    const fetchServers = async () => {
+      let delay: number;
       try {
-        console.log('[ServerContext] Initial fetch - attempt', attemptsRef.current + 1);
-        // Build query parameters for pagination
-        const params = new URLSearchParams();
-        params.append('page', currentPage.toString());
-        params.append('limit', serversPerPage.toString());
-
-        // Fetch both paginated servers and all servers in parallel
-        const [paginatedData, allData] = await Promise.all([
-          apiGet(`/servers?${params.toString()}`),
-          apiGet('/servers'), // Fetch all servers without pagination
-        ]);
-
-        // A newer effect run (page/limit/refreshKey/isInitialLoading change)
-        // owns the timers and state now — this run's data is stale.
-        if (isStaleRun()) return false;
-
-        // Update last fetch time
-        lastFetchTimeRef.current = Date.now();
-
-        // Handle paginated API response wrapper object, extract data field
-        if (paginatedData && paginatedData.success && Array.isArray(paginatedData.data)) {
-          setServers(paginatedData.data);
-          // Update pagination info if available
-          if (paginatedData.pagination) {
-            setPagination(paginatedData.pagination);
-          } else {
-            setPagination(null);
-          }
-        } else if (paginatedData && Array.isArray(paginatedData)) {
-          // Compatibility handling, if API directly returns array
-          setServers(paginatedData);
-          setPagination(null);
-        } else {
-          // If data format is not as expected, set to empty array
-          console.error('Invalid server data format', { paginatedData });
-          setServers([]);
-          setPagination(null);
-        }
-
-        // Handle all servers response
-        if (allData && allData.success && Array.isArray(allData.data)) {
-          setAllServers(allData.data);
-        } else if (allData && Array.isArray(allData)) {
-          setAllServers(allData);
-        } else {
-          setAllServers([]);
-        }
-
-        setIsInitialLoading(false);
-        // Initialization successful — do NOT start polling here. Flipping
-        // isInitialLoading re-runs this effect (it's a dep); the new run takes
-        // the !isInitialLoading branch and starts normal polling exactly once.
-        // Starting it here AND in the re-run fired two duplicate request
-        // pairs back-to-back on every successful startup.
-        phase = 'normal';
-        return true;
-      } catch (err) {
-        // Stale run: don't touch attemptsRef / error state — a newer run has
-        // already reset the counters and owns the UI.
-        if (isStaleRun()) return false;
-        // Increment attempt count, use ref to avoid triggering effect rerun
-        attemptsRef.current += 1;
-        console.error('Initial loading attempt failed', {
-          attempt: attemptsRef.current,
-          err,
+        const params = new URLSearchParams({
+          page: currentPage.toString(),
+          limit: serversPerPage.toString(),
         });
-
-        // Update state for display
-        setFetchAttempts(attemptsRef.current);
-
-        // Set appropriate error message
+        // Fetch both paginated servers and all servers in parallel
+        const [paginatedData, allData] = (await Promise.all([
+          apiGet(`/servers?${params.toString()}`, { signal: controller.signal }),
+          apiGet('/servers', { signal: controller.signal }), // All servers without pagination
+        ])) as [ServerListResponse | Server[], ServerListResponse | Server[]];
+        if (!active) return;
+        if (
+          !Array.isArray(paginatedData) &&
+          (!paginatedData.success || !Array.isArray(paginatedData.data))
+        ) {
+          throw new Error('Invalid server list response');
+        }
+        delay = policy.success(
+          (Array.isArray(paginatedData) ? paginatedData : paginatedData.data!) as Server[],
+        );
+        lastFetchTimeRef.current = Date.now();
+        applyServerResponse(paginatedData, allData);
+        setIsInitialLoading(false);
+        setFetchAttempts(0);
+        setError(null);
+      } catch (err) {
+        if (!active) return;
+        delay = policy.failure();
+        setFetchAttempts((attempts) => attempts + 1);
+        setIsInitialLoading(false);
+        console.error('Error fetching servers', { err });
         if (!navigator.onLine) {
           setError(t('errors.network'));
+        } else if (
+          err instanceof TypeError &&
+          (err.message.includes('NetworkError') || err.message.includes('Failed to fetch'))
+        ) {
+          setError(t('errors.serverConnection'));
         } else {
-          setError(t('errors.initialStartup'));
+          setError(t('errors.serverFetch'));
         }
-
-        // If maximum attempt count is exceeded, give up initialization and switch to normal polling.
-        // setIsInitialLoading(false) re-runs this effect, whose !isInitialLoading
-        // branch calls startNormalPolling exactly once — do NOT also call it
-        // here (that fired two duplicate request pairs back-to-back).
-        if (attemptsRef.current >= CONFIG.startup.maxAttempts) {
-          if (isStaleRun()) return false;
-          console.log('Maximum startup attempts reached, switching to normal polling');
-          setIsInitialLoading(false);
-          // Clear initialization polling
-          clearTimer();
-        }
-
-        return false;
       }
+      if (active) timerRef.current = setTimeout(fetchServers, delay);
     };
 
-    // On component mount, set appropriate polling based on current state
-    if (isInitialLoading) {
-      // Ensure no other timers are running
-      clearTimer();
-
-      // Execute initial request immediately
-      fetchInitialData();
-
-      // Set polling interval for initialization phase
-      intervalRef.current = setInterval(fetchInitialData, CONFIG.startup.pollingInterval);
-      console.log(`Started initial polling with interval: ${CONFIG.startup.pollingInterval}ms`);
-    } else {
-      // Initialization completed, start normal polling
-      startNormalPolling();
-    }
-
-    // Cleanup function
+    void fetchServers();
     return () => {
+      active = false;
+      controller.abort();
       clearTimer();
     };
-  }, [refreshKey, t, isInitialLoading, startNormalPolling, currentPage, serversPerPage]);
+  }, [auth.isAuthenticated, applyServerResponse, refreshKey, t, currentPage, serversPerPage]);
 
   useEffect(() => {
     if (!pagination) {
@@ -389,16 +210,9 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     // Clear current timer
     clearTimer();
 
-    // If in initialization phase, reset initialization state
-    if (isInitialLoading) {
-      setIsInitialLoading(true);
-      attemptsRef.current = 0;
-      setFetchAttempts(0);
-    }
-
     // Change in refreshKey will trigger useEffect to run again
     setRefreshKey((prevKey) => prevKey + 1);
-  }, [isInitialLoading]);
+  }, []);
 
   // Smart refresh with debounce (only refresh if enough time has passed)
   const refreshIfNeeded = useCallback(() => {

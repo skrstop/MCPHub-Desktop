@@ -187,6 +187,23 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   if (
     segs[0] === 'servers' &&
     segs.length >= 5 &&
+    segs[2] === 'tools' &&
+    segs[4] === 'hidden-params' &&
+    m === 'PUT'
+  ) {
+    const b = body as { hiddenParams?: string[] } | null;
+    return {
+      command: 'update_server_tool_hidden_params',
+      args: {
+        serverName: decodeURIComponent(segs[1]),
+        toolName: decodeURIComponent(segs[3]),
+        hiddenParams: Array.isArray(b?.hiddenParams) ? b!.hiddenParams : [],
+      },
+    };
+  }
+  if (
+    segs[0] === 'servers' &&
+    segs.length >= 5 &&
     (segs[2] === 'tools' || segs[2] === 'prompts' || segs[2] === 'resources') &&
     segs[4] === 'description'
   ) {

@@ -12,6 +12,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { PermissionChecker } from '@/components/PermissionChecker';
 import { PERMISSIONS } from '@/constants/permissions';
 import { isTauri } from '@/utils/tauriClient';
+import { getSmartRoutingPath } from '@/utils/runtime';
 import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { Copy, Check, Download, Edit, Trash2, Code as CodeIcon, Zap, Database, Wrench, Sparkles, RefreshCw, Route as RouteIcon, Key, Lock, Cloud, SlidersHorizontal, ShieldCheck, Package, KeyRound, FileDown, X, FileText, Loader2 } from 'lucide-react';
@@ -509,15 +510,11 @@ const isFullSchemaTopN = (value: number) => Number.isInteger(value) && value >= 
 // Mirrors TOOL_DEFINITION_FIELDS / DEFAULT_TOOL_DEFINITION_FIELDS in
 // origin src/constants/smartRoutingDefaults.ts (origin #1286; the desktop
 // smart_routing backend consumes the same key).
-const TOOL_DEFINITION_FIELDS = [
-  'title',
-  'annotations',
-  'outputSchema',
-  'execution',
-  'icons',
-  '_meta',
-] as const;
-const DEFAULT_TOOL_DEFINITION_FIELDS: readonly string[] = ['title', 'annotations'];
+import {
+  TOOL_DEFINITION_FIELDS,
+  DEFAULT_TOOL_DEFINITION_FIELDS,
+  fieldTipKey,
+} from '@/utils/toolDefinitionFields';
 
 function parseBasePacingDelayForUpdate(
   rawValue: string,
@@ -600,6 +597,15 @@ const SettingsPage: React.FC = () => {
     npmRegistry: '',
     baseUrl: 'http://localhost:23333',
   });
+
+  // Tool-field tip popover (click / hover the field name): which field's
+  // description is showing, and whether it was PINNED by click (hover-opened
+  // tips close on mouseleave; pinned ones stay until another field is picked
+  // or the same field is clicked again). Native title tooltips are unreliable
+  // in WKWebView (delayed / sometimes never shown), so the tip is rendered
+  // as an inline popover instead.
+  const [tipField, setTipField] = useState<string | null>(null);
+  const tipPinnedRef = useRef(false);
 
   const [tempSmartRoutingConfig, setTempSmartRoutingConfig] = useState<{
     dbUrl: string;
@@ -1726,9 +1732,10 @@ const SettingsPage: React.FC = () => {
       if (parsedTopN !== undefined) {
         updates.fullSchemaTopN = parsedTopN;
       }
-      const origFields =
+      const origFields: readonly string[] =
         smartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
-      const tempFields = tempSmartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
+      const tempFields: readonly string[] =
+        tempSmartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
       if (
         origFields.length !== tempFields.length ||
         origFields.some((f) => !tempFields.includes(f))
@@ -1879,9 +1886,9 @@ const SettingsPage: React.FC = () => {
       updates.fullSchemaTopN = parsedFullSchemaTopN;
     }
     {
-      const origFields =
+      const origFields: readonly string[] =
         smartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
-      const tempFields =
+      const tempFields: readonly string[] =
         tempSmartRoutingConfig.toolDefinitionFields ?? DEFAULT_TOOL_DEFINITION_FIELDS;
       if (
         origFields.length !== tempFields.length ||
@@ -2739,11 +2746,11 @@ const SettingsPage: React.FC = () => {
                         copied URL stays clean (unscoped /mcp/$smart). */}
                     <EndpointCopy
                       label="MCP"
-                      url={`${accessBaseUrl}/mcp/$smart(/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'})`}
-                      copyValue={`${accessBaseUrl}/mcp/$smart`}
+                      url={`${accessBaseUrl}/mcp/${getSmartRoutingPath()}(/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'})`}
+                      copyValue={`${accessBaseUrl}/mcp/${getSmartRoutingPath()}`}
                       configValue={() =>
                         buildMcpClientConfig(
-                          `${accessBaseUrl}/mcp/$smart`,
+                          `${accessBaseUrl}/mcp/${getSmartRoutingPath()}`,
                           routingConfig,
                           bearerKeys,
                         )
@@ -3465,13 +3472,79 @@ const SettingsPage: React.FC = () => {
                 <p className="block text-xs text-gray-600">
                   {t('settings.toolDefinitionFields')}
                 </p>
+                {/* Core four: always carried by every result, not editable. */}
+                <p className="block text-xs text-gray-500 mt-2">
+                  {t('settings.toolFieldCoreTitle')}
+                </p>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                  {['name', 'description', 'inputSchema', 'serverName'].map((field) => (
+                    <label
+                      key={field}
+                      className="flex items-center gap-1 text-sm font-mono opacity-70 cursor-help"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        // Click pins/unpins the tip. Hover may have already
+                        // opened it — clicking then PINS (not toggles off).
+                        if (tipField === field && tipPinnedRef.current) {
+                          tipPinnedRef.current = false;
+                          setTipField(null);
+                        } else {
+                          tipPinnedRef.current = true;
+                          setTipField(field);
+                        }
+                      }}
+                      onMouseEnter={() => setTipField(field)}
+                      onMouseLeave={() => {
+                        if (!tipPinnedRef.current) {
+                          setTipField((v) => (v === field ? null : v));
+                        }
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        className="hub-checkbox sm"
+                        checked
+                        disabled
+                        tabIndex={-1}
+                      />
+                      {field}
+                    </label>
+                  ))}
+                </div>
+                <p className="block text-xs text-gray-500 mt-2">
+                  {t('settings.toolFieldOptionalTitle')}
+                </p>
                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
                   {TOOL_DEFINITION_FIELDS.map((field) => {
                     const selected =
                       tempSmartRoutingConfig.toolDefinitionFields ??
                       DEFAULT_TOOL_DEFINITION_FIELDS;
                     return (
-                      <label key={field} className="flex items-center gap-1 text-sm font-mono">
+                      <label
+                        key={field}
+                        className="flex items-center gap-1 text-sm font-mono cursor-help"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          // Only the field NAME click pins/unpins the tip —
+                          // clicking the checkbox keeps its native toggle
+                          // semantics (label forwards to the input).
+                          if ((e.target as HTMLElement).tagName !== 'INPUT') {
+                            if (tipField === field && tipPinnedRef.current) {
+                              tipPinnedRef.current = false;
+                              setTipField(null);
+                            } else {
+                              tipPinnedRef.current = true;
+                              setTipField(field);
+                            }
+                          }
+                        }}
+                        onMouseEnter={() => setTipField(field)}
+                        onMouseLeave={() => {
+                          if (!tipPinnedRef.current) {
+                            setTipField((v) => (v === field ? null : v));
+                          }
+                        }}
+                      >
                         <input
                           type="checkbox"
                           className="hub-checkbox sm"
@@ -3491,6 +3564,16 @@ const SettingsPage: React.FC = () => {
                     );
                   })}
                 </div>
+                {/* Inline tip popover: click or hover a field name to show its
+                    description (native title tooltips are unreliable in
+                    WKWebView). Clicking elsewhere / re-hovering clears it. */}
+                {tipField && (
+                  <p className="text-xs text-blue-600 dark:text-blue-300 mt-2 px-2 py-1.5 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
+                    <span className="font-mono font-medium">{tipField}</span>
+                    {' — '}
+                    {t(fieldTipKey(tipField))}
+                  </p>
+                )}
                 <p className="text-xs text-gray-500 mt-1">
                   {t('settings.toolDefinitionFieldsDescription')}
                 </p>

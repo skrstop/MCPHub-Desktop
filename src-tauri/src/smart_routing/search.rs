@@ -370,6 +370,7 @@ mod tests {
 
     fn tool(name: &str, schema: serde_json::Value) -> Tool {
         Tool {
+            hidden_params: None,
             name: name.to_string(),
             description: Some("upstream desc".to_string()),
             input_schema: schema,

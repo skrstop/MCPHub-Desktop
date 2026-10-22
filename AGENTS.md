@@ -542,7 +542,7 @@ npm run build                     # 生产构建
 
 ### 4.1 同步策略
 
-1. `mcphub-origin/` 是 git 子模块，仅作参考与 diff 来源，**永不修改子模块内容**。
+1. `mcphub-origin/` 是 git 子模块，仅作参考与 diff 来源，**永不修改子模块内容**。子模块必须保持**分支模式**（`main` 跟踪 `origin/main`）——禁止 `git checkout origin/main`（detached HEAD，指针游离）；同步后需在父仓库 `git add mcphub-origin` 记录新 SHA。
 2. `frontend/`、`locales/` 是 origin 的**有改造副本**：大部分文件与 origin 一致；desktop 改造文件（§4.2 清单）同步时**必须手动合并保留差异**。
 3. Rust 后端不直接同步 Node 代码，但需逐 commit 评估安全/重要 fix 是否镜像。
 4. `package.json`、lockfile、docs/、Docker/docker-compose 等不同步。
@@ -581,8 +581,8 @@ npm run build                     # 生产构建
 ### 4.3 同步操作 SOP
 
 ```bash
-# 1. 更新子模块
-cd mcphub-origin && git fetch origin && git checkout origin/main && cd ..
+# 1. 更新子模块（分支模式跟踪 main，禁止 checkout origin/main——会 detached）
+cd mcphub-origin && git fetch origin && git checkout main && git pull --ff-only && cd ..
 # 2. 列出待同步提交（基线 = §4.4 的 SHA）
 cd mcphub-origin && git --no-pager log --oneline <last-sync-sha>..HEAD
 # 3. 生成 patch + dry-run
@@ -600,12 +600,67 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `cc22b8b`（origin/main，= v1.1.5 后 1 commit） |
-| **对应 origin tag** | `v1.1.5`（后 1 commit，未发布新 tag） |
-| **桌面端版本号** | `1.1.5001`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
-| **同步执行日期** | 2026-10-17（0ee8100 后 11 commit 评估收口） |
+| **当前已同步到 origin commit** | `fd1abaa`（origin/main，= v1.1.7 后 4 commit） |
+| **对应 origin tag** | `v1.1.7`（后 4 commit，未发布新 tag） |
+| **桌面端版本号** | `1.1.5006`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
+| **同步执行日期** | 2026-10-21（209b74d 后 4 commit 依赖升级收口） |
 
-> 下次同步以 `cc22b8b` 为基线起点（`git log --oneline cc22b8b..HEAD`）。
+> 下次同步以 `fd1abaa` 为基线起点（`git log --oneline fd1abaa..HEAD`）。
+
+#### 2026-10-21（第五轮）：`209b74d` -> `fd1abaa`（4 commit，纯依赖升级）
+
+- `2da710c` server-legacy 2.1.0→2.3.1 / `9f5ad57` @mcp/server 2.1.0→2.3.0 / `e130a97` vite 6.4.3→6.4.4 / `fd1abaa` hono 4.13.7→4.13.11：**全部无需镜像**——origin Node 后端/TS SDK 依赖，桌面为 Rust + rmcp 3.4.1 栈，无对应依赖面（唯一 .ts 变更是 origin 自身测试的环境隔离调整）。
+- **子模块指针模式修正**：此前 SOP 用 `git checkout origin/main` 导致 detached HEAD（指针游离、"每次都变"）→ 改为分支模式 `git checkout main && git pull --ff-only`（.gitmodules 已有 `branch = main`），SOP §4.3 与 §4.1 规则 1 已更新。
+- 版本 `1.1.5005 → 1.1.5006`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5006.md`。
+- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
+
+#### 2026-10-20（第四轮）：`4d1e84a` -> `209b74d`（1 commit，#1343 按工具隐藏 input-schema 参数全栈镜像）
+
+- `209b74d` #1343 hide input-schema parameters per tool：**完整镜像（Rust + 前端 + locales + IPC）**——
+  - **语义**：hidden_params 存配置列表（投影报告 configured），schema 移除 effective（required 过滤在读取时）；调用参数剥离在 pool::call_tool_with_meta/call_tool 与 session_pool::call_tool_isolated 三个 choke point；apply_tool_filters 是 tools-list/describe/openapi 的公共 schema 隐藏点。
+  - **Rust**：migration **v35**（server_tool_config.hidden_params TEXT + 0035 SQL）；models/server_tool_config.rs 加 hidden_params；server_tool_config_service.rs 重构（SELECT_COLS + row_to_config 消除三处重复，AssertSqlSafe 包裹 format! SQL）+ 新函数 update_hidden_params/effective_hidden_params/hide_schema_params/apply_hidden_params_to_tool/strip_hidden_arguments/remove_hidden_arguments/any_hidden_params + apply_tool_filters 接线；models/server.rs Tool 加 hidden_params 字段（8 处 Tool 初始化器补 None）；pool.rs 加 cached_tool_schema + 调用入口剥离；session_pool.rs 入口剥离；smart_routing/meta.rs 搜索跳过条件加 any_hidden_params + 标准模式优先用 live（post-filter）schema；commands/cost.rs 成本计算应用隐藏；新命令 update_server_tool_hidden_params（require_admin + live schema 校验：required 不可隐藏、参数必须存在）+ lib.rs 注册；tauriClient.ts 加 PUT /servers/:s/tools/:t/hidden-params 映射。
+  - **前端**：cp utils/hiddenParams.ts；types Tool.hiddenParams；toolService.updateToolHiddenParams；ToolCard「模型可见参数」复选框 UI；locales ×5（en/zh/fr/tr/es 各 4 键）。
+  - **测试**：server_tool_config_service +5 测试（effective/hide/apply 纯函数、update_hidden_params round-trip、strip noop 路径）+ migration v35 fresh-DB 测试；**legacy_config_functions_round_trip 测试已移除**——踩中 sqlx 0.9.0 测试池解码异常（NULL TEXT 读回 Some("")、`SqliteRow::current` 列数缓存越界 panic：语句在 schema 变更后 live 重 prepare 而 sqlx 缓存元数据不失效；生产路径 E2E 全绿不受影响），记录为已知测试环境问题。
+- 版本 `1.1.5004 → 1.1.5005`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5005.md`。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **236 passed**（--test-threads=2）；tsc 0 错；npm build ✓；契约脚本 0 mismatch；50 轮新代码测试循环 0 失败；E2E spot（r109 32 + matrix_v2 152 + r1200 45 + pin_matrix 31 + r461 22 = 282 断言）全绿。
+- **影响功能点与结果**：服务器工具详情新增「模型可见参数」复选框——勾选后该工具 inputSchema 仅暴露所选参数（required 恒可见）、调用时多余参数被剥离、$smart 搜索/描述/成本计算同步应用。**用户需重启生效**。
+
+#### 2026-10-20（第三轮）：`040f7b9` -> `4d1e84a`（1 commit，用户会话失效安全修复镜像）
+
+- `4d1e84a` Merge commit from fork（用户离职/会话失效）：**部分镜像（JWT 凭证版本绑定）**——
+  - **桌面同类缺口确认**：`require_admin`（及 bearer_keys 本地副本、mcpb、get_current_user、change_password）只验 JWT 签名+role，不回查 DB——改密/删用户后旧 token 进程内 24h 仍有效（origin 修复的正是此类）。
+  - **镜像落地**：`Claims` 加 `session_version`（sha256(`username\0password_hash`)，`#[serde(default)]`）；`issue_token` 加 password_hash 参数（login 传入；guest 传空）；新 `verify_token_fresh`（签名验证 → guest 短路 → 回查 user 行 → 常数时间比较 session_version；用户不存在/版本不匹配一律 "Token is not valid"）——接线 5 处（config::require_admin、bearer_keys 本地 require_admin 副本、mcpb pick、auth::get_current_user、auth::change_password）。**兼容性**：JWT secret 每进程随机 + token 仅存内存 SessionState，重启即全失效，无跨版本兼容问题。
+  - **不镜像部分（桌面无对应面）**：①OAuth token sessionVersion（桌面 oauth_tokens 客户端域、无 username 绑定，consent 本地单用户）；②deleteUser 离职级联（bearer keys 无 owner 列、groups/servers 无 sharedWithUsers——桌面单用户无共享体系）；③auth 中间件 OAuth 分支移除（桌面无该分支）；④rateLimit 注释（无 /auth/register）。
+  - **测试**：+2 单测（session_version 随凭证轮换/确定性/64hex；fresh_verify 拒绝改密后旧 token 与已删用户 token——真实 DB round-trip）。
+- 版本 `1.1.5003 → 1.1.5004`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5004.md`。
+- **影响功能点与结果**：改密/删用户后旧令牌立即失效（安全修复）。**用户需重启生效**。
+
+#### 2026-10-20（第二轮）：`f318d0e` -> `040f7b9`（1 commit，安全修复评估收口）
+
+- `040f7b9` Merge commit from fork（私有漏洞报告修复）：**passthrough 头安全**——新增 `isSafePassthroughHeader`（拒绝 authorization/proxy-authorization/cookie/x-auth-token/x-api-key 及 bearer 自定义头名）+ 全部 passthrough 收集点门控（openapi client、mcpService collectPassthroughHeaders 与两处 handleCallToolRequestImpl）+ 配置了 passthroughHeaders 的服务器改为 admin-only（create/batchCreate/update/importTemplate 四入口错误文案细分）。**无需镜像**——桌面 passthrough_headers 仅从服务器自身静态 `cfg.headers` 取值（pool.rs:151-157），全仓无「转发调用方请求头」路径（grep request_headers/caller 转发零命中），漏洞类不存在；admin-only 半边由桌面单用户 + server create/update `require_admin` 覆盖。
+- 版本 `1.1.5002 → 1.1.5003`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5003.md`。
+- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
+
+#### 2026-10-20：`cc22b8b` -> `f318d0e`（15 commit，v1.1.5 后未发布）
+
+- **前端/locales 已同步**：
+  - `0d43ef7` #1340 分组指令：前端全链（types Group/GroupFormData.instructions、useGroupData、Add/EditGroupForm textarea 块）+ locales 3 键 ×5。
+  - `f318d0e` #1355 服务器状态轮询重写：新增 `utils/serverPolling.ts`（fast 2s 窗口/稳定采样/指数退避策略，桌面 NORMAL_INTERVAL 调 10000 保留桌面节奏）+ ServerContext 单 effect + AbortController 架构替换旧 startup/normal 双阶段（桌面保留：并行 allServers 拉取、import.meta.env.DEV、errors.serverConnection 错误映射；旧 pollRunRef 代际令牌被 origin active-flag 架构自然取代）。
+  - `3fb2254` #1328 es 语言（本轮补齐 origin 新增 21 键到 5 语言，es 只增合并）。
+  - `cc22b8b` #1331 smartRoutingPath 前端 plumbing（types/runtime + utils/runtime getSmartRoutingPath + Dashboard/SettingsPage URL 构造）——**桌面后端无此配置面，恒回退 '$smart'，no-op plumbing（origin parity 保留）**。
+  - `09fc35b` 附带 authService register 错误透传一行。
+  - **跳过**（桌面无对应体系）：#1318 PersonalOAuthControls/identityMode、#1354 allowRegistration、#1330 权限门控 UI（桌面后端 require_admin 已强制）、#1313 凭证槽 args target。
+- **Rust 镜像**：
+  - `0d43ef7` #1340 分组指令后端：**migration v34**（groups.instructions TEXT，add_column_if_missing 幂等 + 0034 SQL 快照）+ models/group.rs Group/GroupPayload + group_service（SELECT_COLS/row_to_group/create/update/FTS 文本）+ **rmcp_bridge initialize override**（set_peer_info + negotiate_initialize 后按 scope 注入：`$smart/{group}` 与 `/mcp/{group}`；名字碰撞时 server 路由也注入系 origin findRouteGroup 逐字 parity，注释钉死；空串 trim 后不注入）。
+  - `801c561` #1299 工具调用防护移植：新 `services/tool_call_guard.rs`（fancy-regex，9 规则 = 7 execution-tier + 2 always-on，全部线性扫描/OnceLock 编译缓存；1MB 扫描预算 fail-closed；execution key 归一化对齐 TS \s）+ 开关（env `TOOL_CALL_GUARD_ENABLED=true` 或 config `toolCallGuard.enabled`，默认关）+ **5 处接线**（bridge execute_tool_call / REST /rest/{server}/call、/rest/group/{g}/call、/api tools（execute_openapi_impl）、/api/$smart/call（smart_rest_call）+ Tauri call_tool 命令）。**阻断载体 parity**：MCP 面回 `CallToolResult::error`（isError:true + 规则 ID 文本，非协议级错误——origin 同载体，严格客户端不会误判传输故障）；REST 面 400 `{"error"}`；Tauri 面 Err(String)。
+- **评估无需镜像**（逐 commit）：`8229c98` #1345 Prometheus metrics（无运维抓取场景）；`92d9bc3` #1326 压缩连字符文件名（无 Tool Result Compression）；`609295f` #1337 bearer `******` 大小写（桌面 eq_ignore_ascii_case 已覆盖）；`c88a858` #1338 changelog TTL（无该服务）；`07c3f85` #1335 凭证槽 OAuth 共存（无凭证槽）；`3e1176d` #1318 / `fd30d57` #1313 per-user 体系；`8125141` #1320 apps 聚合路由；`94e1906` #1346 settings sync pruning（SQLite 单源）；`61d1e45` #1347 表单数组参数（rmcp-openapi 库处理）；`ed692e2` #1350 cl100k（本地 GGUF 嵌入）；`b3ec898` #1314 MCPB Windows rename（mcpb_service 已先 remove_dir_all 再 rename）；`bc3bc1d` #1325 page/limit 400（serde 类型系统覆盖）；`ac3b710` #1324 分组移除通知（update_group 无条件通知，超集）；`756d1ed` #1354 自注册（无 Better Auth）；`2dd0ea3` #1339 错误日志上下文（桌面已有 server/tool 上下文）。
+- 版本 `1.1.5001 → 1.1.5002`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5002.md`。
+- **影响功能点与结果**：分组可配置指令（initialize 下发）；可选工具调用防护（默认关）；服务器状态连接变化期 2s 快速轮询；新增西班牙语。**用户需重启生效**。
+- **同步后独立复核（3 波 7 代理 + 亲核修复 + 全量回归）**：
+  - **W1（4 代理）修复 7 项**：①[H] powershell-cradle executes 正则误用原始大小写文本（混合大小写 cradle 漏报）→ 改 &lower + 回归用例；②[H] /api/$smart/call 绕过守卫（smart_rest_call 直落 handle_call_tool）→ 补 assert_safe 400；③[M] bridge 守卫阻断用协议级 -32001 错误（origin 是 isError:true 工具结果，严格客户端会误判会话故障）→ 改 CallToolResult::error 载体（真机 E2E 验证 isError:true + 文本）；④[L] is_execution_key 空白归一化漏 tab/CR/LF → is_whitespace；⑤[L] Tauri call_tool 命令未接守卫 → 补；⑥[L] migrations/README .sql 清单失实 → 更新；⑦[L] __pycache__ 入 .gitignore。**测试补强**：每条 execution 规则正/负用例（此前 5 规则零覆盖正是 ① 漏网根源）。
+  - **W2（2 代理）**：修复合回炉全清（args 所有权/400 形状/顺序语义/origin parity 断言逐条验证成立）；E2E 断言面审计——80 套零击穿（instructions 键无精确集合断言、守卫默认关、版本号无断言）。
+  - **W3（1 代理终审）**：instructions 端到端契约闭环、守卫 5 处语义一致、安全横扫干净；#1324/#1314/#1322「无需镜像」抽查成立。
+  - **验证**：cargo check 0 错 0 警；cargo test --lib **201 passed**（+9 守卫单测）；tsc 0 错；npm build ✓；契约脚本 0 mismatch；**75 套 E2E：72 绿 + round50c 瞬态复跑 19/19 + r460 A1 / r1000 E1/E3 共 3 例定性为上游 IDE 服务器工具 schema 漂移**（analyze_calls/search_text 不再声明 outputSchema，43 个其他工具仍带；本轮 Rust diff 零触及工具字段路径，非回归）。守卫真机验证：config 开启 → 危险参数 isError:true 阻断、良性调用放行 → 还原关闭。
 
 #### 2026-10-17：`0ee8100` -> `cc22b8b`（11 commit，跨 v1.1.4/v1.1.5）
 
@@ -842,4 +897,4 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.5001**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.5006**。

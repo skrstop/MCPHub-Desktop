@@ -164,3 +164,57 @@ pub async fn list_server_tool_pins(
         .await
         .map_err(|e| e.to_string())
 }
+
+/// Set the top-level input parameters of a tool that models do not see
+/// (#1343 parity). PUT /servers/:serverName/tools/:toolName/hidden-params
+#[tauri::command]
+pub async fn update_server_tool_hidden_params(
+    session: State<'_, SessionState>,
+    server_name: String,
+    tool_name: String,
+    hidden_params: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    // Write op: same admin gate as toggle/description/pin.
+    crate::commands::config::require_admin(&session).await?;
+    if server_name.is_empty() || tool_name.is_empty() {
+        return Err("Server name and tool name are required".to_string());
+    }
+    if hidden_params.iter().any(|n| n.is_empty()) {
+        return Err("hiddenParams must be an array of parameter names".to_string());
+    }
+    // The dashboard sends the bare upstream name (pool caches bare names);
+    // accept a runtime (prefixed) name too, as a direct caller may send it.
+    let prefix = format!("{server_name}{}", crate::smart_routing::meta::tool_name_separator().await);
+    let bare = tool_name.strip_prefix(&prefix).unwrap_or(&tool_name);
+    // Validated against the live schema when the tool is known; a
+    // disconnected server's settings are stored as given, and required ones
+    // are never hidden (read-time filtering enforces that too).
+    let cached = pool::list_tools_for(&server_name).await.unwrap_or_default();
+    if !cached.is_empty() {
+        let live = cached.iter().find(|t| t.name == bare);
+        if let Some(live) = live {
+            let required: Vec<String> = live
+                .input_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let props = live
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.as_object());
+            for name in &hidden_params {
+                if required.iter().any(|r| r == name) {
+                    return Err(format!("Parameter '{name}' is required and cannot be hidden"));
+                }
+                if props.map(|p| !p.contains_key(name)).unwrap_or(true) {
+                    return Err(format!("Tool {tool_name} has no parameter '{name}'"));
+                }
+            }
+        }
+    }
+    let stored = server_tool_config_service::update_hidden_params(&server_name, bare, hidden_params)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "success": true, "hiddenParams": stored }))
+}

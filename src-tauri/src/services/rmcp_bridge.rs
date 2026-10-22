@@ -1020,6 +1020,17 @@ impl HubBridge {
         let tool_name = tool_name.to_string();
         let scope_clean = scope.trim_start_matches('/').trim().to_string();
 
+        // #1299 parity: opt-in pre-call guard for high-risk arguments.
+        // Origin surfaces a block as a tool-level error result (isError:true
+        // + errorCode -32001 in the result), NOT a protocol-level JSON-RPC
+        // error — strict clients treat protocol errors as transport/session
+        // failures, so mirror the carrier too.
+        if let Err(msg) = crate::services::tool_call_guard::assert_safe(&args).await {
+            return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text(msg),
+            ])));
+        }
+
         // $smart scopes: intercept the three meta tools. A non-meta name on a
         // smart scope is a pinned tool called directly — fall through to the
         // normal call path below ($smart resolves to all pool servers,
@@ -1516,6 +1527,44 @@ impl ServerHandler for HubBridge {
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         Cow::Borrowed(ProtocolVersion::KNOWN_VERSIONS)
+    }
+
+    // #1340 parity: group-level instructions on initialize. When the client
+    // connects through a group route (/mcp/{group} or /mcp/$smart/{group}),
+    // inject the group's instructions into the initialize result. Bare /mcp
+    // and bare $smart have no group. A server-name route whose name collides
+    // with a group name also injects that group's instructions — this mirrors
+    // origin exactly (getGroupInstructions looks the segment up as a group
+    // regardless of route kind), so the collision behavior is intentional
+    // parity, not a bug.
+    async fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::InitializeResult, ErrorData> {
+        context.peer.set_peer_info(request.clone());
+        let mut info = self.negotiate_initialize(&request)?;
+        let scope = Self::scope_from_ctx(&context);
+        let group_segment = scope.strip_prefix("$smart/").or(if scope.is_empty() {
+            None
+        } else {
+            Some(scope.as_str())
+        });
+        if let Some(segment) = group_segment {
+            if let Ok(Some(group)) =
+                crate::services::group_service::find_by_name_or_id(segment).await
+            {
+                if let Some(text) = group
+                    .instructions
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    info.instructions = Some(text.to_string());
+                }
+            }
+        }
+        Ok(info)
     }
 
     // Discover answers static server info: cacheable for 1h and shareable

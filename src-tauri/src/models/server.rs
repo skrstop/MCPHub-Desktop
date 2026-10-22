@@ -293,6 +293,11 @@ pub struct Tool {
     /// MCP Apps / 2026 execution hints (`execution.taskSupport` etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<serde_json::Value>,
+    /// #1343: configured hidden input-schema parameters (projection only —
+    /// reported to the dashboard so checkboxes reflect the stored setting;
+    /// never sent upstream).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_params: Option<Vec<String>>,
     /// Tool icons (MCP Apps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<serde_json::Value>,

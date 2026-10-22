@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 33;
+pub const TARGET_VERSION: i64 = 35;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -184,6 +184,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         31 => migrate_v31(pool).await,
         32 => migrate_v32(pool).await,
         33 => migrate_v33(pool).await,
+        34 => migrate_v34(pool).await,
+        35 => migrate_v35(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -405,6 +407,18 @@ async fn migrate_v32(pool: &SqlitePool) -> Result<()> {
 /// created out-of-band) must never be silently deregistered.
 async fn migrate_v33(pool: &SqlitePool) -> Result<()> {
     add_column_if_missing(pool, "oauth_clients", "dynamic", "INTEGER NOT NULL DEFAULT 0").await
+}
+
+/// v33 → v34: group-level instructions (#1340 parity) — optional text sent to
+/// MCP clients on initialize when they connect through the group's route.
+async fn migrate_v34(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(pool, "groups", "instructions", "TEXT").await
+}
+
+/// v34 → v35 (#1343 parity): per-tool hidden input-schema parameters.
+/// JSON array string on `server_tool_config.hidden_params`; NULL = unset.
+async fn migrate_v35(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(pool, "server_tool_config", "hidden_params", "TEXT").await
 }
 
 /// v30 → v31: OAuth Provider (MCPHub as authorization server).
@@ -2208,5 +2222,81 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(&bak_path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v34（#1340 分组指令）：fresh DB 直升 TARGET_VERSION 后 groups 表必须
+    /// 带 instructions 列，且可直插直查；重跑幂等。
+    #[tokio::test]
+    async fn v34_group_instructions_column() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('groups')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(cols.iter().any(|x| x == "instructions"), "groups.instructions missing in {:?}", cols);
+
+        sqlx::query(
+            "INSERT INTO groups (id, name, description, instructions, servers) \
+             VALUES ('g1', 'grp', 'd', 'be nice', '[]')",
+        )
+        .execute(&pool)
+        .await
+        .expect("groups insert with instructions must succeed");
+        let instr: Option<String> = sqlx::query_scalar(
+            "SELECT instructions FROM groups WHERE id = 'g1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(instr.as_deref(), Some("be nice"));
+
+        // Idempotent: re-running pending migrations must not fail.
+        run_pending(&pool).await.expect("re-run migrations idempotent");
+    }
+
+    /// v35（#1343 工具隐藏参数）：fresh DB 直升 TARGET_VERSION 后
+    /// server_tool_config 必须带 hidden_params 列，且可直插直查；重跑幂等。
+    #[tokio::test]
+    async fn v35_tool_hidden_params_column() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('server_tool_config')")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(cols.iter().any(|x| x == "hidden_params"), "hidden_params missing in {:?}", cols);
+
+        sqlx::query(
+            "INSERT INTO server_tool_config (id, server_name, item_type, item_name, enabled, hidden_params) \
+             VALUES ('c1', 'srv', 'tool', 't1', 1, '[\"a\"]')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert with hidden_params must succeed");
+        let hp: Option<String> = sqlx::query_scalar(
+            "SELECT hidden_params FROM server_tool_config WHERE id = 'c1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(hp.as_deref(), Some("[\"a\"]"));
+
+        // Idempotent: re-running pending migrations must not fail.
+        run_pending(&pool).await.expect("re-run migrations idempotent");
     }
 }

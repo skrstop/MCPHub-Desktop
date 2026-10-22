@@ -1472,39 +1472,19 @@ button.text-white.is-loading::after {
   100% { margin-left: -40%; }
 }
 
-/* Custom checkbox — reliable across WKWebView (accent-color is unreliable there).
-   appearance:none removes the native control; :checked paints a blue box + white tick. */
+/* Checkbox: use NATIVE rendering. <input> is a replaced element — hand-painted
+   ticks (::after pseudo-element or background SVG) get clipped/misrendered in
+   WKWebView (the tick showed only half). Native drawing can't be clipped;
+   accent-color just tints it (falls back to the system blue if unsupported). */
 .hub-checkbox {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border: 1px solid var(--hub-line);
-  border-radius: 4px;
-  background: var(--hub-surface);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  width: 14px;
+  height: 14px;
+  accent-color: #2563eb;
   cursor: pointer;
   flex-shrink: 0;
   margin: 0 7px 0 0;
 }
-.hub-checkbox:hover { border-color: #2563eb; }
-.hub-checkbox:checked {
-  background: #2563eb;
-  border-color: #2563eb;
-}
-.hub-checkbox:checked::after {
-  content: '';
-  display: block;
-  width: 4px;
-  height: 8px;
-  border: solid #fff;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) translateY(-1px);
-}
-.hub-checkbox.sm { width: 12px; height: 12px; border-radius: 3px; }
-.hub-checkbox.sm:checked::after { width: 3px; height: 6px; border-width: 0 1.5px 1.5px 0; }
+.hub-checkbox.sm { width: 14px; height: 14px; }
 .hub-checkbox:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--hub-surface), 0 0 0 3px #2563eb;

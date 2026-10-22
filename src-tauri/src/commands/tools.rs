@@ -44,6 +44,10 @@ pub async fn call_tool(
     // Executes arbitrary upstream tools; admin-gated in multi-user mode
     // (skipAuth short-circuits).
     crate::commands::config::require_admin(&session).await?;
+    // #1299 parity: opt-in pre-call guard for high-risk arguments.
+    crate::services::tool_call_guard::assert_safe(&arguments)
+        .await
+        .map_err(|e| e)?;
     // Check if tool is enabled before calling
     let tools = pool::list_tools_for(&server_name).await.map_err(|e| e.to_string())?;
     let filtered = server_tool_config_service::apply_tool_filters(&server_name, tools)

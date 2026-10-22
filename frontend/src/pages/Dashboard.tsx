@@ -8,6 +8,7 @@ import { useCostData } from '@/hooks/useCostData';
 import { formatTokens } from '@/utils/contextCost';
 import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { isTauri } from '@/utils/tauriClient';
+import { getSmartRoutingPath } from '@/utils/runtime';
 import { Server } from '@/types';
 import { EndpointCopy } from '@/components/ui/EndpointCopy';
 import { ServerStatusDot } from '@/components/ui/StatusDot';
@@ -338,9 +339,9 @@ const DashboardPage: React.FC = () => {
               Group/server suffix is optional — shown in parentheses, copied URL stays clean. */}
           <EndpointCopy
             label="SMART"
-            url={`${baseUrl}/mcp/$smart(/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'})`}
-            copyValue={`${baseUrl}/mcp/$smart`}
-            configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/$smart`)}
+            url={`${baseUrl}/mcp/${getSmartRoutingPath()}(/${t('pages.dashboard.namePlaceholder') || '<server-or-group>'})`}
+            copyValue={`${baseUrl}/mcp/${getSmartRoutingPath()}`}
+            configValue={() => buildMcpConfigJson(`${baseUrl}/mcp/${getSmartRoutingPath()}`)}
             configCopiedMessage={configCopiedMessage}
           />        </div>
       </div>

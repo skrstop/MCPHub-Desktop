@@ -61,8 +61,16 @@ pub async fn get_server_costs() -> Result<Vec<ServerCost>, String> {
             if let Some(ref desc) = tool.description {
                 cost += estimate_tokens(desc);
             }
-            // Input schema tokens
-            cost += estimate_json_tokens(&tool.input_schema);
+            // Input schema tokens — cost what a model receives: hidden
+            // parameters are not in the schema it sees (#1343 parity).
+            let mut schema = tool.input_schema.clone();
+            if let Ok(Some(cfg)) = server_tool_config_service::get_config(&status.name, "tool", &tool.name).await {
+                if let Some(h) = cfg.hidden_params.as_ref().filter(|h| !h.is_empty()) {
+                    let eff = server_tool_config_service::effective_hidden_params(Some(&tool.input_schema), h);
+                    server_tool_config_service::hide_schema_params(&mut schema, &eff);
+                }
+            }
+            cost += estimate_json_tokens(&schema);
 
             // Check if tool is enabled (default: true)
             let enabled = tool_configs.iter()

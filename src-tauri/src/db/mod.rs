@@ -47,9 +47,16 @@ pub async fn ensure_test_pool() {
             let _ = std::fs::remove_file(&p);
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
+        // Mirror the app pool options (WAL + busy_timeout + bounded pool):
+        // default DELETE-journal options under parallel tests produced
+        // cross-connection statement-cache staleness (sqlx reused column
+        // metadata captured before an ALTER, panicking in SqliteRow::current).
         let opts = SqliteConnectOptions::from_str(&url)
-            .expect("parse test db url");
+            .expect("parse test db url")
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_millis(5000));
         let pool = SqlitePoolOptions::new()
+            .max_connections(5)
             .connect_with(opts)
             .await
             .expect("connect test sqlite");

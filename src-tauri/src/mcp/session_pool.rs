@@ -69,6 +69,11 @@ pub async fn call_tool_isolated(
     tool: &str,
     arguments: Value,
 ) -> Result<ToolCallResult> {
+    // #1343: hidden parameters are dropped before the isolated client call
+    // (the shared-pool path strips inside pool::call_tool_with_meta).
+    let arguments =
+        crate::services::server_tool_config_service::strip_hidden_arguments(server_name, tool, arguments)
+            .await;
     let key = (session_id.to_string(), server_name.to_string());
 
     // Fast path: a cached client exists. Clone the Arc out under a read lock,

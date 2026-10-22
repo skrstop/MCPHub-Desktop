@@ -46,7 +46,7 @@ const ModelVectorSettings: React.FC = () => {
   // Dialog copy mode: 'switch' (model swap) vs 'reload' (plain re-embed with
   // the current model) — same shared ReindexDialog, different lead/done text.
   const [reindexMode, setReindexMode] = useState<'switch' | 'reload'>('switch');
-  const [sectionOpen, setSectionOpen] = useState(true);
+  const [sectionOpen, setSectionOpen] = useState(false);
   const deviceWrapRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
 
@@ -208,6 +208,25 @@ const ModelVectorSettings: React.FC = () => {
         <div className="flex items-center gap-2.5">
           <Boxes size={15} className="text-[var(--hub-ink-2)]" />
           <h2 className="font-medium text-[var(--hub-ink)]">{t('settings.mvTitle')}</h2>
+          {/* 消费方徽章移到标题行（原在展开内容首行，收起时不可见） */}
+          <span
+            className="hub-tag"
+            title={t('settings.mvSourceSmartRouting')}
+            style={smartRoutingConfig.enabled
+              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
+              : { opacity: 0.45 }}
+          >
+            {t('settings.mvSourceSmartRouting')}
+          </span>
+          <span
+            className="hub-tag"
+            title="RAG"
+            style={ragEnabled
+              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
+              : { opacity: 0.45 }}
+          >
+            RAG
+          </span>
         </div>
         <span className="text-[var(--hub-ink-3)]">{sectionOpen ? '−' : '+'}</span>
       </div>
@@ -227,22 +246,6 @@ const ModelVectorSettings: React.FC = () => {
             <span style={{ fontSize: 12.5, color: mvRunning ? 'var(--hub-ink)' : 'var(--hub-ink-3)' }}>
               {statusText}
             </span>
-          </span>
-          <span
-            className="hub-tag"
-            style={smartRoutingConfig.enabled
-              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
-              : { opacity: 0.45 }}
-          >
-            {t('settings.mvSourceSmartRouting')}
-          </span>
-          <span
-            className="hub-tag"
-            style={ragEnabled
-              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
-              : { opacity: 0.45 }}
-          >
-            RAG
           </span>
           {status?.initializing && (
             <Loader2 size={12} className="animate-spin text-[var(--hub-ink-3)]" />

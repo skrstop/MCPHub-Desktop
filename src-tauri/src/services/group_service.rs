@@ -11,12 +11,13 @@ fn row_to_group(r: &sqlx::sqlite::SqliteRow) -> Result<Group> {
         id: r.try_get("id")?,
         name: r.try_get("name")?,
         description: r.try_get("description").ok().flatten(),
+        instructions: r.try_get("instructions").ok().flatten(),
         servers,
         created_at: r.try_get("created_at")?,
     })
 }
 
-const SELECT_COLS: &str = "id, name, description, servers, created_at";
+const SELECT_COLS: &str = "id, name, description, instructions, servers, created_at";
 
 pub async fn list_all() -> Result<Vec<Group>> {
     let rows = sqlx::query(sqlx::AssertSqlSafe(&*format!(
@@ -154,16 +155,21 @@ pub async fn find_by_name_or_id(name_or_id: &str) -> Result<Option<Group>> {    
 pub async fn create(payload: &GroupPayload) -> Result<Group> {
     let id = Uuid::new_v4().to_string();
     let servers_json = serde_json::to_string(&payload.servers)?;
-    let fts_text = group_fts_text(&payload.name, payload.description.as_deref());
+    let fts_text = group_fts_text(
+        &payload.name,
+        payload.description.as_deref(),
+        payload.instructions.as_deref(),
+    );
 
     let mut tx = db::pool().begin().await?;
     sqlx::query(
-        "INSERT INTO groups (id, name, description, servers) \
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO groups (id, name, description, instructions, servers) \
+         VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&payload.name)
     .bind(&payload.description)
+    .bind(&payload.instructions)
     .bind(&servers_json)
     .execute(&mut *tx)
     .await
@@ -197,7 +203,11 @@ pub async fn create(payload: &GroupPayload) -> Result<Group> {
 
 pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
     let servers_json = serde_json::to_string(&payload.servers)?;
-    let fts_text = group_fts_text(&payload.name, payload.description.as_deref());
+    let fts_text = group_fts_text(
+        &payload.name,
+        payload.description.as_deref(),
+        payload.instructions.as_deref(),
+    );
 
     let mut tx = db::pool().begin().await?;
     // Capture the old name INSIDE the tx so the bearer-key cascade rewrites
@@ -210,10 +220,11 @@ pub async fn update(id: &str, payload: &GroupPayload) -> Result<Group> {
         .await?
         .and_then(|r| r.try_get("name").ok());
     let result = sqlx::query(
-        "UPDATE groups SET name=?, description=?, servers=? WHERE id=?",
+        "UPDATE groups SET name=?, description=?, instructions=?, servers=? WHERE id=?",
     )
     .bind(&payload.name)
     .bind(&payload.description)
+    .bind(&payload.instructions)
     .bind(&servers_json)
     .bind(id)
     .execute(&mut *tx)
@@ -285,12 +296,16 @@ pub async fn delete(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// groups 的 FTS 可搜索文本（P3）：name + description
-fn group_fts_text(name: &str, description: Option<&str>) -> String {
-    match description {
-        Some(d) if !d.is_empty() => format!("{name} {d}"),
-        _ => name.to_string(),
+/// groups 的 FTS 可搜索文本（P3）：name + description + instructions
+fn group_fts_text(name: &str, description: Option<&str>, instructions: Option<&str>) -> String {
+    let mut parts = vec![name.to_string()];
+    if let Some(d) = description.filter(|d| !d.is_empty()) {
+        parts.push(d.to_string());
     }
+    if let Some(i) = instructions.filter(|i| !i.is_empty()) {
+        parts.push(i.to_string());
+    }
+    parts.join(" ")
 }
 
 /// Rewrite `old_name` → `new_name` in every bearer key's `allowed_groups`
@@ -350,4 +365,75 @@ async fn cascade_bearer_groups_remove_tx(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn payload(name: &str, instructions: Option<&str>) -> GroupPayload {
+        GroupPayload {
+            name: name.to_string(),
+            description: Some("test group".to_string()),
+            instructions: instructions.map(|s| s.to_string()),
+            servers: vec![json!({"name": "srv-a", "tools": "all"})],
+        }
+    }
+
+    /// #1340 parity: instructions must round-trip through create/update,
+    /// feed the FTS searchable text, and clear back to None.
+    #[tokio::test]
+    async fn instructions_round_trip_update_and_fts() {
+        crate::db::ensure_test_pool().await;
+        let name = format!("sv_grp_{}", uuid::Uuid::new_v4().simple());
+        let token = format!("svinstr{}", uuid::Uuid::new_v4().simple());
+
+        // Create with instructions.
+        let created = create(&payload(&name, Some(&format!("Always {} first", token))))
+            .await
+            .unwrap();
+        assert_eq!(created.instructions.as_deref(), Some(format!("Always {} first", token).as_str()));
+
+        // Read back via find_by_name_or_id (by id and by name).
+        let by_id = find_by_name_or_id(&created.id).await.unwrap().unwrap();
+        assert_eq!(by_id.instructions.as_deref(), created.instructions.as_deref());
+        let by_name = find_by_name_or_id(&name).await.unwrap().unwrap();
+        assert_eq!(by_name.instructions.as_deref(), created.instructions.as_deref());
+
+        // Instructions feed the FTS text: searching the unique token finds the group.
+        let page = search_paged(&token, 0, 10).await.unwrap();
+        assert!(
+            page.items.iter().any(|g| g.id == created.id),
+            "unique instruction token must be FTS-searchable"
+        );
+
+        // Update rotates the instructions.
+        let new_token = format!("svinstr{}", uuid::Uuid::new_v4().simple());
+        let mut p = payload(&name, Some(&new_token));
+        p.description = created.description.clone();
+        let updated = update(&created.id, &p).await.unwrap();
+        assert_eq!(updated.instructions.as_deref(), Some(new_token.as_str()));
+        let page2 = search_paged(&new_token, 0, 10).await.unwrap();
+        assert!(page2.items.iter().any(|g| g.id == created.id));
+
+        // Update to None clears the field.
+        let mut p2 = payload(&name, None);
+        p2.description = created.description.clone();
+        let cleared = update(&created.id, &p2).await.unwrap();
+        assert!(cleared.instructions.is_none());
+
+        delete(&created.id).await.unwrap();
+        assert!(find_by_name_or_id(&created.id).await.unwrap().is_none());
+    }
+
+    /// Create without instructions → None (column default path).
+    #[tokio::test]
+    async fn create_without_instructions_is_none() {
+        crate::db::ensure_test_pool().await;
+        let name = format!("sv_grp_{}", uuid::Uuid::new_v4().simple());
+        let created = create(&payload(&name, None)).await.unwrap();
+        assert!(created.instructions.is_none());
+        delete(&created.id).await.unwrap();
+    }
 }

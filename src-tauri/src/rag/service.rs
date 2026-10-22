@@ -1636,6 +1636,7 @@ pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
     tool_definitions()
         .into_iter()
         .map(|v| Tool {
+                    hidden_params: None,
             name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
             description: v.get("description").and_then(|d| d.as_str()).map(String::from),
             input_schema: v.get("inputSchema").cloned().unwrap_or(json!({})),

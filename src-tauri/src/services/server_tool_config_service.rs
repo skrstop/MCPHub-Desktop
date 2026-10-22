@@ -6,23 +6,10 @@ use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub async fn get_config(
-    server_name: &str,
-    item_type: &str,
-    item_name: &str,
-) -> Result<Option<ServerToolConfig>> {
-    let row = sqlx::query(
-        "SELECT id, server_name, item_type, item_name, enabled, description, pinned, created_at, updated_at
-         FROM server_tool_config
-         WHERE server_name=? AND item_type=? AND item_name=?",
-    )
-    .bind(server_name)
-    .bind(item_type)
-    .bind(item_name)
-    .fetch_optional(db::pool())
-    .await?;
+const SELECT_COLS: &str = "id, server_name, item_type, item_name, enabled, description, pinned, hidden_params, created_at, updated_at";
 
-    Ok(row.map(|r| ServerToolConfig {
+fn row_to_config(r: &sqlx::sqlite::SqliteRow) -> ServerToolConfig {
+    ServerToolConfig {
         id: r.try_get("id").unwrap_or_default(),
         server_name: r.try_get("server_name").unwrap_or_default(),
         item_type: r.try_get("item_type").unwrap_or_default(),
@@ -30,9 +17,33 @@ pub async fn get_config(
         enabled: r.try_get::<i64, _>("enabled").unwrap_or(1) != 0,
         description: r.try_get("description").ok(),
         pinned: r.try_get::<i64, _>("pinned").unwrap_or(0) != 0,
+        hidden_params: r
+            .try_get::<Option<String>, _>("hidden_params")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()),
         created_at: r.try_get("created_at").unwrap_or_default(),
         updated_at: r.try_get("updated_at").unwrap_or_default(),
-    }))
+    }
+}
+
+pub async fn get_config(
+    server_name: &str,
+    item_type: &str,
+    item_name: &str,
+) -> Result<Option<ServerToolConfig>> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(&*format!(
+        "SELECT {SELECT_COLS}
+         FROM server_tool_config
+         WHERE server_name=? AND item_type=? AND item_name=?"
+    )))
+    .bind(server_name)
+    .bind(item_type)
+    .bind(item_name)
+    .fetch_optional(db::pool())
+    .await?;
+
+    Ok(row.map(|r| row_to_config(&r)))
 }
 
 /// True when ANY tool description override exists — a cheap single-row
@@ -50,44 +61,46 @@ pub async fn any_description_override() -> bool {
     .unwrap_or(false)
 }
 
+/// True when ANY tool has configured hidden parameters — a cheap single-row
+/// probe mirroring any_description_override, used to keep the smart-search
+/// hot path from skipping the live-list refresh when schemas must change.
+pub async fn any_hidden_params() -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM server_tool_config
+         WHERE item_type='tool' AND hidden_params IS NOT NULL AND hidden_params != '[]'
+         LIMIT 1",
+    )
+    .fetch_optional(db::pool())
+    .await
+    .map(|o| o.is_some())
+    .unwrap_or(false)
+}
+
 /// List all overrides for a given server (and optionally item_type).
 pub async fn list_for_server(
     server_name: &str,
     item_type: Option<&str>,
 ) -> Result<Vec<ServerToolConfig>> {
     let rows = if let Some(t) = item_type {
-        sqlx::query(
-            "SELECT id, server_name, item_type, item_name, enabled, description, pinned, created_at, updated_at
-             FROM server_tool_config WHERE server_name=? AND item_type=?",
-        )
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "SELECT {SELECT_COLS}
+             FROM server_tool_config WHERE server_name=? AND item_type=?"
+        )))
         .bind(server_name)
         .bind(t)
         .fetch_all(db::pool())
         .await?
     } else {
-        sqlx::query(
-            "SELECT id, server_name, item_type, item_name, enabled, description, pinned, created_at, updated_at
-             FROM server_tool_config WHERE server_name=?",
-        )
+        sqlx::query(sqlx::AssertSqlSafe(&*format!(
+            "SELECT {SELECT_COLS}
+             FROM server_tool_config WHERE server_name=?"
+        )))
         .bind(server_name)
         .fetch_all(db::pool())
         .await?
     };
 
-    Ok(rows
-        .iter()
-        .map(|r| ServerToolConfig {
-            id: r.try_get("id").unwrap_or_default(),
-            server_name: r.try_get("server_name").unwrap_or_default(),
-            item_type: r.try_get("item_type").unwrap_or_default(),
-            item_name: r.try_get("item_name").unwrap_or_default(),
-            enabled: r.try_get::<i64, _>("enabled").unwrap_or(1) != 0,
-            description: r.try_get("description").ok(),
-            pinned: r.try_get::<i64, _>("pinned").unwrap_or(0) != 0,
-            created_at: r.try_get("created_at").unwrap_or_default(),
-            updated_at: r.try_get("updated_at").unwrap_or_default(),
-        })
-        .collect())
+    Ok(rows.iter().map(row_to_config).collect())
 }
 
 /// Upsert an override (insert or update on conflict).
@@ -268,6 +281,136 @@ pub async fn list_pinned_tools(server_name: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Set the top-level input parameters of a tool that models do not see
+/// (#1343 parity). An empty list removes the setting. The stored list is
+/// deduplicated (order preserved); required-parameter filtering happens at
+/// read time against the live schema, so a stored name that later becomes
+/// required simply stops taking effect instead of corrupting the setting.
+/// Returns the effective stored list.
+pub async fn update_hidden_params(
+    server_name: &str,
+    item_name: &str,
+    params: Vec<String>,
+) -> Result<Vec<String>> {
+    let previous = get_config(server_name, "tool", item_name).await.ok().flatten();
+    // Dedupe, preserve first-occurrence order.
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<String> = params.into_iter().filter(|p| seen.insert(p.clone())).collect();
+    let stored: Option<Vec<String>> =
+        if deduped.is_empty() { None } else { Some(deduped) };
+    let stored_json = stored
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()));
+
+    // Preserve enabled/description/pinned: only this column is touched.
+    sqlx::query(
+        "INSERT INTO server_tool_config (id, server_name, item_type, item_name, enabled, description, hidden_params)
+         VALUES (?, ?, ?, ?, 1, NULL, ?)
+         ON CONFLICT(server_name, item_type, item_name)
+         DO UPDATE SET hidden_params=excluded.hidden_params, updated_at=datetime('now')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(server_name)
+    .bind("tool")
+    .bind(item_name)
+    .bind(&stored_json)
+    .execute(db::pool())
+    .await?;
+
+    let changed = previous
+        .as_ref()
+        .map(|prev| prev.hidden_params != stored)
+        .unwrap_or(true);
+    if changed {
+        crate::services::subscription_hub::notify_tools_list_changed().await;
+    }
+    Ok(stored.unwrap_or_default())
+}
+
+/// The configured hidden names that take effect: required ones never do
+/// (origin `getEffectiveHiddenParams` parity).
+pub fn effective_hidden_params(schema: Option<&serde_json::Value>, hidden: &[String]) -> Vec<String> {
+    if hidden.is_empty() {
+        return vec![];
+    }
+    let required: Vec<&serde_json::Value> = schema
+        .and_then(|s| s.get("required"))
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    hidden
+        .iter()
+        .filter(|n| !required.iter().any(|r| r.as_str() == Some(n.as_str())))
+        .cloned()
+        .collect()
+}
+
+/// Remove the hidden top-level properties from an input schema in place
+/// (origin `hideSchemaParams` parity). No-op when nothing is hidden or the
+/// schema has no properties object.
+pub fn hide_schema_params(schema: &mut serde_json::Value, hidden: &[String]) {
+    if hidden.is_empty() {
+        return;
+    }
+    if let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for name in hidden {
+            props.remove(name);
+        }
+    }
+}
+
+/// Apply a tool's configured hidden parameters to its projection:
+/// `tool.hidden_params` reports the CONFIGURED list (dashboard checkbox
+/// state), while the schema has the EFFECTIVE list removed (required names
+/// stay visible). Origin `applyHiddenParams` + projection parity.
+pub fn apply_hidden_params_to_tool(tool: &mut Tool, configured: &[String]) {
+    if configured.is_empty() {
+        return;
+    }
+    tool.hidden_params = Some(configured.to_vec());
+    let effective = effective_hidden_params(Some(&tool.input_schema), configured);
+    hide_schema_params(&mut tool.input_schema, &effective);
+}
+
+/// Call arguments without the tool's hidden parameters, so a model that
+/// guesses one cannot reach it; the upstream default applies instead
+/// (origin `removeHiddenArguments` parity). Looks up the configured list by
+/// bare tool name and the live schema from the shared pool cache; a missing
+/// config, an empty list, or an unknown tool returns the arguments as-is.
+pub async fn strip_hidden_arguments(
+    server_name: &str,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let configured = get_config(server_name, "tool", tool_name)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.hidden_params)
+        .unwrap_or_default();
+    let schema = crate::mcp::pool::cached_tool_schema(server_name, tool_name).await;
+    let effective = effective_hidden_params(schema.as_ref(), &configured);
+    remove_hidden_arguments(args, &effective)
+}
+
+/// Pure core of [`strip_hidden_arguments`]: drop the effective hidden names
+/// from object-shaped arguments; non-object arguments pass through untouched.
+pub fn remove_hidden_arguments(args: serde_json::Value, effective: &[String]) -> serde_json::Value {
+    if effective.is_empty() {
+        return args;
+    }
+    match args {
+        serde_json::Value::Object(map) => {
+            let mut map = map;
+            for name in effective {
+                map.remove(name);
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other,
+    }
+}
+
 /// Filter and apply description overrides to a server's tool list.
 /// Tools disabled via server_tool_config are excluded; description overrides are applied.
 pub async fn apply_tool_filters(server_name: &str, tools: Vec<Tool>) -> Result<Vec<Tool>> {
@@ -296,8 +439,192 @@ pub async fn apply_tool_filters(server_name: &str, tools: Vec<Tool>) -> Result<V
                     // trigger a re-embed (origin #1198 parity).
                     tool.description_overridden = true;
                 }
+                // #1343: hidden parameters — schema models receive loses the
+                // effective names; the projection reports the configured list.
+                if let Some(h) = cfg.hidden_params.as_ref().filter(|h| !h.is_empty()) {
+                    apply_hidden_params_to_tool(&mut tool, h);
+                }
             }
             tool
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::server::Tool;
+    use serde_json::json;
+
+    fn tool(name: &str, schema: serde_json::Value) -> Tool {
+        Tool {
+            name: name.to_string(),
+            description: None,
+            input_schema: schema,
+            server_name: "srv".into(),
+            enabled: true,
+            annotations: None,
+            output_schema: None,
+            title: None,
+            execution: None,
+            icons: None,
+            meta: None,
+            hidden_params: None,
+            description_overridden: false,
+        }
+    }
+
+    #[test]
+    fn effective_hidden_filters_required_and_empty() {
+        let schema = json!({"properties": {"a": {}, "b": {}}, "required": ["a"]});
+        // Required names never take effect.
+        assert_eq!(
+            effective_hidden_params(Some(&schema), &["a".into(), "b".into()]),
+            vec!["b".to_string()]
+        );
+        // No required array → everything takes effect.
+        let schema2 = json!({"properties": {"a": {}}});
+        assert_eq!(
+            effective_hidden_params(Some(&schema2), &["a".into()]),
+            vec!["a".to_string()]
+        );
+        // Empty configured list → nothing.
+        assert!(effective_hidden_params(Some(&schema), &[]).is_empty());
+        // Missing schema → everything takes effect (store as given).
+        assert_eq!(
+            effective_hidden_params(None, &["x".into()]),
+            vec!["x".to_string()]
+        );
+    }
+
+    #[test]
+    fn hide_schema_params_removes_only_top_level_properties() {
+        let mut schema = json!({
+            "properties": {"a": {}, "b": {"nested": {"a": {}}}},
+            "required": ["a"]
+        });
+        hide_schema_params(&mut schema, &["a".into(), "ghost".into()]);
+        assert!(schema["properties"].get("a").is_none());
+        // Nested same-name objects are untouched.
+        assert!(schema["properties"]["b"]["nested"].get("a").is_some());
+        // required array is untouched (visibility filtering is read-time).
+        assert_eq!(schema["required"], json!(["a"]));
+        // No properties object → no-op, no panic.
+        let mut bare = json!({"type": "object"});
+        hide_schema_params(&mut bare, &["a".into()]);
+        assert_eq!(bare, json!({"type": "object"}));
+        // Empty hidden → no-op.
+        let mut s2 = json!({"properties": {"a": {}}});
+        hide_schema_params(&mut s2, &[]);
+        assert!(s2["properties"].get("a").is_some());
+    }
+
+    #[test]
+    fn apply_hidden_params_to_tool_reports_configured_hides_effective() {
+        let schema = json!({"properties": {"a": {}, "b": {}}, "required": ["a"]});
+        let mut t = tool("scrape", schema);
+        apply_hidden_params_to_tool(&mut t, &["a".into(), "b".into()]);
+        // Projection reports the CONFIGURED list (dashboard checkbox state).
+        assert_eq!(t.hidden_params, Some(vec!["a".into(), "b".into()]));
+        // Schema loses only the EFFECTIVE name (required `a` stays visible).
+        assert!(t.input_schema["properties"].get("a").is_some());
+        assert!(t.input_schema["properties"].get("b").is_none());
+        // Empty configured list leaves everything alone.
+        let mut t2 = tool("x", json!({"properties": {"a": {}}}));
+        apply_hidden_params_to_tool(&mut t2, &[]);
+        assert!(t2.hidden_params.is_none());
+        assert!(t2.input_schema["properties"].get("a").is_some());
+    }
+
+    #[tokio::test]
+    async fn update_hidden_params_round_trip_dedupe_and_clear() {
+        crate::db::ensure_test_pool().await;
+        let server = format!("sv_hp_{}", uuid::Uuid::new_v4().simple());
+        let item = format!("tool_{}", uuid::Uuid::new_v4().simple());
+
+        // Seed a row with a description override (must be preserved).
+        update_description(&server, "tool", &item, Some("user override"))
+            .await
+            .unwrap();
+
+        // Set with duplicates → deduped, order preserved.
+        let stored = update_hidden_params(&server, &item, vec!["b".into(), "a".into(), "b".into()])
+            .await
+            .unwrap();
+        assert_eq!(stored, vec!["b".to_string(), "a".to_string()]);
+        let cfg = get_config(&server, "tool", &item).await.unwrap().unwrap();
+        assert_eq!(cfg.hidden_params, Some(vec!["b".into(), "a".into()]));
+        // Description override survived the hidden-params write.
+        assert_eq!(cfg.description.as_deref(), Some("user override"));
+
+        // Probe agrees.
+        assert!(any_hidden_params().await);
+
+        // Empty list clears the setting (NULL), other fields intact.
+        let cleared = update_hidden_params(&server, &item, vec![]).await.unwrap();
+        assert!(cleared.is_empty());
+        let cfg2 = get_config(&server, "tool", &item).await.unwrap().unwrap();
+        assert!(cfg2.hidden_params.is_none());
+        assert_eq!(cfg2.description.as_deref(), Some("user override"));
+
+        // apply_tool_filters applies the projection end-to-end.
+        update_hidden_params(&server, &item, vec!["b".into()]).await.unwrap();
+        let mut t = tool(&item, json!({"properties": {"a": {}, "b": {}}}));
+        t.server_name = server.clone();
+        let out = apply_tool_filters(&server, vec![t]).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].hidden_params, Some(vec!["b".into()]));
+        assert!(out[0].input_schema["properties"].get("b").is_none());
+        assert!(out[0].input_schema["properties"].get("a").is_some());
+
+        // Cleanup.
+        sqlx::query("DELETE FROM server_tool_config WHERE server_name=?")
+            .bind(&server)
+            .execute(db::pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn strip_hidden_arguments_noop_paths() {
+        crate::db::ensure_test_pool().await;
+        let server = format!("sv_hp_{}", uuid::Uuid::new_v4().simple());
+        let args = json!({"a": 1, "b": 2});
+
+        // No config row → as-is.
+        let out = strip_hidden_arguments(&server, "t", args.clone()).await;
+        assert_eq!(out, args);
+
+        // Config with empty list → as-is.
+        update_hidden_params(&server, "t", vec![]).await.unwrap();
+        let out = strip_hidden_arguments(&server, "t", args.clone()).await;
+        assert_eq!(out, args);
+
+        // Config with names but no pool entry (unknown schema) → effective
+        // list is the configured list; keys are still dropped (store-as-given
+        // semantics for disconnected servers).
+        update_hidden_params(&server, "t", vec!["a".into()]).await.unwrap();
+        let out = strip_hidden_arguments(&server, "t", args.clone()).await;
+        assert_eq!(out, json!({"b": 2}));
+
+        // Non-object arguments pass through untouched.
+        let arr = json!([1, 2]);
+        let out = strip_hidden_arguments(&server, "t", arr.clone()).await;
+        assert_eq!(out, arr);
+
+        // Pure core: empty effective list is a no-op; object strip drops only
+        // the named keys.
+        assert_eq!(remove_hidden_arguments(args.clone(), &[]), args);
+        assert_eq!(
+            remove_hidden_arguments(args.clone(), &["a".into()]),
+            json!({"b": 2})
+        );
+        assert_eq!(remove_hidden_arguments(arr.clone(), &["a".into()]), arr);
+
+        sqlx::query("DELETE FROM server_tool_config WHERE server_name=?")
+            .bind(&server)
+            .execute(db::pool())
+            .await
+            .unwrap();
+    }
 }
