@@ -9,8 +9,8 @@ use anyhow::Result;
 use tauri::AppHandle;
 
 use crate::models::rag::{
-    BatchPreview, RagChunkPage, RagDoc, RagDocInfo, RagFolderScan, RagPickedFile, RagSearchResult,
-    RagSettings, RagStatus, RagTagPage, RagTagStat, RagUpdateCheck,
+    BatchPreview, RagChunkPage, RagDoc, RagDocHistoryVersion, RagDocInfo, RagFolderScan,
+    RagPickedFile, RagSearchResult, RagSettings, RagStatus, RagTagPage, RagTagStat, RagUpdateCheck,
 };
 use crate::rag::service;
 
@@ -667,6 +667,38 @@ pub async fn open_rag_doc_source_file(
     service::open_doc_source(&app, &id).await.map_err(|e| e.to_string())
 }
 
+/// Open one HISTORY version's archived RAW original with the OS default
+/// application ("查看源文件" in the history detail dialog).
+#[tauri::command]
+pub async fn open_rag_doc_history_source(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    doc_id: String,
+    version: u32,
+) -> Result<(), String> {
+    // Same arbitrary-path open surface as open_rag_doc_source_file.
+    crate::commands::config::require_admin(&session).await?;
+    service::open_doc_history_source(&app, &doc_id, version)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Reveal one HISTORY version's archived files in the OS file manager
+/// ("文件跳转" in the history dialog).
+#[tauri::command]
+pub async fn open_rag_doc_history_location(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    doc_id: String,
+    version: u32,
+) -> Result<(), String> {
+    // Same arbitrary-path reveal surface as open_rag_file_location.
+    crate::commands::config::require_admin(&session).await?;
+    service::open_doc_history_location(&app, &doc_id, version)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Re-embed every uploaded doc with the currently-loaded model, after a model
 /// swap recreated the vector table (embedding dim changed). Drives the same
 /// upload overlay the frontend uses for imports: emits `rag://reindex-progress`
@@ -750,4 +782,57 @@ pub async fn rag_model_download_cancel(
 ) -> Result<bool, String> {
     crate::commands::config::require_admin(&session).await?;
     Ok(service::cancel_model_download(&size))
+}
+
+// ─── 文档历史版本 ─────────────────────────────────────────────────────────
+
+/// List a doc's historical versions, newest first.
+#[tauri::command]
+pub async fn list_rag_doc_history(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    doc_id: String,
+) -> Result<Vec<RagDocHistoryVersion>, String> {
+    // History content is a read-exfil channel like get_rag_doc — admin-gated.
+    crate::commands::config::require_admin(&session).await?;
+    service::list_doc_history(&app, &doc_id).await.map_err(|e| e.to_string())
+}
+
+/// Read one historical version's full content (View-dialog shape).
+#[tauri::command]
+pub async fn get_rag_doc_history(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    doc_id: String,
+    version: u32,
+) -> Result<RagDoc, String> {
+    crate::commands::config::require_admin(&session).await?;
+    service::read_doc_history(&app, &doc_id, version).await.map_err(|e| e.to_string())
+}
+
+/// Batch-delete historical versions of a doc; returns the removed count.
+#[tauri::command]
+pub async fn delete_rag_doc_history(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    doc_id: String,
+    versions: Vec<u32>,
+) -> Result<u32, String> {
+    crate::commands::config::require_admin(&session).await?;
+    service::delete_doc_history(&app, &doc_id, &versions).await.map_err(|e| e.to_string())
+}
+
+/// Diff two versions of a doc (to_version omitted = current content).
+#[tauri::command]
+pub async fn diff_rag_doc_history(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    doc_id: String,
+    from_version: u32,
+    to_version: Option<u32>,
+) -> Result<String, String> {
+    crate::commands::config::require_admin(&session).await?;
+    service::diff_doc_history(&app, &doc_id, from_version, to_version)
+        .await
+        .map_err(|e| e.to_string())
 }

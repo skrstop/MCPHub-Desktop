@@ -89,6 +89,8 @@ uuid = { version = "1", features = ["v4"] }
 # fingerprint stored in DocMeta.md5). Lightweight; matches the "md5" naming in
 # the feature spec.
 md-5 = "0.10"
+# Local text diff for the RAG doc-history compare tools (unified diff output).
+similar = "2"
 
 # scrypt KDF for the smart-routing toolset hash (origin parity: N=2048, r=8,
 # p=1, 32 bytes over a stable-serialized normalized tool list).

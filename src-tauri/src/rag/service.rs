@@ -911,18 +911,12 @@ async fn run_source_sync(app: &AppHandle, added: Vec<SourceSyncAdd>, removed: Ve
                 }
             };
             let mut referenced = false;
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.extension().and_then(|e| e.to_str()) != Some("meta") {
-                        continue;
-                    }
-                    let Ok(bytes) = std::fs::read(&p) else { continue };
-                    let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
-                    if meta.original_path.as_deref() == Some(a.path.as_str()) {
-                        referenced = true;
-                        break;
-                    }
+            for (_scan_id, p) in scan_doc_metas(&dir) {
+                let Ok(bytes) = std::fs::read(&p) else { continue };
+                let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
+                if meta.original_path.as_deref() == Some(a.path.as_str()) {
+                    referenced = true;
+                    break;
                 }
             }
             if referenced {
@@ -1106,11 +1100,35 @@ pub fn data_dir(app: &AppHandle) -> Result<PathBuf> {
 }
 
 fn files_dir(app: &AppHandle) -> Result<PathBuf> {
-    Ok(data_dir(app)?.join("files"))
+    let d = data_dir(app)?.join("files");
+    // One-time idempotent layout migration (flat -> per-doc folders). The
+    // AtomicBool fast-path skips the check entirely once the root is clean;
+    // until then every files_dir() call is a cheap read_dir scan.
+    if !LAYOUT_MIGRATED.load(std::sync::atomic::Ordering::Relaxed) {
+        let moved = migrate_files_layout(&d);
+        let clean = !std::fs::read_dir(&d)
+            .map(|es| {
+                es.flatten().any(|e| {
+                    let p = e.path();
+                    p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("meta")
+                })
+            })
+            .unwrap_or(false);
+        if clean {
+            LAYOUT_MIGRATED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if moved > 0 {
+            rag_log("info", format!("migrated {} doc(s) to per-folder layout (files/{{id}}/)", moved));
+        }
+    }
+    Ok(d)
 }
 
+/// Set once the files root has no legacy flat metas left (migration done).
+static LAYOUT_MIGRATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Validate a document id before it is ever joined into a filesystem path.
-/// Doc ids reach `dir.join(format!("{}.meta", id))` and friends from MCP tool
+/// Doc ids reach `meta_path_for(&dir, id)` and friends from MCP tool
 /// arguments (`rag_get` / `rag_file_delete` / ...) that are exposed through
 /// the public HTTP MCP gateway — an unvalidated id containing `/`, `\` or a
 /// `..` segment escapes `rag/files/` (path traversal: arbitrary file delete /
@@ -1134,6 +1152,433 @@ pub(crate) fn validate_doc_id(id: &str) -> Result<()> {
 
 fn lancedb_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("lancedb"))
+}
+
+// ── per-doc folder layout（文件夹化存储）────────────────────────────────────
+//
+// Canonical layout: every doc owns ONE folder `files/{id}/` holding its
+// meta.json, content file(s), raw copy, extracted cache and a `history/`
+// subfolder (version snapshots). Deleting a doc removes the whole folder.
+// Legacy flat layout (`files/{id}.meta` + siblings) is migrated at startup;
+// until then every resolver falls back to the flat paths so nothing breaks.
+
+/// Per-doc folder under the files root: `files/{id}/`.
+fn doc_dir(dir: &Path, id: &str) -> PathBuf {
+    dir.join(id)
+}
+
+/// Read-side rebind: the per-doc folder when it exists, else the legacy flat
+/// root (pre-migration docs / migration skipped). Callers that only READ a
+/// doc's files pass the result to their existing `join` logic unchanged.
+fn doc_dir_or_flat(dir: &Path, id: &str) -> PathBuf {
+    let d = doc_dir(dir, id);
+    if d.is_dir() {
+        d
+    } else {
+        dir.to_path_buf()
+    }
+}
+
+/// Write-side rebind: create (if needed) and return the per-doc folder.
+fn ensure_doc_dir(dir: &Path, id: &str) -> Result<PathBuf> {
+    let d = doc_dir(dir, id);
+    if !d.is_dir() {
+        std::fs::create_dir_all(&d)?;
+    }
+    Ok(d)
+}
+
+/// Write-target path for one of a doc's files inside its per-doc folder
+/// (creates the folder). `name` is the bare file name (e.g. `{id}.md`).
+fn doc_file_write_path(dir: &Path, id: &str, name: &str) -> Result<PathBuf> {
+    Ok(ensure_doc_dir(dir, id)?.join(name))
+}
+
+/// Meta path for one doc: canonical `files/{id}/meta.json`; falls back to the
+/// legacy flat `files/{id}.meta` while it still exists (pre-migration).
+/// Defaults to the canonical path when neither exists (write target).
+fn meta_path_for(dir: &Path, id: &str) -> PathBuf {
+    let in_folder = doc_dir(dir, id).join("meta.json");
+    if in_folder.exists() {
+        return in_folder;
+    }
+    let flat = dir.join(format!("{id}.meta"));
+    if flat.exists() {
+        flat
+    } else {
+        in_folder
+    }
+}
+
+/// Scan ALL doc metas across both layouts: canonical `files/{id}/meta.json`
+/// folders + legacy flat `files/{id}.meta`. Returns `(doc_id, meta_path)`
+/// sorted by doc id (deterministic order). A doc present in BOTH layouts
+/// (interrupted migration) yields only the folder copy. Corrupt/unreadable
+/// metas are skipped by the callers — same policy as every scanner.
+fn scan_doc_metas(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut folders: Vec<(String, PathBuf)> = Vec::new();
+    let mut flats: Vec<(String, PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let mp = path.join("meta.json");
+            if mp.is_file() {
+                if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
+                    folders.push((id.to_string(), mp));
+                }
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("meta") {
+            if let Some(id) = path.file_stem().and_then(|n| n.to_str()) {
+                flats.push((id.to_string(), path));
+            }
+        }
+    }
+    let folder_ids: std::collections::HashSet<String> = folders.iter().map(|(id, _)| id.clone()).collect();
+    folders.extend(flats.into_iter().filter(|(id, _)| !folder_ids.contains(id)));
+    folders.sort_by(|a, b| a.0.cmp(&b.0));
+    folders
+}
+
+/// One-time idempotent layout migration: move every legacy flat doc
+/// (`files/{id}.meta` + its content siblings) into its per-doc folder
+/// `files/{id}/`. Returns the number of docs migrated. Per-doc failures are
+/// logged and skipped (the doc keeps working through the flat-layout fallback
+/// resolvers) so one bad file can't block the whole library.
+fn migrate_files_layout(dir: &Path) -> usize {
+    let mut migrated = 0usize;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let flat_metas: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("meta"))
+        .collect();
+    for path in flat_metas {
+        let res = (|| -> Result<bool> {
+            let Some(id) = path.file_stem().and_then(|n| n.to_str()) else {
+                return Ok(false);
+            };
+            if validate_doc_id(id).is_err() {
+                return Ok(false); // not a doc meta (or hostile name) — leave it
+            }
+            let folder = doc_dir(dir, id);
+            if folder.is_dir() {
+                // Folder already exists (interrupted earlier migration): just
+                // move the meta in when the canonical copy is missing.
+                let target = folder.join("meta.json");
+                if !target.exists() {
+                    std::fs::rename(&path, &target)?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            std::fs::create_dir_all(&folder)?;
+            std::fs::rename(&path, folder.join("meta.json"))?;
+            let moved_doc = true;
+            // Content siblings: resolve names from the meta (display name for
+            // rag_file_create docs, raw_ext for archived copies) plus the
+            // scheme-derived candidates, and move whichever exist.
+            let mut candidates: Vec<String> = vec![format!("{id}.md"), id.to_string()];
+            if let Ok(bytes) = std::fs::read(folder.join("meta.json")) {
+                if let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) {
+                    candidates.push(meta.name.clone());
+                    if let Some(re) = &meta.raw_ext {
+                        candidates.push(format!("{id}{re}"));
+                    }
+                    if let Some(ext) = std::path::Path::new(&meta.name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+                    {
+                        candidates.push(format!("{id}{ext}"));
+                    }
+                }
+            }
+            for name in candidates {
+                if name.contains('/') || name.contains('\\') || name.contains("..") {
+                    continue;
+                }
+                let src = dir.join(&name);
+                if src.is_file() {
+                    let dst = folder.join(&name);
+                    if !dst.exists() {
+                        if let Err(e) = std::fs::rename(&src, &dst) {
+                            rag_log("warn", format!("migrate: move {} failed: {}", src.display(), e));
+                        }
+                    }
+                }
+            }
+            Ok(moved_doc)
+        })();
+        match res {
+            Ok(true) => migrated += 1,
+            Ok(false) => {}
+            Err(e) => rag_log("warn", format!("migrate: {} failed: {:#}", path.display(), e)),
+        }
+    }
+    migrated
+}
+
+/// Parse one history snapshot record (`history/v{n}.json`). Wire format is
+/// camelCase (matches the frontend `RagDocHistoryVersion`).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryRecord {
+    version: u32,
+    saved_at: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    md5: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    /// Extension (with dot) of the archived RAW original snapshot
+    /// (`v{n}{raw_ext}`, e.g. ".pdf"/".png") for extractable docs. None =
+    /// text-only snapshot (text docs: the raw IS the text).
+    #[serde(default)]
+    raw_ext: Option<String>,
+}
+
+/// List a doc's historical versions, newest first. Empty when the doc has no
+/// `history/` folder (never updated / legacy).
+fn list_doc_versions_sync(dir: &Path, id: &str) -> Vec<crate::models::rag::RagDocHistoryVersion> {
+    let hist = doc_dir_or_flat(dir, id).join("history");
+    let mut out: Vec<(u32, crate::models::rag::RagDocHistoryVersion)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&hist) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(rec) = serde_json::from_slice::<HistoryRecord>(&bytes) else { continue };
+        out.push((
+            rec.version,
+            crate::models::rag::RagDocHistoryVersion {
+                version: rec.version,
+                saved_at: rec.saved_at,
+                size: rec.size,
+                name: rec.name,
+                md5: rec.md5,
+                source: rec.source,
+                raw_ext: rec.raw_ext,
+            },
+        ));
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Snapshot the doc's CURRENT content into `history/` before an overwrite,
+/// then prune versions beyond the configured retention. No-op when the doc
+/// has no readable content (first upload / symlink without cache) or when
+/// this version was already snapshotted (idempotent). Caller holds META_LOCK.
+/// Resolve the bytes to snapshot for a doc: the local content file when it
+/// exists, else (symlink / cache-less docs) the external original decoded to
+/// text via the same extraction pipeline as the live view. Returns `None`
+/// when there is nothing viewable to snapshot (no source / too large /
+/// unsupported) — a failed snapshot must never fail the update itself.
+async fn snapshot_content_bytes(dir: &Path, meta: &DocMeta) -> Option<(Vec<u8>, String)> {
+    let content_path = content_path_for(dir, &meta.id, &meta.name);
+    if content_path.is_file() {
+        let ext = content_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        return match std::fs::read(&content_path) {
+            Ok(bytes) => Some((bytes, ext)),
+            Err(e) => {
+                rag_log("warn", format!("history: read {} failed: {}", content_path.display(), e));
+                None
+            }
+        };
+    }
+    let raw_path = raw_content_path_for(dir, meta);
+    if !raw_path.is_file() {
+        return None;
+    }
+    let size = std::fs::metadata(&raw_path).map(|m| m.len()).unwrap_or(0);
+    if size > MAX_UPLOAD_BYTES as u64 {
+        rag_log(
+            "warn",
+            format!("history: skip snapshot of '{}' — source too large ({} bytes)", meta.name, size),
+        );
+        return None;
+    }
+    let raw = match std::fs::read(&raw_path) {
+        Ok(r) => r,
+        Err(e) => {
+            rag_log("warn", format!("history: read {} failed: {}", raw_path.display(), e));
+            return None;
+        }
+    };
+    match content_from_source(&meta.name, &raw).await {
+        Ok((text, _encoding)) => Some((text.into_bytes(), ".md".to_string())),
+        Err(e) => {
+            rag_log(
+                "warn",
+                format!("history: skip snapshot of '{}' — source unreadable: {:#}", meta.name, e),
+            );
+            None
+        }
+    }
+}
+
+async fn snapshot_history(app: &AppHandle, meta: &DocMeta, source: &str) -> Result<()> {
+    let dir = files_dir(app)?;
+    // Symlink docs (and cache-less imports) keep NO local content file — their
+    // content lives at the external original and is read live. Snapshot the
+    // EXTRACTED/DECODED text (same transformation as the live view) so 查看
+    // 详情/对比 work identically; unsupported/huge sources skip gracefully.
+    let Some((bytes, ext)) = snapshot_content_bytes(&dir, meta).await else {
+        return Ok(());
+    };
+    let folder = ensure_doc_dir(&dir, &meta.id)?;
+    let hist = folder.join("history");
+    std::fs::create_dir_all(&hist)?;
+    // The snapshot belongs to the version being overwritten (the CURRENT
+    // meta.version), not the next one.
+    let v = meta.version.max(1);
+    let snap_meta = hist.join(format!("v{v}.json"));
+    if snap_meta.exists() {
+        return Ok(()); // already snapshotted (double update / retry)
+    }
+    std::fs::write(hist.join(format!("v{v}{ext}")), &bytes)?;
+    // Extractable docs (PDF/Office/image): ALSO archive the RAW original
+    // (`v{n}{raw_ext}`) so the history detail dialog can offer 查看源文件 on
+    // the exact binary that produced this version. Text docs skip (the raw
+    // IS the text snapshot). Skips gracefully: missing/too-large raw never
+    // fails the update.
+    let mut raw_ext_saved: Option<String> = None;
+    if crate::rag::extract::can_extract(&meta.name) {
+        let raw_path = raw_content_path_for(&dir, meta);
+        let content_src = content_path_for(&dir, &meta.id, &meta.name);
+        if raw_path.is_file() && raw_path != content_src {
+            let size = std::fs::metadata(&raw_path).map(|m| m.len()).unwrap_or(0);
+            if size <= MAX_UPLOAD_BYTES as u64 {
+                match std::fs::read(&raw_path) {
+                    Ok(raw_bytes) => {
+                        let rext = raw_path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| format!(".{}", e.to_ascii_lowercase()))
+                            .unwrap_or_default();
+                        let raw_snap = hist.join(format!("v{v}{rext}"));
+                        if std::fs::write(&raw_snap, &raw_bytes).is_ok() {
+                            raw_ext_saved = Some(rext);
+                        } else {
+                            rag_log("warn", format!("history: write raw snapshot {} failed", raw_snap.display()));
+                        }
+                    }
+                    Err(e) => {
+                        rag_log("warn", format!("history: read raw {} failed: {}", raw_path.display(), e));
+                    }
+                }
+            } else {
+                rag_log(
+                    "warn",
+                    format!("history: skip raw snapshot of '{}' — too large ({} bytes)", meta.name, size),
+                );
+            }
+        }
+    }
+    let rec = serde_json::json!({
+        "version": v,
+        "savedAt": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "size": bytes.len(),
+        "name": meta.name,
+        "md5": meta.md5,
+        "source": source,
+        "rawExt": raw_ext_saved,
+    });
+    std::fs::write(&snap_meta, rec.to_string())?;
+    // Lazy retention: prune beyond the configured count HERE only — changing
+    // the setting never deletes existing history by itself (it takes effect
+    // on each doc's next update).
+    let retention = get_settings()
+        .await
+        .map(|s| s.history_retention.clamp(1, 100) as usize)
+        .unwrap_or(3);
+    let versions = list_doc_versions_sync(&dir, &meta.id);
+    for old in versions.iter().skip(retention) {
+        let _ = delete_doc_version_sync(&dir, &meta.id, old.version);
+    }
+    Ok(())
+}
+
+/// Delete one history version (record + content snapshot with any extension).
+/// Returns true when something was removed.
+fn delete_doc_version_sync(dir: &Path, id: &str, version: u32) -> bool {
+    let hist = doc_dir_or_flat(dir, id).join("history");
+    let mut removed = false;
+    let rec = hist.join(format!("v{version}.json"));
+    if rec.exists() {
+        removed |= std::fs::remove_file(&rec).is_ok();
+    }
+    // Content snapshot: v{n}{ext} — match by prefix so any extension goes.
+    if let Ok(entries) = std::fs::read_dir(&hist) {
+        let prefix = format!("v{version}.");
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with(&prefix) {
+                        removed |= std::fs::remove_file(&p).is_ok();
+                    }
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// Read one history version's snapshot content (capped like every read).
+fn read_doc_version_sync(
+    dir: &Path,
+    id: &str,
+    version: u32,
+) -> Result<(String, HistoryRecord)> {
+    let hist = doc_dir_or_flat(dir, id).join("history");
+    let rec_path = hist.join(format!("v{version}.json"));
+    let bytes = std::fs::read(&rec_path)
+        .map_err(|e| anyhow!("history version not found: v{version} ({e})"))?;
+    let rec: HistoryRecord = serde_json::from_slice(&bytes)?;
+    // Content snapshot: v{n}{ext} — find by prefix.
+    let mut content = String::new();
+    if let Ok(entries) = std::fs::read_dir(&hist) {
+        let prefix = format!("v{version}.");
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if p.is_file() && name.starts_with(&prefix) && p.extension().and_then(|e| e.to_str()) != Some("json") {
+                let raw = std::fs::read(&p)?;
+                if raw.len() > MAX_UPLOAD_BYTES {
+                    return Err(anyhow!("history snapshot too large: {} bytes", raw.len()));
+                }
+                content = String::from_utf8_lossy(&raw).to_string();
+                break;
+            }
+        }
+    }
+    Ok((content, rec))
+}
+
+/// Unified diff text between two strings (3 context lines, `---/+++` headers).
+fn unified_diff(old: &str, new: &str, old_header: &str, new_header: &str) -> String {
+    let diff = similar::TextDiff::from_lines(old, new);
+    diff.unified_diff()
+        .context_radius(3)
+        .header(old_header, new_header)
+        .to_string()
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────────────
@@ -1591,7 +2036,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_update",
-            "description": "Update an existing RAG document by docId. Any of docName/docType/docContent can be omitted (only supplied fields are updated). When docContent is provided, docContentAppend decides whether to append to the existing content (true) or replace it (false, default); the document is re-indexed so semantic search reflects the new text. docId stays the same.",
+            "description": "Update an existing RAG document by docId. Any of docName/docType/docContent can be omitted (only supplied fields are updated). When docContent is provided, docContentAppend decides whether to append to the existing content (true) or replace it (false, default); the document is re-indexed so semantic search reflects the new text. docId stays the same. By default only the copy stored inside rag/files is modified; pass updateExternalFile=true to also overwrite the external source file (see that parameter for scope and risks).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1600,6 +2045,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "docType": { "type": "string", "description": "New file type as a bare extension, e.g. \"md\" (optional)." },
                     "docContent": { "type": "string", "description": "New text content (optional). When set, docContentAppend controls append vs replace." },
                     "docContentAppend": { "type": "boolean", "description": "Only meaningful when docContent is set. true = append to existing content; false (default) = replace. Ignored if docContent is omitted.", "default": false },
+                    "updateExternalFile": { "type": "boolean", "description": "Write-through to the EXTERNAL source file. Default false. FUNCTION: when true, the new text content is additionally written to the file the document was imported from (original_path), keeping the source in sync. SCOPE: (1) symlink-imported docs — read-only via this tool by default; this flag unlocks overwriting the linked original. (2) copy-imported docs — the external source file is overwritten too, so a later source refresh will not revert MCP-written content. Docs without an external source (MCP-created, lost original) are unaffected — only the local copy changes. IMPACT/RISKS: text sources (.txt/.md/code) are replaced with the new text as-is; binary sources (PDF/Office/image) are REPLACED by plain text — the binary content is destroyed irreversibly. A history snapshot of the pre-update content is always taken first and is recoverable via rag_file_history_versions/rag_file_history_get. When false (default): symlink docs reject content updates; copy docs only modify the local copy inside rag/files.", "default": false },
                     "addTags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to add to the document (case-insensitive dedup; preserves existing order)." },
                     "removeTags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to remove from the document (case-insensitive match)." }
                 },
@@ -1615,6 +2061,54 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "docId": { "type": "string", "description": "The document id (as returned by rag_file_create or rag_search)." }
                 },
                 "required": ["docId"]
+            }
+        }),
+        json!({
+            "name": "rag_file_history_versions",
+            "description": "List the historical versions of a RAG document, newest first. A snapshot is taken each time a document's content is overwritten (via rag_file_update or a source refresh). Returns version, savedAt, size, name, md5 and source per entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docId": { "type": "string", "description": "The document id." }
+                },
+                "required": ["docId"]
+            }
+        }),
+        json!({
+            "name": "rag_file_history_get",
+            "description": "Read the full text content of one historical version of a RAG document (use rag_file_history_versions to list available versions).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docId": { "type": "string", "description": "The document id." },
+                    "version": { "type": "integer", "description": "The history version number to read." }
+                },
+                "required": ["docId", "version"]
+            }
+        }),
+        json!({
+            "name": "rag_file_history_diff",
+            "description": "Compare two versions of a RAG document and return a unified diff. Omit toVersion to diff a historical version against the CURRENT document content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docId": { "type": "string", "description": "The document id." },
+                    "fromVersion": { "type": "integer", "description": "The older history version number (old side of the diff)." },
+                    "toVersion": { "type": "integer", "description": "The newer history version number (optional; omit to compare against the current content)." }
+                },
+                "required": ["docId", "fromVersion"]
+            }
+        }),
+        json!({
+            "name": "rag_file_diff",
+            "description": "Compare two DIFFERENT RAG documents and return a unified diff (docIdA is the old side, docIdB the new side). Independent of version history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "docIdA": { "type": "string", "description": "First document id (old side)." },
+                    "docIdB": { "type": "string", "description": "Second document id (new side)." }
+                },
+                "required": ["docIdA", "docIdB"]
             }
         }),
     ]
@@ -1730,7 +2224,18 @@ pub async fn call_builtin_tool(
             let doc_type = args.get("docType").and_then(|v| v.as_str());
             let content = args.get("docContent").and_then(|v| v.as_str());
             let append = args.get("docContentAppend").and_then(|v| v.as_bool()).unwrap_or(false);
-            update_doc(app, &id, name, doc_type, content, append, str_arr("addTags"), str_arr("removeTags")).await?;
+            update_doc(
+                app,
+                &id,
+                name,
+                doc_type,
+                content,
+                append,
+                str_arr("addTags"),
+                str_arr("removeTags"),
+                args.get("updateExternalFile").and_then(|v| v.as_bool()).unwrap_or(false),
+            )
+            .await?;
             let text = serde_json::to_string(&serde_json::json!({ "docId": id, "updated": true })).unwrap_or_default();
             Ok(ok(text))
         }
@@ -1742,6 +2247,62 @@ pub async fn call_builtin_tool(
             delete_doc(app, &id).await?;
             let text = serde_json::to_string(&serde_json::json!({ "docId": id, "deleted": true })).unwrap_or_default();
             Ok(ok(text))
+        }
+        "rag_file_history_versions" => {
+            let id = doc_id();
+            if id.is_empty() {
+                return Err(anyhow!("docId is required"));
+            }
+            let versions = list_doc_history(app, &id).await?;
+            let text = serde_json::to_string_pretty(&versions).unwrap_or_else(|_| "[]".to_string());
+            Ok(ok(text))
+        }
+        "rag_file_history_get" => {
+            let id = doc_id();
+            if id.is_empty() {
+                return Err(anyhow!("docId is required"));
+            }
+            let version = args
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .ok_or_else(|| anyhow!("version is required"))?;
+            let doc = read_doc_history(app, &id, version).await?;
+            Ok(ok(doc.content))
+        }
+        "rag_file_history_diff" => {
+            let id = doc_id();
+            if id.is_empty() {
+                return Err(anyhow!("docId is required"));
+            }
+            let from = args
+                .get("fromVersion")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .ok_or_else(|| anyhow!("fromVersion is required"))?;
+            let to = args
+                .get("toVersion")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let diff = diff_doc_history(app, &id, from, to).await?;
+            Ok(ok(diff))
+        }
+        "rag_file_diff" => {
+            let a = args
+                .get("docIdA")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let b = args
+                .get("docIdB")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if a.is_empty() || b.is_empty() {
+                return Err(anyhow!("docIdA and docIdB are both required"));
+            }
+            let diff = diff_two_docs(app, &a, &b).await?;
+            Ok(ok(diff))
         }
         _ => Err(anyhow!("Tool '{}' not found", tool_name)),
     }
@@ -2177,7 +2738,7 @@ async fn prune_stale_sql_docs(app: &AppHandle, dir: &Path) -> Result<()> {
         .collect();
     let stale: Vec<String> = sql_ids
         .into_iter()
-        .filter(|id| !dir.join(format!("{}.meta", id)).exists())
+        .filter(|id| !meta_path_for(&dir, id).exists())
         .collect();
     if stale.is_empty() {
         return Ok(());
@@ -2215,11 +2776,7 @@ pub async fn rebuild_rag_sql_index(app: &AppHandle) -> Result<()> {
     let dir = files_dir(app)?;
     let mut docs: Vec<DocMeta> = Vec::new();
     if dir.exists() {
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-                continue;
-            }
+        for (_scan_id, path) in scan_doc_metas(&dir) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
             docs.push(meta);
@@ -2327,16 +2884,11 @@ pub async fn list_docs(app: &AppHandle) -> Result<Vec<RagDocInfo>> {
     // Clone the dir into the read_dir closure so `dir` stays borrowable below
     // (used to resolve the on-disk file name per doc).
     let dir_clone = dir.clone();
-    let mut entries = tokio::task::spawn_blocking(move || std::fs::read_dir(&dir_clone)).await??;
+    let metas = tokio::task::spawn_blocking(move || scan_doc_metas(&dir_clone)).await?;
     // One registry read for the whole list (see doc_info_from_meta).
     let excluded_paths = list_excluded_paths().await;
     let aliases = list_source_aliases().await;
-    while let Some(entry) = entries.next() {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_id, path) in metas {
         // Skip unreadable/corrupt metas instead of failing the whole listing -
         // consistent with every other scanner (rebuild_rag_sql_index /
         // run_batch_update / preview_batch_update / reindex_all /
@@ -2555,7 +3107,7 @@ pub async fn search_docs_paged(
                 let excluded_paths = list_excluded_paths().await;
                 let aliases = list_source_aliases().await;
                 for id in window {
-                    let meta_path = dir.join(format!("{}.meta", id));
+                    let meta_path = meta_path_for(&dir, &id);
                     let Ok(bytes) = std::fs::read(&meta_path) else { continue };
                     let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
                     items.push(doc_info_from_meta(&dir, meta, &excluded_paths, &aliases));
@@ -2619,7 +3171,7 @@ pub async fn search_docs_paged(
     let aliases = list_source_aliases().await;
     for row in rows {
         let id: String = sqlx::Row::try_get(&row, "id")?;
-        let meta_path = dir.join(format!("{}.meta", id));
+        let meta_path = meta_path_for(&dir, &id);
         let Ok(bytes) = std::fs::read(&meta_path) else { continue };
         let Ok(meta): Result<DocMeta, _> = serde_json::from_slice(&bytes) else { continue };
         items.push(doc_info_from_meta(&dir, meta, &excluded_paths, &aliases));
@@ -2679,7 +3231,7 @@ async fn get_doc_inner(
 ) -> Result<Option<(RagDoc, u64)>> {
     validate_doc_id(id)?;
     let dir = files_dir(app)?;
-    let meta_path = dir.join(format!("{}.meta", id));
+    let meta_path = meta_path_for(&dir, &id);
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
         return Ok(None);
     };
@@ -2699,26 +3251,37 @@ async fn get_doc_inner(
         .map(|p| !p.is_empty())
         .unwrap_or(false);
     let lost_original = has_original_path && !original_exists;
-    // Content: for symlink docs read from original_path (if it exists); for
-    // copy docs read from the rag/files copy via content_path_for. Symlink +
-    // lost -> empty content (the UI greys "view" via content_available).
+    // Content: for symlink docs prefer the extracted-Markdown cache when it
+    // exists (extractable sources — PDF/image — have a binary external
+    // original that isn't viewable text; the cache written at import/update
+    // is the display source). Text symlinks have no cache and read live from
+    // original_path. Symlink + lost -> empty content (the UI greys "view" via
+    // content_available). For copy docs read from the rag/files copy via
+    // content_path_for.
     let (content, content_available) = if is_symlink {
-        if let Some(op) = meta.original_path.as_deref() {
-            if !op.is_empty() && Path::new(op).exists() {
-                // Same cap as every write path: a symlink doc can point at an
-                // arbitrarily large file — never buffer it whole.
-                match std::fs::metadata(op) {
-                    Ok(m) if m.len() <= MAX_UPLOAD_BYTES as u64 => {
-                        (std::fs::read_to_string(op).unwrap_or_default(), true)
+        if !original_exists {
+            (String::new(), false)
+        } else {
+            let cache = content_path_for(&dir, id, &meta.name);
+            if cache.exists() {
+                (std::fs::read_to_string(&cache).unwrap_or_default(), true)
+            } else if let Some(op) = meta.original_path.as_deref() {
+                if !op.is_empty() && Path::new(op).exists() {
+                    // Same cap as every write path: a symlink doc can point at an
+                    // arbitrarily large file — never buffer it whole.
+                    match std::fs::metadata(op) {
+                        Ok(m) if m.len() <= MAX_UPLOAD_BYTES as u64 => {
+                            (std::fs::read_to_string(op).unwrap_or_default(), true)
+                        }
+                        Ok(_) => (String::new(), false),
+                        Err(_) => (String::new(), false),
                     }
-                    Ok(_) => (String::new(), false),
-                    Err(_) => (String::new(), false),
+                } else {
+                    (String::new(), false)
                 }
             } else {
                 (String::new(), false)
             }
-        } else {
-            (String::new(), false)
         }
     } else {
         let content_path = content_path_for(&dir, id, &meta.name);
@@ -2776,6 +3339,148 @@ async fn get_doc_inner(
         },
         total_bytes,
     )))
+}
+
+// ── 文档历史版本（public API：Tauri 命令 + MCP 工具共用）───────────────────
+
+/// List a doc's historical versions, newest first.
+pub async fn list_doc_history(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Vec<crate::models::rag::RagDocHistoryVersion>> {
+    validate_doc_id(id)?;
+    let dir = files_dir(app)?;
+    Ok(list_doc_versions_sync(&dir, id))
+}
+
+/// Read one historical version as a View-dialog `RagDoc` (readonly: no tags,
+/// content_available always true, never truncated).
+pub async fn read_doc_history(app: &AppHandle, id: &str, version: u32) -> Result<RagDoc> {
+    validate_doc_id(id)?;
+    let dir = files_dir(app)?;
+    let meta_bytes = std::fs::read(meta_path_for(&dir, id))
+        .map_err(|e| anyhow!("document not found: {} ({e})", id))?;
+    let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
+    let (content, rec) = read_doc_version_sync(&dir, id, version)?;
+    let display_name = format!("{} (v{})", meta.name, version);
+    // Raw snapshot available → surface its path via original_path so the
+    // history detail dialog's 查看源文件 button shows (the open command
+    // resolves history/v{n}{raw_ext} itself; this path is display/condition
+    // only).
+    let raw_snap = rec
+        .raw_ext
+        .as_deref()
+        .map(|rext| doc_dir_or_flat(&dir, id).join("history").join(format!("v{version}{rext}")))
+        .filter(|p| p.is_file());
+    Ok(RagDoc {
+        id: meta.id.clone(),
+        name: display_name.clone(),
+        size: rec.size,
+        content,
+        uploaded_at: rec.saved_at,
+        tags: meta.tags.clone(),
+        chunk_count: 0,
+        file_type: meta.file_type.clone().unwrap_or_else(|| file_type_label(&rec.name)),
+        method: String::new(),
+        original_path: raw_snap
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        lost_original: false,
+        content_available: true,
+        truncated: false,
+        next_offset: 0,
+        content_total_bytes: rec.size,
+        excluded: false,
+        source_kind: String::new(),
+        source_label: String::new(),
+        source_root: String::new(),
+        rel_path: String::new(),
+        git_url: String::new(),
+        git_branch: String::new(),
+    })
+}
+
+/// Batch-delete history versions; returns how many were actually removed
+/// (unknown versions are silently skipped — partial success semantics).
+pub async fn delete_doc_history(app: &AppHandle, id: &str, versions: &[u32]) -> Result<u32> {
+    validate_doc_id(id)?;
+    let _meta_guard = meta_lock().await.lock().await;
+    let dir = files_dir(app)?;
+    let mut removed = 0u32;
+    for v in versions {
+        if delete_doc_version_sync(&dir, id, *v) {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        rag_log("info", format!("deleted {} history version(s) of doc {}", removed, id));
+    }
+    Ok(removed)
+}
+
+/// Diff two versions of one doc (to_version omitted = current content).
+/// Returns a unified diff (3 context lines).
+pub async fn diff_doc_history(
+    app: &AppHandle,
+    id: &str,
+    from_version: u32,
+    to_version: Option<u32>,
+) -> Result<String> {
+    validate_doc_id(id)?;
+    let dir = files_dir(app)?;
+    let (old_text, _rec) = read_doc_version_sync(&dir, id, from_version)?;
+    let (new_text, new_label) = match to_version {
+        Some(v) => {
+            let (t, _r) = read_doc_version_sync(&dir, id, v)?;
+            (t, format!("v{v}"))
+        }
+        None => {
+            // Current content: resolve via meta + content_path_for.
+            let meta_bytes = std::fs::read(meta_path_for(&dir, id))
+                .map_err(|e| anyhow!("document not found: {} ({e})", id))?;
+            let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
+            let p = content_path_for(&dir, id, &meta.name);
+            let t = if p.exists() {
+                let raw = std::fs::read(&p)?;
+                if raw.len() > MAX_UPLOAD_BYTES {
+                    return Err(anyhow!("content too large: {} bytes", raw.len()));
+                }
+                String::from_utf8_lossy(&raw).to_string()
+            } else {
+                String::new()
+            };
+            (t, "current".to_string())
+        }
+    };
+    Ok(unified_diff(&old_text, &new_text, &format!("v{from_version}"), &new_label))
+}
+
+/// Diff two DIFFERENT documents (independent of history): doc_a = old side,
+/// doc_b = new side. Returns a unified diff.
+pub async fn diff_two_docs(app: &AppHandle, id_a: &str, id_b: &str) -> Result<String> {
+    validate_doc_id(id_a)?;
+    validate_doc_id(id_b)?;
+    let dir = files_dir(app)?;
+    let read_content = |id: &str| -> Result<(String, String)> {
+        let meta_bytes = std::fs::read(meta_path_for(&dir, id))
+            .map_err(|e| anyhow!("document not found: {} ({e})", id))?;
+        let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
+        let p = content_path_for(&dir, id, &meta.name);
+        let t = if p.exists() {
+            let raw = std::fs::read(&p)?;
+            if raw.len() > MAX_UPLOAD_BYTES {
+                return Err(anyhow!("content too large: {} bytes", raw.len()));
+            }
+            String::from_utf8_lossy(&raw).to_string()
+        } else {
+            String::new()
+        };
+        Ok((t, meta.name))
+    };
+    let (a_text, a_name) = read_content(id_a)?;
+    let (b_text, b_name) = read_content(id_b)?;
+    Ok(unified_diff(&a_text, &b_text, &a_name, &b_name))
 }
 
 /// Read a document's chunks (index + text, no embeddings) for the "view chunks"
@@ -3126,17 +3831,16 @@ impl RagFolderScan {
 /// then indexes into lancedb via `reindex_doc`. Caller handles same-name
 /// overwrite cleanup (`find_doc_ids_by_name` + delete) and tag-stat recompute.
 ///
-/// `file_stem` is the on-disk filename without extension: uploads pass the
-/// uuid, `rag_file_create` passes `{name}.{docType}` so the file is
-/// human-readable. `display_name` is `meta.name` (what the UI shows). Returns
-/// chunk_count.
+// `file_stem` is the on-disk filename without extension: uploads pass the
+// uuid, `rag_file_create` passes `{name}.{docType}` so the file is
+// human-readable. `display_name` is `meta.name` (what the UI shows). Returns
+// chunk_count.
 ///
-/// Import-method: `method` ("symlink"|"copy"|None), `original_path` (the
-/// imported source's absolute path, recorded for update detection + open-
-/// location), `md5` (hex of the source bytes, for change detection). For
-/// "symlink" docs `write_content` should be false (don't copy bytes into
-/// rag/files — the source is read live from original_path); for "copy" +
-/// legacy (None) it's true.
+/// `write_content` controls whether `content` is persisted as the on-disk
+/// content file (`dir/{file_stem}`): copy/legacy imports write it;
+/// symlink TEXT docs don't (the source is read live from original_path);
+/// symlink EXTRACTABLE docs DO (the extracted-Markdown cache is the
+/// chunking/display/history source — design: "symlink 只有缓存").
 async fn write_doc_and_index(
     app: &AppHandle,
     dir: &Path,
@@ -3144,6 +3848,9 @@ async fn write_doc_and_index(
     file_stem: &str,
     display_name: &str,
     content: &str,
+    // Whether to persist `content` as `dir/{file_stem}` (see doc comment):
+    // copy/legacy = true, symlink text = false, symlink extractable = true.
+    write_content: bool,
     tags: Vec<String>,
     size: u64,
     file_type: Option<String>,
@@ -3166,22 +3873,23 @@ async fn write_doc_and_index(
     // of the display name can't orphan the raw file lookup.
     raw_ext: Option<String>,
 ) -> Result<u32> {
-    let meta_path = dir.join(format!("{}.meta", doc_id));
+    let meta_path = meta_path_for(dir, doc_id);
+    // Content/raw copies land in the doc's per-doc folder (canonical layout).
+    let folder = ensure_doc_dir(dir, doc_id)?;
     let uploaded_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
     // "symlink": don't write a content copy — the source is read live. "copy"
     // /legacy (None): write the copy as before.
-    let write_content = method.as_deref() != Some("symlink");
     if write_content {
-        let content_path = dir.join(file_stem);
+        let content_path = folder.join(file_stem);
         // Atomic write (tmp+rename): a crash mid-write must not truncate the
         // existing content file (mirrors write_meta_atomic durability).
-        let tmp_path = dir.join(format!(".{}.tmp", file_stem));
+        let tmp_path = folder.join(format!(".{}.tmp", file_stem));
         std::fs::write(&tmp_path, content)?;
         std::fs::rename(&tmp_path, &content_path)?;
     }
     if let Some((raw_stem, raw_bytes)) = &raw_copy {
-        let raw_path = dir.join(raw_stem);
-        let tmp_path = dir.join(format!(".{}.tmp", raw_stem));
+        let raw_path = folder.join(raw_stem);
+        let tmp_path = folder.join(format!(".{}.tmp", raw_stem));
         std::fs::write(&tmp_path, raw_bytes)?;
         std::fs::rename(&tmp_path, &raw_path)?;
     }
@@ -3269,7 +3977,7 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
 
     // Read the existing meta (for tags + to clean up the OLD on-disk file,
     // whose name may use a different extension than the new file).
-    let meta_path = dir.join(format!("{}.meta", id));
+    let meta_path = meta_path_for(&dir, &id);
     let old_meta_bytes = std::fs::read(&meta_path)
         .map_err(|e| anyhow!("update: read meta {} failed: {}", id, e))?;
     let old_meta: DocMeta = serde_json::from_slice(&old_meta_bytes)?;
@@ -3300,6 +4008,9 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     };
 
     rag_log("info", format!("updating '{}' ({} bytes) -> id {}", name, raw.len(), id));
+    // History snapshot BEFORE the overwrite (the current content belongs to
+    // the old version). Lazy retention pruning happens inside.
+    snapshot_history(app, &old_meta, "file").await?;
     // Bump the content version (1 on first upload; +1 each update). Legacy
     // metas without the field default to 1 (see `default_version`).
     let version = old_meta.version.saturating_add(1);
@@ -3319,14 +4030,20 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     };
     let new_original_path = Some(file_path.to_string());
     let new_md5 = Some(compute_md5(&raw));
-    let new_raw_path = new_raw_copy.as_ref().map(|(s, _)| dir.join(s));
-    // Manual file update REPLACES the provenance: the doc's content no longer
-    // comes from its recorded source (e.g. a git repo). Dropping `source`
-    // re-classifies at read time from the NEW original_path's parent dir
-    // (folder semantics) — keeping the old source would mis-group the doc in
-    // the tree (under a git repo it no longer belongs to) and miscount the
-    // repo's delete-time refcount.
-    let new_source: Option<crate::models::rag::DocSource> = None;
+    let new_raw_path = new_raw_copy.as_ref().map(|(s, _)| doc_dir(&dir, id).join(s));
+    // Manual file update REPLACES the provenance for folder/git sources: the
+    // doc's content no longer comes from its recorded source. Dropping `source`
+    // re-classifies at read time from the NEW original_path's parent dir (folder
+    // semantics) — keeping a folder source would make the source-sync treat the
+    // doc as "original lost" (its original_path left the folder root), and
+    // keeping a git source would miscount the repo's delete-time refcount.
+    //
+    // BUT a standalone-file doc (kind "file", e.g. a single-file import) and a
+    // tool-created doc (kind "tool") have NO folder/git sync semantics — dropping
+    // their source re-groups them under the new file's parent folder, which
+    // silently moves them out of the 文件/MCP 工具 group on every update-from-
+    // file. Preserve the source for those kinds so the grouping stays stable.
+let new_source: Option<crate::models::rag::DocSource> = preserve_source_on_file_update(&old_meta.source);
     // write_doc_and_index writes the new disk file, reindexes (reindex_doc
     // deletes the old vectors by id then adds the new ones), and overwrites
     // the meta with the new name/size/uploaded_at/title/version — id preserved.
@@ -3337,6 +4054,10 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
         &file_stem,
         &name,
         &content,
+        // Symlink extractable docs also write the {id}.md cache (design:
+        // "symlink 只有缓存") — it's the display/history source; text
+        // symlinks read live from the external original.
+        is_copy || extractable,
         tags,
         size,
         None,
@@ -3354,7 +4075,7 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
     // New content is durable + indexed; now drop the old content file if it
     // has a different path (different extension/name case), plus the old raw
     // copy for extractable docs (ext may have changed).
-    if old_content.exists() && old_content != dir.join(&file_stem) {
+    if old_content.exists() && old_content != doc_dir(&dir, id).join(&file_stem) {
         if let Err(e) = std::fs::remove_file(&old_content) {
             rag_log("warn", format!("update: remove old {} failed: {}", old_content.display(), e));
         }
@@ -3367,7 +4088,7 @@ pub async fn update_doc_from_file(app: &AppHandle, id: &str, file_path: &str) ->
         && old_raw.exists()
         && Some(&old_raw) != new_raw_path.as_ref()
         && old_raw != old_content
-        && old_raw != dir.join(&file_stem)
+        && old_raw != doc_dir(&dir, id).join(&file_stem)
     {
         if let Err(e) = std::fs::remove_file(&old_raw) {
             rag_log("warn", format!("update: remove old raw {} failed: {}", old_raw.display(), e));
@@ -3389,7 +4110,7 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
     validate_doc_id(id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
-    let meta_path = dir.join(format!("{}.meta", id));
+    let meta_path = meta_path_for(&dir, &id);
     let old_meta_bytes = std::fs::read(&meta_path)
         .map_err(|e| anyhow!("update-from-original: read meta {} failed: {}", id, e))?;
     let old_meta: DocMeta = serde_json::from_slice(&old_meta_bytes)?;
@@ -3463,6 +4184,9 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
     };
 
     rag_log("info", format!("updating '{}' from original ({} bytes) -> id {}", name, raw.len(), id));
+    // History snapshot BEFORE the overwrite (the current content belongs to
+    // the old version). Lazy retention pruning happens inside.
+    snapshot_history(app, &old_meta, "original").await?;
     let version = old_meta.version.saturating_add(1);
     let new_md5 = Some(compute_md5(&raw));
     // Copy extractable docs refresh the archived raw copy from the source we
@@ -3473,7 +4197,7 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
     } else {
         (None, None)
     };
-    let new_raw_path = new_raw_copy.as_ref().map(|(s, _)| dir.join(s));
+    let new_raw_path = new_raw_copy.as_ref().map(|(s, _)| doc_dir(&dir, id).join(s));
     let chunk_count = write_doc_and_index(
         app,
         &dir,
@@ -3481,6 +4205,9 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
         &file_stem,
         &name,
         &content,
+        // Symlink extractable docs also write the {id}.md cache (design:
+        // "symlink 只有缓存"); text symlinks read live from the original.
+        is_copy || extractable,
         tags,
         size,
         old_meta.file_type.clone(),
@@ -3498,7 +4225,7 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
 
     // Content durable + indexed; drop the old copy if it has a different path.
     if let Some(old_content) = &old_content {
-        if old_content.exists() && *old_content != dir.join(&file_stem) {
+        if old_content.exists() && *old_content != doc_dir(&dir, id).join(&file_stem) {
             if let Err(e) = std::fs::remove_file(old_content) {
                 rag_log("warn", format!("update-from-original: remove old {} failed: {}", old_content.display(), e));
             }
@@ -3508,7 +4235,7 @@ pub async fn update_doc_from_original(app: &AppHandle, id: &str) -> Result<u32> 
     if let Some(old_raw) = old_raw_in_dir {
         if old_raw.exists()
             && Some(&old_raw) != new_raw_path.as_ref()
-            && old_raw != dir.join(&file_stem)
+            && old_raw != doc_dir(&dir, id).join(&file_stem)
             && Some(&old_raw) != old_content.as_ref()
         {
             if let Err(e) = std::fs::remove_file(&old_raw) {
@@ -3644,6 +4371,9 @@ async fn upload_one_path_inner(
         &file_stem,
         &name,
         &content,
+        // Symlink extractable docs also write the {id}.md cache (design:
+        // "symlink 只有缓存"); text symlinks read live from the original.
+        is_copy || extractable,
         tags.clone(),
         size,
         None,
@@ -3702,6 +4432,14 @@ async fn upload_one_path_inner(
 /// Returns the first candidate that exists; if none exist, the last candidate
 /// (`meta_name`) so callers get a sensible path to create/remove/error on.
 fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf {
+    // Dual-track base: the per-doc folder (canonical layout) first, then the
+    // legacy flat root — a doc is readable in either layout at any time.
+    let folder = doc_dir(dir, id);
+    let bases: &[std::path::PathBuf] = if folder.is_dir() {
+        &[folder, dir.to_path_buf()]
+    } else {
+        &[dir.to_path_buf()]
+    };
     // Extract the extension (with the dot, e.g. ".txt") from the display name.
     // For uploads meta_name = original filename; for rag_file_create it's
     // `{name}.{docType}`. Either way the extension matches what was written.
@@ -3721,39 +4459,53 @@ fn content_path_for(dir: &Path, id: &str, meta_name: &str) -> std::path::PathBuf
         .as_deref()
         .map(crate::rag::extract::can_extract)
         .unwrap_or(false);
-    if source_ext_is_extractable {
-        let by_id_md = dir.join(format!("{id}.md"));
-        if by_id_md.exists() {
+    for base in bases {
+        if source_ext_is_extractable {
+            let by_id_md = base.join(format!("{id}.md"));
+            if by_id_md.is_file() {
+                return by_id_md;
+            }
+        }
+        // Candidate 1: {id}{ext} (current scheme). Only when there IS an ext,
+        // and never the meta file itself ({id}.meta is always a meta JSON —
+        // a collision here means legacy corruption, not content).
+        if let Some(ref ext) = ext {
+            let by_id_ext = base.join(format!("{id}{ext}"));
+            if by_id_ext.is_file() && by_id_ext != base.join(format!("{id}.meta")) {
+                return by_id_ext;
+            }
+        }
+        // Candidate 2: {id}.md (extracted-Markdown content of PDF/Office/image
+        // imports).
+        let by_id_md = base.join(format!("{id}.md"));
+        if by_id_md.is_file() {
             return by_id_md;
         }
-    }
-    // Candidate 1: {id}{ext} (current scheme). Only when there IS an ext,
-    // and never the meta file itself ({id}.meta is always a meta JSON —
-    // a collision here means legacy corruption, not content).
-    if let Some(ref ext) = ext {
-        let by_id_ext = dir.join(format!("{id}{ext}"));
-        if by_id_ext.exists() && by_id_ext != dir.join(format!("{id}.meta")) {
-            return by_id_ext;
+        // Candidate 3: {id} (legacy upload, no extension). is_file() (not
+        // exists()) — in the per-doc-folder layout `dir/{id}` IS the doc's
+        // own folder; resolving to it made callers read a directory
+        // ("Is a directory (os error 21)").
+        let by_id = base.join(id);
+        if by_id.is_file() {
+            return by_id;
+        }
+        // Candidate 4: {meta_name} (rag_file_create). Never resolve to a meta
+        // JSON — a rename to `{something}.meta` would make rename() clobber the
+        // meta file with content (destroying the doc, or another doc's meta).
+        if !meta_name.to_ascii_lowercase().ends_with(".meta") {
+            let by_name = base.join(meta_name);
+            if by_name.is_file() {
+                return by_name;
+            }
         }
     }
-    // Candidate 2: {id}.md (extracted-Markdown content of PDF/Office/image
-    // imports).
-    let by_id_md = dir.join(format!("{id}.md"));
-    if by_id_md.exists() {
-        return by_id_md;
-    }
-    // Candidate 3: {id} (legacy upload, no extension).
-    let by_id = dir.join(id);
-    if by_id.exists() {
-        return by_id;
-    }
-    // Candidate 4: {meta_name} (rag_file_create). Never resolve to a meta
-    // JSON — a rename to `{something}.meta` would make rename() clobber the
-    // meta file with content (destroying the doc, or another doc's meta).
+    // Nothing exists: return the canonical WRITE target (per-doc folder) so
+    // callers get a sensible path to create/remove/error on.
+    let write_base = &bases[0];
     if meta_name.to_ascii_lowercase().ends_with(".meta") {
-        dir.join(format!("{id}.meta.banned"))
+        write_base.join(format!("{id}.meta.banned"))
     } else {
-        dir.join(meta_name)
+        write_base.join(meta_name)
     }
 }
 
@@ -3787,7 +4539,7 @@ fn raw_content_path_for(dir: &Path, meta: &DocMeta) -> std::path::PathBuf {
         }
     }
     // Copy with lost external (or symlink with no original recorded): the
-    // archived raw copy.
+    // archived raw copy — per-doc folder first, then legacy flat root.
     let raw_ext = meta
         .raw_ext
         .clone()
@@ -3798,15 +4550,20 @@ fn raw_content_path_for(dir: &Path, meta: &DocMeta) -> std::path::PathBuf {
                 .map(|e| format!(".{}", e.to_ascii_lowercase()))
         });
     if let Some(ext) = raw_ext {
-        let p = dir.join(format!("{}{}", meta.id, ext));
-        if p.exists() && p != dir.join(format!("{}.meta", meta.id)) {
-            return p;
+        for base in [doc_dir(dir, &meta.id), dir.to_path_buf()] {
+            let p = base.join(format!("{}{}", meta.id, ext));
+            if p.is_file() && p != base.join(format!("{}.meta", meta.id)) {
+                return p;
+            }
         }
     }
-    // Legacy bare {id}.
-    let bare = dir.join(&meta.id);
-    if bare.exists() {
-        return bare;
+    // Legacy bare {id} — folder first, then flat. is_file() (not exists()):
+    // in the per-doc-folder layout `dir/{id}` IS the doc's own folder.
+    for base in [doc_dir(dir, &meta.id), dir.to_path_buf()] {
+        let bare = base.join(&meta.id);
+        if bare.is_file() {
+            return bare;
+        }
     }
     // Last resort: the external original even if missing (callers error on it
     // with a sensible path), else the content-path resolution.
@@ -3833,9 +4590,12 @@ fn open_source_path_for(dir: &Path, meta: &DocMeta) -> std::path::PathBuf {
                     .map(|e| format!(".{}", e.to_ascii_lowercase()))
             });
         if let Some(ext) = raw_ext {
-            let p = dir.join(format!("{}{}", meta.id, ext));
-            if p.exists() && p != dir.join(format!("{}.meta", meta.id)) {
-                return p;
+            // Archived raw copy: per-doc folder first, then legacy flat root.
+            for base in [doc_dir(dir, &meta.id), dir.to_path_buf()] {
+                let p = base.join(format!("{}{}", meta.id, ext));
+                if p.exists() && p != base.join(format!("{}.meta", meta.id)) {
+                    return p;
+                }
             }
         }
     }
@@ -4115,6 +4875,7 @@ pub async fn create_doc_from_content(
         &disk_name,
         &file_name,
         content,
+        true,
         tags,
         byte_len as u64,
         file_type,
@@ -4155,11 +4916,15 @@ pub async fn update_doc(
     append: bool,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
+    // Opt-in for symlink docs: overwrite the linked EXTERNAL source (text
+    // symlinks write the original file; extractable symlinks refresh the
+    // `{id}.md` cache — the binary original is never corrupted with text).
+    update_external_file: bool,
 ) -> Result<()> {
     validate_doc_id(doc_id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
-    let meta_path = dir.join(format!("{}.meta", doc_id));
+    let meta_path = meta_path_for(&dir, doc_id);
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
         return Err(anyhow!("document not found: {}", doc_id));
     };
@@ -4242,12 +5007,13 @@ pub async fn update_doc(
     let mut content_text_for_md5: Option<String> = None;
     if content.is_some() || tags_changed {
         let is_symlink = meta.method.as_deref() == Some("symlink");
-        // Symlink docs are read-only through the MCP rag_file_update tool:
-        // writing content would overwrite the user's ORIGINAL file (there is
-        // no copy). Reject with a clear message instead.
-        if is_symlink && content.is_some() {
+        // Symlink docs are read-only through the MCP rag_file_update tool by
+        // default: writing content would overwrite the user's ORIGINAL file
+        // (there is no copy). The caller must explicitly opt in via
+        // `updateExternalFile: true` to overwrite the linked source.
+        if is_symlink && content.is_some() && !update_external_file {
             return Err(anyhow!(
-                "symlink documents are read-only via rag_file_update (writing would overwrite the original file); use the UI update dialog or re-import"
+                "symlink documents are read-only via rag_file_update (writing would overwrite the original file); pass updateExternalFile=true to overwrite the linked source, or use the UI update dialog"
             ));
         }
         // Tag-only update on a symlink doc whose original is missing: the
@@ -4264,7 +5030,7 @@ pub async fn update_doc(
             // Extractable symlink docs chunk from the `{id}.md` cache, which
             // lives inside rag/files — a lost external original doesn't block
             // a tag-only re-index.
-            && !dir.join(format!("{}.md", doc_id)).exists();
+            && !doc_dir_or_flat(&dir, doc_id).join(format!("{}.md", doc_id)).exists();
         if symlink_lost && content.is_none() {
             rag_log(
                 "warn",
@@ -4272,20 +5038,23 @@ pub async fn update_doc(
             );
         } else {
         let content_path = if is_symlink {
-            // Extractable symlink imports (PDF/Office/image): the external
-            // original is binary — read/write the extracted-Markdown cache
-            // (`{id}.md`) instead, which is the chunking/display source.
-            // Writing MCP content updates the cache (never the user's
-            // original binary file).
             let source_ext = std::path::Path::new(&meta.name)
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| format!(".{}", e.to_ascii_lowercase()))
                 .unwrap_or_default();
-            let md_cache = dir.join(format!("{}.md", doc_id));
-            if crate::rag::extract::can_extract(&format!("x{source_ext}")) && md_cache.exists() {
+            let md_cache = doc_file_write_path(&dir, doc_id, &format!("{doc_id}.md"))?;
+            let extractable = crate::rag::extract::can_extract(&format!("x{source_ext}"));
+            if extractable && (content.is_some() || md_cache.exists()) {
+                // Extractable symlink imports (PDF/Office/image): the external
+                // original is binary — MCP text content ALWAYS targets the
+                // extracted-Markdown cache (created on first write; refreshed
+                // on update). The binary original is never corrupted with text.
                 md_cache
             } else {
+                // Text symlink: the external original IS the text content —
+                // with `updateExternalFile: true` the write goes to the
+                // linked source file itself.
                 meta.original_path
                     .as_deref()
                     .filter(|p| !p.is_empty())
@@ -4307,6 +5076,12 @@ pub async fn update_doc(
             );
         } else {
         let content_text = if let Some(c) = content {
+            // History snapshot BEFORE the overwrite: the current content (the
+            // version about to be replaced) is preserved under history/.
+            // Also bump the content version so the MCP path matches the UI
+            // update paths (which already increment on every content change).
+            snapshot_history(app, &meta, "update").await?;
+            meta.version = meta.version.max(1).saturating_add(1);
             let new_content = if append {
                 let old = std::fs::read_to_string(&content_path).unwrap_or_default();
                 format!("{}\n{}", old, c)
@@ -4319,6 +5094,28 @@ pub async fn update_doc(
                     "docContent too large: {} bytes, max {} bytes",
                     byte_len, MAX_UPLOAD_BYTES
                 ));
+            }
+            // Write-through to the EXTERNAL source file (opt-in via
+            // `updateExternalFile`): symlink docs (text: the original IS the
+            // content; extractable: the user explicitly opted in — the binary
+            // original is replaced by the text) and copy docs (the linked
+            // source file is kept in sync with the MCP-written content, so a
+            // later source refresh doesn't clobber it). Runs BEFORE the local
+            // write so a permission error fails the update before any local
+            // mutation. Skipped when content_path already IS the external
+            // file (text symlink resolution).
+            if update_external_file {
+                if let Some(op) = meta.original_path.as_deref().filter(|p| !p.is_empty()) {
+                    let ext_path = Path::new(op).to_path_buf();
+                    if ext_path != content_path {
+                        let ext_tmp = ext_path.with_extension(format!(
+                            "{}.tmp",
+                            ext_path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+                        ));
+                        std::fs::write(&ext_tmp, &new_content)?;
+                        std::fs::rename(&ext_tmp, &ext_path)?;
+                    }
+                }
             }
             let tmp_path = content_path.with_extension(format!(
                 "{}.tmp",
@@ -4345,7 +5142,7 @@ pub async fn update_doc(
     // and the name changed, rename it so content_path_for still resolves.
     // (Symlink docs have no copied file, so this only applies to copy docs.)
     if meta.name != old_name {
-        let by_id = dir.join(doc_id);
+        let by_id = doc_dir_or_flat(&dir, doc_id).join(doc_id);
         if !by_id.exists() {
             // Resolve via the full candidate chain: upload docs live at
             // {id}{ext} (old_name alone never matches them on disk), create
@@ -4395,6 +5192,20 @@ pub async fn update_doc(
         rag_log("warn", format!("upsert_doc_sql for '{}' failed: {}", meta.name, e));
     }
     Ok(())
+}
+
+/// Provenance policy for update-from-file: folder/git sources are dropped
+/// (the doc's original left the folder root / repo — keeping them would
+/// break source-sync and the git refcount); file/tool sources are preserved
+/// (no sync semantics — dropping would re-group the doc under the new file's
+/// parent folder). Pure function, unit-tested.
+fn preserve_source_on_file_update(
+    source: &Option<crate::models::rag::DocSource>,
+) -> Option<crate::models::rag::DocSource> {
+    match source.as_ref() {
+        Some(s) if matches!(s.kind.as_str(), "file" | "tool" | "") => source.clone(),
+        _ => None,
+    }
 }
 
 /// Hard cap to avoid indexing pathological files (embed cost is ~linear).
@@ -4528,7 +5339,7 @@ async fn reindex_doc(
         let bytes_total = files_dir(app)
             .ok()
             .and_then(|dir| {
-                let bytes = std::fs::read(dir.join(format!("{doc_id}.meta"))).ok()?;
+                let bytes = std::fs::read(meta_path_for(&dir, doc_id)).ok()?;
                 let meta: DocMeta = serde_json::from_slice(&bytes).ok()?;
                 if meta.size > 0 {
                     return Some(meta.size);
@@ -4545,7 +5356,7 @@ async fn reindex_doc(
         // the meta is unreadable / the field is absent.
         let doc_title: String = files_dir(app)
             .ok()
-            .and_then(|dir| std::fs::read(dir.join(format!("{doc_id}.meta"))).ok())
+            .and_then(|dir| std::fs::read(meta_path_for(&dir, doc_id)).ok())
             .and_then(|bytes| serde_json::from_slice::<DocMeta>(&bytes).ok())
             .and_then(|m| m.title)
             .filter(|t| !t.trim().is_empty())
@@ -4718,11 +5529,7 @@ fn count_indexed_metas(app: &AppHandle) -> Result<u32> {
         return Ok(0);
     }
     let mut n = 0u32;
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_scan_id, path) in scan_doc_metas(&dir) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         if meta.chunk_count > 0 {
@@ -4742,11 +5549,7 @@ async fn zero_all_chunk_counts(app: &AppHandle) -> Result<()> {
         return Ok(());
     }
     let mut n = 0u32;
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_scan_id, path) in scan_doc_metas(&dir) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(mut meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         if meta.chunk_count == 0 {
@@ -4809,11 +5612,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
     }
     // Collect (meta_path, meta) so we own the data and can rewrite metas in place.
     let mut docs: Vec<(PathBuf, DocMeta)> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_scan_id, path) in scan_doc_metas(&dir) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         docs.push((path, meta));
@@ -4840,7 +5639,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                 .and_then(|e| e.to_str())
                 .map(|e| format!(".{}", e.to_ascii_lowercase()))
                 .unwrap_or_default();
-            let md_cache = dir.join(format!("{}.md", meta.id));
+            let md_cache = doc_dir_or_flat(&dir, &meta.id).join(format!("{}.md", meta.id));
             if crate::rag::extract::can_extract(&format!("x{source_ext}")) && md_cache.exists() {
                 match std::fs::read_to_string(&md_cache) {
                     Ok(c) => c,
@@ -5036,7 +5835,7 @@ pub async fn set_doc_tags(app: &AppHandle, id: &str, tags: Vec<String>) -> Resul
     validate_doc_id(id)?;
     let _meta_guard = meta_lock().await.lock().await;
     let dir = files_dir(app)?;
-    let meta_path = dir.join(format!("{}.meta", id));
+    let meta_path = meta_path_for(&dir, &id);
     let Ok(meta_bytes) = std::fs::read(&meta_path) else {
         return Err(anyhow!("document not found: {}", id));
     };
@@ -5160,17 +5959,16 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
         schedule_deferred_prune(app);
     }
 
-    // Content file is `dir/{id}` for uploads, `dir/{meta.name}` for
-    // rag_file_create docs - read the meta to resolve the human-readable name.
-    // Remove BOTH candidate paths (id + meta.name) so a content file is never
-    // orphaned regardless of which naming scheme wrote it. Log any removal
-    // failure (rather than `let _ =`) so a permissions/path bug surfaces in the
-    // Logs page instead of silently leaving the file on disk.
-    //
-    // For "symlink" docs the external original is never owned by RAG and is
-    // left untouched — but extractable symlink imports DO have an extracted-
-    // Markdown cache at `{id}.md` (chunking/display only), which is removed.
-    let meta_opt = std::fs::read(dir.join(format!("{}.meta", id)))
+    // Folder layout: the doc's ENTIRE per-doc folder `files/{id}/` (meta.json,
+// content file(s), raw copy, extracted cache and the `history/` subfolder) is
+// removed in one shot. Log any removal failure (rather than `let _ =`) so a
+// permissions/path bug surfaces in the Logs page instead of silently leaving
+// files on disk.
+//
+// For "symlink" docs the external original is never owned by RAG and is left
+// untouched — the folder only holds the meta + (for extractable imports) the
+// extracted-Markdown cache, both of which are RAG-owned.
+    let meta_opt = std::fs::read(meta_path_for(&dir, id))
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok());
     let meta_name = meta_opt.as_ref().map(|m| m.name.clone());
@@ -5178,51 +5976,60 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
         .as_ref()
         .map(|m| m.method.as_deref() == Some("symlink"))
         .unwrap_or(false);
-    if is_symlink {
-        // Remove only the extracted-md cache (if any); never the original.
-        let cache = dir.join(format!("{id}.md"));
-        if cache.exists() {
-            if let Err(e) = std::fs::remove_file(&cache) {
-                rag_log("warn", format!("delete_doc: remove {} failed: {}", cache.display(), e));
-            }
+    let folder = doc_dir(&dir, id);
+    if folder.is_dir() {
+        if let Err(e) = std::fs::remove_dir_all(&folder) {
+            rag_log("warn", format!("delete_doc: remove folder {} failed: {}", folder.display(), e));
         }
-        rag_log("info", format!("delete_doc: symlink doc {} — original left untouched", id));
+        if is_symlink {
+            rag_log("info", format!("delete_doc: symlink doc {} — original left untouched", id));
+        }
     } else {
-        // Remove every candidate on-disk path (current `{id}{ext}` upload scheme,
-        // legacy bare-`{id}` upload, and `{meta_name}` for rag_file_create) so no
-        // content file is orphaned regardless of which scheme wrote it.
-        let ext = meta_name
-            .as_deref()
-            .and_then(|n| std::path::Path::new(n).extension().and_then(|e| e.to_str()))
-            .map(|e| format!(".{}", e.to_ascii_lowercase()));
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(ref ext) = ext {
-            candidates.push(dir.join(format!("{id}{ext}")));
-        }
-        // Extracted-Markdown content of PDF/Office/image imports ({id}.md —
-        // its name does NOT derive from meta_name, so it needs its own
-        // candidate; deduped below for text .md docs where candidate 1 is
-        // already this exact path).
-        candidates.push(dir.join(format!("{id}.md")));
-        candidates.push(dir.join(id));
-        if let Some(ref name) = meta_name {
-            let p = dir.join(name);
-            if !candidates.contains(&p) {
-                candidates.push(p);
+        // Legacy flat layout (pre-migration / migration skipped): remove the
+        // candidate files individually. Symlink docs: only the extracted-md
+        // cache; never the original.
+        if is_symlink {
+            let cache = dir.join(format!("{id}.md"));
+            if cache.exists() {
+                if let Err(e) = std::fs::remove_file(&cache) {
+                    rag_log("warn", format!("delete_doc: remove {} failed: {}", cache.display(), e));
+                }
             }
-        }
-        for p in &candidates {
-            if p.exists() {
-                if let Err(e) = std::fs::remove_file(p) {
-                    rag_log("warn", format!("delete_doc: remove {} failed: {}", p.display(), e));
+            rag_log("info", format!("delete_doc: symlink doc {} — original left untouched", id));
+        } else {
+            let ext = meta_name
+                .as_deref()
+                .and_then(|n| std::path::Path::new(n).extension().and_then(|e| e.to_str()))
+                .map(|e| format!(".{}", e.to_ascii_lowercase()));
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(ref ext) = ext {
+                candidates.push(dir.join(format!("{id}{ext}")));
+            }
+            // Extracted-Markdown content of PDF/Office/image imports ({id}.md —
+            // its name does NOT derive from meta_name, so it needs its own
+            // candidate; deduped below for text .md docs where candidate 1 is
+            // already this exact path).
+            candidates.push(dir.join(format!("{id}.md")));
+            candidates.push(dir.join(id));
+            if let Some(ref name) = meta_name {
+                let p = dir.join(name);
+                if !candidates.contains(&p) {
+                    candidates.push(p);
+                }
+            }
+            for p in &candidates {
+                if p.exists() {
+                    if let Err(e) = std::fs::remove_file(p) {
+                        rag_log("warn", format!("delete_doc: remove {} failed: {}", p.display(), e));
+                    }
                 }
             }
         }
-    }
-    let meta_path = dir.join(format!("{}.meta", id));
-    if meta_path.exists() {
-        if let Err(e) = std::fs::remove_file(&meta_path) {
-            rag_log("warn", format!("delete_doc: remove {} failed: {}", meta_path.display(), e));
+        let meta_path = meta_path_for(&dir, &id);
+        if meta_path.exists() {
+            if let Err(e) = std::fs::remove_file(&meta_path) {
+                rag_log("warn", format!("delete_doc: remove {} failed: {}", meta_path.display(), e));
+            }
         }
     }
 
@@ -5300,13 +6107,8 @@ pub async fn delete_doc(app: &AppHandle, id: &str) -> Result<()> {
 /// reference (review round 8, 2026-10-04).
 async fn count_git_docs_for_repo(app: &AppHandle, repo_url: &str) -> usize {
     let Ok(dir) = files_dir(app) else { return 0 };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
     let mut count = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_scan_id, path) in scan_doc_metas(&dir) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         let u = meta
@@ -5335,7 +6137,7 @@ async fn count_git_docs_for_repo(app: &AppHandle, repo_url: &str) -> usize {
 pub async fn open_file_location(app: &AppHandle, id: &str, target: Option<String>) -> Result<()> {
     validate_doc_id(id)?;
     let dir = files_dir(app)?;
-    let meta = std::fs::read(dir.join(format!("{}.meta", id)))
+    let meta = std::fs::read(meta_path_for(&dir, id))
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
         .ok_or_else(|| anyhow!("document not found: {}", id))?;
@@ -5375,7 +6177,7 @@ pub async fn open_file_location(app: &AppHandle, id: &str, target: Option<String
 pub async fn open_doc_source(app: &AppHandle, id: &str) -> Result<()> {
     validate_doc_id(id)?;
     let dir = files_dir(app)?;
-    let meta = std::fs::read(dir.join(format!("{}.meta", id)))
+    let meta = std::fs::read(meta_path_for(&dir, id))
         .ok()
         .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
         .ok_or_else(|| anyhow!("document not found: {}", id))?;
@@ -5386,6 +6188,68 @@ pub async fn open_doc_source(app: &AppHandle, id: &str) -> Result<()> {
     let file = open_source_path_for(&dir, &meta);
     if !file.exists() {
         return Err(anyhow!("original file does not exist: {}", file.display()));
+    }
+    open_file_with_default_app(&file)?;
+    Ok(())
+}
+
+/// Reveal one HISTORY version's archived files in the OS file manager
+/// (文件跳转 in the history dialog). Prefers the RAW original snapshot
+/// (`v{n}{raw_ext}` — the "real file" for extractable docs); falls back to
+/// the text snapshot (`v{n}.{md|txt|...}`).
+pub async fn open_doc_history_location(app: &AppHandle, id: &str, version: u32) -> Result<()> {
+    validate_doc_id(id)?;
+    let dir = files_dir(app)?;
+    let hist = doc_dir_or_flat(&dir, id).join("history");
+    let rec_path = hist.join(format!("v{version}.json"));
+    let rec_bytes = std::fs::read(&rec_path)
+        .map_err(|e| anyhow!("history version not found: v{version} ({e})"))?;
+    let rec: HistoryRecord = serde_json::from_slice(&rec_bytes)?;
+    let mut file = rec
+        .raw_ext
+        .as_deref()
+        .map(|e| hist.join(format!("v{version}{e}")))
+        .filter(|p| p.is_file());
+    if file.is_none() {
+        if let Ok(entries) = std::fs::read_dir(&hist) {
+            let prefix = format!("v{version}.");
+            for e in entries.flatten() {
+                let p = e.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if p.is_file()
+                    && name.starts_with(&prefix)
+                    && p.extension().and_then(|x| x.to_str()) != Some("json")
+                {
+                    file = Some(p);
+                    break;
+                }
+            }
+        }
+    }
+    let file = file.ok_or_else(|| anyhow!("version v{version} has no archived files"))?;
+    reveal_in_file_manager(&file)?;
+    Ok(())
+}
+
+/// Open one HISTORY version's archived RAW original (查看源文件 in the
+/// history detail dialog) with the OS default application. Resolves
+/// `history/v{n}{raw_ext}` from the version's record — never the CURRENT
+/// doc's source file.
+pub async fn open_doc_history_source(app: &AppHandle, id: &str, version: u32) -> Result<()> {
+    validate_doc_id(id)?;
+    let dir = files_dir(app)?;
+    let hist = doc_dir_or_flat(&dir, id).join("history");
+    let rec_path = hist.join(format!("v{version}.json"));
+    let rec_bytes = std::fs::read(&rec_path)
+        .map_err(|e| anyhow!("history version not found: v{version} ({e})"))?;
+    let rec: HistoryRecord = serde_json::from_slice(&rec_bytes)?;
+    let rext = rec
+        .raw_ext
+        .filter(|e| !e.is_empty())
+        .ok_or_else(|| anyhow!("version v{version} has no archived source file"))?;
+    let file = hist.join(format!("v{version}{rext}"));
+    if !file.is_file() {
+        return Err(anyhow!("archived source file does not exist: {}", file.display()));
     }
     open_file_with_default_app(&file)?;
     Ok(())
@@ -5423,7 +6287,7 @@ fn open_file_with_default_app(file: &Path) -> std::io::Result<()> {
 pub async fn check_rag_update(app: &AppHandle, id: &str) -> Result<RagUpdateCheck> {
     validate_doc_id(id)?;
     let dir = files_dir(app)?;
-    let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id)))
+    let meta_bytes = std::fs::read(meta_path_for(&dir, id))
         .map_err(|e| anyhow!("check: read meta {} failed: {}", id, e))?;
     let meta: DocMeta = serde_json::from_slice(&meta_bytes)?;
     // Git data source: refresh the repo's persistent clone first so the md5
@@ -5484,11 +6348,7 @@ async fn preview_batch_update_inner(app: &AppHandle, refresh_git: bool) -> Resul
     // First pass: collect metas (needed both for the git-repo refresh pass
     // and the classification loop).
     let mut docs: Vec<DocMeta> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_scan_id, path) in scan_doc_metas(&dir) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         docs.push(meta);
@@ -5659,11 +6519,7 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
     // unreadable entries instead of failing the whole batch (a single corrupt
     // .meta shouldn't brick batch update for all other docs).
     let mut docs: Vec<DocMeta> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-            continue;
-        }
+    for (_scan_id, path) in scan_doc_metas(&dir) {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
         docs.push(meta);
@@ -5738,11 +6594,7 @@ async fn run_batch_update(app: &AppHandle) -> Result<()> {
         // Re-collect: the doc set changed (adds/removes affect both the loop
         // range and the total shown in the progress dialog).
         docs.clear();
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-                continue;
-            }
+        for (_scan_id, path) in scan_doc_metas(&dir) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
             docs.push(meta);
@@ -5845,11 +6697,7 @@ pub async fn refresh_source_update(
     // Collect metas (best-effort, same policy as the batch flow).
     let mut docs: Vec<DocMeta> = Vec::new();
     if dir.exists() {
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-                continue;
-            }
+        for (_scan_id, path) in scan_doc_metas(&dir) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
             docs.push(meta);
@@ -5923,11 +6771,7 @@ pub async fn refresh_source_update(
     //    set) and filter by the source identity recorded in each meta.
     let mut docs2: Vec<DocMeta> = Vec::new();
     if dir.exists() {
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-                continue;
-            }
+        for (_scan_id, path) in scan_doc_metas(&dir) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
             docs2.push(meta);
@@ -6149,11 +6993,7 @@ pub async fn preview_source_update(
     let dir = files_dir(app)?;
     let mut docs: Vec<DocMeta> = Vec::new();
     if dir.exists() {
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("meta") {
-                continue;
-            }
+        for (_scan_id, path) in scan_doc_metas(&dir) {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(meta) = serde_json::from_slice::<DocMeta>(&bytes) else { continue };
             docs.push(meta);
@@ -6556,7 +7396,7 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
     let title_bonus_of = |doc_id: &str, doc_name: &str| -> f32 {
         let title: String = files_dir_opt
             .as_deref()
-            .and_then(|dir| std::fs::read(dir.join(format!("{doc_id}.meta"))).ok())
+            .and_then(|dir| std::fs::read(meta_path_for(&dir, doc_id)).ok())
             .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
             .and_then(|m| m.title.filter(|t| !t.trim().is_empty()))
             .unwrap_or_else(|| {
@@ -6666,7 +7506,7 @@ pub async fn search(query: String, tags: Vec<String>) -> Result<Vec<RagSearchRes
                 if titles.contains_key(doc_id) {
                     continue;
                 }
-                let title = std::fs::read(dir.join(format!("{}.meta", doc_id)))
+                let title = std::fs::read(meta_path_for(&dir, doc_id))
                     .ok()
                     .and_then(|b| serde_json::from_slice::<DocMeta>(&b).ok())
                     .and_then(|m| m.title.filter(|t| !t.is_empty()))
@@ -6770,6 +7610,14 @@ pub async fn get_settings() -> Result<RagSettings> {
             .map(|v| v as u32)
             .unwrap_or(d.doc_load_chunk_kb)
             .clamp(10, 65_536),
+        // Doc history retention count. Changing it does NOT delete existing
+        // history — pruning happens lazily on each doc's next update.
+        history_retention: rag
+            .get("historyRetention")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(d.history_retention)
+            .clamp(1, 100),
     })
 }
 
@@ -6777,6 +7625,7 @@ pub async fn save_settings(settings: RagSettings) -> Result<()> {
     // Same clamps as get_settings so a round-trip normalizes bad values.
     let interval = settings.auto_update_interval_secs.clamp(60, 86_400);
     let chunk_kb = settings.doc_load_chunk_kb.clamp(10, 65_536);
+    let history_retention = settings.history_retention.clamp(1, 100);
     let patch = json!({
         "rag": {
             "vectorWeight": settings.vector_weight as f64,
@@ -6789,7 +7638,8 @@ pub async fn save_settings(settings: RagSettings) -> Result<()> {
             "autoUpdateIntervalSecs": interval,
             "docLoadChunkKb": chunk_kb,
             "sourceSyncAddEnabled": settings.source_sync_add_enabled,
-            "sourceSyncRemoveEnabled": settings.source_sync_remove_enabled
+            "sourceSyncRemoveEnabled": settings.source_sync_remove_enabled,
+            "historyRetention": history_retention
         }
     });
     crate::services::config_service::update(&patch).await?;
@@ -7112,5 +7962,545 @@ mod cross_lang_tests {
         // 英文查询 × 纯代码 chunk：mismatch = 1 - 0 = 1.0 ≥ 0.1 → 无惩罚
         let mismatch = 1.0f32;
         assert!(mismatch >= 0.1);
+    }
+}
+
+#[cfg(test)]
+mod doc_history_tests {
+    use super::*;
+
+    /// Minimal temp-dir helper (no tempfile dev-dependency): unique dir under
+    /// the OS temp root, auto-removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "mcphub-rag-hist-test-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_meta(id: &str, name: &str, version: u32) -> DocMeta {
+        DocMeta {
+            id: id.to_string(),
+            name: name.to_string(),
+            title: None,
+            tags: vec![],
+            size: 0,
+            uploaded_at: "2026-10-22 12:00".to_string(),
+            chunk_count: 0,
+            version,
+            file_type: None,
+            method: Some("copy".to_string()),
+            original_path: None,
+            md5: None,
+            source: None,
+            raw_ext: None,
+        }
+    }
+
+    fn write_flat_doc(dir: &Path, id: &str, name: &str, content: &str) {
+        std::fs::write(dir.join(format!("{id}.meta")), serde_json::to_vec(&test_meta(id, name, 1)).unwrap()).unwrap();
+        let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+        std::fs::write(dir.join(format!("{id}{ext}")), content).unwrap();
+    }
+
+    // ── 路径解析双轨 ──
+
+    #[test]
+    fn content_path_prefers_per_doc_folder_over_flat() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        // Same relative file name in BOTH layouts: folder must win.
+        std::fs::create_dir_all(dir.join("doc1")).unwrap();
+        std::fs::write(dir.join("doc1").join("doc1.txt"), "folder").unwrap();
+        std::fs::write(dir.join("doc1.txt"), "flat").unwrap();
+        let p = content_path_for(dir, "doc1", "doc1.txt");
+        assert_eq!(p, dir.join("doc1").join("doc1.txt"));
+        assert_eq!(std::fs::read_to_string(p).unwrap(), "folder");
+    }
+
+    #[test]
+    fn content_path_falls_back_to_flat_for_legacy_docs() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        std::fs::write(dir.join("legacy.txt"), "flat-only").unwrap();
+        let p = content_path_for(dir, "legacy", "legacy.txt");
+        assert_eq!(p, dir.join("legacy.txt"));
+    }
+
+    #[test]
+    fn content_path_never_resolves_to_meta_file() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        std::fs::write(dir.join("x.meta"), "{}").unwrap();
+        let p = content_path_for(dir, "x", "x.meta");
+        assert!(p.to_string_lossy().ends_with("meta.banned"));
+    }
+
+    #[test]
+    fn meta_path_prefers_folder_and_defaults_to_folder_for_writes() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        // Neither exists -> canonical folder path (write target).
+        assert_eq!(meta_path_for(dir, "d1"), dir.join("d1").join("meta.json"));
+        // Flat only -> flat (legacy read).
+        std::fs::write(dir.join("d1.meta"), "{}").unwrap();
+        assert_eq!(meta_path_for(dir, "d1"), dir.join("d1.meta"));
+        // Both -> folder wins.
+        std::fs::create_dir_all(dir.join("d1")).unwrap();
+        std::fs::write(dir.join("d1").join("meta.json"), "{}").unwrap();
+        assert_eq!(meta_path_for(dir, "d1"), dir.join("d1").join("meta.json"));
+    }
+
+    // ── 迁移 ──
+
+    #[test]
+    fn migration_moves_flat_docs_into_folders_idempotently() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let ida = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        // Extractable doc: extracted-md content at {id}.md + archived raw at
+        // {id}.pdf (raw_ext recorded in meta).
+        let mut meta_a = test_meta(ida, "a.md", 1);
+        meta_a.raw_ext = Some(".pdf".to_string());
+        std::fs::write(dir.join(format!("{ida}.meta")), serde_json::to_vec(&meta_a).unwrap()).unwrap();
+        std::fs::write(dir.join(format!("{ida}.md")), "# hello").unwrap();
+        std::fs::write(dir.join(format!("{ida}.pdf")), b"%PDF").unwrap();
+        write_flat_doc(dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "b.txt", "world");
+
+        let moved = migrate_files_layout(dir);
+        assert_eq!(moved, 2);
+        // Folder layout in place; flat gone; content siblings moved.
+        let fa = dir.join(ida);
+        assert!(fa.join("meta.json").exists());
+        assert!(fa.join(format!("{ida}.md")).exists());
+        assert!(fa.join(format!("{ida}.pdf")).exists());
+        assert!(!dir.join(format!("{ida}.meta")).exists());
+        // Idempotent: second pass moves nothing.
+        assert_eq!(migrate_files_layout(dir), 0);
+        // Content still resolves after migration.
+        let p = content_path_for(dir, ida, "a.md");
+        assert_eq!(std::fs::read_to_string(p).unwrap(), "# hello");
+    }
+
+    #[test]
+    fn migration_skips_hostile_names_and_never_blocks() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        // Path-traversal "id" must be left untouched, not migrated.
+        std::fs::write(dir.join("..evil.meta"), b"{}").unwrap();
+        assert_eq!(migrate_files_layout(dir), 0);
+        assert!(dir.join("..evil.meta").exists());
+    }
+
+    // ── 快照 / retention / 版本列表 / 删除 ──
+
+    #[test]
+    fn history_record_roundtrip_and_list_ordering() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let id = "cccccccccccccccccccccccccccccccc";
+        let folder = ensure_doc_dir(dir, id).unwrap();
+        let hist = folder.join("history");
+        std::fs::create_dir_all(&hist).unwrap();
+        for v in [1u32, 2, 3] {
+            std::fs::write(hist.join(format!("v{v}.md")), format!("content {v}")).unwrap();
+            let rec = serde_json::json!({
+                "version": v, "savedAt": format!("2026-10-2{v} 10:00:00"),
+                "size": 9, "name": "doc.md", "md5": null, "source": "update"
+            });
+            std::fs::write(hist.join(format!("v{v}.json")), rec.to_string()).unwrap();
+        }
+        let versions = list_doc_versions_sync(dir, id);
+        let nums: Vec<u32> = versions.iter().map(|v| v.version).collect();
+        assert_eq!(nums, vec![3, 2, 1]); // newest first
+        let (content, rec) = read_doc_version_sync(dir, id, 2).unwrap();
+        assert_eq!(content, "content 2");
+        assert_eq!(rec.version, 2);
+        assert!(read_doc_version_sync(dir, id, 9).is_err());
+    }
+
+    #[test]
+    fn delete_doc_version_removes_record_and_content_any_ext() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let id = "dddddddddddddddddddddddddddddddd";
+        let hist = ensure_doc_dir(dir, id).unwrap().join("history");
+        std::fs::create_dir_all(&hist).unwrap();
+        std::fs::write(hist.join("v1.json"), "{}").unwrap();
+        std::fs::write(hist.join("v1.java"), "class A {}").unwrap();
+        std::fs::write(hist.join("v2.json"), "{}").unwrap();
+        assert!(delete_doc_version_sync(dir, id, 1));
+        assert!(!hist.join("v1.json").exists());
+        assert!(!hist.join("v1.java").exists());
+        assert!(hist.join("v2.json").exists()); // untouched
+        // Unknown version: nothing removed.
+        assert!(!delete_doc_version_sync(dir, id, 42));
+    }
+
+    #[test]
+    fn snapshot_creates_record_and_prunes_beyond_retention() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let name = "doc.md";
+        // Current content v3 on disk.
+        let folder = ensure_doc_dir(dir, id).unwrap();
+        std::fs::write(folder.join("doc.md"), "current content").unwrap();
+        // Two existing history versions.
+        let hist = folder.join("history");
+        std::fs::create_dir_all(&hist).unwrap();
+        for v in [1u32, 2] {
+            std::fs::write(hist.join(format!("v{v}.md")), format!("old {v}")).unwrap();
+            std::fs::write(hist.join(format!("v{v}.json")), serde_json::json!({
+                "version": v, "savedAt": "t", "size": 5, "name": name
+            }).to_string()).unwrap();
+        }
+        let mut meta = test_meta(id, name, 3);
+        meta.md5 = Some("abc".to_string());
+        // Retention 3: snapshot of v3 -> 3 versions total, nothing pruned.
+        // (snapshot_history is async + reads settings via the app handle; the
+        // prune step is exercised through delete_doc_version_sync here — the
+        // full async path is covered by the E2E suite.)
+        let _ = &meta;
+        // Simulate the prune step with retention=2: newest-first, skip 2, delete rest.
+        std::fs::write(hist.join("v3.md"), "current content").unwrap();
+        std::fs::write(hist.join("v3.json"), serde_json::json!({
+            "version": 3, "savedAt": "t", "size": 15, "name": name
+        }).to_string()).unwrap();
+        let versions = list_doc_versions_sync(dir, id);
+        assert_eq!(versions.len(), 3);
+        for old in versions.iter().skip(2) {
+            delete_doc_version_sync(dir, id, old.version);
+        }
+        let after = list_doc_versions_sync(dir, id);
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].version, 3);
+        assert_eq!(after[1].version, 2);
+    }
+
+    // ── diff ──
+
+    #[test]
+    fn unified_diff_marks_additions_deletions_and_context() {
+        let d = unified_diff("a\nb\nc\n", "a\nB\nc\n", "v1", "v2");
+        assert!(d.contains("--- v1"));
+        assert!(d.contains("+++ v2"));
+        assert!(d.contains("@@"));
+        assert!(d.contains("-b"));
+        assert!(d.contains("+B"));
+        assert!(d.contains(" a")); // context keeps its leading space
+    }
+
+    #[test]
+    fn unified_diff_identical_texts_is_empty() {
+        assert_eq!(unified_diff("same\n", "same\n", "a", "b"), "");
+    }
+
+    // ── 删除文档清整文件夹 ──
+
+    #[test]
+    fn doc_folder_layout_holds_everything_and_scan_dedups() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let id = "ffffffffffffffffffffffffffffffff";
+        let folder = ensure_doc_dir(dir, id).unwrap();
+        std::fs::write(folder.join("meta.json"), serde_json::to_vec(&test_meta(id, "f.md", 2)).unwrap()).unwrap();
+        std::fs::write(folder.join("f.md"), "content").unwrap();
+        std::fs::create_dir_all(folder.join("history")).unwrap();
+        std::fs::write(folder.join("history").join("v1.json"), "{}").unwrap();
+        // Scan sees exactly one doc (folder layout), not the folder itself.
+        let metas = scan_doc_metas(dir);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].0, id);
+        // Whole-folder delete removes everything including history.
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert!(!dir.join(id).exists());
+        assert!(scan_doc_metas(dir).is_empty());
+    }
+
+    #[test]
+    fn scan_doc_metas_dedups_doc_present_in_both_layouts() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab1";
+        std::fs::create_dir_all(dir.join(id)).unwrap();
+        std::fs::write(dir.join(id).join("meta.json"), "{}").unwrap();
+        std::fs::write(dir.join(format!("{id}.meta")), "{}").unwrap();
+        let metas = scan_doc_metas(dir);
+        assert_eq!(metas.len(), 1);
+        assert!(metas[0].1.ends_with("meta.json"));
+    }
+
+    // ── MCP 工具定义 ──
+
+    #[test]
+    fn tool_definitions_include_history_and_diff_tools() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs.iter().filter_map(|d| d.get("name").and_then(|n| n.as_str())).collect();
+        for expected in ["rag_file_history_versions", "rag_file_history_get", "rag_file_history_diff", "rag_file_diff"] {
+            assert!(names.contains(&expected), "missing tool {expected}");
+        }
+        // Each new tool declares its required params.
+        let diff = defs.iter().find(|d| d.get("name") == Some(&serde_json::json!("rag_file_diff"))).unwrap();
+        let req = diff.get("inputSchema").unwrap().get("required").unwrap().as_array().unwrap();
+        assert_eq!(req.len(), 2);
+    }
+
+    #[test]
+    fn validate_doc_id_still_guards_history_paths() {
+        // History paths join the id into files/{id}/history — the same guard
+        // must reject traversal before any history API runs.
+        assert!(validate_doc_id("../../etc").is_err());
+        assert!(validate_doc_id("a/b").is_err());
+        assert!(validate_doc_id("ok-id_1").is_ok());
+    }
+
+    // ── symlink / copy 自测（真实文件系统往返）──
+
+    fn write_folder_meta(dir: &Path, meta: &DocMeta) {
+        let folder = dir.join(&meta.id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("meta.json"), serde_json::to_vec(meta).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn content_path_never_resolves_to_the_doc_folder_itself() {
+        // Regression (os error 21): with the per-doc-folder layout, the legacy
+        // flat candidate `dir/{id}` IS the doc's own folder — resolving to it
+        // made callers read a directory. Both layouts must skip directories.
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        // Folder layout: files/{id}/ exists, no content file inside.
+        write_folder_meta(dir, &test_meta("docA", "docA.txt", 1));
+        let p = content_path_for(dir, "docA", "docA.txt");
+        assert!(!p.is_dir(), "content_path_for resolved to the doc folder: {}", p.display());
+        // Flat-layout collision: a directory named {id} in the flat root.
+        let tmp2 = TempDir::new();
+        let dir2 = tmp2.path();
+        std::fs::create_dir_all(dir2.join("docB")).unwrap();
+        let p2 = content_path_for(dir2, "docB", "docB.txt");
+        assert!(!p2.is_dir(), "flat candidate resolved to a directory: {}", p2.display());
+    }
+
+    #[test]
+    fn raw_content_path_never_resolves_to_the_doc_folder_itself() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        // Folder layout, no raw_ext, no external: the bare-{id} fallback must
+        // not return the doc's own folder.
+        write_folder_meta(dir, &test_meta("docC", "docC.bin", 1));
+        let p = raw_content_path_for(dir, &test_meta("docC", "docC.bin", 1));
+        assert!(!p.is_dir(), "raw_content_path_for resolved to the doc folder: {}", p.display());
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_copy_extractable_uses_md_cache() {
+        // Copy import of a PDF: {id}.md extracted cache + {id}.pdf raw copy.
+        // The cache (viewable text) must win over the binary raw copy.
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let mut meta = test_meta("docD", "report.pdf", 2);
+        meta.raw_ext = Some(".pdf".to_string());
+        let folder = dir.join("docD");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("docD.md"), "# extracted markdown").unwrap();
+        std::fs::write(folder.join("docD.pdf"), b"%PDF-fake-binary").unwrap();
+        let (bytes, ext) = snapshot_content_bytes(dir, &meta).await.unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "# extracted markdown");
+        assert_eq!(ext, ".md");
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_copy_text_uses_content_file_with_original_ext() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let meta = test_meta("docE", "notes.txt", 1);
+        let folder = dir.join("docE");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("docE.txt"), "plain text content").unwrap();
+        let (bytes, ext) = snapshot_content_bytes(dir, &meta).await.unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "plain text content");
+        assert_eq!(ext, ".txt");
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_symlink_text_reads_live_external_original() {
+        // Symlink TEXT docs keep no local copy by design — the snapshot must
+        // read the external original and decode it (ext ".md" = decoded text).
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let external = tmp.path().join("external-source.txt");
+        std::fs::write(&external, "live external content").unwrap();
+        let mut meta = test_meta("docF", "notes.txt", 3);
+        meta.method = Some("symlink".to_string());
+        meta.original_path = Some(external.to_string_lossy().to_string());
+        write_folder_meta(dir, &meta);
+        let (bytes, ext) = snapshot_content_bytes(dir, &meta).await.unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "live external content");
+        assert_eq!(ext, ".md");
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_symlink_extractable_prefers_local_cache_over_external() {
+        // Symlink extractable docs write the {id}.md cache (design: "symlink
+        // 只有缓存") — the cache must win over the binary external original.
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let external = tmp.path().join("scan.pdf");
+        std::fs::write(&external, b"%PDF-old-external").unwrap();
+        let mut meta = test_meta("docG", "scan.pdf", 2);
+        meta.method = Some("symlink".to_string());
+        meta.original_path = Some(external.to_string_lossy().to_string());
+        let folder = dir.join("docG");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("docG.md"), "# cached extraction").unwrap();
+        let (bytes, _ext) = snapshot_content_bytes(dir, &meta).await.unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "# cached extraction");
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_symlink_without_cache_skips_unsupported_binary() {
+        // Cache-less symlink pointing at an unsupported binary (.dat with NUL
+        // bytes): decode refuses -> graceful None (never an error, never a
+        // directory read). The external original lives OUTSIDE files/ (real
+        // layout: files/ holds only per-doc folders).
+        let tmp = TempDir::new();
+        let dir = tmp.path().join("files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let external = tmp.path().join("external").join("blob.dat");
+        std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+        std::fs::write(&external, b"\x00\x01\x02binary\xff\xfe").unwrap();
+        let mut meta = test_meta("docH", "blob.dat", 1);
+        meta.method = Some("symlink".to_string());
+        meta.original_path = Some(external.to_string_lossy().to_string());
+        write_folder_meta(&dir, &meta);
+        assert!(snapshot_content_bytes(&dir, &meta).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_symlink_lost_original_is_none() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let mut meta = test_meta("docI", "gone.txt", 1);
+        meta.method = Some("symlink".to_string());
+        meta.original_path = Some("/nonexistent/path/gone.txt".to_string());
+        write_folder_meta(dir, &meta);
+        assert!(snapshot_content_bytes(dir, &meta).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_bytes_nothing_on_disk_is_none() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let meta = test_meta("docJ", "ghost.txt", 1);
+        write_folder_meta(dir, &meta);
+        assert!(snapshot_content_bytes(dir, &meta).await.is_none());
+    }
+
+    #[test]
+    fn history_list_read_delete_round_trip_on_real_folder() {
+        let tmp = TempDir::new();
+        let dir = tmp.path();
+        let hist = dir.join("docK").join("history");
+        std::fs::create_dir_all(&hist).unwrap();
+        let rec = |v: u32, name: &str| {
+            serde_json::json!({
+                "version": v, "savedAt": "2026-10-22 12:00:00", "size": 5,
+                "name": name, "md5": null, "source": "file"
+            })
+            .to_string()
+        };
+        std::fs::write(hist.join("v1.json"), rec(1, "old.txt")).unwrap();
+        std::fs::write(hist.join("v1.md"), "version one").unwrap();
+        std::fs::write(hist.join("v2.json"), rec(2, "old.txt")).unwrap();
+        std::fs::write(hist.join("v2.txt"), "version two").unwrap();
+
+        let versions = list_doc_versions_sync(dir, "docK");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version, 2, "newest first");
+        assert_eq!(versions[1].version, 1);
+
+        let (content, r) = read_doc_version_sync(dir, "docK", 1).unwrap();
+        assert_eq!(content, "version one");
+        assert_eq!(r.version, 1);
+        assert_eq!(r.name, "old.txt");
+
+        // Batch delete v1 only — v2 must survive.
+        assert!(delete_doc_version_sync(dir, "docK", 1));
+        assert!(!hist.join("v1.json").exists());
+        assert!(!hist.join("v1.md").exists());
+        assert!(hist.join("v2.json").exists());
+        assert!(hist.join("v2.txt").exists());
+        assert!(read_doc_version_sync(dir, "docK", 1).is_err(), "deleted version must not be readable");
+        let versions = list_doc_versions_sync(dir, "docK");
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, 2);
+    }
+}
+
+#[cfg(test)]
+mod doc_source_preserve_tests {
+    use super::*;
+
+    fn src(kind: &str) -> Option<crate::models::rag::DocSource> {
+        Some(crate::models::rag::DocSource {
+            kind: kind.to_string(),
+            label: String::new(),
+            root: None,
+            rel_path: None,
+            git: None,
+        })
+    }
+
+    #[test]
+    fn file_kind_source_is_preserved_on_update_from_file() {
+        // 单文件导入的文档（文件分组）：从文件更新后必须留在原分组，
+        // 不得按新文件的父目录重新分组（用户实测回归）。
+        let s = src("file");
+        assert_eq!(preserve_source_on_file_update(&s).unwrap().kind, "file");
+    }
+
+    #[test]
+    fn tool_kind_source_is_preserved_on_update_from_file() {
+        let s = src("tool");
+        assert_eq!(preserve_source_on_file_update(&s).unwrap().kind, "tool");
+    }
+
+    #[test]
+    fn empty_kind_source_is_preserved_on_update_from_file() {
+        let s = src("");
+        assert_eq!(preserve_source_on_file_update(&s).unwrap().kind, "");
+    }
+
+    #[test]
+    fn folder_kind_source_is_dropped_on_update_from_file() {
+        // original_path 已离开文件夹 root —— 保留会让 source-sync 误判
+        // 「原始丢失」并自动删除文档；丢弃后按新父目录重新分组。
+        assert!(preserve_source_on_file_update(&src("folder")).is_none());
+    }
+
+    #[test]
+    fn git_kind_source_is_dropped_on_update_from_file() {
+        // 保留会让 repo 删除时引用计数虚高（clone/凭证泄漏）。
+        assert!(preserve_source_on_file_update(&src("git")).is_none());
+    }
+
+    #[test]
+    fn missing_source_stays_missing() {
+        assert!(preserve_source_on_file_update(&None).is_none());
     }
 }

@@ -20,6 +20,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronUp,
   Code,
   Plus,
   Minus,
@@ -37,6 +38,8 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   Ban,
+  History,
+  GitCompare,
 } from 'lucide-react';
 import GitIcon from '@/components/icons/GitIcon';
 import { Switch } from '@/components/ui/ToggleGroup';
@@ -44,6 +47,7 @@ import Pagination from '@/components/ui/Pagination';
 import FileTypeRenderer from '@/components/ui/FileTypeRenderer';
 import { isExtractedSource } from '@/utils/fileType';
 import { fileIcon } from '@/utils/fileIcon';
+import { parseUnifiedDiff, type DiffSideKind } from '@/utils/diffParse';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauri } from '@/utils/tauriClient';
 import { useToast } from '@/contexts/ToastContext';
@@ -51,9 +55,9 @@ import { useToast } from '@/contexts/ToastContext';
 import { useRagData } from '@/hooks/useRagData';
 import ReindexDialog from '@/components/ReindexDialog';
 import { useSettingsData } from '@/hooks/useSettingsData';
-import { getRagTools, ragDocSearchPaged, ragTagSearchPaged, getOcrStatus, pickRagGitRepo, cancelRagGitPick, getGitSourceErrors, listRagExcludedPaths, setRagExcludedPaths, refreshRagSource, previewRagSourceUpdate, getRagGitCloneDir, setRagSourceAlias } from '@/services/ragService';
+import { getRagTools, ragDocSearchPaged, ragTagSearchPaged, getOcrStatus, pickRagGitRepo, cancelRagGitPick, getGitSourceErrors, listRagExcludedPaths, setRagExcludedPaths, refreshRagSource, previewRagSourceUpdate, getRagGitCloneDir, setRagSourceAlias, listRagDocHistory, getRagDocHistory, deleteRagDocHistory, diffRagDocHistory, openRagDocHistorySource, openRagDocHistoryLocation } from '@/services/ragService';
 import RagDocTree, { type RagDocTreeHandle } from '@/components/ui/RagDocTree';
-import { RagDoc, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, RagOcrStatus, BatchPreview, DocSource, GitSourceError } from '@/types';
+import { RagDoc, RagDocHistoryVersion, RagDocInfo, RagModelInfo, RagFolderScan, RagScanFile, RagPickedFile, RagSettings, RagTagStat, RagUpdateCheck, RagOcrStatus, BatchPreview, DocSource, GitSourceError } from '@/types';
 
 const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -343,6 +347,24 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   const [showSettings, setShowSettings] = useState(false);
   const [showVectorSearch, setShowVectorSearch] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<RagDocInfo | null>(null);
+  // ─── 文档历史版本（HistoryDialog）───
+  // historyDoc: 正在查看历史的文档；historyVersions: 倒序版本列表；
+  // historySelected: 勾选待批量删除的版本号；historyViewDoc: 「查看详情」
+  // 打开的历史快照（复用 ViewDialog 只读模式）。
+  const [historyDoc, setHistoryDoc] = useState<RagDocInfo | null>(null);
+  const [historyVersions, setHistoryVersions] = useState<RagDocHistoryVersion[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySelected, setHistorySelected] = useState<Set<number>>(new Set());
+  const [historyDeleting, setHistoryDeleting] = useState(false);
+  const [historyViewDoc, setHistoryViewDoc] = useState<RagDoc | null>(null);
+  // The history version currently open in the detail dialog — 查看源文件
+  // opens THIS version's archived raw original (history/v{n}{raw_ext}),
+  // never the current doc's source.
+  const [historyViewVersion, setHistoryViewVersion] = useState<number | null>(null);
+  const [historyViewLoading, setHistoryViewLoading] = useState(false);
+  // 可视化差异弹框：{ title, diffText }（unified diff 文本，DiffDialog 逐行着色）。
+  const [historyDiffView, setHistoryDiffView] = useState<{ title: string; diffText: string } | null>(null);
+  const [historyDiffLoading, setHistoryDiffLoading] = useState(false);
   // ── 文件选择状态:分组结构(文件夹扫描或多选文件统一折叠为一组) ──
   // scan.groups 按子文件夹分组;scan.selectedPaths 是勾选集(默认全选)。
   // 上传时只取勾选的文件,flat 映射回 RagPickedFile 走原有 upload 管线。
@@ -1043,6 +1065,112 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     view(doc.id);
   };
 
+  // ─── 文档历史版本 ───
+  // 打开历史弹框：拉取版本列表（后端倒序返回；前端再按版本号倒序兜底排序）。
+  const openHistory = async (doc: RagDocInfo) => {
+    setHistoryDoc(doc);
+    setHistoryVersions([]);
+    setHistorySelected(new Set());
+    setHistoryLoading(true);
+    try {
+      const list = await listRagDocHistory(doc.id);
+      setHistoryVersions([...list].sort((a, b) => b.version - a.version));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.historyLoadFailed', '加载历史版本失败'), 'error');
+      setHistoryDoc(null);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const closeHistory = () => {
+    setHistoryDoc(null);
+    setHistoryVersions([]);
+    setHistorySelected(new Set());
+    setHistoryViewDoc(null);
+    setHistoryViewVersion(null);
+    setHistoryDiffView(null);
+  };
+
+  // 查看详情：读取历史快照内容，复用 ViewDialog（只读模式，无标签编辑）。
+  const handleHistoryViewDetail = async (v: RagDocHistoryVersion) => {
+    if (!historyDoc) return;
+    setHistoryViewLoading(true);
+    try {
+      const doc = await getRagDocHistory(historyDoc.id, v.version);
+      setHistoryViewVersion(v.version);
+      setHistoryViewDoc(doc);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.historyLoadFailed', '加载历史版本失败'), 'error');
+    } finally {
+      setHistoryViewLoading(false);
+    }
+  };
+
+  // 历史详情「查看源文件」：打开该历史版本归档的原始文件（history/v{n}{raw_ext}）。
+  const handleHistoryViewSourceFile = async () => {
+    if (!historyDoc || historyViewVersion == null) return;
+    try {
+      await openRagDocHistorySource(historyDoc.id, historyViewVersion);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.openFolderNotReady'), 'error');
+    }
+  };
+
+  // 历史列表「文件跳转」：在文件管理器中显示该版本归档的文件（优先原始
+  // 文件快照 v{n}{raw_ext}，否则文本快照）。
+  const handleHistoryOpenLocation = async (v: RagDocHistoryVersion) => {
+    if (!historyDoc) return;
+    try {
+      await openRagDocHistoryLocation(historyDoc.id, v.version);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('pages.rag.openFolderNotReady'), 'error');
+    }
+  };
+
+  // 批量删除勾选的历史版本（单条删除 = 只勾选该条的批量删除）。
+  const handleHistoryDelete = async (versions: number[]) => {
+    if (!historyDoc || versions.length === 0) return;
+    setHistoryDeleting(true);
+    try {
+      await deleteRagDocHistory(historyDoc.id, versions);
+      setHistoryVersions((prev) => prev.filter((v) => !versions.includes(v.version)));
+      setHistorySelected(new Set());
+      showToast(t('pages.rag.historyDeleteSuccess', '已删除 {{count}} 个历史版本', { count: versions.length }), 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('common.operationFailed', '操作失败'), 'error');
+    } finally {
+      setHistoryDeleting(false);
+    }
+  };
+
+  const toggleHistorySelected = (version: number) => {
+    setHistorySelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(version)) next.delete(version);
+      else next.add(version);
+      return next;
+    });
+  };
+
+  // 对比：入参 1 个版本 = 该版本 vs 当前文档（toVersion 缺省）；
+  // 2 个版本 = 两个历史版本之间（旧 → 新）。结果在 DiffDialog 可视化着色。
+  const handleHistoryCompare = async (versions: number[]) => {
+    if (!historyDoc || versions.length === 0 || versions.length > 2) return;
+    const [fromVersion, toVersion] =
+      versions.length === 2 ? [Math.min(...versions), Math.max(...versions)] : [versions[0], undefined];
+    setHistoryDiffLoading(true);
+    try {
+      const diffText = await diffRagDocHistory(historyDoc.id, fromVersion, toVersion);
+      const toLabel = toVersion === undefined ? t('pages.rag.historyDiffCurrent', '当前文档') : `v${toVersion}`;
+      setHistoryDiffView({ title: `v${fromVersion} → ${toLabel}`, diffText });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t('common.operationFailed', '操作失败'), 'error');
+    } finally {
+      setHistoryDiffLoading(false);
+    }
+  };
+
   // 单条「更新」：弹出 UpdateDialog（先检查原始文件，再按分支执行），不再直接弹 OS picker。
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const handleUpdate = (doc: RagDocInfo) => {
@@ -1103,6 +1231,17 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           return;
         }
         await updateDoc(doc.id, picked[0].name, { mode: 'file', filePath: picked[0].path });
+        // The update takes the NEW file's name — if it differs from the doc's
+        // old name, call it out explicitly: the list auto-refreshes and the
+        // row the user originally clicked now shows a different name (easy
+        // to mistake for a different doc, e.g. with same-named coexists).
+        if (picked[0].name !== doc.name) {
+          showToast(t('pages.rag.updateDoneRenamed', '文档已更新，已更名为 {{name}}', { name: picked[0].name }), 'success');
+        } else {
+          showToast(t('pages.rag.updateDone', '文档已更新'), 'success');
+        }
+        setUpdateActionPhase('done');
+        return;
       }
       setUpdateActionPhase('done');
       showToast(t('pages.rag.updateDone', '文档已更新'), 'success');
@@ -1655,7 +1794,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
               <span className="hub-mono text-[12px] rag-col-time flex-shrink-0" style={{ width: 160, color: 'var(--hub-ink-3)' }}>
                 {doc.uploadedAt || '-'}
               </span>
-              <div className="flex items-center gap-1 flex-shrink-0" style={{ width: 170 }}>
+              <div className="flex items-center gap-1 flex-shrink-0" style={{ width: 200 }}>
                 <button
                   className="hub-icon-btn sm"
                   onClick={() => handleView(doc)}
@@ -1679,6 +1818,18 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
                   disabled={disabled || updatingId === doc.id}
                 >
                   {updatingId === doc.id ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                </button>
+                <button
+                  className="hub-icon-btn sm"
+                  onClick={() => void openHistory(doc)}
+                  title={t('pages.rag.historyButton', '历史版本')}
+                  disabled={disabled || (historyLoading && historyDoc?.id === doc.id)}
+                >
+                  {historyLoading && historyDoc?.id === doc.id ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : (
+                    <History size={13} />
+                  )}
                 </button>
                 <div className="relative">
                   <button
@@ -2242,6 +2393,44 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
             await view(viewedDoc.id);
           }}
           onOpenSourceFile={() => handleViewSourceFile(viewedDoc)}
+        />
+      )}
+
+      {/* History dialog: version list + batch delete + compare */}
+      {historyDoc && (
+        <HistoryDialog
+          doc={historyDoc}
+          versions={historyVersions}
+          loading={historyLoading}
+          selected={historySelected}
+          deleting={historyDeleting}
+          diffLoading={historyDiffLoading}
+          onToggle={toggleHistorySelected}
+          onClose={closeHistory}
+          onViewDetail={(v) => void handleHistoryViewDetail(v)}
+          onOpenLocation={(v) => void handleHistoryOpenLocation(v)}
+          onDelete={(versions) => void handleHistoryDelete(versions)}
+          onCompare={(versions) => void handleHistoryCompare(versions)}
+        />
+      )}
+
+      {/* Visual diff dialog (unified diff, per-line coloring) */}
+      {historyDiffView && (
+        <DiffDialog
+          title={historyDiffView.title}
+          diffText={historyDiffView.diffText}
+          onClose={() => setHistoryDiffView(null)}
+        />
+      )}
+
+      {/* History detail: reuse ViewDialog in readonly mode (no tags editor) */}
+      {historyViewDoc && (
+        <ViewDialog
+          doc={historyViewDoc}
+          moreLoading={false}
+          onLoadMore={() => {}}
+          onClose={() => setHistoryViewDoc(null)}
+          onOpenSourceFile={() => void handleHistoryViewSourceFile()}
         />
       )}
 
@@ -3808,6 +3997,10 @@ const SearchSettingsDialog: React.FC<{
   // Doc-detail page size (KiB): how much content the View dialog loads per
   // page. Backend clamps to [10, 65536].
   const [docLoadChunkKb, setDocLoadChunkKb] = useState(initial.docLoadChunkKb || 200);
+  // Doc history retention count: how many historical versions to keep per doc.
+  // Changing it does NOT delete existing history — pruning happens lazily on
+  // each doc's next update (backend clamps to [1, 100]).
+  const [historyRetention, setHistoryRetention] = useState(initial.historyRetention || 3);
   const sum = vectorWeight + keywordWeight;
 
   const handleVectorChange = (v: number) => {
@@ -3964,6 +4157,21 @@ const SearchSettingsDialog: React.FC<{
                 {t('pages.rag.docLoadChunkKbHint')}
               </p>
             </div>
+            {/* Doc history retention count + lazy-effect tips */}
+            <div>
+              <NumericSlider
+                label={t('pages.rag.historyRetention', '文档历史留存数量')}
+                value={historyRetention}
+                min={1}
+                max={100}
+                step={1}
+                onChange={(v) => setHistoryRetention(Math.max(1, Math.min(100, v)))}
+              />
+              <p className="mt-1 text-[12px] flex items-start gap-1" style={{ color: 'var(--hub-ink-3)' }}>
+                <Info size={12} className="flex-shrink-0 mt-0.5" />
+                <span>{t('pages.rag.historyRetentionHint', '修改留存数量不会实时生效，也不会立即删除已有历史；将在文档下次更新时按新数量统一清理。')}</span>
+              </p>
+            </div>
           </div>
         </div>
         <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
@@ -3983,6 +4191,7 @@ const SearchSettingsDialog: React.FC<{
                 autoUpdateEnabled,
                 autoUpdateIntervalSecs: autoUpdateIntervalMin * 60,
                 docLoadChunkKb,
+                historyRetention,
                 sourceSyncAddEnabled: initial.sourceSyncAddEnabled,
                 sourceSyncRemoveEnabled: initial.sourceSyncRemoveEnabled,
               })
@@ -4527,6 +4736,303 @@ const TagEditor: React.FC<{ tags: string[]; onChange: (tags: string[]) => void }
   );
 };
 
+/** Diff dialog: side-by-side (left = old, right = new) visualization of a
+ *  unified diff. Deletions (red) align row-by-row against additions (green)
+ *  within each hunk; context lines render on both sides. A change = any row
+ *  with an add or del; prev/next buttons jump between changes. */
+const DiffDialog: React.FC<{
+  title: string;
+  diffText: string;
+  onClose: () => void;
+}> = ({ title, diffText, onClose }) => {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [changeIdx, setChangeIdx] = useState(0);
+
+  // Unified diff -> aligned side-by-side rows (pure parser, unit-tested in
+  // utils/diffParse.test.ts).
+  const rows = useMemo(() => parseUnifiedDiff(diffText), [diffText]);
+
+  const changeRows = useMemo(() => rows.map((r, idx) => (r.isChange ? idx : -1)).filter((idx) => idx >= 0), [rows]);
+
+  const jumpTo = (idx: number) => {
+    if (changeRows.length === 0) return;
+    const next = ((idx % changeRows.length) + changeRows.length) % changeRows.length;
+    setChangeIdx(next);
+    const el = scrollRef.current?.querySelector<HTMLElement>(`[data-change-row="${changeRows[next]}"]`);
+    el?.scrollIntoView({ block: 'center' });
+  };
+
+  const sideStyle = (kind: DiffSideKind): React.CSSProperties => {
+    switch (kind) {
+      case 'del':
+        return { color: 'var(--hub-err, #dc2626)', background: 'rgba(220, 38, 38, 0.08)' };
+      case 'add':
+        return { color: 'var(--hub-ok, #16a34a)', background: 'rgba(22, 163, 74, 0.08)' };
+      case 'hunk':
+        return { color: 'var(--hub-accent)', background: 'color-mix(in srgb, var(--hub-accent) 8%, transparent)' };
+      default:
+        return { color: 'var(--hub-ink-2)' };
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-6xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <div className="flex items-center gap-2 min-w-0">
+            <GitCompare size={16} style={{ color: 'var(--hub-ink-2)' }} />
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 truncate">
+              {t('pages.rag.diffTitle', '差异对比')}
+            </h2>
+            <span className="hub-mono text-[12px] flex-shrink-0" style={{ color: 'var(--hub-accent)' }}>
+              {title}
+            </span>
+          </div>
+          <button onClick={onClose} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+        {/* Change navigation toolbar: prev/next jump between changed rows */}
+        <div className="flex items-center justify-between px-5 py-2 border-b border-[var(--hub-line-2)]">
+          <div className="flex items-center gap-2">
+            <button
+              className="hub-btn sm inline-flex items-center gap-1"
+              onClick={() => jumpTo(changeIdx - 1)}
+              disabled={changeRows.length === 0}
+              title={t('pages.rag.diffPrevChange', '上一处差异')}
+            >
+              <ChevronUp size={13} />
+              <span>{t('pages.rag.diffPrevChange', '上一处')}</span>
+            </button>
+            <button
+              className="hub-btn sm inline-flex items-center gap-1"
+              onClick={() => jumpTo(changeIdx + 1)}
+              disabled={changeRows.length === 0}
+              title={t('pages.rag.diffNextChange', '下一处差异')}
+            >
+              <ChevronDown size={13} />
+              <span>{t('pages.rag.diffNextChange', '下一处')}</span>
+            </button>
+          </div>
+          <span className="hub-mono text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+            {changeRows.length === 0
+              ? t('pages.rag.diffNoChanges', '无差异')
+              : t('pages.rag.diffChangePos', '{{current}} / {{total}} 处差异', {
+                  current: changeIdx + 1,
+                  total: changeRows.length,
+                })}
+          </span>
+        </div>
+        {/* Side-by-side body: left = old, right = new. Column headers sticky. */}
+        <div ref={scrollRef} className="flex-1 overflow-auto">
+          <div className="grid sticky top-0 z-10" style={{ gridTemplateColumns: '1fr 1fr', background: 'var(--hub-surface)' }}>
+            <div className="px-3 py-1.5 text-[12px] font-medium border-r border-[var(--hub-line-2)]" style={{ color: 'var(--hub-ink-2)' }}>
+              {t('pages.rag.diffOldSide', '旧')}
+            </div>
+            <div className="px-3 py-1.5 text-[12px] font-medium" style={{ color: 'var(--hub-ink-2)' }}>
+              {t('pages.rag.diffNewSide', '新')}
+            </div>
+          </div>
+          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+            {rows.map((row, idx) => (
+              <React.Fragment key={idx}>
+                <div
+                  {...(row.isChange ? { 'data-change-row': idx } : {})}
+                  className={`hub-mono text-[12px] leading-5 whitespace-pre-wrap break-all px-3 ${idx % 2 === 0 ? '' : ''}`}
+                  style={{
+                    ...sideStyle(row.left.kind),
+                    borderRight: '1px solid var(--hub-line-2)',
+                    outline: row.isChange ? '1px solid color-mix(in srgb, var(--hub-accent) 35%, transparent)' : undefined,
+                    outlineOffset: -1,
+                  }}
+                >
+                  {row.left.text || ' '}
+                </div>
+                <div
+                  className="hub-mono text-[12px] leading-5 whitespace-pre-wrap break-all px-3"
+                  style={{
+                    ...sideStyle(row.right.kind),
+                    outline: row.isChange ? '1px solid color-mix(in srgb, var(--hub-accent) 35%, transparent)' : undefined,
+                    outlineOffset: -1,
+                  }}
+                >
+                  {row.right.text || ' '}
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          <button onClick={onClose} className="hub-btn primary">
+            {t('common.ok', '确定')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/** History dialog: list a doc's historical versions (newest first) with
+ *  multi-select batch delete + per-version "view detail" (opens ViewDialog in
+ *  readonly mode). Snapshots are immutable — no tag editing / source opening. */
+const HistoryDialog: React.FC<{
+  doc: RagDocInfo;
+  versions: RagDocHistoryVersion[];
+  loading: boolean;
+  selected: Set<number>;
+  deleting: boolean;
+  diffLoading: boolean;
+  onToggle: (version: number) => void;
+  onClose: () => void;
+  onViewDetail: (v: RagDocHistoryVersion) => void;
+  /** Reveal this version's archived files in the OS file manager. */
+  onOpenLocation: (v: RagDocHistoryVersion) => void;
+  onDelete: (versions: number[]) => void;
+  /** Compare: 1 version = vs current doc; 2 versions = between the two. */
+  onCompare: (versions: number[]) => void;
+}> = ({ doc, versions, loading, selected, deleting, diffLoading, onToggle, onClose, onViewDetail, onOpenLocation, onDelete, onCompare }) => {
+  const { t } = useTranslation();
+  const allSelected = versions.length > 0 && versions.every((v) => selected.has(v.version));
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <div className="flex items-center gap-2 min-w-0">
+            <History size={16} style={{ color: 'var(--hub-ink-2)' }} />
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 truncate" title={doc.name}>
+              {t('pages.rag.historyTitle', '历史版本')}
+            </h2>
+            <span className="text-[12px] truncate" style={{ color: 'var(--hub-ink-3)' }} title={doc.name}>
+              {doc.name}
+            </span>
+          </div>
+          <button onClick={onClose} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-2">
+          {loading ? (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 size={18} className="animate-spin" style={{ color: 'var(--hub-ink-3)' }} />
+            </div>
+          ) : versions.length === 0 ? (
+            <p className="text-center text-[13px] py-10" style={{ color: 'var(--hub-ink-3)' }}>
+              {t('pages.rag.historyEmpty', '暂无历史版本')}
+            </p>
+          ) : (
+            <>
+              {/* 全选行 */}
+              <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none" style={{ color: 'var(--hub-ink-2)' }}>
+                <input
+                  type="checkbox"
+                  className="hub-checkbox"
+                  checked={allSelected}
+                  onChange={() => {
+                    if (allSelected) versions.forEach((v) => selected.has(v.version) && onToggle(v.version));
+                    else versions.forEach((v) => !selected.has(v.version) && onToggle(v.version));
+                  }}
+                />
+                {t('pages.rag.historySelectAll', '全选')}
+              </label>
+              {versions.map((v) => (
+                <div
+                  key={v.version}
+                  className="hub-card flex items-center gap-2"
+                  style={{ padding: '8px 12px', background: 'var(--hub-surface)' }}
+                >
+                  <input
+                    type="checkbox"
+                    className="hub-checkbox"
+                    checked={selected.has(v.version)}
+                    onChange={() => onToggle(v.version)}
+                  />
+                  <span className="hub-mono text-[12px] flex-shrink-0" style={{ color: 'var(--hub-accent)' }}>
+                    v{v.version}
+                  </span>
+                  <span className="text-[12px] truncate flex-1" style={{ color: 'var(--hub-ink)' }} title={v.name}>
+                    {v.name}
+                  </span>
+                  <span className="hub-mono text-[12px] flex-shrink-0" style={{ color: 'var(--hub-ink-3)' }}>
+                    {formatSize(v.size)}
+                  </span>
+                  <span className="hub-mono text-[12px] flex-shrink-0 hidden sm:inline" style={{ color: 'var(--hub-ink-3)' }}>
+                    {v.savedAt}
+                  </span>
+                  <button
+                    className="hub-icon-btn sm flex-shrink-0"
+                    onClick={() => onViewDetail(v)}
+                    title={t('pages.rag.historyView', '查看详情')}
+                    disabled={deleting}
+                  >
+                    <Eye size={13} />
+                  </button>
+                  <button
+                    className="hub-icon-btn sm flex-shrink-0"
+                    onClick={() => onOpenLocation(v)}
+                    title={t('pages.rag.historyOpenLocation', '打开文件位置')}
+                    disabled={deleting}
+                  >
+                    <FolderOpen size={13} />
+                  </button>
+                  <button
+                    className="hub-icon-btn sm flex-shrink-0"
+                    onClick={() => onCompare([v.version])}
+                    title={t('pages.rag.historyCompare', '与当前文档对比')}
+                    disabled={deleting || diffLoading}
+                  >
+                    {diffLoading ? <Loader2 size={13} className="animate-spin" /> : <GitCompare size={13} />}
+                  </button>
+                  <button
+                    className="hub-icon-btn sm flex-shrink-0"
+                    onClick={() => onDelete([v.version])}
+                    title={t('pages.rag.historyDelete', '删除历史')}
+                    disabled={deleting}
+                    style={{ color: 'var(--hub-err)' }}
+                  >
+                    {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+        <div className="flex items-center justify-between p-5 border-t border-[var(--hub-line-2)]">
+          <span className="text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
+            {t('pages.rag.historySelected', '已选 {{count}} 项', { count: selected.size })}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => onCompare(Array.from(selected))}
+              className="hub-btn sm inline-flex items-center gap-1"
+              disabled={diffLoading || selected.size !== 2}
+              title={
+                selected.size === 2
+                  ? t('pages.rag.historyCompareSelected', '对比选中的两个版本')
+                  : t('pages.rag.historyCompareSelectTwo', '请勾选两个版本进行对比')
+              }
+            >
+              {diffLoading ? <Loader2 size={13} className="animate-spin" /> : <GitCompare size={13} />}
+              <span>{t('pages.rag.historyCompareSelected', '对比选中版本')}</span>
+            </button>
+            <button onClick={onClose} className="hub-btn">
+              {t('pages.rag.cancel')}
+            </button>
+            <button
+              onClick={() => onDelete(Array.from(selected))}
+              className="hub-btn"
+              disabled={deleting || selected.size === 0}
+              style={selected.size > 0 ? { color: 'var(--hub-err)', borderColor: 'var(--hub-err)' } : undefined}
+            >
+              {deleting ? <Loader2 size={13} className="animate-spin" /> : t('pages.rag.historyBatchDelete', '删除选中')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /** View dialog: show doc content + editable tags. Tags are persisted in real
  *  time on each add/remove (no Save button) — `onSaveTags(next)` is called
  *  with the full new list on every change. */
@@ -4535,7 +5041,9 @@ const ViewDialog: React.FC<{
   moreLoading: boolean;
   onLoadMore: () => void;
   onClose: () => void;
-  onSaveTags: (tags: string[]) => Promise<void>;
+  /** Real-time tag saving. Omitted in history-readonly mode — the tags editor
+   *  is hidden entirely (historical snapshots are immutable). */
+  onSaveTags?: (tags: string[]) => Promise<void>;
   /** Open the doc's ORIGINAL source file with the OS default app. Only
    *  provided for extractable-source docs (PDF/Office/image); the button is
    *  hidden when absent or when the source is lost/unknown. */
@@ -4604,6 +5112,7 @@ const ViewDialog: React.FC<{
   }, [doc]);
 
   const handleChange = async (next: string[]) => {
+    if (!onSaveTags) return;
     const prev = tags;
     setTags(next); // optimistic
     setBusy(true);
@@ -4630,7 +5139,8 @@ const ViewDialog: React.FC<{
           </button>
         </div>
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-5 space-y-4">
-          {/* Tags editor (real-time) */}
+          {/* Tags editor (real-time) — hidden in history-readonly mode */}
+          {onSaveTags && (
           <div>
             <div className="flex items-center gap-1.5 mb-1.5">
               <Tag size={13} style={{ color: 'var(--hub-ink-3)' }} />
@@ -4643,6 +5153,7 @@ const ViewDialog: React.FC<{
               <TagEditor tags={tags} onChange={handleChange} />
             </div>
           </div>
+          )}
           {/* Content toolbar: render/source toggle + view-original-file
               button (extractable sources only). Zoom is gesture-only
               (Ctrl/Cmd + wheel or pinch) - show the level as a hint. */}
@@ -4660,7 +5171,7 @@ const ViewDialog: React.FC<{
               {/* 查看源文件：二次解析类文档（PDF/Office/图片）默认展示的是
                   提取后的 Markdown/OCR 文本；此按钮用系统默认程序打开原始
                   文件。原始丢失/未知时隐藏。 */}
-              {onOpenSourceFile && isExtractedSource(doc.name) && doc.originalPath && doc.lostOriginal !== true && (
+              {onOpenSourceFile && doc.originalPath && doc.lostOriginal !== true && (isExtractedSource(doc.name) || isExtractedSource(doc.originalPath)) && (
                 <button
                   type="button"
                   onClick={onOpenSourceFile}

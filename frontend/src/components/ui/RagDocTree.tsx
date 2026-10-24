@@ -101,7 +101,8 @@ const RagDocTree = React.forwardRef<RagDocTreeHandle, {
   onRenameSource?: (target: { kind: 'git' | 'folder'; url?: string; root?: string; currentLabel: string }) => void;
 }>(({ docs, renderRow, selectedIds, onToggleDocs, forceExpanded, onAllCollapsedChange, onRefreshSource, refreshingSourceKey, excludedPaths, excludeToggling, onToggleDirExcluded, onToggleDocsExcluded, onToggleSourceExcluded, onRenameSource }, ref) => {
   const { t } = useTranslation();
-  // 折叠状态：key = `${kind}\n${label}\n${dirPath}`；默认全部展开。
+  // 折叠状态：key = `${kind}\n${label}\n${dirPath}`；切换到树形时默认全部
+  // 收起（数据首次到位时执行一次；后续 docs 刷新不重置用户展开状态）。
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   // 一键展开/收起（需求反馈）：用 override 状态 + 递增版本号驱动全部节点。
   // expandAll 清空 collapsed；collapseAll 收集当前全部节点 key 一次性置入。
@@ -204,6 +205,23 @@ const RagDocTree = React.forwardRef<RagDocTreeHandle, {
   const sourcesRef = useRef(sources);
   useEffect(() => {
     sourcesRef.current = sources;
+  }, [sources]);
+
+  // 切换到树形视图时默认全部收起：数据首次到位时把全部源/目录 key 置入
+  // collapsed（仅一次；之后的 docs 刷新不重置用户手动展开的状态）。
+  const didInitialCollapse = useRef(false);
+  useEffect(() => {
+    if (didInitialCollapse.current) return;
+    if (sources.length === 0) return;
+    const keys = new Set<string>();
+    for (const src of sources) {
+      const srcKey = `${src.kind}\n${src.label}`;
+      keys.add(srcKey);
+      collectDirKeys(buildDirTree(src.docs), '', srcKey, keys);
+    }
+    setCollapsed(keys);
+    didInitialCollapse.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sources]);
 
   /** 收集目录子树全部折叠 key（DirNode 的 key = sourceKey + \n + dirPath）。 */

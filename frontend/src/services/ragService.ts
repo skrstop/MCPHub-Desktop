@@ -2,6 +2,7 @@ import { apiGet, apiPost, apiPut } from '../utils/fetchInterceptor';
 import type { ModelDownloadProgress } from '@/components/ui/ModelSelector';
 import {
   RagDoc,
+  RagDocHistoryVersion,
   RagDocInfo,
   RagChunk,
   RagChunkPage,
@@ -429,6 +430,7 @@ export const getRagSettings = async (): Promise<RagSettings> => {
       docLoadChunkKb: 200,
       sourceSyncAddEnabled: false,
       sourceSyncRemoveEnabled: true,
+      historyRetention: 3,
     }
   );
 };
@@ -437,6 +439,42 @@ export const getRagSettings = async (): Promise<RagSettings> => {
 export const saveRagSettings = async (settings: RagSettings): Promise<void> => {
   const response: ApiResponse = await apiPut('/rag/settings', settings);
   if (!response.success) throw new Error(response.message || 'Failed to save RAG settings');
+};
+
+/** List a doc's historical versions, newest first. */
+export const listRagDocHistory = async (docId: string): Promise<RagDocHistoryVersion[]> => {
+  const response: ApiResponse<RagDocHistoryVersion[]> = await apiPost('/rag/docs/history/list', { docId });
+  if (!response.success) throw new Error(response.message || 'Failed to list doc history');
+  return response.data ?? [];
+};
+
+/** Read one historical version's full content (View-dialog shape). */
+export const getRagDocHistory = async (docId: string, version: number): Promise<RagDoc> => {
+  const response: ApiResponse<RagDoc> = await apiPost('/rag/docs/history/get', { docId, version });
+  if (!response.success) throw new Error(response.message || 'Failed to read doc history');
+  if (!response.data) throw new Error('History version not found');
+  return response.data;
+};
+
+/** Batch-delete historical versions of a doc. */
+export const deleteRagDocHistory = async (docId: string, versions: number[]): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/docs/history/delete', { docId, versions });
+  if (!response.success) throw new Error(response.message || 'Failed to delete doc history');
+};
+
+/** Diff two versions of a doc (toVersion omitted = current content). */
+export const diffRagDocHistory = async (
+  docId: string,
+  fromVersion: number,
+  toVersion?: number,
+): Promise<string> => {
+  const response: ApiResponse<string> = await apiPost('/rag/docs/history/diff', {
+    docId,
+    fromVersion,
+    toVersion,
+  });
+  if (!response.success) throw new Error(response.message || 'Failed to diff doc history');
+  return response.data ?? '';
 };
 
 /** Model context window (tokens), to cap chunk_size in the UI. */
@@ -466,6 +504,20 @@ export const openRagFileLocation = async (id: string, target?: 'source' | 'conte
 export const openRagSourceFile = async (id: string): Promise<void> => {
   const response: ApiResponse = await apiPost('/rag/open-source-file', { id });
   if (!response.success) throw new Error(response.message || 'Failed to open source file');
+};
+
+/** Open one HISTORY version's archived RAW original with the OS default
+ *  application ("查看源文件" in the history detail dialog). */
+export const openRagDocHistorySource = async (docId: string, version: number): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/open-history-source', { docId, version });
+  if (!response.success) throw new Error(response.message || 'Failed to open history source file');
+};
+
+/** Reveal one HISTORY version's archived files in the OS file manager
+ *  ("文件跳转" in the history dialog). */
+export const openRagDocHistoryLocation = async (docId: string, version: number): Promise<void> => {
+  const response: ApiResponse = await apiPost('/rag/open-history-location', { docId, version });
+  if (!response.success) throw new Error(response.message || 'Failed to open history file location');
 };
 
 /**

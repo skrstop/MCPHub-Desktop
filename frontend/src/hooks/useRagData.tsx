@@ -75,7 +75,7 @@ const useRagDataState = () => {
   // `initializing` (toggle on/off) so the switch can show "切换中" instead of
   // "开启中". Either flag grays out the page.
   const [switchingModel, setSwitchingModel] = useState(false);
-  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0, autoUpdateEnabled: true, autoUpdateIntervalSecs: 300, docLoadChunkKb: 200, sourceSyncAddEnabled: false, sourceSyncRemoveEnabled: true });
+  const [settings, setSettings] = useState<RagSettings>({ vectorWeight: 0.9, keywordWeight: 0.1, maxResults: 20, scoreThreshold: 0.65, chunkSize: 0, chunkOverlap: 0, autoUpdateEnabled: true, autoUpdateIntervalSecs: 300, docLoadChunkKb: 200, sourceSyncAddEnabled: false, sourceSyncRemoveEnabled: true, historyRetention: 3 });
   const [modelLimits, setModelLimits] = useState<RagModelLimits>({ maxContext: 2048 });
   const [viewedDoc, setViewedDoc] = useState<RagDoc | null>(null);
   const [viewLoading, setViewLoading] = useState(false);

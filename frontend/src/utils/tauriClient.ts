@@ -817,6 +817,29 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // PUT /rag/settings — persist search settings
     if (segs[1] === 'settings' && m === 'PUT')
       return { command: 'save_rag_settings', args: { settings: body } };
+    // POST /rag/docs/history/list — doc history version list (newest first)
+    if (segs[1] === 'docs' && segs[2] === 'history' && segs[3] === 'list' && m === 'POST') {
+      const b = body as { docId?: string } | null;
+      return { command: 'list_rag_doc_history', args: { docId: b?.docId ?? '' } };
+    }
+    // POST /rag/docs/history/get — read one historical version's content
+    if (segs[1] === 'docs' && segs[2] === 'history' && segs[3] === 'get' && m === 'POST') {
+      const b = body as { docId?: string; version?: number } | null;
+      return { command: 'get_rag_doc_history', args: { docId: b?.docId ?? '', version: b?.version ?? 0 } };
+    }
+    // POST /rag/docs/history/delete — batch-delete historical versions
+    if (segs[1] === 'docs' && segs[2] === 'history' && segs[3] === 'delete' && m === 'POST') {
+      const b = body as { docId?: string; versions?: number[] } | null;
+      return { command: 'delete_rag_doc_history', args: { docId: b?.docId ?? '', versions: b?.versions ?? [] } };
+    }
+    // POST /rag/docs/history/diff — diff two versions (toVersion omitted = current)
+    if (segs[1] === 'docs' && segs[2] === 'history' && segs[3] === 'diff' && m === 'POST') {
+      const b = body as { docId?: string; fromVersion?: number; toVersion?: number } | null;
+      return {
+        command: 'diff_rag_doc_history',
+        args: { docId: b?.docId ?? '', fromVersion: b?.fromVersion ?? 0, toVersion: b?.toVersion },
+      };
+    }
     // POST /rag/search — similarity search (optional tag filter)
     if (segs[1] === 'search' && m === 'POST') {
       const b = body as { query?: string; tags?: string[] } | null;
@@ -890,6 +913,24 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     if (segs[1] === 'open-source-file' && m === 'POST') {
       const b = body as { id?: string } | null;
       return { command: 'open_rag_doc_source_file', args: { id: b?.id ?? '' } };
+    }
+    // POST /rag/open-history-source — open one HISTORY version's archived RAW
+    // original ("查看源文件" in the history detail dialog)
+    if (segs[1] === 'open-history-source' && m === 'POST') {
+      const b = body as { docId?: string; version?: number } | null;
+      return {
+        command: 'open_rag_doc_history_source',
+        args: { docId: b?.docId ?? '', version: b?.version ?? 0 },
+      };
+    }
+    // POST /rag/open-history-location — reveal one HISTORY version's archived
+    // files in the file manager ("文件跳转" in the history dialog)
+    if (segs[1] === 'open-history-location' && m === 'POST') {
+      const b = body as { docId?: string; version?: number } | null;
+      return {
+        command: 'open_rag_doc_history_location',
+        args: { docId: b?.docId ?? '', version: b?.version ?? 0 },
+      };
     }
     // POST /rag/reindex-all — re-embed every doc with the currently-loaded
     // model (after a model swap recreated the vector table). Emits progress

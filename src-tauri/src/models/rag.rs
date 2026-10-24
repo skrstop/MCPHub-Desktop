@@ -61,6 +61,42 @@ pub struct RagSettings {
     /// in the UI.
     #[serde(default = "default_source_sync_remove_enabled")]
     pub source_sync_remove_enabled: bool,
+    /// Doc history retention count: how many historical versions to keep per
+    /// doc. Default 3. Changing this does NOT delete existing history —
+    /// pruning happens lazily the next time each doc is updated. Clamped to
+    /// [1, 100] at read/save time.
+    #[serde(default = "default_history_retention")]
+    pub history_retention: u32,
+}
+
+fn default_history_retention() -> u32 {
+    3
+}
+
+/// One historical version of a RAG doc (snapshot taken before a content
+/// overwrite). Listed newest-first by the backend.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RagDocHistoryVersion {
+    /// Snapshot version (the doc's meta.version at snapshot time).
+    pub version: u32,
+    /// When the snapshot was taken (local time string).
+    pub saved_at: String,
+    /// Snapshot content size in bytes.
+    pub size: u64,
+    /// Doc display name at snapshot time.
+    pub name: String,
+    /// Content md5 at snapshot time (hex), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
+    /// What produced the snapshot: "update" | "file" | "original" | "batch".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Extension (with dot) of the archived RAW original snapshot for
+    /// extractable docs (PDF/Office/image) — "查看源文件" in the history
+    /// detail dialog opens `history/v{n}{raw_ext}`. None = text-only snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_ext: Option<String>,
 }
 
 fn default_source_sync_remove_enabled() -> bool {
@@ -136,6 +172,7 @@ impl Default for RagSettings {
             doc_load_chunk_kb: 200,
             source_sync_add_enabled: false,
             source_sync_remove_enabled: true,
+            history_retention: 3,
         }
     }
 }

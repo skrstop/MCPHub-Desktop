@@ -461,6 +461,32 @@ export interface RagSettings {
   /** Auto-remove docs whose source file vanished. Default true — off keeps
    *  docs flagged "lost original" in the UI instead of deleting them. */
   sourceSyncRemoveEnabled: boolean;
+  /** Doc history retention count: how many historical versions to keep per
+   *  doc. Default 3; clamped to [1, 100] by the backend. Changing this does
+   *  NOT delete existing history immediately — pruning happens lazily the
+   *  next time each doc is updated. */
+  historyRetention: number;
+}
+
+/** One historical version of a RAG doc (snapshot taken before a content
+ *  overwrite). Listed newest-first by the backend. */
+export interface RagDocHistoryVersion {
+  /** Snapshot version (the doc's meta.version at snapshot time). */
+  version: number;
+  /** When the snapshot was taken (ISO/local string). */
+  savedAt: string;
+  /** Snapshot content size in bytes. */
+  size: number;
+  /** Doc display name at snapshot time. */
+  name: string;
+  /** Content md5 at snapshot time (hex), when known. */
+  md5?: string;
+  /** What produced the snapshot: "update" | "file" | "original" | "batch". */
+  source?: string;
+  /** Extension (with dot) of the archived RAW original snapshot for
+   *  extractable docs (PDF/Office/image) — enables 查看源文件 in the
+   *  history detail dialog. Absent = text-only snapshot. */
+  rawExt?: string;
 }
 
 /** Model context window (tokens), read from the model's config.json. */
