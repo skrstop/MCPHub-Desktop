@@ -29,6 +29,7 @@ pub async fn list_servers(session: tauri::State<'_, SessionState>) -> Result<Vec
                 error: None,
                 last_connected: None,
                 server_version: None,
+                protocol_version: None,
             },
             vec![],
         ));
@@ -40,7 +41,8 @@ pub async fn list_servers(session: tauri::State<'_, SessionState>) -> Result<Vec
                 Vec::new()
             }
         };
-        result.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() });
+        let recovery_info = crate::mcp::recovery::get(&status.name).await;
+        result.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new(), recovery: recovery_info });
     }
     // Append the "mcphub-desktop" builtin server (virtual, no DB row), which
     // bundles the RAG tools + builtin prompts + builtin resources as one
@@ -163,6 +165,7 @@ pub async fn search_servers(
                 error: None,
                 last_connected: None,
                 server_version: None,
+                protocol_version: None,
             },
             vec![],
         ));
@@ -173,7 +176,8 @@ pub async fn search_servers(
                 Vec::new()
             }
         };
-        infos.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() });
+        let recovery_info = crate::mcp::recovery::get(&status.name).await;
+        infos.push(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new(), recovery: recovery_info });
     }
 
     // Builtin virtual server (RAG): include when the tab asks for it and the
@@ -252,6 +256,7 @@ pub async fn get_server(session: tauri::State<'_, SessionState>, name: String) -
                 error: None,
                 last_connected: None,
                 server_version: None,
+                protocol_version: None,
             },
             vec![],
         ));
@@ -263,7 +268,8 @@ pub async fn get_server(session: tauri::State<'_, SessionState>, name: String) -
                 Vec::new()
             }
         };
-        Ok(Some(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new() }))
+        let recovery_info = crate::mcp::recovery::get(&status.name).await;
+        Ok(Some(ServerInfo { config: cfg, status, tools, prompts: Vec::new(), resources: Vec::new(), recovery: recovery_info }))
     } else {
         Ok(None)
     }
@@ -294,8 +300,10 @@ pub async fn add_server(
         error: None,
         last_connected: None,
         server_version: None,
+        protocol_version: None,
     };
-    Ok(ServerInfo { config: saved, status, tools: vec![], prompts: Vec::new(), resources: Vec::new() })
+    let recovery_info = crate::mcp::recovery::get(&status.name).await;
+    Ok(ServerInfo { config: saved, status, tools: vec![], prompts: Vec::new(), resources: Vec::new(), recovery: recovery_info })
 }
 
 #[tauri::command]
@@ -401,8 +409,10 @@ pub async fn update_server(
             error: None,
             last_connected: None,
             server_version: None,
+            protocol_version: None,
         };
-        return Ok(ServerInfo { config: saved, status, tools: vec![], prompts: Vec::new(), resources: Vec::new() });
+        let recovery_info = crate::mcp::recovery::get(&status.name).await;
+        return Ok(ServerInfo { config: saved, status, tools: vec![], prompts: Vec::new(), resources: Vec::new(), recovery: recovery_info });
     }
 
     if needs_reconnect {
@@ -435,6 +445,7 @@ pub async fn update_server(
                 error: None,
                 last_connected: None,
                 server_version: None,
+                protocol_version: None,
             },
             vec![],
         ));
@@ -443,7 +454,8 @@ pub async fn update_server(
     let tools = server_tool_config_service::apply_tool_filters(&saved.name, live_tools)
         .await
         .unwrap_or_default();
-    Ok(ServerInfo { config: saved, status: live_status, tools, prompts: Vec::new(), resources: Vec::new() })
+    let recovery_info = crate::mcp::recovery::get(&saved.name).await;
+    Ok(ServerInfo { config: saved, status: live_status, tools, prompts: Vec::new(), resources: Vec::new(), recovery: recovery_info })
 }
 
 /// Fields baked into the live MCP client/transport at connect time. Editing any
@@ -613,6 +625,7 @@ pub async fn reload_server(
         error: None,
         last_connected: None,
         server_version: None,
+        protocol_version: None,
     });
     Ok(status)
 }

@@ -976,6 +976,78 @@ fn to_call_response(
 }
 
 impl HubBridge {
+    /// Origin #1370: build the per-call elicitation relay for isolated
+    /// (perSessionClient) tool calls. The relay forwards upstream
+    /// `elicitation/create` requests to the downstream client via its
+    /// `Peer<RoleServer>` handle, gated on the modes the downstream client
+    /// declared at initialize (rmcp's `supported_elicitation_modes` treats a
+    /// legacy empty `elicitation: {}` capability as form-only). Clients that
+    /// did not declare elicitation get no relay — upstream elicitation then
+    /// fails with "Elicitation requires an active tool call", mirroring
+    /// origin's shared-path behaviour. Modern 2026 downstream sessions are
+    /// naturally excluded: rmcp's SEP-2260 enforcement rejects
+    /// server-initiated requests outside the originating handler scope, and
+    /// origin likewise does not support modern multi-round-trip elicitation.
+    fn downstream_elicitation_relay(
+        context: &RequestContext<RoleServer>,
+    ) -> Option<crate::mcp::elicitation::ElicitationRelay> {
+        let modes = context.peer.supported_elicitation_modes();
+        if modes.is_empty() {
+            return None;
+        }
+        let peer = context.peer.clone();
+        let notify_peer = context.peer.clone();
+        Some(crate::mcp::elicitation::ElicitationRelay::new(
+            modes,
+            std::sync::Arc::new(move |params| {
+                let peer = peer.clone();
+                Box::pin(async move {
+                    // Bound the downstream leg: a hung downstream client must
+                    // not park the upstream handler task forever (origin
+                    // bounds it via the downstream request signal + lifetime
+                    // abort; rmcp gives no per-request cancel here, so a
+                    // timeout is the equivalent guard). Matches the upstream
+                    // call budget.
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(600),
+                        peer.create_elicitation(params),
+                    )
+                    .await
+                    .map_err(|_| {
+                        rmcp::ErrorData::new(
+                            rmcp::model::ErrorCode::INTERNAL_ERROR,
+                            "elicitation forwarding timed out",
+                            None,
+                        )
+                    })?
+                    .map_err(|e| match e {
+                        rmcp::service::ServiceError::McpError(err) => err,
+                        other => rmcp::ErrorData::new(
+                            rmcp::model::ErrorCode::INTERNAL_ERROR,
+                            format!("elicitation forwarding failed: {other}"),
+                            None,
+                        ),
+                    })
+                }) as crate::mcp::elicitation::ForwardFuture
+            }),
+            // URL-mode completion: forward to the owning downstream session.
+            Some(std::sync::Arc::new(move |params: Option<Value>| {
+                let peer = notify_peer.clone();
+                tokio::spawn(async move {
+                    let notification = rmcp::model::ServerNotification::CustomNotification(
+                        rmcp::model::CustomNotification::new(
+                            "notifications/elicitation/complete",
+                            params,
+                        ),
+                    );
+                    if let Err(e) = peer.send_notification(notification).await {
+                        log::debug!("[bridge] elicitation/complete forward failed: {e}");
+                    }
+                });
+            })),
+        ))
+    }
+
     /// Request-level `_meta` passthrough (MRTR inputResponses retry, OTel).
     /// A downstream client retrying an input_required call sends
     /// `io.modelcontextprotocol/inputResponses` (+ requestState) as typed
@@ -1015,6 +1087,7 @@ impl HubBridge {
         source_ip: Option<String>,
         strip_2024: bool,
         sep_2322: bool,
+        elicitation: Option<crate::mcp::elicitation::ElicitationRelay>,
     ) -> Result<CallToolResponse, ErrorData> {
         let scope = scope.to_string();
         let tool_name = tool_name.to_string();
@@ -1381,9 +1454,27 @@ impl HubBridge {
                     &sn,
                     &orig_name,
                     args.clone(),
+                    elicitation.clone(),
                 ),
             )
             .await;
+            // Origin parity (elicitationService lifetime abort): a call that
+            // ended by TIMEOUT abandoned its upstream request — rmcp sends no
+            // per-request cancel on drop, so a late-upstream elicitation
+            // could otherwise reach the successor call's relay. Evict the
+            // isolated client so the successor rebuilds a fresh connection.
+            // ONLY on timeout: run_call's own Err path already evicts on
+            // connection-class failures, and tool-level errors must keep the
+            // per-session state (e.g. a Playwright browser session).
+            if let Err(e) = &result {
+                // Match OUR timeout prefix only ("upstream tool call timed
+                // out after Ns", mcp/time.rs). A bare "timed out" substring
+                // would also hit upstream tool-level error text (e.g. "git
+                // fetch timed out") and evict a healthy per-session client.
+                if e.to_string().starts_with("upstream tool call timed out") {
+                    crate::mcp::session_pool::evict_isolated(&sid, &sn).await;
+                }
+            }
             let dur = start.elapsed().as_millis() as i64;
             Self::log_call_activity(&sn, &orig_name, dur, &args, result.as_ref(), source_ip.as_deref()).await;
             let result = result.map_err(|e| Self::err(e.to_string()))?;
@@ -1437,6 +1528,25 @@ impl HubBridge {
             Some(f) => f.prompts.clone(),
             None => None,
         }
+    }
+
+    /// GHSA-vgj6-pm6x-8g97 parity (origin f0867d5 part 4): builtin
+    /// prompts/resources are hub-level content, served only when no specific
+    /// non-builtin server is targeted. On desktop that means: the root scope,
+    /// or a scope whose filter list actually includes the builtin server (its
+    /// own single-server scope, or a group that has it as a member). A
+    /// single-server scope for another server — or a group without the
+    /// builtin member — must not serve builtin content even though the
+    /// selection helper below returns `None` (allow-all) for it.
+    async fn builtin_in_scope(scope: &str) -> bool {
+        let s = scope.trim_start_matches('/').trim();
+        if s.is_empty() {
+            return true;
+        }
+        mcp_scope_server_filters(scope)
+            .await
+            .iter()
+            .any(|f| f.name == crate::rag::service::BUILTIN_SERVER_NAME)
     }
 
     async fn builtin_resource_selection(&self, scope: &str) -> Option<Vec<String>> {
@@ -1718,7 +1828,7 @@ impl ServerHandler for HubBridge {
                 // the task stuck in `working` forever (with no TTL the sweeper
                 // would never reap it and the client would poll indefinitely).
                 let outcome = std::panic::AssertUnwindSafe(
-                    this.execute_tool_call(&scope, &tool_name, args, bearer_ref.as_ref(), upstream_meta, session_id_bg, source_ip_bg, strip_2024_bg, sep_2322_bg),
+                    this.execute_tool_call(&scope, &tool_name, args, bearer_ref.as_ref(), upstream_meta, session_id_bg, source_ip_bg, strip_2024_bg, sep_2322_bg, None),
                 )
                 .catch_unwind()
                 .await
@@ -1795,9 +1905,11 @@ impl ServerHandler for HubBridge {
                 .and_then(|p| crate::services::http_server::client_ip_of(&p.headers)),
             strip_2024,
             Self::is_2026_session(&context),
+            Self::downstream_elicitation_relay(&context),
         )
         .await
     }
+
 
     // ── Prompts (builtin "mcphub-desktop" server only) ──────────────────
 
@@ -1842,6 +1954,10 @@ impl ServerHandler for HubBridge {
             });
         }
         if !Self::builtin_visible_for_bearer(bearer.as_ref()).await {
+            let result = ListPromptsResult::with_all_items(Vec::new());
+            return Ok(result);
+        }
+        if !Self::builtin_in_scope(&scope).await {
             let result = ListPromptsResult::with_all_items(Vec::new());
             return Ok(result);
         }
@@ -1896,6 +2012,9 @@ impl ServerHandler for HubBridge {
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
             return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
         }
+        if !Self::builtin_in_scope(&scope).await {
+            return Err(Self::invalid_params(format!("Prompt '{}' not found", name)));
+        }
         let args: Value = Value::Object(request.arguments.clone().unwrap_or_default());
         let prompt_sel = self.builtin_prompt_selection(&scope).await;
         let prompt = crate::services::prompt_service::list_all()
@@ -1946,6 +2065,10 @@ impl ServerHandler for HubBridge {
                 result
             });
         }
+        if !Self::builtin_in_scope(&scope).await {
+            let result = ListResourcesResult::with_all_items(Vec::new());
+            return Ok(result);
+        }
         let resource_sel = self.builtin_resource_selection(&scope).await;
         let resources = crate::services::resource_service::list_all().await.unwrap_or_default();
         let list = resources
@@ -1987,14 +2110,28 @@ impl ServerHandler for HubBridge {
         if crate::smart_routing::meta::is_smart_scope(scope.trim_start_matches('/').trim()) {
             return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
         }
-        let resource_sel = self.builtin_resource_selection(&scope).await;
-        let resource = crate::services::resource_service::list_all()
-            .await
-            .ok()
-            .and_then(|rs| {
-                rs.into_iter()
-                    .find(|r| r.enabled && r.uri == uri && builtin_allowed(&resource_sel, &r.uri))
-            });
+        // GHSA part 4 gates the BUILTIN lookup only — a ui:// dynamic widget
+        // read must still reach the upstream fallback on non-builtin scopes
+        // (policy-gated inside the loop below). The exemption covers ONLY the
+        // early return: the builtin lookup itself stays scope-gated, or a
+        // hub-registered `ui://` resource would be served from any scope
+        // (selection helper returns allow-all there).
+        let builtin_in_scope_now = Self::builtin_in_scope(&scope).await;
+        if !builtin_in_scope_now && !uri.starts_with("ui://") {
+            return Err(Self::invalid_params(format!("Resource '{}' not found", uri)));
+        }
+        let resource = if builtin_in_scope_now {
+            let resource_sel = self.builtin_resource_selection(&scope).await;
+            crate::services::resource_service::list_all()
+                .await
+                .ok()
+                .and_then(|rs| {
+                    rs.into_iter()
+                        .find(|r| r.enabled && r.uri == uri && builtin_allowed(&resource_sel, &r.uri))
+                })
+        } else {
+            None
+        };
         match resource {
             Some(r) => {
                 let result: ReadResourceResponse = ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
@@ -2032,12 +2169,7 @@ impl ServerHandler for HubBridge {
                 // answers. ($smart scopes already returned not-found above —
                 // no ui:// reads through the meta surface.)
                 if uri.starts_with("ui://") {
-                    let mut candidates: Vec<String> = self
-                        .scope_filters(&scope, bearer.as_ref())
-                        .await
-                        .into_iter()
-                        .map(|f| f.name)
-                        .collect();
+                    let mut filters = self.scope_filters(&scope, bearer.as_ref()).await;
                     // Stable probe order for the root scope (origin iterates
                     // its serverInfos in registration order) + disabled
                     // servers are never probed.
@@ -2045,14 +2177,39 @@ impl ServerHandler for HubBridge {
                         .await
                         .unwrap_or_default();
                     if scope.trim_start_matches('/').trim().is_empty() {
-                        candidates
-                            .sort_by_key(|n| all.iter().position(|s| &s.name == n).unwrap_or(usize::MAX));
+                        filters.sort_by_key(|f| {
+                            all.iter().position(|s| s.name == f.name).unwrap_or(usize::MAX)
+                        });
                     }
-                    candidates.retain(|n| all.iter().find(|s| &s.name == n).map(|s| s.enabled).unwrap_or(true));
+                    filters.retain(|f| {
+                        all.iter().find(|s| s.name == f.name).map(|s| s.enabled).unwrap_or(true)
+                    });
 
-                    for name in &candidates {
-                        if name == crate::rag::service::BUILTIN_SERVER_NAME {
+                    for f in &filters {
+                        let name = &f.name;
+                        if *name == crate::rag::service::BUILTIN_SERVER_NAME {
                             continue;
+                        }
+                        // GHSA-vgj6-pm6x-8g97 parity (origin f0867d5 part 3):
+                        // enforce resource policy BEFORE the ui:// fallback
+                        // probe — a group's per-member resource selection and
+                        // a per-server resource disablement must both gate
+                        // dynamic widget reads, not just resources/list.
+                        if let Some(allowed) = &f.resources {
+                            if !allowed.iter().any(|s| s == &uri) {
+                                continue;
+                            }
+                        }
+                        if let Ok(Some(cfg)) = crate::services::server_tool_config_service::get_config(
+                            name,
+                            "resource",
+                            &uri,
+                        )
+                        .await
+                        {
+                            if !cfg.enabled {
+                                continue;
+                            }
                         }
                         let Some(st) = pool::get_status(name).await else {
                             continue;

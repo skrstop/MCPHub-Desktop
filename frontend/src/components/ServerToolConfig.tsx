@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IGroupServerConfig, Prompt, Resource, Server, ServerCost, Tool } from '@/types';
+import { CapabilitySelection } from './CapabilitySelection.js';
 import { Wrench, MessageSquare, FileText, Search, X, Pin } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { useSettingsData } from '@/hooks/useSettingsData';
@@ -33,6 +34,7 @@ interface ServerToolConfigProps {
 }
 
 interface CapabilityItem {
+  annotations?: Record<string, unknown>;
   key: string;
   value: string;
   description?: string;
@@ -254,6 +256,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
           key: tool.name,
           value: normalizeNamedCapability(server.name, tool.name),
           description: tool.description,
+          annotations: tool.annotations,
           defaultDescription: tool.defaultDescription,
           hasDescriptionOverride: tool.hasDescriptionOverride,
         }));
@@ -563,7 +566,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
           return (
             <div
               key={server.name}
-              className="border border-gray-200 dark:border-gray-700 rounded-lg hover:border-gray-300 hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 transition-colors"
+              className="border border-[var(--hub-line)] rounded-lg bg-[var(--hub-surface)] hover:border-[var(--hub-ink-3)] hover:bg-[var(--hub-surface-hover)] transition-colors"
             >
               <div
                 className="flex items-center justify-between p-3 rounded-lg transition-colors cursor-pointer"
@@ -582,7 +585,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                     onChange={() => toggleServer(server.name)}
                     className="hub-checkbox"
                   />
-                  <span className="font-medium text-gray-900 cursor-pointer select-none">
+                  <span className="font-medium text-[var(--hub-ink)] cursor-pointer select-none">
                     {server.name}
                   </span>
                   {server.config?.type === 'builtin' && (
@@ -607,7 +610,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
 
                 <div className="flex items-center space-x-3">
                   {getServerSelectedCost(server) > 0 && (
-                    <span className="text-sm text-gray-400 hub-mono" title={t('cost.estimate')}>
+                    <span className="text-sm text-[var(--hub-ink-3)] hub-mono" title={t('cost.estimate')}>
                       Σ {formatTokens(getServerSelectedCost(server))}
                     </span>
                   )}
@@ -624,7 +627,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                     </span>
                   ))}
                   <svg
-                    className={cn('w-5 h-5 text-gray-400 transition-transform', isExpanded && 'rotate-180')}
+                    className={cn('w-5 h-5 text-[var(--hub-ink-3)] hover:text-[var(--hub-ink-2)] transition-transform', isExpanded && 'rotate-180')}
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -640,11 +643,11 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
               </div>
 
               {isExpanded && (
-                <div className="border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-3">
+                <div className="border-t border-[var(--hub-line)] bg-[var(--hub-bg-2)] p-3">
                   <div className="space-y-4">
                     {serverConfig && (
                     <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
-                      <label className="block text-xs font-medium text-gray-600">
+                      <label className="block text-xs font-medium text-[var(--hub-ink-2)]">
                         {t('groups.alias')}
                       </label>
                       <input
@@ -652,7 +655,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                         value={serverConfig.alias || ''}
                         placeholder={server.name}
                         onChange={(event) => updateServerAlias(server.name, event.target.value)}
-                        className="w-full rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm text-gray-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                        className="hub-input"
                       />
                     </div>
                   )}
@@ -676,7 +679,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                       return (
                         <div key={key}>
                           <div className="flex items-center justify-between mb-3">
-                            <span className="text-sm font-medium text-gray-700">{t(titleKey)}</span>
+                            <span className="text-sm font-medium text-[var(--hub-ink-2)]">{t(titleKey)}</span>
                             <div className="flex items-center gap-3">
                               {serverConfig && (
                                 <span className="text-xs text-green-600">
@@ -687,7 +690,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                               )}
                               {serverConfig && getSelectedCapabilityCost(server, key) > 0 && (
                                 <span
-                                  className="text-xs text-gray-400 hub-mono"
+                                  className="text-xs text-[var(--hub-ink-3)] hub-mono"
                                   title={t('cost.estimate')}
                                 >
                                   Σ {formatTokens(getSelectedCapabilityCost(server, key))}
@@ -709,7 +712,16 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                             </div>
                           </div>
 
-                          <PaginatedItems items={items} pageSize={5}>
+                          <CapabilitySelection
+                            key={`${server.name}:${key}`}
+                            items={items}
+                            selection={serverConfig?.[key] ?? []}
+                            tools={key === 'tools'}
+                            label={t(titleKey)}
+                            onChange={(selection) =>
+                              updateServerCapability(server.name, key, selection)
+                            }
+                          >
                             {(item) => {
                               const isChecked = isCapabilityItemSelected(
                                 server.name,
@@ -747,12 +759,12 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                       }
                                       className="hub-checkbox sm"
                                     />
-                                    <span className="text-gray-700 break-all whitespace-nowrap flex-shrink-0">
+                                    <span className="text-[var(--hub-ink-2)] break-all whitespace-nowrap flex-shrink-0">
                                       {item.value}
                                     </span>
                                     {(item.description ||
                                       descriptionInfo?.hasDescriptionOverride) && (
-                                      <span className="min-w-0 flex items-center gap-1 text-gray-400 text-xs truncate">
+                                      <span className="min-w-0 flex items-center gap-1 text-[var(--hub-ink-3)] text-xs truncate">
                                         <span
                                           className="truncate"
                                           title={descriptionTitle || undefined}
@@ -773,7 +785,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                     )}
                                     {costMap.get(item.key) != null && (
                                       <span
-                                        className="text-xs text-gray-400 hub-mono whitespace-nowrap ml-auto flex-shrink-0"
+                                        className="text-xs text-[var(--hub-ink-3)] hub-mono whitespace-nowrap ml-auto flex-shrink-0"
                                         title={t('cost.estimate')}
                                       >
                                         Σ {formatTokens(costMap.get(item.key)!)}
@@ -799,7 +811,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                           'flex-shrink-0 transition-colors',
                                           isPinned
                                             ? 'text-blue-600'
-                                            : 'text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400',
+                                            : 'text-[var(--hub-ink-3)] hover:text-[var(--hub-ink-2)]',
                                         )}
                                       >
                                         <Pin size={12} fill={isPinned ? 'currentColor' : 'none'} />
@@ -808,7 +820,7 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                                 </div>
                               );
                             }}
-                          </PaginatedItems>
+                          </CapabilitySelection>
                         </div>
                       );
                     })()}
@@ -821,17 +833,17 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
       </PaginatedItems>
 
       {availableServers.length === 0 && (
-        <p className="text-gray-500 text-sm">{t('groups.noServerOptions')}</p>
+        <p className="text-[var(--hub-ink-3)] text-sm">{t('groups.noServerOptions')}</p>
       )}
       {availableServers.length > 0 &&
         activeTab === 'prompts' &&
         filteredTabServers.length === 0 && (
-          <p className="text-gray-500 text-sm">{t('groups.noPrompts')}</p>
+          <p className="text-[var(--hub-ink-3)] text-sm">{t('groups.noPrompts')}</p>
         )}
       {availableServers.length > 0 &&
         activeTab === 'resources' &&
         filteredTabServers.length === 0 && (
-          <p className="text-gray-500 text-sm">{t('groups.noResources')}</p>
+          <p className="text-[var(--hub-ink-3)] text-sm">{t('groups.noResources')}</p>
         )}
     </div>
   );

@@ -201,7 +201,7 @@ async fn ensure_on_demand_client(
 
     let idle_ms = cfg.idle_timeout_ms.unwrap_or(DEFAULT_IDLE_MS);
 
-    let (client, tools, server_version) = match build_and_connect(&cfg).await {
+    let (client, tools, server_version, protocol_version) = match build_and_connect(&cfg).await {
         Ok(t) => t,
         Err(e) => {
             let msg = format!(
@@ -251,7 +251,7 @@ async fn ensure_on_demand_client(
         );
     }
     // Mark the pool placeholder awake so status + cached tools reflect reality.
-    pool::mark_on_demand_awake(server_name, tools, server_version).await;
+    pool::mark_on_demand_awake(server_name, tools, server_version, protocol_version).await;
 
     // Release the connect lock BEFORE the caller runs the operation: the
     // self-heal retry inside run_call/run_read re-enters the public entry
@@ -595,7 +595,7 @@ async fn run_read(
 /// error so the child process tree is reaped (not orphaned).
 async fn build_and_connect(
     cfg: &crate::models::server::ServerConfig,
-) -> Result<(McpClient, Vec<Tool>, Option<String>)> {
+) -> Result<(McpClient, Vec<Tool>, Option<String>, Option<String>)> {
     log::info!(
         "[on-demand] Building + connecting on-demand client for '{}' (type={:?})",
         cfg.name, cfg.server_type
@@ -633,7 +633,8 @@ async fn build_and_connect(
                 }
             };
             let server_version = client.server_version();
-            Ok((client, tools, server_version))
+            let protocol_version = client.protocol_version();
+            Ok((client, tools, server_version, protocol_version))
         }
         Ok(Err(e)) => {
             log::warn!(

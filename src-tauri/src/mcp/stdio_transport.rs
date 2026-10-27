@@ -95,7 +95,13 @@ pub(crate) fn parse_progress_pct(line: &str) -> Option<u8> {
                 return Some((num.min(100)) as u8);
             }
             if j < bytes.len() && bytes[j] == b'/' {
-                // fraction done/total
+                // Fraction done/total. Reject slash-chain tokens (dates like
+                // 2026/10/27, paths like a/b/c): a candidate whose number is
+                // immediately preceded by '/' is part of a longer chain, not
+                // a standalone "12/34" progress token.
+                if start > 0 && bytes[start - 1] == b'/' {
+                    continue;
+                }
                 let mut k = j + 1;
                 while k < bytes.len() && bytes[k] == b' ' {
                     k += 1;
@@ -106,11 +112,11 @@ pub(crate) fn parse_progress_pct(line: &str) -> Option<u8> {
                 }
                 if k > tstart {
                     if let Ok(total) = line[tstart..k].parse::<u64>() {
-                        if total > 0 {
-                            // saturating: stderr is server-controlled and may
-                            // contain huge numbers; `num * 100` must not panic
-                            // (a panic here kills the drain task and, via a
-                            // full stderr pipe, the whole stdio server).
+                        // A real progress fraction has num <= total. Anything
+                        // else (dates, version paths, counts) would saturate
+                        // to 100% and pin the bar full — skip this number and
+                        // keep scanning the line instead.
+                        if total > 0 && num <= total {
                             return Some((num.saturating_mul(100) / total).min(100) as u8);
                         }
                     }
@@ -135,4 +141,40 @@ pub(crate) fn looks_like_download_progress(line: &str) -> bool {
         || lower.contains("downloading")
         || ((lower.contains("added") || lower.contains("installed")) && lower.contains("package"))
         || parse_progress_pct(line).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_download_progress, parse_progress_pct};
+
+    #[test]
+    fn parse_progress_percent_forms() {
+        assert_eq!(parse_progress_pct("downloading 42%"), Some(42));
+        assert_eq!(parse_progress_pct("100%"), Some(100));
+        assert_eq!(parse_progress_pct("fetch: 12/34"), Some(35));
+        assert_eq!(parse_progress_pct("fetch: 5/100"), Some(5));
+        assert_eq!(parse_progress_pct("no progress here"), None);
+    }
+
+    /// Regression: date-prefixed stderr lines (`2026/10/27`) previously
+    /// parsed as fraction 2026/10 → saturating 100%, pinning the download
+    /// bar at 100% for the whole install. num > total must not count as a
+    /// fraction, and the line must not be misread as progress at all.
+    #[test]
+    fn parse_rejects_non_fraction_slash_patterns() {
+        assert_eq!(parse_progress_pct("[2026/10/27 15:00:00] server started"), None);
+        assert_eq!(parse_progress_pct("listening on port 3000 v1.2.3"), None);
+        assert_eq!(parse_progress_pct("GET /api/users/42 200"), None);
+        // real fractions still work after a rejected candidate earlier in line
+        assert_eq!(parse_progress_pct("[2026/10/27] fetch 12/34"), Some(35));
+    }
+
+    #[test]
+    fn looks_like_progress_classification() {
+        assert!(looks_like_download_progress("fetch: 12/34"));
+        assert!(looks_like_download_progress("Downloading package..."));
+        assert!(looks_like_download_progress("added 12 packages in 3s"));
+        // date-only lines are ordinary logs, not download progress
+        assert!(!looks_like_download_progress("[2026/10/27 15:00:00] server started"));
+    }
 }

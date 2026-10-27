@@ -18,6 +18,11 @@ pub trait McpTransport: Send + Sync {
     fn server_version(&self) -> Option<String> {
         None
     }
+    /// The MCP protocol version negotiated during the handshake (origin #1379).
+    /// Defaults to `None` for transports that don't track it (SSE/OpenAPI).
+    fn protocol_version(&self) -> Option<String> {
+        None
+    }
     /// Retrieve the list of tools from the remote server
     async fn list_tools(&self) -> Result<Vec<Tool>>;
     /// List tools plus the upstream-advertised list TTL (2026-07-28
@@ -57,6 +62,19 @@ pub trait McpTransport: Send + Sync {
         let _ = uri;
         Err(anyhow::anyhow!("resources not supported on this transport"))
     }
+
+    /// Per-connection elicitation relay slot (origin #1370 mirror). Only the
+    /// rmcp stdio/HTTP transports implement this; SSE/OpenAPI transports have
+    /// no elicitation support and return `None` (upstream elicitation there
+    /// is declined by the handler default).
+    fn elicitation_slot(&self) -> Option<crate::mcp::elicitation::ElicitationSlot> {
+        None
+    }
+    /// Connection-lifetime URL-mode completion forwarder slot (see
+    /// mcp::elicitation). Default None — SSE/OpenAPI transports unaffected.
+    fn elicitation_notify_slot(&self) -> Option<crate::mcp::elicitation::ElicitNotifySlot> {
+        None
+    }
 }
 
 /// Thin wrapper that holds a boxed transport and the server name
@@ -89,6 +107,10 @@ impl McpClient {
         self.transport.server_version()
     }
 
+    pub fn protocol_version(&self) -> Option<String> {
+        self.transport.protocol_version()
+    }
+
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
         self.transport.list_tools().await
     }
@@ -117,5 +139,17 @@ impl McpClient {
         uri: &str,
     ) -> Result<Vec<rmcp::model::ResourceContents>> {
         self.transport.read_resource(uri).await
+    }
+
+    /// #1370: per-connection elicitation relay slot, if this transport
+    /// supports elicitation forwarding.
+    pub fn elicitation_slot(&self) -> Option<crate::mcp::elicitation::ElicitationSlot> {
+        self.transport.elicitation_slot()
+    }
+
+    pub fn elicitation_notify_slot(
+        &self,
+    ) -> Option<crate::mcp::elicitation::ElicitNotifySlot> {
+        self.transport.elicitation_notify_slot()
     }
 }

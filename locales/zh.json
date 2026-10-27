@@ -151,7 +151,8 @@
     "passwordRequireSpecial": "密码必须包含至少一个特殊字符",
     "passwordStrengthHint": "密码必须至少 8 个字符，且包含字母、数字和特殊字符",
     "user": "用户",
-    "passwordLoginDisabledNoSso": "账密登录已禁用，且未配置任何 SSO 提供商。请在系统配置中重新启用以登录。"
+    "passwordLoginDisabledNoSso": "账密登录已禁用，且未配置任何 SSO 提供商。请在系统配置中重新启用以登录。",
+    "skipAuthGuestName": "免登录模式"
   },
   "server": {
     "localExecutionRequiresAdmin": "本地命令执行需要管理员权限。",
@@ -250,10 +251,13 @@
     "resetTimeoutOnProgress": "收到进度通知时重置超时",
     "resetTimeoutOnProgressDescription": "适用于发送周期性进度更新的长时间运行操作（默认开启）",
     "keepAlive": "连接健康检查",
-    "enableKeepAlive": "启用健康检查与自动重连",
-    "keepAliveDescription": "定期检查远端服务健康状态，并在服务断开后自动尝试重连。",
+    "retryScheduled": "{{time}} 重试",
+    "reconnecting": "正在重连…",
+    "lastRetry": "上次重试：{{time}}（已尝试 {{count}} 次）",
+    "enableKeepAlive": "启用健康检查",
+    "keepAliveDescription": "周期性检查连接健康状态。已断连的远端服务始终会按退避策略自动重连。",
     "keepAliveInterval": "检查间隔（毫秒）",
-    "keepAliveIntervalDescription": "健康检查和自动重连尝试的时间间隔（默认：60000毫秒 = 1分钟）",
+    "keepAliveIntervalDescription": "健康检查的时间间隔（默认：60000毫秒 = 1分钟）",
     "perSessionClient": "会话级客户端隔离",
     "perSessionClientDescription": "为每个会话创建独立的上游连接，而不是在所有会话间共享同一个连接。适用于 Playwright 等有状态服务器。并发会话越多，上游连接数越多。",
     "remove": "移除",
@@ -348,7 +352,8 @@
       "personalReconnect": "重新授权",
       "personalDisconnect": "断开授权",
       "personalError": "个人授权失败",
-      "personalSuccess": "个人授权已保存，请返回 Dashboard → 服务器。"
+      "personalSuccess": "个人授权已保存，请返回 Dashboard → 服务器。",
+      "allowInsecureTokenEndpointHelpDesktop": "默认关闭。将以非 TLS 方式向该上游服务器发送凭据与令牌。仅应在可信网络中启用；推荐使用 HTTPS。"
     },
     "duplicate": "创建副本",
     "nameInvalid": "服务器名称只能包含字母、数字、点、下划线和连字符（不能包含空格或特殊字符）",
@@ -368,7 +373,14 @@
     "argumentLabel": "参数 {{index}}",
     "removeArgument": "移除参数 {{index}}",
     "maxBufferSize": "Stdio 缓冲区上限（字节）",
-    "maxBufferSizeDescription": "Stdio 读取缓冲区的最大大小。留空使用 SDK 默认值（10 MiB）。提高上限会允许使用更多内存。"
+    "maxBufferSizeDescription": "Stdio 读取缓冲区的最大大小。留空使用 SDK 默认值（10 MiB）。提高上限会允许使用更多内存。",
+    "protocolVersion": "MCP 协议",
+    "protocolVersionUnknown": "未获取",
+    "reportedVersion": "服务端报告的版本",
+    "protocolNegotiation": "协议协商",
+    "protocolNegotiationAuto": "自动（先探测现代协议）",
+    "protocolNegotiationLegacy": "仅旧版（initialize 握手）",
+    "protocolNegotiationDescription": "自动模式先探测 2026 现代协议（server/discover），失败时回退旧版 initialize 握手；仅旧版模式完全跳过现代协议探测。"
   },
   "status": {
     "sleeping": "休眠",
@@ -486,7 +498,7 @@
     "workspace": "工作区",
     "system": "系统",
     "skills": "技能",
-    "rag": "RAG",
+    "rag": "知识库",
     "beta": "Beta"
   },
   "pages": {
@@ -576,7 +588,7 @@
       "title": "技能"
     },
     "rag": {
-      "title": "RAG",
+      "title": "知识库",
       "subtitle": "为 MCP 提供文档检索",
       "memoryWarn": "开启后将占用大量内存,建议在有足够内存的设备上开启。",
       "memoryInsufficient": "内存不足,无法开启 RAG。",
@@ -981,7 +993,13 @@
       "diffNoChanges": "无差异",
       "diffChangePos": "{{current}} / {{total}} 处差异",
       "diffOldSide": "旧",
-      "diffNewSide": "新"
+      "diffNewSide": "新",
+      "scanCollapsedHint": "{{count}} 个文件（已选 {{sel}}）",
+      "scanPhaseMetas": "读取文档元数据…",
+      "scanPhaseGit": "拉取 Git 数据源远端… ({{current}}/{{total}})",
+      "scanPhaseScan": "扫描数据源目录（检测新增/删除）…",
+      "scanPhaseChecking": "比对文件变更 ({{current}}/{{total}})：{{name}}",
+      "scanPhaseCheckingCount": "比对文件变更 ({{current}}/{{total}})"
     }
   },
   "logs": {
@@ -1067,7 +1085,27 @@
     "pinToolLabel": "固定到智能路由端点",
     "unpinTool": "取消固定：仅通过 search_tools 访问此工具",
     "pinToolSuccess": "已固定 {{name}}",
-    "unpinToolSuccess": "已取消固定 {{name}}"
+    "unpinToolSuccess": "已取消固定 {{name}}",
+    "bulkSearch": "按名称或描述搜索…",
+    "bulkSearchLabel": "搜索{{capability}}",
+    "annotationFilter": "按注解筛选",
+    "allAnnotations": "所有注解",
+    "readOnlyHint": "只读提示",
+    "destructiveHint": "破坏性提示",
+    "idempotentHint": "幂等提示",
+    "flatList": "平铺列表",
+    "riskGroups": "风险分组",
+    "visibleCount": "显示 {{count}} / {{total}} 项",
+    "selectVisible": "选择可见项",
+    "deselectVisible": "取消可见项",
+    "invertVisible": "反选可见项",
+    "riskHint": "分组依据上游提示和名称推测，不保证安全性。操作仅影响筛选后的项目。",
+    "noMatchingItems": "没有匹配的项目",
+    "risk_read": "读取",
+    "risk_create": "创建",
+    "risk_update": "更新",
+    "risk_delete": "删除",
+    "risk_other": "其他 / 未分类"
   },
   "market": {
     "title": "本地安装",
@@ -1151,7 +1189,7 @@
     "details": "详细信息",
     "tools": "工具",
     "tool": "个工具",
-    "toolsAvailable": "{{count}} 个工具可用",
+    "toolsAvailable": "{{count}} 个工具可用||{{count}} 个工具可用",
     "loadingTools": "加载工具中...",
     "noTools": "该服务器没有可用工具",
     "noDescription": "无描述信息",
@@ -1664,7 +1702,8 @@
     "fieldMeta": "上游自定义扩展元数据。",
     "fieldName": "工具代码名（多服务器时带服务器前缀）。",
     "fieldDescription": "工具描述，模型据此判断相关性。",
-    "fieldServerName": "提供该工具的 MCP 服务器名。"
+    "fieldServerName": "提供该工具的 MCP 服务器名。",
+    "mvSourceRag": "知识库"
   },
   "mcpb": {
     "upload": "上传",
@@ -2209,6 +2248,15 @@
     "serverRoute": "单服务器路由",
     "smartRoute": "智能路由端点",
     "smartApiRoute": "智能路由 REST API",
-    "sseRoute": "SSE 端点"
+    "sseRoute": "SSE 端点",
+    "intro": "MCPHub 桌面版会在本机启动一个 HTTP 服务，下列地址可直接配置到 Cursor、Cherry Studio 等支持 MCP 协议的客户端：",
+    "bearerNotice": "当前已开启 Bearer 鉴权，调用时请在请求头中带上配置的 Bearer Token。",
+    "exposeHttpDisabled": "当前未开启 HTTP 暴露，外部客户端无法访问。请到「设置 → 路由配置」中开启 HTTP 暴露后再使用以下地址。",
+    "smartRouteDescription": "不直接暴露全部工具，客户端通过 search/describe/call 元工具按需检索并调用（需在设置中开启 Smart Routing）。括号内为可选的服务名或分组名，用于限定检索范围。",
+    "globalRouteDescription": "聚合所有已启用 MCP Server 的工具/资源。需在「路由配置」中开启全局路由。",
+    "groupRouteDescription": "按分组聚合，将 {groupName} 替换为目标分组名称。",
+    "serverRouteDescription": "直连单个 MCP Server，将 {serverName} 替换为服务名称。",
+    "sseRouteDescription": "兼容旧版 SSE 客户端的入口地址。",
+    "smartApiRouteDescription": "将智能路由元工具暴露为 OpenAPI 规范，供 OpenWebUI 等 REST 客户端导入调用。括号内为可选的服务名或分组名。"
   }
 }

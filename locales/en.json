@@ -151,7 +151,8 @@
     "passwordRequireSpecial": "Password must contain at least one special character",
     "passwordStrengthHint": "Password must be at least 8 characters and contain letters, numbers, and special characters",
     "user": "User",
-    "passwordLoginDisabledNoSso": "Password sign-in is disabled and no SSO provider is configured. Re-enable it in the system config to sign in."
+    "passwordLoginDisabledNoSso": "Password sign-in is disabled and no SSO provider is configured. Re-enable it in the system config to sign in.",
+    "skipAuthGuestName": "Guest Mode"
   },
   "server": {
     "localExecutionRequiresAdmin": "Local command execution requires an administrator.",
@@ -250,10 +251,13 @@
     "resetTimeoutOnProgress": "Reset Timeout on Progress",
     "resetTimeoutOnProgressDescription": "Reset timeout on progress notifications (enabled by default)",
     "keepAlive": "Connection Health",
-    "enableKeepAlive": "Enable Health Checks and Auto Reconnect",
-    "keepAliveDescription": "Run periodic health checks and automatically reconnect this remote server when it becomes disconnected.",
+    "retryScheduled": "Retry at {{time}}",
+    "reconnecting": "Reconnecting…",
+    "lastRetry": "Last retry: {{time}} ({{count}} attempts)",
+    "enableKeepAlive": "Enable Health Checks",
+    "keepAliveDescription": "Run periodic health checks. Disconnected remote servers always reconnect automatically with backoff.",
     "keepAliveInterval": "Check interval (ms)",
-    "keepAliveIntervalDescription": "Time between health checks and automatic reconnect attempts in milliseconds (default: 60000ms = 1 minute)",
+    "keepAliveIntervalDescription": "Time between health checks in milliseconds (default: 60000ms = 1 minute)",
     "perSessionClient": "Per-Session Client Isolation",
     "perSessionClientDescription": "Create a dedicated upstream connection per session instead of sharing one across all sessions. Enable for stateful servers like Playwright. Increases upstream connections with concurrent sessions.",
     "remove": "Remove",
@@ -348,7 +352,8 @@
       "personalReconnect": "Reconnect",
       "personalDisconnect": "Disconnect",
       "personalError": "Personal authorization failed",
-      "personalSuccess": "Personal authorization saved. Return to Dashboard → Servers."
+      "personalSuccess": "Personal authorization saved. Return to Dashboard → Servers.",
+      "allowInsecureTokenEndpointHelpDesktop": "Off by default. Sends credentials and tokens to this upstream server over non-TLS. Only enable on trusted networks; HTTPS is recommended."
     },
     "duplicate": "Duplicate",
     "nameInvalid": "Server name can only contain letters, numbers, dots, underscores, and hyphens (no spaces or special characters)",
@@ -368,7 +373,14 @@
     "argumentLabel": "Argument {{index}}",
     "removeArgument": "Remove argument {{index}}",
     "maxBufferSize": "Stdio buffer limit (bytes)",
-    "maxBufferSizeDescription": "Maximum stdio read buffer size. Leave blank for the SDK default (10 MiB). Larger limits allow higher memory use."
+    "maxBufferSizeDescription": "Maximum stdio read buffer size. Leave blank for the SDK default (10 MiB). Larger limits allow higher memory use.",
+    "protocolVersion": "MCP protocol",
+    "protocolVersionUnknown": "Not available",
+    "reportedVersion": "Version reported by the server",
+    "protocolNegotiation": "Protocol Negotiation",
+    "protocolNegotiationAuto": "Auto (probe modern first)",
+    "protocolNegotiationLegacy": "Legacy (initialize only)",
+    "protocolNegotiationDescription": "Auto probes the 2026 modern protocol (server/discover) before falling back to the legacy handshake. Legacy skips the modern probe entirely."
   },
   "status": {
     "sleeping": "Sleeping",
@@ -486,7 +498,7 @@
     "workspace": "Workspace",
     "system": "System",
     "skills": "Skills",
-    "rag": "RAG",
+    "rag": "Knowledge Base",
     "beta": "Beta"
   },
   "pages": {
@@ -576,7 +588,7 @@
       "title": "Skills"
     },
     "rag": {
-      "title": "RAG",
+      "title": "Knowledge Base",
       "subtitle": "Document retrieval for MCP",
       "memoryWarn": "Enabling this will consume a large amount of memory. Enable on a device with sufficient memory.",
       "memoryInsufficient": "Insufficient memory to enable RAG.",
@@ -981,7 +993,13 @@
       "diffNoChanges": "No differences",
       "diffChangePos": "{{current}} / {{total}} changes",
       "diffOldSide": "Old",
-      "diffNewSide": "New"
+      "diffNewSide": "New",
+      "scanCollapsedHint": "{{count}} file(s) ({{sel}} selected)",
+      "scanPhaseMetas": "Reading document metadata…",
+      "scanPhaseGit": "Fetching Git source remote… ({{current}}/{{total}})",
+      "scanPhaseScan": "Scanning source directories (detecting additions/removals)…",
+      "scanPhaseChecking": "Comparing file changes ({{current}}/{{total}}): {{name}}",
+      "scanPhaseCheckingCount": "Comparing file changes ({{current}}/{{total}})"
     }
   },
   "logs": {
@@ -1067,7 +1085,27 @@
     "pinToolLabel": "Pin to the Smart Routing endpoint",
     "unpinTool": "Unpin: reach this tool through search_tools only",
     "pinToolSuccess": "Pinned {{name}}",
-    "unpinToolSuccess": "Unpinned {{name}}"
+    "unpinToolSuccess": "Unpinned {{name}}",
+    "bulkSearch": "Search by name or description…",
+    "bulkSearchLabel": "Search {{capability}}",
+    "annotationFilter": "Filter by annotation",
+    "allAnnotations": "All annotations",
+    "readOnlyHint": "Read-only hint",
+    "destructiveHint": "Destructive hint",
+    "idempotentHint": "Idempotent hint",
+    "flatList": "Flat list",
+    "riskGroups": "Risk groups",
+    "visibleCount": "{{count}} of {{total}} visible",
+    "selectVisible": "Select visible",
+    "deselectVisible": "Deselect visible",
+    "invertVisible": "Invert visible",
+    "riskHint": "Groups use upstream hints and name heuristics; they do not guarantee safety. Actions affect filtered items only.",
+    "noMatchingItems": "No matching items",
+    "risk_read": "Read",
+    "risk_create": "Create",
+    "risk_update": "Update",
+    "risk_delete": "Delete",
+    "risk_other": "Other / unclassified"
   },
   "market": {
     "title": "Local Installation",
@@ -1664,7 +1702,8 @@
     "fieldMeta": "Upstream custom extension metadata.",
     "fieldName": "Tool code name (with server prefix when multiple servers are exposed).",
     "fieldDescription": "Tool description used by the model to decide relevance.",
-    "fieldServerName": "Name of the MCP server providing the tool."
+    "fieldServerName": "Name of the MCP server providing the tool.",
+    "mvSourceRag": "Knowledge Base"
   },
   "mcpb": {
     "upload": "Upload",
@@ -2209,6 +2248,15 @@
     "serverRoute": "Server Route",
     "smartRoute": "Smart Routing Route",
     "smartApiRoute": "Smart Routing REST API",
-    "sseRoute": "SSE Route"
+    "sseRoute": "SSE Route",
+    "intro": "MCPHub Desktop starts a local HTTP service. Configure the addresses below directly into MCP-capable clients such as Cursor or Cherry Studio:",
+    "bearerNotice": "Bearer authentication is enabled — include the configured Bearer Token in the request header when calling.",
+    "exposeHttpDisabled": "HTTP exposure is currently off, so external clients cannot reach these addresses. Enable HTTP exposure in Settings → Routing Configuration first.",
+    "smartRouteDescription": "Does not expose all tools directly; clients retrieve and call tools on demand via the search/describe/call meta tools (requires Smart Routing enabled in Settings). The optional suffix in parentheses is a server or group name to scope the search.",
+    "globalRouteDescription": "Aggregates tools/resources from all enabled MCP servers. Requires global routing enabled in Routing Configuration.",
+    "groupRouteDescription": "Aggregates by group — replace {groupName} with the target group name.",
+    "serverRouteDescription": "Connects to a single MCP server — replace {serverName} with the server name.",
+    "sseRouteDescription": "Entry URL for legacy SSE clients.",
+    "smartApiRouteDescription": "Exposes the Smart Routing meta tools as an OpenAPI spec for REST clients such as OpenWebUI. The optional suffix in parentheses is a server or group name."
   }
 }

@@ -35,6 +35,7 @@ const KNOWN_KEYS = new Set<keyof ServerConfig | string>([
   'enabled',
   'visibility',
   'enableKeepAlive',
+  'protocolNegotiation',
   'keepAliveInterval',
   'perSessionClient',
   'startOnDemand',
@@ -128,6 +129,23 @@ export const normalizeImportedServers = (parsed: ImportJsonFormat): NormalizeRes
     // Detect the server type using multiple strategies (desktop: lenient detection).
     const detectedType = autoDetectType(config);
     normalizedConfig.type = parseServerType(detectedType);
+
+    // #1382 parity: validate protocolNegotiation against the NORMALIZED type
+    // (desktop lenient detection accepts "streamablehttp"/url-only variants
+    // that origin's raw `config.type` check would misjudge as non-http).
+    if (config.protocolNegotiation !== undefined) {
+      if (
+        !['auto', 'legacy'].includes(config.protocolNegotiation) ||
+        (config.protocolNegotiation === 'auto' && normalizedConfig.type !== 'streamable-http')
+      ) {
+        issues.push({
+          name,
+          message: 'protocolNegotiation must be auto or legacy; auto requires streamable-http.',
+        });
+        continue;
+      }
+      normalizedConfig.protocolNegotiation = config.protocolNegotiation;
+    }
 
     if (normalizedConfig.type === 'sse' || normalizedConfig.type === 'streamable-http') {
       normalizedConfig.url = config.url;

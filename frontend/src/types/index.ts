@@ -680,8 +680,9 @@ export interface ServerConfig {
   // Per-server visibility for non-admin users.
   visibility?: 'private' | 'group' | 'public';
   sharedWithUsers?: string[];
-  enableKeepAlive?: boolean; // Enable remote health checks and automatic reconnect attempts
-  keepAliveInterval?: number; // Health check and reconnect interval in milliseconds (default: 60000ms)
+  protocolNegotiation?: 'auto' | 'legacy'; // Streamable HTTP defaults to auto; other transports remain legacy.
+  enableKeepAlive?: boolean; // Enable remote health checks; disconnected remote servers always retry
+  keepAliveInterval?: number; // Health check interval in milliseconds (default: 60000ms)
   perSessionClient?: boolean; // Create a dedicated upstream client per downstream session instead of sharing one connection (for stateful servers like Playwright)
   // On-demand spawning (stdio only): skip startup connect, spawn the process
   // lazily on the first tool call, and shut it down automatically after the
@@ -785,10 +786,13 @@ export interface OpenAPISecurityConfig {
 // Server types
 export interface Server {
   name: string;
+  protocolVersion?: string;
   owner?: string;
   visibility?: 'private' | 'group' | 'public';
   status: ServerStatus;
   error?: string;
+  /** Origin #1385: background reconnect recovery state (remote servers). */
+  recovery?: { attempts: number; lastAttemptAt?: string; nextAttemptAt?: string };
   /** Running version reported by the MCP handshake (stdio servers). */
   version?: string;
   // Resolved npx/uvx package version + registry update hint for stdio servers
@@ -864,6 +868,9 @@ export interface ServerFormData {
   };
   // Create a dedicated upstream client per downstream session (stateful servers)
   perSessionClient?: boolean;
+  // Upstream protocol negotiation (streamable-http only): auto probes
+  // server/discover (2026 modern) first; legacy skips the modern probe.
+  protocolNegotiation?: 'auto' | 'legacy';
   // On-demand spawning (stdio only): spawn lazily on first tool call, shut down after idle timeout
   startOnDemand?: boolean;
   idleTimeoutMs?: number;

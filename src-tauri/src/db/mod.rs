@@ -109,6 +109,9 @@ pub async fn initialize(app: &AppHandle) -> Result<()> {
 
     // Run version-wise migrations
     migration::run_pending(&pool).await?;
+    // Unconditional repairs for DBs stamped current by an intermediate build
+    // whose DDL was later amended (idempotent, cheap).
+    migration::repair_schema(&pool).await?;
 
     DB_POOL
         .set(pool)

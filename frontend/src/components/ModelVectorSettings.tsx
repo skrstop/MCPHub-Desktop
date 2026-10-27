@@ -220,12 +220,12 @@ const ModelVectorSettings: React.FC = () => {
           </span>
           <span
             className="hub-tag"
-            title="RAG"
+            title={t('settings.mvSourceRag')}
             style={ragEnabled
               ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
               : { opacity: 0.45 }}
           >
-            RAG
+            {t('settings.mvSourceRag')}
           </span>
         </div>
         <span className="text-[var(--hub-ink-3)]">{sectionOpen ? '−' : '+'}</span>

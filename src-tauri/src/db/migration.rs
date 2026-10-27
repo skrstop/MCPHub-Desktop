@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 35;
+pub const TARGET_VERSION: i64 = 37;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -126,6 +126,36 @@ async fn set_version(pool: &SqlitePool, version: i64) -> Result<()> {
     Ok(())
 }
 
+/// Unconditional (non-version-gated) schema repairs for databases stamped
+/// at TARGET_VERSION by an intermediate build whose DDL was later amended.
+/// Runs on every startup; every statement is idempotent.
+pub async fn repair_schema(pool: &SqlitePool) -> Result<()> {
+    // v37 amendment: an intermediate build created capability_snapshots
+    // without the fingerprint column and stamped schema_version=37 — the
+    // version-gated migrate_v37 never re-enters on those DBs. Also cover the
+    // "table missing entirely" case (hand-edited version stamp / partial
+    // backup restore): without this, add_column_if_missing would fail with
+    // "no such table" and abort startup on an otherwise repairable DB.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS capability_snapshots (
+            server_name TEXT PRIMARY KEY,
+            tools_json  TEXT NOT NULL,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT NOT NULL DEFAULT ''
+        )",
+    )
+    .execute(pool)
+    .await?;
+    add_column_if_missing(
+        pool,
+        "capability_snapshots",
+        "fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    Ok(())
+}
+
 /// Run all pending migrations to bring the database to `TARGET_VERSION`.
 pub async fn run_pending(pool: &SqlitePool) -> Result<()> {
     let current = get_current_version(pool).await?;
@@ -186,6 +216,8 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         33 => migrate_v33(pool).await,
         34 => migrate_v34(pool).await,
         35 => migrate_v35(pool).await,
+        36 => migrate_v36(pool).await,
+        37 => migrate_v37(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -419,6 +451,40 @@ async fn migrate_v34(pool: &SqlitePool) -> Result<()> {
 /// JSON array string on `server_tool_config.hidden_params`; NULL = unset.
 async fn migrate_v35(pool: &SqlitePool) -> Result<()> {
     add_column_if_missing(pool, "server_tool_config", "hidden_params", "TEXT").await
+}
+
+/// v36 → v37 (#1384 parity): last-known tool snapshots for on-demand servers.
+/// One row per server name; `tools_json` is a serialized `Vec<Tool>` captured
+/// when the server last woke. Sleeping placeholders load it at startup so the
+/// server still advertises its previous tools until the first cold start.
+async fn migrate_v37(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS capability_snapshots (
+            server_name TEXT PRIMARY KEY,
+            tools_json  TEXT NOT NULL,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT NOT NULL DEFAULT ''
+        )",
+    )
+    .execute(pool)
+    .await?;
+    // Repair path: an intermediate build created the table WITHOUT the
+    // fingerprint column (CREATE TABLE IF NOT EXISTS is a no-op there) —
+    // every snapshot save/load would fail silently. Idempotent.
+    add_column_if_missing(
+        pool,
+        "capability_snapshots",
+        "fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
+    Ok(())
+}
+
+/// v35 → v36 (#1382 parity): per-server upstream protocol negotiation mode
+/// ('auto' | 'legacy'); NULL = auto for streamable-http, legacy otherwise.
+async fn migrate_v36(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(pool, "servers", "protocol_negotiation", "TEXT").await
 }
 
 /// v30 → v31: OAuth Provider (MCPHub as authorization server).
@@ -2298,5 +2364,110 @@ mod tests {
 
         // Idempotent: re-running pending migrations must not fail.
         run_pending(&pool).await.expect("re-run migrations idempotent");
+    }
+
+    /// v37（#1384 on-demand 工具快照）：fresh DB 直升 TARGET_VERSION 后
+    /// capability_snapshots 表必须存在且可直插直查；重跑幂等。
+    #[tokio::test]
+    async fn v37_capability_snapshots_table() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        sqlx::query(
+            "INSERT INTO capability_snapshots (server_name, tools_json, updated_at) \
+             VALUES ('od', '[{\"name\":\"t1\"}]', '2026-10-26T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("capability_snapshots insert must succeed");
+        let tools: String = sqlx::query_scalar(
+            "SELECT tools_json FROM capability_snapshots WHERE server_name = 'od'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tools, "[{\"name\":\"t1\"}]");
+
+        // Idempotent: re-running pending migrations must not fail.
+        run_pending(&pool).await.expect("re-run migrations idempotent");
+    }
+
+    /// repair_schema 的目标场景：DB 已盖 37 戳但 capability_snapshots 缺
+    /// fingerprint 列（中间构建）——repair 必须补列且可写入；表整体缺失时
+    /// 也必须自愈建表而非启动失败。
+    #[tokio::test]
+    async fn repair_schema_fixes_stamped_v37_without_fingerprint() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        // Simulate the intermediate build: table WITHOUT fingerprint column,
+        // version stamp already at TARGET_VERSION (no pending migrations).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE capability_snapshots (
+                server_name TEXT PRIMARY KEY,
+                tools_json  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_version(&pool, TARGET_VERSION).await.unwrap();
+        assert_eq!(get_current_version(&pool).await.unwrap(), TARGET_VERSION);
+
+        repair_schema(&pool).await.expect("repair must succeed");
+
+        let has_fp: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('capability_snapshots') WHERE name = 'fingerprint'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(has_fp, 1, "fingerprint column must be added by repair");
+        sqlx::query(
+            "INSERT INTO capability_snapshots (server_name, tools_json, fingerprint, updated_at) \
+             VALUES ('od', '[]', 'v1:ab:cd', '2026-10-26T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("snapshot save must work after repair");
+
+        // Idempotent: repair on a healthy DB is a no-op.
+        repair_schema(&pool).await.expect("re-repair idempotent");
+    }
+
+    #[tokio::test]
+    async fn repair_schema_creates_missing_table() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations");
+        sqlx::query("DROP TABLE capability_snapshots").execute(&pool).await.unwrap();
+        set_version(&pool, TARGET_VERSION).await.unwrap();
+
+        repair_schema(&pool).await.expect("repair must recreate the table");
+
+        sqlx::query(
+            "INSERT INTO capability_snapshots (server_name, tools_json, fingerprint, updated_at) \
+             VALUES ('od', '[]', '', '2026-10-26T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("snapshot save must work after table recreation");
     }
 }

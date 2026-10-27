@@ -30,7 +30,7 @@ fn encode_server_type(t: &ServerType) -> &'static str {
 
 pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled
          FROM servers WHERE enabled = 1",
     )
     .fetch_all(db::pool())
@@ -40,7 +40,7 @@ pub async fn list_all_enabled() -> Result<Vec<ServerConfig>> {
 
 pub async fn list_all() -> Result<Vec<ServerConfig>> {
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled
          FROM servers ORDER BY name",
     )
     .fetch_all(db::pool())
@@ -56,7 +56,7 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
     let key = search_key.trim();
     if key.is_empty() {
         let rows = sqlx::query(
-            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled \
+            "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled \
              FROM servers ORDER BY name",
         )
         .fetch_all(db::pool())
@@ -78,7 +78,7 @@ pub async fn search_configs(search_key: &str) -> Result<Vec<ServerConfig>> {
             let counts: std::collections::HashMap<String, i64> =
                 weighted.into_iter().collect();
             let all = sqlx::query(
-                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled \
+                "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled \
                  FROM servers ORDER BY name",
             )
             .fetch_all(db::pool())
@@ -111,7 +111,7 @@ async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
             .replace('_', "\\_")
     );
     let rows = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled \
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled \
          FROM servers \
          WHERE LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(description, '')) LIKE ? ESCAPE '\\' \
          ORDER BY name",
@@ -125,7 +125,7 @@ async fn like_search(key: &str) -> Result<Vec<ServerConfig>> {
 
 pub async fn get_by_name(name: &str) -> Result<Option<ServerConfig>> {
     let row = sqlx::query(
-        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled
+        "SELECT id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled
          FROM servers WHERE name = ?",
     )
     .bind(name)
@@ -168,6 +168,30 @@ fn validate_combination(cfg: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// Upstream protocol negotiation mode (origin #1382 `resolveUpstreamProtocolMode`):
+/// `auto` probes `server/discover` (2026 modern) before legacy initialize and is
+/// only valid for streamable-http; `legacy` skips the modern probe. Returns the
+/// effective mode — None means auto for streamable-http, legacy for everything else.
+pub(crate) fn resolve_protocol_mode(cfg: &ServerConfig) -> Result<&'static str> {
+    if let Some(mode) = cfg.protocol_negotiation.as_deref() {
+        if mode != "auto" && mode != "legacy" {
+            return Err(anyhow!("protocolNegotiation must be auto or legacy"));
+        }
+        if mode == "auto" && cfg.server_type != ServerType::StreamableHttp {
+            return Err(anyhow!("protocolNegotiation auto requires streamable-http"));
+        }
+    }
+    Ok(match cfg.protocol_negotiation.as_deref() {
+        Some("legacy") => "legacy",
+        _ if cfg.server_type == ServerType::StreamableHttp => "auto",
+        _ => "legacy",
+    })
+}
+
+fn validate_protocol_negotiation(cfg: &ServerConfig) -> Result<()> {
+    resolve_protocol_mode(cfg).map(|_| ())
+}
+
 /// servers 的 FTS 可搜索文本（P3：多字段单空格拼接）：name + description
 fn server_fts_text(name: &str, description: Option<&str>) -> String {
     match description {
@@ -185,6 +209,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     }
     validate_server_name(&cfg.name)?;
     validate_combination(cfg)?;
+    validate_protocol_negotiation(cfg)?;
     let id = Uuid::new_v4().to_string();
     let args = cfg.args.as_ref().map(serde_json::to_string).transpose()?;
     let env = cfg.env.as_ref().map(serde_json::to_string).transpose()?;
@@ -214,8 +239,8 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
 
     let mut tx = db::pool().begin().await?;
     sqlx::query(
-        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, passthrough_headers, oauth, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO servers (id, name, server_type, description, command, args, env, url, headers, options, openapi, per_session_client, start_on_demand, idle_timeout_ms, proxy, enable_keep_alive, keep_alive_interval, protocol_negotiation, passthrough_headers, oauth, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&cfg.name)
@@ -234,6 +259,7 @@ pub async fn create(cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&proxy)
     .bind(enable_keep_alive)
     .bind(keep_alive_interval)
+    .bind(&cfg.protocol_negotiation)
     .bind(&passthrough_headers)
     .bind(&oauth)
     .bind(enabled)
@@ -275,6 +301,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     }
     validate_server_name(&cfg.name)?;
     validate_combination(cfg)?;
+    validate_protocol_negotiation(cfg)?;
     let args = cfg.args.as_ref().map(serde_json::to_string).transpose()?;
     let env = cfg.env.as_ref().map(serde_json::to_string).transpose()?;
     let headers = cfg.headers.as_ref().map(serde_json::to_string).transpose()?;
@@ -304,7 +331,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     let mut tx = db::pool().begin().await?;
     let result = sqlx::query(
         "UPDATE servers SET name=?, server_type=?, description=?, command=?, args=?, env=?, url=?,
-         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enable_keep_alive=?, keep_alive_interval=?, passthrough_headers=?, oauth=?, enabled=?, updated_at=datetime('now') WHERE name=?",
+         headers=?, options=?, openapi=?, per_session_client=?, start_on_demand=?, idle_timeout_ms=?, proxy=?, enable_keep_alive=?, keep_alive_interval=?, protocol_negotiation=?, passthrough_headers=?, oauth=?, enabled=?, updated_at=datetime('now') WHERE name=?",
     )
     .bind(&cfg.name)
     .bind(server_type)
@@ -322,6 +349,7 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
     .bind(&proxy)
     .bind(enable_keep_alive)
     .bind(keep_alive_interval)
+    .bind(&cfg.protocol_negotiation)
     .bind(&passthrough_headers)
     .bind(&oauth)
     .bind(enabled)
@@ -365,6 +393,10 @@ pub async fn update(name: &str, cfg: &ServerConfig) -> Result<ServerConfig> {
             .bind(&cfg.name)
             .bind(name)
             .execute(&mut *tx)
+            .await?;
+        // Last-known tool snapshots are keyed by server NAME — rewrite the key
+        // or the renamed server loses its restored sleeping tools (#1384).
+        crate::services::capability_snapshot_service::rename_snapshot_tx(&mut tx, name, &cfg.name)
             .await?;
         // Drop the old name's connect-lock entry (renamed → old key orphaned).
         let old_name = name.to_string();
@@ -416,6 +448,9 @@ pub async fn delete(name: &str) -> Result<()> {
         .execute(&mut *tx)
         .await?;
     cascade_bearer_keys_remove_tx(&mut tx, name).await?;
+    // Last-known tool snapshots are keyed by server NAME — drop the row or a
+    // recreated server with the same name would resurrect stale tools (#1384).
+    crate::services::capability_snapshot_service::delete_snapshot_tx(&mut tx, name).await?;
     tx.commit().await?;
     // Connect-lock entry is keyed by NAME and never contended again — drop it
     // or the map grows without bound over a long session (rename/delete).
@@ -635,6 +670,7 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
     let keep_alive_interval = r
         .try_get::<Option<i64>, _>("keep_alive_interval")?
         .map(|v| v as u64);
+    let protocol_negotiation = r.try_get::<Option<String>, _>("protocol_negotiation")?;
     let passthrough_headers: Option<Vec<String>> = r
         .try_get::<Option<String>, _>("passthrough_headers")?
         .as_deref()
@@ -660,6 +696,7 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         proxy,
         enable_keep_alive,
         keep_alive_interval,
+        protocol_negotiation,
         passthrough_headers,
         oauth,
         per_session_client: Some(r.try_get::<i64, _>("per_session_client")? != 0),
@@ -670,4 +707,70 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> Result<ServerConfig> {
         },
         enabled: r.try_get::<i64, _>("enabled")? != 0,
     })
+}
+
+#[cfg(test)]
+mod protocol_negotiation_tests {
+    use super::*;
+
+    fn cfg(server_type: ServerType, mode: Option<&str>) -> ServerConfig {
+        ServerConfig {
+            id: String::new(),
+            name: "t".into(),
+            server_type,
+            description: None,
+            command: None,
+            args: None,
+            env: None,
+            url: Some("http://localhost:1".into()),
+            headers: None,
+            options: None,
+            openapi: None,
+            proxy: None,
+            enable_keep_alive: None,
+            keep_alive_interval: None,
+            protocol_negotiation: mode.map(|s| s.to_string()),
+            passthrough_headers: None,
+            oauth: None,
+            per_session_client: None,
+            start_on_demand: None,
+            idle_timeout_ms: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn streamable_http_defaults_to_auto() {
+        assert_eq!(resolve_protocol_mode(&cfg(ServerType::StreamableHttp, None)).unwrap(), "auto");
+    }
+
+    #[test]
+    fn non_http_transports_are_always_legacy() {
+        for t in [ServerType::Stdio, ServerType::Sse, ServerType::Openapi] {
+            assert_eq!(resolve_protocol_mode(&cfg(t.clone(), None)).unwrap(), "legacy");
+            assert!(
+                resolve_protocol_mode(&cfg(t.clone(), Some("auto"))).is_err(),
+                "auto must be rejected for non-streamable-http"
+            );
+            assert_eq!(resolve_protocol_mode(&cfg(t, Some("legacy"))).unwrap(), "legacy");
+        }
+    }
+
+    #[test]
+    fn explicit_modes_on_streamable_http() {
+        assert_eq!(
+            resolve_protocol_mode(&cfg(ServerType::StreamableHttp, Some("auto"))).unwrap(),
+            "auto"
+        );
+        assert_eq!(
+            resolve_protocol_mode(&cfg(ServerType::StreamableHttp, Some("legacy"))).unwrap(),
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn invalid_values_rejected() {
+        assert!(resolve_protocol_mode(&cfg(ServerType::StreamableHttp, Some("modern"))).is_err());
+        assert!(resolve_protocol_mode(&cfg(ServerType::Stdio, Some(""))).is_err());
+    }
 }

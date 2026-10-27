@@ -133,7 +133,8 @@
     "error.unable_to_get_user_info": "No se puede obtener la información del usuario del proveedor de identidad.",
     "createAccount": "Crear cuenta",
     "backToLogin": "Volver al inicio de sesión",
-    "userAlreadyExists": "El nombre de usuario ya existe"
+    "userAlreadyExists": "El nombre de usuario ya existe",
+    "skipAuthGuestName": "Modo invitado"
   },
   "server": {
     "startOnDemand": "Inicio bajo demanda",
@@ -227,10 +228,13 @@
     "resetTimeoutOnProgress": "Restablecer el tiempo de espera al progresar",
     "resetTimeoutOnProgressDescription": "Restablece el tiempo de espera con las notificaciones de progreso (habilitado por defecto)",
     "keepAlive": "Estado de la conexión",
-    "enableKeepAlive": "Habilitar comprobaciones de estado y reconexión automática",
-    "keepAliveDescription": "Ejecuta comprobaciones de estado periódicas y reconecta automáticamente este servidor remoto cuando se desconecta.",
+    "retryScheduled": "Reintento a las {{time}}",
+    "reconnecting": "Reconectando…",
+    "lastRetry": "Último reintento: {{time}} ({{count}} intentos)",
+    "enableKeepAlive": "Habilitar comprobaciones de estado",
+    "keepAliveDescription": "Comprobar el estado periódicamente. Los servidores remotos desconectados siempre se reconectan automáticamente con espera progresiva.",
     "keepAliveInterval": "Intervalo de comprobación (ms)",
-    "keepAliveIntervalDescription": "Tiempo entre comprobaciones de estado e intentos de reconexión automática en milisegundos (predeterminado: 60000 ms = 1 minuto)",
+    "keepAliveIntervalDescription": "Tiempo entre comprobaciones en milisegundos (predeterminado: 60000 ms = 1 minuto)",
     "perSessionClient": "Aislamiento de cliente por sesión",
     "perSessionClientDescription": "Crea una conexión ascendente dedicada por sesión en lugar de compartir una entre todas las sesiones. Habilítalo para servidores con estado como Playwright. Aumenta las conexiones ascendentes con sesiones concurrentes.",
     "remove": "Quitar",
@@ -325,7 +329,8 @@
       "personalReconnect": "Reconectar",
       "personalDisconnect": "Desconectar",
       "personalError": "Error en la autorización personal",
-      "personalSuccess": "Autorización personal guardada. Vuelve a Panel → Servidores."
+      "personalSuccess": "Autorización personal guardada. Vuelve a Panel → Servidores.",
+      "allowInsecureTokenEndpointHelpDesktop": "Desactivado por defecto. Envía credenciales y tokens a este servidor upstream sin TLS. Actívelo solo en redes confiables; se recomienda HTTPS."
     },
     "builtinBadge": "Integrado",
     "builtinServer": "Servidor integrado (no editable/eliminable)",
@@ -350,7 +355,14 @@
     "unknownError": "Error desconocido",
     "updateTo": "Actualizar a {{version}}",
     "localExecutionRequiresAdmin": "La ejecución de comandos locales requiere un administrador.",
-    "httpOAuthRequiresAdmin": "Permitir endpoints de tokens OAuth por HTTP requiere un administrador."
+    "httpOAuthRequiresAdmin": "Permitir endpoints de tokens OAuth por HTTP requiere un administrador.",
+    "protocolVersion": "Protocolo MCP",
+    "protocolVersionUnknown": "No disponible",
+    "reportedVersion": "Versión indicada por el servidor",
+    "protocolNegotiation": "Negociación de protocolo",
+    "protocolNegotiationAuto": "Automático (probar moderno primero)",
+    "protocolNegotiationLegacy": "Heredado (solo initialize)",
+    "protocolNegotiationDescription": "Automático prueba primero el protocolo moderno 2026 (server/discover) antes de recurrir al saludo heredado. Heredado omite por completo la prueba moderna."
   },
   "status": {
     "sleeping": "En suspensión",
@@ -536,7 +548,7 @@
     "workspace": "Espacio de trabajo",
     "system": "Sistema",
     "beta": "Beta",
-    "rag": "RAG",
+    "rag": "Base de conocimiento",
     "skills": "Skills"
   },
   "pages": {
@@ -623,7 +635,7 @@
       "title": "Registros del sistema"
     },
     "rag": {
-      "title": "RAG",
+      "title": "Base de conocimiento",
       "subtitle": "Recuperación de documentos para MCP",
       "memoryWarn": "Activar esto consumirá una gran cantidad de memoria. Actívalo en un dispositivo con memoria suficiente.",
       "memoryInsufficient": "Memoria insuficiente para activar RAG.",
@@ -1028,7 +1040,13 @@
       "diffNoChanges": "Sin diferencias",
       "diffChangePos": "{{current}} / {{total}} diferencias",
       "diffOldSide": "Antiguo",
-      "diffNewSide": "Nuevo"
+      "diffNewSide": "Nuevo",
+      "scanCollapsedHint": "{{count}} archivo(s) ({{sel}} seleccionado(s))",
+      "scanPhaseMetas": "Leyendo metadatos de documentos…",
+      "scanPhaseGit": "Obteniendo el remoto de la fuente Git… ({{current}}/{{total}})",
+      "scanPhaseScan": "Escaneando directorios de origen (detectando altas/bajas)…",
+      "scanPhaseChecking": "Comparando cambios de archivos ({{current}}/{{total}}): {{name}}",
+      "scanPhaseCheckingCount": "Comparando cambios de archivos ({{current}}/{{total}})"
     },
     "skills": {
       "title": "Skills"
@@ -1117,7 +1135,27 @@
     "unpinToolSuccess": "{{name}} desfijada",
     "instructions": "Instrucciones",
     "instructionsHelp": "Opcional. Se envían a los clientes MCP al conectarse a este grupo (también como $smart/<group>); la mayoría los añade al prompt de sistema del modelo.",
-    "instructionsPlaceholder": "p. ej., Usa fetch para páginas web; si falla, usa firecrawl_scrape."
+    "instructionsPlaceholder": "p. ej., Usa fetch para páginas web; si falla, usa firecrawl_scrape.",
+    "bulkSearch": "Buscar por nombre o descripción…",
+    "bulkSearchLabel": "Buscar {{capability}}",
+    "annotationFilter": "Filtrar por anotación",
+    "allAnnotations": "Todas las anotaciones",
+    "readOnlyHint": "Indicación de solo lectura",
+    "destructiveHint": "Indicación destructiva",
+    "idempotentHint": "Indicación de idempotencia",
+    "flatList": "Lista plana",
+    "riskGroups": "Grupos de riesgo",
+    "visibleCount": "{{count}} de {{total}} visibles",
+    "selectVisible": "Seleccionar visibles",
+    "deselectVisible": "Deseleccionar visibles",
+    "invertVisible": "Invertir visibles",
+    "riskHint": "Los grupos usan indicaciones del servidor y heurísticas de nombres; no garantizan seguridad. Las acciones solo afectan a los elementos filtrados.",
+    "noMatchingItems": "No hay coincidencias",
+    "risk_read": "Lectura",
+    "risk_create": "Creación",
+    "risk_update": "Actualización",
+    "risk_delete": "Eliminación",
+    "risk_other": "Otros / sin clasificar"
   },
   "market": {
     "title": "Instalación local",
@@ -1723,7 +1761,8 @@
     "fieldMeta": "Metadatos de extensión personalizados del servidor.",
     "fieldName": "Nombre de código de la herramienta (con prefijo del servidor cuando se exponen varios).",
     "fieldDescription": "Descripción de la herramienta que el modelo usa para decidir la relevancia.",
-    "fieldServerName": "Nombre del servidor MCP que proporciona la herramienta."
+    "fieldServerName": "Nombre del servidor MCP que proporciona la herramienta.",
+    "mvSourceRag": "Base de conocimiento"
   },
   "mcpb": {
     "upload": "Subir",
@@ -2104,7 +2143,16 @@
     "smartApiRoute": "API REST de enrutamiento inteligente",
     "smartRoute": "Ruta de enrutamiento inteligente",
     "sseRoute": "Ruta SSE",
-    "title": "URLs de acceso al servicio"
+    "title": "URLs de acceso al servicio",
+    "intro": "MCPHub Desktop inicia un servicio HTTP local. Configure las direcciones siguientes directamente en clientes compatibles con MCP como Cursor o Cherry Studio:",
+    "bearerNotice": "La autenticación Bearer está activada: incluya el Bearer Token configurado en la cabecera de la solicitud al realizar llamadas.",
+    "exposeHttpDisabled": "La exposición HTTP está desactivada actualmente; los clientes externos no pueden acceder a estas direcciones. Active primero la exposición HTTP en Ajustes → Configuración de enrutamiento.",
+    "smartRouteDescription": "No expone todas las herramientas directamente; los clientes las recuperan y llaman a demanda mediante las meta-herramientas search/describe/call (requiere Smart Routing activado en Ajustes). El sufijo opcional entre paréntesis es un nombre de servidor o grupo para acotar la búsqueda.",
+    "globalRouteDescription": "Agrega herramientas/recursos de todos los servidores MCP habilitados. Requiere el enrutamiento global activado en la Configuración de enrutamiento.",
+    "groupRouteDescription": "Agrega por grupo: sustituya {groupName} por el nombre del grupo de destino.",
+    "serverRouteDescription": "Se conecta a un único servidor MCP: sustituya {serverName} por el nombre del servidor.",
+    "sseRouteDescription": "URL de entrada para clientes SSE heredados.",
+    "smartApiRouteDescription": "Expone las meta-herramientas de Smart Routing como una especificación OpenAPI para clientes REST como OpenWebUI. El sufijo opcional entre paréntesis es un nombre de servidor o grupo."
   },
   "menu": {
     "about": "Acerca de {{app}}",

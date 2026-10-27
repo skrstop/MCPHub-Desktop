@@ -37,6 +37,10 @@ struct PoolEntry {
     /// not here (`client` stays `None`); this entry is a "shadow" carrying
     /// status + cached tools + the flag.
     start_on_demand: bool,
+    /// Cached remote-ness (sse/streamable-http). Remote servers recover via
+    /// the background backoff scheduler (origin #1385); stdio/openapi keep
+    /// the session_rebuild behavior.
+    is_remote: bool,
 }
 
 type Pool = Arc<RwLock<HashMap<String, PoolEntry>>>;
@@ -95,8 +99,10 @@ pub(crate) async fn build_client(cfg: &ServerConfig) -> Result<McpClient> {
             // rmcp-backed transport (AGENTS.md §3.9.6): official SDK protocol
             // layer — Auto lifecycle (discover probe → legacy fallback),
             // native MRTR, native tasks/get polling, custom headers.
+            // #1382: `protocolNegotiation: 'legacy'` skips the modern probe.
+            let legacy_only = cfg.protocol_negotiation.as_deref() == Some("legacy");
             let transport =
-                RmcpHttpTransport::new(&name, url, headers);
+                RmcpHttpTransport::with_protocol_mode(&name, url, headers, legacy_only);
             Ok(McpClient::new(name, Box::new(transport)))
         }
         ServerType::Openapi => {
@@ -210,6 +216,10 @@ pub(crate) async fn pool_connect_lock(name: &str) -> std::sync::Arc<tokio::sync:
 pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     let name = cfg.name.clone();
     let per_session_client = cfg.per_session_client.unwrap_or(false);
+    // Remote (sse/streamable-http) servers recover via the background backoff
+    // scheduler (origin #1385); cached on the entry so the scheduler can seed
+    // recovery without a per-tick DB read.
+    let is_remote = matches!(cfg.server_type, ServerType::Sse | ServerType::StreamableHttp);
 
     // 0. Check if already connecting (prevent re-entry from rapid disable/enable clicks)
     // Per-server connect serialization: the `starting` re-entry guard below
@@ -224,6 +234,11 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
     // guard to release before connect based on the old (wrong) comment.
     let name_lock = pool_connect_lock(&name).await;
     let _connect_guard = name_lock.lock().await;
+    // A recovery-spawned attempt may have queued behind a slow connect; the
+    // claim was stamped at take_due, so refresh it now that we actually hold
+    // the lock — otherwise reclaim_stalled's 600s budget could expire during
+    // the wait and fire a duplicate attempt that tears down this connection.
+    super::recovery::touch_claim(&name).await;
     {
         let map = pool().read().await;
         if let Some(entry) = map.get(&name) {
@@ -253,23 +268,33 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         let sleep_msg = format!("[{}] Skipping startup connect for on-demand server (sleeping)", name);
         log::info!("{}", sleep_msg);
         app_logger::log_to_db("info", &sleep_msg);
+        // #1384 parity: restore the last-known tool snapshot so the sleeping
+        // server still advertises its previous tools until the first cold
+        // start. Status stays disconnected/sleeping — only tools are populated.
+        let restored_tools =
+            crate::services::capability_snapshot_service::load_snapshot(&cfg)
+                .await
+                .unwrap_or_default();
+        let restored_count = restored_tools.len();
         let status = ServerStatus {
             name: name.clone(),
             connected: false,
             starting: false,
             start_on_demand: true,
-            tool_count: 0,
+            tool_count: restored_count,
             error: None,
             last_connected: None,
             server_version: None,
+            protocol_version: None,
         };
         let mut map = pool().write().await;
         map.insert(name.clone(), PoolEntry {
             client: None,
             status: status.clone(),
-            tools: vec![],
+            tools: restored_tools,
             per_session_client,
             start_on_demand: true,
+            is_remote,
         });
         return status;
     }
@@ -291,10 +316,12 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                 error: None,
                 last_connected: None,
                 server_version: None,
+                protocol_version: None,
             },
             tools: vec![],
             per_session_client,
             start_on_demand: false,
+                    is_remote,
         });
     }
 
@@ -325,9 +352,10 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     error: Some(e.to_string()),
                     last_connected: None,
                     server_version: None,
+                    protocol_version: None,
                 };
                 let mut map = pool().write().await;
-                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false, is_remote });
                 return status;
             }
         };
@@ -382,6 +410,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                 // Capture the server-reported version before moving the client
                 // into the pool, for a best-effort "update available" check.
                 let running_version = entry_client.server_version();
+                let running_protocol = entry_client.protocol_version();
                 let last_connected = Some(chrono::Utc::now().to_rfc3339());
                 let status = ServerStatus {
                     name: name.clone(),
@@ -392,6 +421,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     error: None,
                     last_connected,
                     server_version: running_version.clone(),
+                    protocol_version: running_protocol.clone(),
                 };
                 let mut map = pool().write().await;
                 map.insert(name.clone(), PoolEntry {
@@ -400,6 +430,7 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     tools,
                     per_session_client,
                     start_on_demand: false,
+                    is_remote,
                 });
                 let conn_msg = if attempt > 1 {
                     format!("[{}] Connected ({} tools) after {} attempts", name, tool_count, attempt)
@@ -432,6 +463,10 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     tools_for_index,
                     cfg.description.clone(),
                 );
+                // Successful connect clears any reconnect recovery state
+                // (origin #1385) — covers recovery attempts AND manual
+                // toggle/reload connects alike.
+                super::recovery::clear(&name).await;
                 return status;
             }
             Ok(Err(e)) => {
@@ -481,9 +516,10 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     error: Some(last_error.clone()),
                     last_connected: None,
                     server_version: None,
+                    protocol_version: None,
                 };
                 let mut map = pool().write().await;
-                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false, is_remote });
                 return status;
             }
             Err(_elapsed) => {
@@ -509,9 +545,10 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
                     error: Some(last_error.clone()),
                     last_connected: None,
                     server_version: None,
+                    protocol_version: None,
                 };
                 let mut map = pool().write().await;
-                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
+                map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false, is_remote });
                 return status;
             }
         }
@@ -542,9 +579,10 @@ pub async fn connect_server(cfg: &ServerConfig) -> ServerStatus {
         error: Some(last_error),
         last_connected: None,
         server_version: None,
+        protocol_version: None,
     };
     let mut map = pool().write().await;
-    map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false });
+    map.insert(name.clone(), PoolEntry { client: None, status: status.clone(), tools: vec![], per_session_client, start_on_demand: false, is_remote });
     status
 }
 
@@ -570,6 +608,11 @@ pub async fn disconnect_server(name: &str) -> Result<()> {
     // server stays alive until a second disable. The helper shares the SAME
     // lock table as connect_server (Arc equality guaranteed).
     let _disconnect_guard = pool_connect_lock(name).await;
+    // User-initiated disconnect (disable/delete/update): drop any pending
+    // reconnect recovery (origin #1385 clearClientKeepAlive parity). The
+    // lock-free `disconnect_server_inner` (called mid-connect) deliberately
+    // does NOT clear — a recovery attempt's own cleanup must keep its state.
+    super::recovery::clear(name).await;
     disconnect_server_inner(name).await
 }
 
@@ -626,6 +669,7 @@ pub async fn disconnect_all() {
     // processes are killed via kill_process_tree rather than relying on
     // kill_on_drop at process exit.
     super::on_demand::cleanup_all_on_demand().await;
+    super::recovery::clear_all().await;
 
     let entries: Vec<(String, PoolEntry)> = {
         let mut map = pool().write().await;
@@ -652,6 +696,20 @@ pub async fn disconnect_all() {
 pub async fn get_all_statuses() -> Vec<ServerStatus> {
     let map = pool().read().await;
     map.values().map(|e| e.status.clone()).collect()
+}
+
+/// Names of pooled remote (sse/streamable-http) servers that are currently
+/// disconnected and not starting. On-demand servers are never remote. Used by
+/// the backoff recovery scheduler (origin #1385) to seed/keep recovery state
+/// without a per-tick DB read.
+pub async fn disconnected_remote_servers() -> Vec<String> {
+    let map = pool().read().await;
+    map.values()
+        .filter(|e| {
+            e.is_remote && !e.status.connected && !e.status.starting && !e.status.start_on_demand
+        })
+        .map(|e| e.status.name.clone())
+        .collect()
 }
 
 /// Get status for a single server
@@ -755,8 +813,42 @@ pub async fn call_tool_with_meta(
     }; // pool read lock released before the upstream call
     let client = client_arc.lock().await;
     let result = client.call_tool_with_meta(tool_name, arguments, request_meta).await;
+    mark_pool_disconnected_if_dead(server_name, &client_arc, &client).await;
     drop(client);
     result
+}
+
+/// #1385 parity (origin's mcpService half): a shared remote transport that
+/// died mid-session must flip the pool entry to disconnected so the 1s
+/// background backoff scheduler picks the server up — the transport's own
+/// `connected` atomic has no other pool-status consumer. Lock ordering is
+/// safe: client mutex → pool write (disconnect paths release the pool write
+/// guard before taking the client mutex).
+async fn mark_pool_disconnected_if_dead(server_name: &str, client_arc: &std::sync::Arc<tokio::sync::Mutex<McpClient>>, client: &McpClient) {
+    if client.is_connected() {
+        return;
+    }
+    let mut map = pool().write().await;
+    if let Some(entry) = map.get_mut(server_name) {
+        // Identity guard: only flip the status if the entry still holds the
+        // SAME client this call used — a concurrent reconnect may have
+        // already replaced it with a healthy one (never tear down a fresh
+        // connection's status based on the dead client's state).
+        let same_client = entry
+            .client
+            .as_ref()
+            .map(|c| std::sync::Arc::ptr_eq(c, client_arc))
+            .unwrap_or(false);
+        if same_client && entry.status.connected {
+            entry.status.connected = false;
+            entry.status.error =
+                Some("Connection lost; background reconnect scheduled".to_string());
+            log::warn!(
+                "[{}] upstream connection lost — marked disconnected for recovery",
+                server_name
+            );
+        }
+    }
 }
 
 /// Read an upstream resource (MCP Apps #1303): same routing as
@@ -790,7 +882,9 @@ pub async fn read_resource(
             .ok_or_else(|| anyhow!("Server '{}' is still starting", server_name))?
     }; // pool read lock released before the upstream call
     let client = client_arc.lock().await;
-    client.read_resource(uri).await
+    let result = client.read_resource(uri).await;
+    mark_pool_disconnected_if_dead(server_name, &client_arc, &client).await;
+    result
 }
 
 pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> Result<ToolCallResult> {
@@ -845,6 +939,11 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
     log::debug!("[{}] Calling tool '{}'...", server_name, tool_name);
     let client = client_arc.lock().await;
     let result = client.call_tool(tool_name, arguments).await;
+    // #1385: same dead-transport propagation as call_tool_with_meta — this is
+    // the main path for the Tauri UI / REST / MCP HTTP API, and the recovery
+    // scheduler seeds from pool entry status, so a dead transport here would
+    // otherwise leave the server permanently "connected" (fake-alive).
+    mark_pool_disconnected_if_dead(server_name, &client_arc, &client).await;
     match &result {
         Ok(r) => {
             let status = if r.is_error { "error" } else { "success" };
@@ -871,7 +970,12 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
 /// status to connected + caches the tool list + server version. Keeps the
 /// `start_on_demand` flag set. No-op if the entry was removed (server
 /// disabled/deleted while spawning).
-pub(crate) async fn mark_on_demand_awake(name: &str, tools: Vec<Tool>, server_version: Option<String>) {
+pub(crate) async fn mark_on_demand_awake(
+    name: &str,
+    tools: Vec<Tool>,
+    server_version: Option<String>,
+    protocol_version: Option<String>,
+) {
     let tool_count = tools.len();
     let last_connected = Some(chrono::Utc::now().to_rfc3339());
     let mut map = pool().write().await;
@@ -884,7 +988,7 @@ pub(crate) async fn mark_on_demand_awake(name: &str, tools: Vec<Tool>, server_ve
         if !entry.start_on_demand {
             return;
         }
-        entry.tools = tools;
+        entry.tools = tools.clone();
         entry.status.connected = true;
         entry.status.starting = false;
         entry.status.start_on_demand = true;
@@ -892,6 +996,29 @@ pub(crate) async fn mark_on_demand_awake(name: &str, tools: Vec<Tool>, server_ve
         entry.status.error = None;
         entry.status.last_connected = last_connected;
         entry.status.server_version = server_version;
+        entry.status.protocol_version = protocol_version;
+    }
+    // #1384 parity: persist the fresh tool list as the last-known snapshot so
+    // a restart can restore it on the sleeping placeholder. Best-effort — a
+    // snapshot failure must never break the wake. Deliberately OUTSIDE the
+    // pool write guard: the DB awaits (get_by_name + upsert) must never stall
+    // global pool operations (status polling, tool calls). An EMPTY list is
+    // never saved: a transient tools/list failure on wake must not erase the
+    // last good snapshot (load treats empty as absent, so the data would be
+    // unrecoverable). The conditional upsert (WHERE EXISTS servers row) makes
+    // a delete/rename landing after the guard release harmless.
+    if !tools.is_empty() {
+        let fingerprint = match crate::services::server_service::get_by_name(name).await {
+            Ok(Some(cfg)) => crate::services::capability_snapshot_service::launch_fingerprint(&cfg),
+            // Deleted/renamed mid-wake or DB error: skip the save.
+            _ => return,
+        };
+        if let Err(e) =
+            crate::services::capability_snapshot_service::save_snapshot(name, &fingerprint, &tools)
+                .await
+        {
+            log::warn!("[{}] Failed to persist capability snapshot: {}", name, e);
+        }
     }
 }
 

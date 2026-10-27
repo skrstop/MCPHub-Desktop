@@ -190,6 +190,13 @@ impl SseTransport {
                 Err(e) => {
                     // Don't leak the pending entry when the POST itself fails.
                     self.pending.lock().await.remove(&id);
+                    // #1385: connection-class failure — flip `connected` so
+                    // mark_pool_disconnected_if_dead can seed the recovery
+                    // scheduler (mirrors rmcp transports; without this the
+                    // no-background-reader fallback mode stays fake-alive
+                    // forever). Application-level MCP errors below must NOT
+                    // touch the flag.
+                    self.connected.store(false, std::sync::atomic::Ordering::SeqCst);
                     return Err(anyhow!(e));
                 }
             };
@@ -211,6 +218,10 @@ impl SseTransport {
                 // never come.
                 let body = resp.text().await.unwrap_or_default();
                 self.pending.lock().await.remove(&id);
+                // #1385: non-2xx is a connection-class failure (dead endpoint
+                // / expired session) — flip `connected` for the recovery
+                // scheduler (see the send-failure branch above).
+                self.connected.store(false, std::sync::atomic::Ordering::SeqCst);
                 return Err(anyhow!("MCP POST failed ({}): {}", post_status, body.chars().take(300).collect::<String>()));
             }
 

@@ -24,8 +24,7 @@ use std::sync::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use rmcp::model::{CallToolRequestParams, RequestMetaObject};
-use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::child_process::TokioChildProcess;
+use rmcp::service::{RoleClient, RunningService};use rmcp::transport::child_process::TokioChildProcess;
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
@@ -35,12 +34,99 @@ use crate::mcp::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
 use crate::services::{app_logger, runtime_env};
 
-/// Empty client handler — the hub only makes requests upstream, it never
-/// handles server-initiated requests/notifications.
-#[derive(Default)]
-struct BridgeClientHandler;
+/// Client handler for the upstream rmcp connection. The hub only makes
+/// requests upstream; the one server-initiated request it handles is
+/// `elicitation/create`, forwarded to the downstream client when a per-call
+/// relay is registered (isolated perSessionClient calls, origin #1370).
+/// Without an active relay (shared pool / no call in flight) the request is
+/// rejected, mirroring origin's "Elicitation requires an active tool call".
+struct BridgeClientHandler {
+    /// Per-connection elicitation relay slot (see mcp::elicitation).
+    elicitation: crate::mcp::elicitation::ElicitationSlot,
+    /// Connection-lifetime URL-mode completion forwarder (survives the call).
+    elicitation_notify: crate::mcp::elicitation::ElicitNotifySlot,
+}
 
-impl rmcp::ClientHandler for BridgeClientHandler {}
+impl BridgeClientHandler {
+    /// Slots are created by the OWNING transport and shared here — the
+    /// session pool registers relays via the transport's accessors, so the
+    /// handler MUST read the same Arcs (separate slots would silently
+    /// disable all forwarding).
+    fn new(
+        elicitation: crate::mcp::elicitation::ElicitationSlot,
+        elicitation_notify: crate::mcp::elicitation::ElicitNotifySlot,
+    ) -> Self {
+        Self {
+            elicitation,
+            elicitation_notify,
+        }
+    }
+}
+
+impl rmcp::ClientHandler for BridgeClientHandler {
+    // Advertise form+url elicitation so elicitation-capable upstream servers
+    // may ask; per-request gating happens in create_elicitation (relay
+    // presence + downstream-declared modes). Deviation from origin: shared
+    // connections also advertise — requests there fail with the
+    // no-active-call error, which is origin's shared-path behaviour anyway.
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
+        info.capabilities.elicitation = Some(
+            rmcp::model::ElicitationCapability::new()
+                .with_form(rmcp::model::FormElicitationCapability::new())
+                .with_url(rmcp::model::UrlElicitationCapability::new()),
+        );
+        info
+    }
+
+    fn create_elicitation(
+        &self,
+        request: rmcp::model::ElicitRequestParams,
+        _context: rmcp::service::RequestContext<RoleClient>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::ElicitResult, rmcp::ErrorData>> + Send + '_ {
+        let relay = crate::mcp::elicitation::take_active(&self.elicitation);
+        async move {
+            match relay {
+                None => Err(crate::mcp::elicitation::elicitation_error(
+                    crate::mcp::elicitation::NO_ACTIVE_TOOL_CALL_MSG,
+                )),
+                Some(relay) => relay.forward(request).await,
+            }
+        }
+    }
+
+    fn on_custom_notification(
+        &self,
+        notification: rmcp::model::CustomNotification,
+        _context: rmcp::service::NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        let relay = crate::mcp::elicitation::take_active(&self.elicitation);
+        // Connection-lifetime fallback: URL-mode completions commonly arrive
+        // AFTER the tool call returned (the user is still on the auth page) —
+        // origin installs its completion handler for the client's lifetime,
+        // so mirror that instead of dropping outside the per-call window.
+        let lifetime_notify = relay
+            .as_ref()
+            .and_then(|r| r.notify_fn())
+            .or_else(|| {
+                self.elicitation_notify
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+            });
+        async move {
+            if notification.method == "notifications/elicitation/complete" {
+                match lifetime_notify {
+                    Some(notify) => notify(notification.params),
+                    None => log::debug!(
+                        "[{}] dropping notifications/elicitation/complete (no downstream owner)",
+                        "rmcp-stdio"
+                    ),
+                }
+            }
+        }
+    }
+}
 
 /// Downstream-driven MRTR retry fields (hub wire convention: inside `_meta`).
 /// Mirrors rmcp_http_transport::downstream_mrtr_retry.
@@ -75,12 +161,16 @@ pub struct RmcpStdioTransport {
     args: Vec<String>,
     env: HashMap<String, String>,
     service: Option<RunningService<RoleClient, BridgeClientHandler>>,
+    /// Per-connection elicitation relay slot (origin #1370).
+    elicitation_slot: crate::mcp::elicitation::ElicitationSlot,
+    elicitation_notify_slot: crate::mcp::elicitation::ElicitNotifySlot,
     pid: Mutex<Option<u32>>,
     connected: std::sync::atomic::AtomicBool,
     /// Rolling stderr tail (~32KB) so handshake failures include the upstream
     /// stderr (mirrors origin #1015 behaviour of StdioTransport).
     stderr_tail: Arc<Mutex<String>>,
     server_version: Option<String>,
+    protocol_version: Option<String>,
     intentional_disconnect: Arc<AtomicBool>,
     /// Bumped on every connect so an old drain task (pipe closing late after
     /// an intentional kill + reconnect reset) can tell it is stale and skip
@@ -99,10 +189,13 @@ impl RmcpStdioTransport {
             args,
             env,
             service: None,
+            elicitation_slot: crate::mcp::elicitation::new_slot(),
+            elicitation_notify_slot: crate::mcp::elicitation::new_notify_slot(),
             pid: Mutex::new(None),
             connected: std::sync::atomic::AtomicBool::new(false),
             stderr_tail: Arc::new(Mutex::new(String::new())),
             server_version: None,
+            protocol_version: None,
             intentional_disconnect: Arc::new(AtomicBool::new(false)),
             drain_generation: Arc::new(AtomicU64::new(0)),
             last_list_ttl: std::sync::Mutex::new(None),
@@ -308,7 +401,10 @@ impl McpTransport for RmcpStdioTransport {
         }
 
         // rmcp runs the initialize handshake inside `serve_client`.
-        let service = rmcp::service::serve_client(BridgeClientHandler, child_transport)
+        let service = rmcp::service::serve_client(
+            BridgeClientHandler::new(self.elicitation_slot.clone(), self.elicitation_notify_slot.clone()),
+            child_transport,
+        )
             .await
             .map_err(|e| {
                 let elapsed = connect_start.elapsed();
@@ -347,6 +443,7 @@ impl McpTransport for RmcpStdioTransport {
                 .as_ref()
                 .map(|i| i.version.clone())
                 .filter(|v| !v.is_empty());
+            self.protocol_version = Some(info.protocol_version.to_string());
         }
 
         self.service = Some(service);
@@ -364,6 +461,11 @@ impl McpTransport for RmcpStdioTransport {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
+        // Drop the connection-lifetime elicitation completion forwarder —
+        // the downstream owner is gone with the connection.
+        if let Ok(mut g) = self.elicitation_notify_slot.lock() {
+            *g = None;
+        }
         self.connected
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.intentional_disconnect.store(true, Ordering::SeqCst);
@@ -407,6 +509,10 @@ impl McpTransport for RmcpStdioTransport {
 
     fn server_version(&self) -> Option<String> {
         self.server_version.clone()
+    }
+
+    fn protocol_version(&self) -> Option<String> {
+        self.protocol_version.clone()
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {
@@ -689,6 +795,14 @@ impl McpTransport for RmcpStdioTransport {
                 anyhow!("resources/read failed: {}", e)
             })?;
         Ok(result.contents)
+    }
+
+    fn elicitation_slot(&self) -> Option<crate::mcp::elicitation::ElicitationSlot> {
+        Some(self.elicitation_slot.clone())
+    }
+
+    fn elicitation_notify_slot(&self) -> Option<crate::mcp::elicitation::ElicitNotifySlot> {
+        Some(self.elicitation_notify_slot.clone())
     }
 }
 

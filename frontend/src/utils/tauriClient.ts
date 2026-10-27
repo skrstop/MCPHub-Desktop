@@ -1289,7 +1289,9 @@ export function transformTauriResponse(command: string, result: unknown): unknow
             ? 'connected'
             : 'disconnected',
       error: st?.error ?? null,
+      recovery: (si.recovery as { attempts: number; lastAttemptAt?: string; nextAttemptAt?: string } | undefined) ?? undefined,
       version: (st?.serverVersion as string | undefined) ?? undefined,
+      protocolVersion: (st?.protocolVersion as string | undefined) ?? undefined,
       tools: si.tools ?? [],
       prompts: si.prompts ?? [],
       resources: si.resources ?? [],

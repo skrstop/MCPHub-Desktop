@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AuthState } from '../types';
 import * as authService from '../services/authService';
 import { getPublicConfig } from '../services/configService';
@@ -42,6 +43,7 @@ const AuthContext = createContext<{
 // Auth provider component
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [auth, setAuth] = useState<AuthState>(initialState);
+  const { t } = useTranslation();
 
   const loadUser = useCallback(async () => {
     try {
@@ -56,7 +58,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           loading: false,
           skipAuth: true,
           user: {
-            username: '免登陆模式',
+            // i18n: this name renders in UserProfileMenu — never hardcode
+            // locale-specific text here.
+            username: t('auth.skipAuthGuestName'),
             isAdmin: true,
             permissions,
           },
@@ -136,7 +140,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       console.error('Unexpected error in loadUser:', outerError);
       setAuth({ ...initialState, loading: false });
     }
-  }, []);
+  }, [t]);
 
   // Load user if token exists
   useEffect(() => {

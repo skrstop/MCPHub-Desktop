@@ -68,6 +68,7 @@ pub async fn call_tool_isolated(
     server_name: &str,
     tool: &str,
     arguments: Value,
+    elicitation: Option<crate::mcp::elicitation::ElicitationRelay>,
 ) -> Result<ToolCallResult> {
     // #1343: hidden parameters are dropped before the isolated client call
     // (the shared-pool path strips inside pool::call_tool_with_meta).
@@ -87,7 +88,7 @@ pub async fn call_tool_isolated(
                 "[session-pool] Reusing isolated client for session {} -> {} (tool '{}')",
                 session_id, server_name, tool
             );
-            return run_call(&key, &client_arc, tool, arguments).await;
+            return run_call(&key, &client_arc, tool, arguments, elicitation.clone()).await;
         }
     }
 
@@ -113,7 +114,7 @@ pub async fn call_tool_isolated(
                 "[session-pool] Isolated client created by a concurrent call for session {} -> {} (tool '{}')",
                 session_id, server_name, tool
             );
-            return run_call(&key, &client_arc, tool, arguments).await;
+            return run_call(&key, &client_arc, tool, arguments, elicitation.clone()).await;
         }
     }
 
@@ -201,7 +202,7 @@ pub async fn call_tool_isolated(
     log::info!("{}", msg);
     app_logger::log_to_db("info", &msg);
 
-    run_call(&key, &client_arc, tool, arguments).await
+    run_call(&key, &client_arc, tool, arguments, elicitation).await
 }
 
 /// Build a client from config and connect it within `CONNECT_TIMEOUT`.
@@ -253,6 +254,7 @@ async fn run_call(
     client_arc: &Arc<Mutex<McpClient>>,
     tool: &str,
     arguments: Value,
+    elicitation: Option<crate::mcp::elicitation::ElicitationRelay>,
 ) -> Result<ToolCallResult> {
     let call_start = std::time::Instant::now();
     // Known limitation (deliberate): the isolated path uses plain `call_tool`
@@ -263,6 +265,33 @@ async fn run_call(
     // meta parameter is the follow-up if parity is ever required.
     let result = {
         let client = client_arc.lock().await;
+        // Origin #1370: register the per-call elicitation relay while the
+        // client mutex is held (calls on one isolated client serialize, so
+        // the slot always belongs to this call). The guard clears the slot
+        // synchronously when this future completes OR is dropped (call
+        // timeout / cancel). Known limitation: dropping this future does NOT
+        // cancel the upstream JSON-RPC request (rmcp sends no per-request
+        // cancel on drop), so an upstream that elicits AFTER its call was
+        // abandoned can reach the SUCCESSOR call's relay on the same
+        // connection (same downstream session — misattribution, not a
+        // cross-session leak). Origin's promise-tail relay has the same
+        // exposure via its lifetime-abort heuristic.
+        let _elicitation_guard = match elicitation.as_ref().zip(client.elicitation_slot()) {
+            Some((relay, slot)) => {
+                // Connection-lifetime URL-mode completion forwarder: set
+                // alongside the per-call relay but NOT cleared by the guard —
+                // completions commonly arrive after the call returned
+                // (origin installs its handler for the client's lifetime).
+                // Cleared on transport disconnect.
+                if let Some(notify_slot) = client.elicitation_notify_slot() {
+                    if let Ok(mut g) = notify_slot.lock() {
+                        *g = relay.notify_fn();
+                    }
+                }
+                Some(crate::mcp::elicitation::SlotClearGuard::set(&slot, relay.clone()))
+            }
+            None => None,
+        };
         client.call_tool(tool, arguments).await
     };
     match result {
@@ -326,6 +355,27 @@ async fn run_call(
 
 /// Remove and disconnect all isolated clients belonging to a session.
 ///
+/// Evict a single isolated client (session, server) — used after a TIMED-OUT
+/// call so a late-upstream elicitation can never reach a successor call's
+/// relay (origin's relay lifetime abort, adapted to rmcp's no-per-request-
+/// cancel model). No-op when the entry is absent or was already rebuilt.
+pub async fn evict_isolated(session_id: &str, server_name: &str) {
+    let key: SessionKey = (session_id.to_string(), server_name.to_string());
+    let removed = {
+        let mut map = store().write().await;
+        map.remove(&key)
+    };
+    if let Some(client_arc) = removed {
+        let mut client = client_arc.lock().await;
+        let _ = client.disconnect().await;
+        log::info!(
+            "[session-pool] Evicted isolated client for session {} -> {} (call timed out)",
+            session_id,
+            server_name
+        );
+    }
+}
+
 /// Called when a downstream session ends (HTTP `DELETE /mcp`). No-op if the
 /// session had no isolated clients. Uses a read-lock fast path first so the
 /// common case (shared-pool mode, empty store) never takes the write lock.

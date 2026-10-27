@@ -71,7 +71,15 @@ from rmcp_round_r1700 import resilient_ip_call
 SPEC_PORT = 0  # dynamic; bound with port 0 and set by start_spec_mock()
 VARIANTS = []      # rebuilt after the mock binds (needs the real port)
 MINIMAL_SPEC = {}  # ditto
-SSRF_SERVER = "r1800ssrf"
+# Per-run unique tag: a hub restart mid-suite (or a previous crashed run)
+# can leave POISONED pool entries for fixed names — startup start_all
+# connects whatever enabled rows exist in the DB at boot, and the suite's
+# DB-only cleanup cannot evict pool entries. Unique names make wait_pickup
+# immune to stale entries; the preflight below makes a poisoned environment
+# self-diagnosing instead of a confusing A0 failure.
+import os as _os
+import time as _time
+SSRF_SERVER = f"r1800ssrf-{_os.getpid()}-{int(_time.time()) % 100000}"
 
 
 def _build_spec_fixtures(port):
@@ -350,6 +358,21 @@ def main():
     snapshot = cfg_read()
     spec_srv = start_spec_mock()
     try:
+        # Poisoned-environment preflight: orphaned pool entries from a
+        # previous crashed run (DB row deleted, pool entry lingering) make
+        # A0/A3b fail confusingly — fail loudly with the remedy instead.
+        try:
+            _st, _data, _ = req("GET", "/servers", timeout=20)
+            _live = {sv.get("name") for sv in json.loads(_data).get("servers", [])}
+            _con = sqlite3.connect(DB)
+            _dbnames = {r[0] for r in _con.execute("SELECT name FROM servers").fetchall()}
+            _con.close()
+            _orphan = sorted(n for n in _live if n.startswith("r1800ssrf") and n not in _dbnames)
+            check("PREFLIGHT no orphaned r1800ssrf pool entries (poisoned env)",
+                  not _orphan,
+                  f"orphaned={_orphan} — restart the hub app once to flush, then re-run")
+        except Exception as _e:
+            check("PREFLIGHT orphan scan", False, f"scan error: {_e}")
         section_a()
         section_b()
         section_c()

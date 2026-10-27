@@ -312,6 +312,7 @@ pub async fn get_server_config_for_copy(session: tauri::State<'_, SessionState>,
                 "enableKeepAlive": server.enable_keep_alive,
                 "keepAliveInterval": server.keep_alive_interval,
                 "passthroughHeaders": server.passthrough_headers,
+                "protocolNegotiation": server.protocol_negotiation,
                 "oauth": redacted_oauth,
             }
         }
@@ -428,6 +429,7 @@ pub async fn export_settings(session: State<'_, SessionState>) -> Result<String,
                 "enableKeepAlive": s.enable_keep_alive,
                 "keepAliveInterval": s.keep_alive_interval,
                 "passthroughHeaders": s.passthrough_headers,
+                "protocolNegotiation": s.protocol_negotiation,
                 // OAuth block redacted exactly like the copy path — export→
                 // import must not silently drop the oauth configuration.
                 "oauth": redact_oauth_for_export(s.oauth.as_ref()),

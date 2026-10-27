@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { X } from 'lucide-react';
 import { Server, EnvVar, ServerFormData } from '@/types';
 import { buildServerPayload } from '../utils/serverFormPayload';
+import { isTauri } from '../utils/tauriClient';
 
 interface ServerFormProps {
   onSubmit: (payload: any) => void;
@@ -135,6 +136,8 @@ const ServerForm = ({
     },
     // Per-session client isolation initialization
     perSessionClient: initialData?.config?.perSessionClient === true,
+    // Upstream protocol negotiation (origin #1382, streamable-http only)
+    protocolNegotiation: initialData?.config?.protocolNegotiation,
     // Proxychains proxy config: round-trip the stored value so editing the
     // server does not silently drop it (there is no in-form editor for it).
     proxy: initialData?.config?.proxy,
@@ -1173,7 +1176,12 @@ const ServerForm = ({
                               {t('server.oauth.allowInsecureTokenEndpoint')}
                             </label>
                             <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
-                              {t('server.oauth.allowInsecureTokenEndpointHelp')}
+                              {/* Desktop (skipAuth, single user) has no admin
+                                  roles — the origin help text's admin-ownership
+                                  sentences would be misleading there. */}
+                              {t(isTauri()
+                                ? 'server.oauth.allowInsecureTokenEndpointHelpDesktop'
+                                : 'server.oauth.allowInsecureTokenEndpointHelp')}
                             </p>
                           </div>
                         )}
@@ -1364,13 +1372,13 @@ const ServerForm = ({
                           className="mr-2"
                         />
                         <label htmlFor="enableKeepAlive" className="text-gray-600 text-sm">
-                          {t('server.enableKeepAlive', 'Enable Health Checks and Auto Reconnect')}
+                          {t('server.enableKeepAlive', 'Enable Health Checks')}
                         </label>
                       </div>
                       <p className="text-xs text-gray-500 mb-3">
                         {t(
                           'server.keepAliveDescription',
-                          'Run periodic health checks and automatically reconnect this remote server when it becomes disconnected.',
+                          'Run periodic health checks. Disconnected remote servers always reconnect automatically with backoff.',
                         )}
                       </p>
                       <div>
@@ -1401,10 +1409,44 @@ const ServerForm = ({
                         <p className="text-xs text-gray-500 mt-1">
                           {t(
                             'server.keepAliveIntervalDescription',
-                            'Time between health checks and automatic reconnect attempts in milliseconds (default: 60000ms = 1 minute)',
+                            'Time between health checks in milliseconds (default: 60000ms = 1 minute)',
                           )}
                         </p>
                       </div>
+                      {serverType === 'streamable-http' && (
+                        <div className="mt-3">
+                          <label
+                            className="block text-gray-600 text-sm font-medium mb-1"
+                            htmlFor="protocolNegotiation"
+                          >
+                            {t('server.protocolNegotiation', 'Protocol Negotiation')}
+                          </label>
+                          <select
+                            id="protocolNegotiation"
+                            value={formData.protocolNegotiation || 'auto'}
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                protocolNegotiation: e.target.value as 'auto' | 'legacy',
+                              }))
+                            }
+                            className="w-full py-2 px-3 form-input"
+                          >
+                            <option value="auto">
+                              {t('server.protocolNegotiationAuto', 'Auto (probe modern first)')}
+                            </option>
+                            <option value="legacy">
+                              {t('server.protocolNegotiationLegacy', 'Legacy (initialize only)')}
+                            </option>
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {t(
+                              'server.protocolNegotiationDescription',
+                              'Auto probes the 2026 modern protocol (server/discover) before falling back to the legacy handshake. Legacy skips the modern probe entirely.',
+                            )}
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

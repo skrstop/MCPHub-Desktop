@@ -34,12 +34,91 @@ use crate::mcp::client::McpTransport;
 use crate::models::server::{Tool, ToolCallResult};
 use crate::services::app_logger;
 
-/// Empty client handler — the hub only makes requests upstream, it never
-/// handles server-initiated requests/notifications.
-#[derive(Default)]
-struct BridgeClientHandler;
+/// Client handler for the upstream rmcp connection — forwards
+/// `elicitation/create` to the downstream client when a per-call relay is
+/// registered (isolated perSessionClient calls, origin #1370). See
+/// rmcp_stdio_transport::BridgeClientHandler for the full contract.
+struct BridgeClientHandler {
+    elicitation: crate::mcp::elicitation::ElicitationSlot,
+    /// Connection-lifetime URL-mode completion forwarder (survives the call).
+    elicitation_notify: crate::mcp::elicitation::ElicitNotifySlot,
+}
 
-impl rmcp::ClientHandler for BridgeClientHandler {}
+impl BridgeClientHandler {
+    /// Slots are created by the OWNING transport and shared here — the
+    /// session pool registers relays via the transport's accessors, so the
+    /// handler MUST read the same Arcs (separate slots would silently
+    /// disable all forwarding).
+    fn new(
+        elicitation: crate::mcp::elicitation::ElicitationSlot,
+        elicitation_notify: crate::mcp::elicitation::ElicitNotifySlot,
+    ) -> Self {
+        Self {
+            elicitation,
+            elicitation_notify,
+        }
+    }
+}
+
+impl rmcp::ClientHandler for BridgeClientHandler {
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
+        info.capabilities.elicitation = Some(
+            rmcp::model::ElicitationCapability::new()
+                .with_form(rmcp::model::FormElicitationCapability::new())
+                .with_url(rmcp::model::UrlElicitationCapability::new()),
+        );
+        info
+    }
+
+    fn create_elicitation(
+        &self,
+        request: rmcp::model::ElicitRequestParams,
+        _context: rmcp::service::RequestContext<RoleClient>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::ElicitResult, rmcp::ErrorData>> + Send + '_ {
+        let relay = crate::mcp::elicitation::take_active(&self.elicitation);
+        async move {
+            match relay {
+                None => Err(crate::mcp::elicitation::elicitation_error(
+                    crate::mcp::elicitation::NO_ACTIVE_TOOL_CALL_MSG,
+                )),
+                Some(relay) => relay.forward(request).await,
+            }
+        }
+    }
+
+    fn on_custom_notification(
+        &self,
+        notification: rmcp::model::CustomNotification,
+        _context: rmcp::service::NotificationContext<RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        let relay = crate::mcp::elicitation::take_active(&self.elicitation);
+        // Connection-lifetime fallback: URL-mode completions commonly arrive
+        // AFTER the tool call returned (the user is still on the auth page) —
+        // origin installs its completion handler for the client's lifetime,
+        // so mirror that instead of dropping outside the per-call window.
+        let lifetime_notify = relay
+            .as_ref()
+            .and_then(|r| r.notify_fn())
+            .or_else(|| {
+                self.elicitation_notify
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+            });
+        async move {
+            if notification.method == "notifications/elicitation/complete" {
+                match lifetime_notify {
+                    Some(notify) => notify(notification.params),
+                    None => log::debug!(
+                        "[{}] dropping notifications/elicitation/complete (no downstream owner)",
+                        "rmcp-http"
+                    ),
+                }
+            }
+        }
+    }
+}
 
 fn request_meta_from_value(meta: Option<Value>) -> Option<RequestMetaObject> {
     meta.and_then(|m| serde_json::from_value(m).ok())
@@ -71,11 +150,19 @@ pub struct RmcpHttpTransport {
     url: String,
     headers: HashMap<String, String>,
     service: Option<RunningService<RoleClient, BridgeClientHandler>>,
+    /// Per-connection elicitation relay slot (origin #1370).
+    elicitation_slot: crate::mcp::elicitation::ElicitationSlot,
+    elicitation_notify_slot: crate::mcp::elicitation::ElicitNotifySlot,
     connected: std::sync::atomic::AtomicBool,
     /// True when the upstream answered `server/discover` (2026 modern,
     /// stateless) — logged for the activity panel, rmcp drives the difference.
     modern: bool,
+    /// Upstream protocol negotiation (origin #1382): when true
+    /// (`protocolNegotiation: 'legacy'`), skip the `server/discover` probe and
+    /// go straight to the legacy initialize handshake.
+    legacy_only: bool,
     server_version: Option<String>,
+    protocol_version: Option<String>,
     /// Upstream-advertised TTL from the most recent list_tools fetch
     /// (only positive single-page TTLs recorded — origin #1277 freshness).
     last_list_ttl: std::sync::Mutex<Option<u64>>,
@@ -87,14 +174,29 @@ impl RmcpHttpTransport {
         url: impl Into<String>,
         headers: HashMap<String, String>,
     ) -> Self {
+        Self::with_protocol_mode(server_name, url, headers, false)
+    }
+
+    /// `legacy_only` mirrors origin #1382 `protocolNegotiation: 'legacy'` —
+    /// skip the modern `server/discover` probe entirely.
+    pub fn with_protocol_mode(
+        server_name: impl Into<String>,
+        url: impl Into<String>,
+        headers: HashMap<String, String>,
+        legacy_only: bool,
+    ) -> Self {
         Self {
             server_name: server_name.into(),
             url: url.into(),
             headers,
             service: None,
+            elicitation_slot: crate::mcp::elicitation::new_slot(),
+            elicitation_notify_slot: crate::mcp::elicitation::new_notify_slot(),
             connected: std::sync::atomic::AtomicBool::new(false),
             modern: false,
+            legacy_only,
             server_version: None,
+            protocol_version: None,
             last_list_ttl: std::sync::Mutex::new(None),
         }
     }
@@ -284,11 +386,13 @@ impl McpTransport for RmcpHttpTransport {
         config.custom_headers = custom_headers;
         let transport = rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_config(config);
 
-        // Auto lifecycle: probe `server/discover` (modern) → fall back to the
-        // legacy initialize handshake. SDK-native replacement of probe_modern.
-        let service = rmcp::service::serve_client_with_lifecycle(
-            BridgeClientHandler,
-            transport,
+        // Lifecycle selection (origin #1382): `protocolNegotiation: 'legacy'`
+        // skips the modern probe and goes straight to the legacy initialize
+        // handshake; the default (auto) probes `server/discover` (2026 modern)
+        // first and falls back to legacy initialize.
+        let lifecycle = if self.legacy_only {
+            ClientLifecycleMode::Initialize
+        } else {
             ClientLifecycleMode::Auto {
                 preferred_versions: vec![
                     ProtocolVersion::V_2026_07_28,
@@ -297,7 +401,15 @@ impl McpTransport for RmcpHttpTransport {
                     ProtocolVersion::V_2025_03_26,
                 ],
                 legacy_version: Some(ProtocolVersion::V_2025_03_26),
-            },
+            }
+        };
+        let service = rmcp::service::serve_client_with_lifecycle(
+            BridgeClientHandler::new(
+                self.elicitation_slot.clone(),
+                self.elicitation_notify_slot.clone(),
+            ),
+            transport,
+            lifecycle,
         )
         .await
         .map_err(|e| {
@@ -328,6 +440,7 @@ impl McpTransport for RmcpHttpTransport {
                 .as_ref()
                 .map(|i| i.version.clone())
                 .filter(|v| !v.is_empty());
+            self.protocol_version = Some(info.protocol_version.to_string());
         }
 
         let mode = if self.modern { "2026 modern (discover, stateless)" } else { "legacy initialize" };
@@ -347,6 +460,11 @@ impl McpTransport for RmcpHttpTransport {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
+        // Drop the connection-lifetime elicitation completion forwarder —
+        // the downstream owner is gone with the connection.
+        if let Ok(mut g) = self.elicitation_notify_slot.lock() {
+            *g = None;
+        }
         self.connected
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(service) = self.service.take() {
@@ -378,6 +496,10 @@ impl McpTransport for RmcpHttpTransport {
 
     fn server_version(&self) -> Option<String> {
         self.server_version.clone()
+    }
+
+    fn protocol_version(&self) -> Option<String> {
+        self.protocol_version.clone()
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {
@@ -539,6 +661,14 @@ impl McpTransport for RmcpHttpTransport {
                 anyhow!("resources/read failed: {}", e)
             })?;
         Ok(result.contents)
+    }
+
+    fn elicitation_slot(&self) -> Option<crate::mcp::elicitation::ElicitationSlot> {
+        Some(self.elicitation_slot.clone())
+    }
+
+    fn elicitation_notify_slot(&self) -> Option<crate::mcp::elicitation::ElicitNotifySlot> {
+        Some(self.elicitation_notify_slot.clone())
     }
 }
 

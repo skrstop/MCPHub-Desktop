@@ -1,6 +1,7 @@
 /// mcp_manager — loads server configs from DB and connects all enabled servers at startup.
 use crate::{
-    mcp::pool,
+    mcp::{pool, recovery},
+    models::server::ServerType,
     services::{app_logger, config_service, server_service},
 };
 use anyhow::Result;
@@ -80,6 +81,14 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
                 if cfg.start_on_demand.unwrap_or(false) {
                     continue;
                 }
+                // Remote (sse/streamable-http) servers recover via the
+                // background backoff scheduler below (origin #1385) —
+                // independent of enableSessionRebuild. Handling them here too
+                // would double-schedule reconnects against the recovery
+                // state machine.
+                if matches!(cfg.server_type, ServerType::Sse | ServerType::StreamableHttp) {
+                    continue;
+                }
                 if disconnected.contains(&cfg.name) {
                     let name = cfg.name.clone();
                     log::info!("[session_rebuild] Reconnecting server '{}'", name);
@@ -113,6 +122,127 @@ pub async fn start_all(app: &AppHandle) -> Result<()> {
                         }
                     });
                 }
+            }
+        }
+    });
+
+    // Origin #1385: disconnected REMOTE (sse/streamable-http) servers ALWAYS
+    // auto-reconnect in the background with exponential backoff + equal
+    // jitter — independent of enableSessionRebuild (which above keeps
+    // governing stdio/openapi rebuilds only).
+    //
+    // Race discipline: this is a poll-based scheduler, so there are no
+    // per-server timers to cancel. Every attempt re-reads the DB config and
+    // re-checks pool state, so a server deleted/renamed/disabled mid-flight
+    // renders the pending attempt harmless by identity guards:
+    //   - deleted   → get_by_name None → recovery cleared, no connect;
+    //   - disabled  → cfg.enabled false → recovery cleared, no connect;
+    //   - renamed   → old name no longer resolves → cleared (the new name is
+    //                 seeded fresh by the pool-status scan below);
+    //   - connected by another path meanwhile → pool status check skips;
+    //   - starting (another connect in flight) → skip; success clears
+    //     recovery inside connect_server, failure is re-seeded next tick.
+    // No lock is held across an await (recovery map ops are short critical
+    // sections; connect_server manages its own per-name connect lock).
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            // Seed/keep recovery entries: every pooled remote server that is
+            // disconnected (and not starting / not on-demand) must have a
+            // scheduled retry. Also reschedules attempts that died without
+            // recording a failure, and sweeps entries for servers that left
+            // the pool (deleted/disabled) unless an attempt is in flight.
+            let remote_disconnected = pool::disconnected_remote_servers().await;
+            for name in &remote_disconnected {
+                recovery::ensure_scheduled(name).await;
+                recovery::reschedule_stalled(name).await;
+            }
+            // Release attempt claims whose spawned task was lost (panic or
+            // cancellation) — otherwise the entry stays `attempting` forever
+            // and that server never auto-reconnects again.
+            recovery::reclaim_stalled().await;
+            recovery::sweep(&remote_disconnected).await;
+            let due = recovery::take_due().await;
+            for name in due {
+                tokio::spawn(async move {
+                    // Identity guard 1: config must still exist and be enabled.
+                    let cfg = match server_service::get_by_name(&name).await {
+                        Ok(Some(c)) => c,
+                        // Deleted mid-flight, or DB read failed: fail-closed —
+                        // never reconnect on uncertainty; drop recovery.
+                        _ => {
+                            recovery::clear(&name).await;
+                            return;
+                        }
+                    };
+                    if !cfg.enabled
+                        || cfg.start_on_demand.unwrap_or(false)
+                        || !matches!(cfg.server_type, ServerType::Sse | ServerType::StreamableHttp)
+                    {
+                        recovery::clear(&name).await;
+                        return;
+                    }
+                    // Origin #1385 parity: an OAuth flow awaiting user
+                    // authorization must not be retried in the background —
+                    // every attempt fails with "authorization is pending" and
+                    // the churn would mask the real state. Stop retrying
+                    // (clear recovery); the connect flow re-seeds recovery on
+                    // failure after the user completes or cancels.
+                    if crate::services::oauth_upstream::status_of(&name).await == "pending" {
+                        recovery::clear(&name).await;
+                        return;
+                    }
+                    // Identity guard 2: another path already connected or is
+                    // connecting — do not double-connect.
+                    if let Some(st) = pool::get_status(&name).await {
+                        if st.connected {
+                            recovery::clear(&name).await;
+                            return;
+                        }
+                        if st.starting {
+                            // In-flight connect owned by another path; release
+                            // our attempt claim — its outcome resolves recovery
+                            // (success clears inside connect_server; failure is
+                            // re-seeded next tick).
+                            recovery::abort_attempt(&name).await;
+                            return;
+                        }
+                    }
+                    log::info!("[recovery] Reconnecting remote server '{}' (attempt {})", name,
+                        recovery::get(&name).await.map(|r| r.attempts).unwrap_or(0));
+                    let status = pool::connect_server(&cfg).await;
+                    if status.connected {
+                        // Post-connect "still enabled?" recheck — the same
+                        // fail-closed invariant as the toggle/reload/rebuild
+                        // paths: a disable/delete landing during the connect
+                        // window must not leave a live process serving a
+                        // disabled server.
+                        let still_enabled = {
+                            match server_service::get_by_name(&name).await {
+                                Ok(c) => c.map(|s| s.enabled).unwrap_or(false),
+                                Err(_) => false,
+                            }
+                        };
+                        if !still_enabled {
+                            log::info!(
+                                "[recovery] '{}' disabled/deleted during reconnect — disconnecting",
+                                name
+                            );
+                            let _ = pool::disconnect_server(&name).await;
+                            recovery::clear(&name).await;
+                            return;
+                        }
+                        recovery::clear(&name).await;
+                        log::info!("[recovery] Server '{}' reconnected", name);
+                    } else {
+                        let err = status.error.as_deref().unwrap_or("unknown");
+                        log::warn!("[recovery] '{}' reconnect failed: {}", name, err);
+                        // Failed attempt: update error (connect_server already
+                        // persisted it on the pool entry), increment attempts,
+                        // reschedule with backoff + jitter.
+                        recovery::record_failure(&name).await;
+                    }
+                });
             }
         }
     });

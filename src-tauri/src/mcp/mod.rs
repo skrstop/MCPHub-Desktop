@@ -1,4 +1,5 @@
 pub mod client;
+pub mod elicitation;
 pub mod stdio_transport;
 pub mod rmcp_stdio_transport;
 pub mod sse_transport;
@@ -6,6 +7,7 @@ pub mod rmcp_http_transport;
 pub mod openapi_transport;
 pub mod pool;
 pub mod progress;
+pub mod recovery;
 pub mod session_pool;
 pub mod on_demand;
 pub mod time;

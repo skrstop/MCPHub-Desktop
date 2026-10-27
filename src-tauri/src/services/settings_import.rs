@@ -49,6 +49,8 @@ struct RawServerConfig {
     enable_keep_alive: Option<bool>,
     #[serde(rename = "keepAliveInterval", alias = "keep_alive_interval")]
     keep_alive_interval: Option<u64>,
+    #[serde(rename = "protocolNegotiation", alias = "protocol_negotiation")]
+    protocol_negotiation: Option<String>,
     #[serde(rename = "passthroughHeaders", alias = "passthrough_headers")]
     passthrough_headers: Option<Vec<String>>,
     #[serde(default)]
@@ -165,6 +167,7 @@ pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
                 // Round-trip fields (see connection-relevant comment above).
                 enable_keep_alive: raw.enable_keep_alive,
                 keep_alive_interval: raw.keep_alive_interval,
+                protocol_negotiation: raw.protocol_negotiation,
                 passthrough_headers: raw.passthrough_headers,
                 oauth: raw.oauth.and_then(|v| match serde_json::from_value(v) {
                     Ok(v) => Some(v),

@@ -597,16 +597,156 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 4.4 最近同步基线
 
-> 版本号规则：跟随 origin 最新 tag 的 `{{version}}`，桌面端为 `{{version}}xxx`（xxx 从 001 递增）。
+> **版本号规则（2026-10-27 起）**：`2位年.月日.迭代号`（如 `26.1027.7`），**不再跟随 origin tag**。
+> - **迭代号**：同一天内每次发布/同步递增（7 → 8 → …）；跨天则年.月日更新、迭代号重置为 1。
+> - **semver 约束**：Cargo/Tauri 拒绝前导零——迭代号写 `7` 而非 `007`（实测 `invalid leading zero in patch version number`）。
+> - **同步时**：每次基线同步收口即递增迭代号并更新四源 + 双 lockfile + `Cargo.lock`；changelog 文件名用新版本号（`doc/upgrade/{版本}.md`，CI 取为 latest.json notes）。
+> - **历史规则（已废弃）**：~~跟随 origin 最新 tag `{{version}}`，桌面端 `{{version}}xxx`~~（1.1.5007 及之前）。
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `fd1abaa`（origin/main，= v1.1.7 后 4 commit） |
-| **对应 origin tag** | `v1.1.7`（后 4 commit，未发布新 tag） |
-| **桌面端版本号** | `1.1.5006`（新规则：origin patch≥1 时 `{{version}}xxx` 补零；semver 禁前导零） |
-| **同步执行日期** | 2026-10-21（209b74d 后 4 commit 依赖升级收口） |
+| **当前已同步到 origin commit** | `08740a1`（origin/main，= v1.1.10 后 5 commit） |
+| **对应 origin tag** | `v1.1.10`（后 5 commit，未发布新 tag） |
+| **桌面端版本号** | `26.1027.7`（**新规则 2026-10-27**：`2位年.月日.迭代号`；Cargo semver 拒绝前导零，迭代号写 7 而非 007；changelog 已合并 1.1.5001~5007 为 `doc/upgrade/26.1027.7.md`） |
+| **同步执行日期** | 2026-10-25/26（fd1abaa 后 18 commit 同步 + 两日复核） |
 
-> 下次同步以 `fd1abaa` 为基线起点（`git log --oneline fd1abaa..HEAD`）。
+> 下次同步以 `08740a1` 为基线起点（`git log --oneline 08740a1..HEAD`）。
+
+#### 2026-10-25（第六轮）：`fd1abaa` -> `8d8debf`（14 commit + 复核两波 + 76 套 E2E 全绿）
+
+- **前端/locales 已同步**（定制文件手动合并，桌面自定义全保留）：
+  - `cb72c75` #1379 协议版本展示：ServerCard 协议版本 chip（openapi 除外）+ types `Server.protocolVersion` + locales ×6；**Rust 镜像**——`ServerStatus.protocol_version`（serde camelCase）+ `McpTransport/McpClient::protocol_version()`（SSE/OpenAPI 默认 None）+ rmcp stdio/http transport 从 `peer_info()` 捕获 + pool 连接点/on_demand `mark_on_demand_awake` 四元组线程 + tauriClient `toFrontendServer` 映射。
+  - `adce2b7` #1372 工具批量筛选（仅前端）：`CapabilitySelection.tsx` + `capabilitySelection.ts` 逐字复制；ServerToolConfig render-prop 集成（桌面图钉/隐藏参数/描述覆盖 UI 保留在 render prop 内）；locales groups.* ×6。**后端批量状态 API 未镜像**（桌面走 Tauri 命令逐项 updateServerCapability）。
+  - `abf847a` #1363 越南语：`locales/vi.json`（origin vi ∪ 桌面键英文兜底，774 桌面专属键零丢失）+ i18n.ts + LanguageSwitch。
+  - `1e5d82b` #1367 上报版本展示：`displayedVersion = packageVersion || server.version` + `server.reportedVersion` ×6。
+  - `b331c93` #1378 行布局 / `431a2bf` #1377 展开完整描述 / `6011a10` #1376 AboutDialog 视口 / `014ba41` #1375 暗色统一（index.css 大改：color-scheme、统一灰阶映射块、删除 legacy 重复块；桌面 hub-* 与 cursor 规则保留；GroupVisibilityFields 桌面无此文件跳过）/ `8d8debf` #1380 名称提示删除（桌面无此行，no-op）。
+- **Rust 镜像**：
+  - `dd05c30` #1370 **elicitation 转发（完整实现）**：新 `mcp/elicitation.rs`（`ElicitationRelay`/`ElicitationSlot`/`SlotClearGuard`，4 单测）+ rmcp features 加 `elicitation` + 两 transport `BridgeClientHandler` 实现 `create_elicitation`（无 relay → "Elicitation requires an active tool call"）+ `on_custom_notification` 转发 `notifications/elicitation/complete` + `session_pool::call_tool_isolated` 接受 `Option<ElicitationRelay>`（client mutex 临界区内注册，guard 同步清除）+ bridge `downstream_elicitation_relay()`（`supported_elicitation_modes()` 处理 legacy 空能力=form-only）仅接 isolated 分支。**rmcp 原生请求 ID 关联 → origin 的 promise-tail relay 不需要**。已知限制：调用 future 被 drop（600s 超时）不取消上游 JSON-RPC 请求，迟到 elicitation 可达后继调用的 relay（同 session 误归属非跨 session 泄漏，注释钉死）；2026 下游受 SEP-2260 限制天然排除（与 origin 一致）。
+  - `f0867d5` **GHSA-vgj6-pm6x-8g97 对齐（桌面审计后修 2 处）**：①`read_resource` ui:// fallback 循环补两道门——分组资源选择（`ServerFilter.resources`）+ 单服务器资源禁用（`server_tool_config get_config(item_type="resource")`）；②新 `builtin_in_scope` helper——内置提示词/资源不再泄漏到未含内置服务器的单服务器/分组作用域（root 与含内置成员的分组行为不变；**ui:// 读取跳过该 gate** 以保持 fallback 可达——首版 gate 误拦 ui:// 被 E2E 影响审计代理抓出后修正）。Part 1/2（上游 prompt 禁用读路径/REST 目标绑定）桌面审计为 SAFE（桌面不代理上游 prompts、REST 无 prompt 端点）。
+- **评估未镜像**：`f9fe28b` #1374 直连路由工具名（桌面无 MCP Apps 路由上下文机制）；`c542fbe` #1368 凭证槽 / `d910ef2` #1364 个人 OAuth（无 per-user 体系）；`adce2b7` 后端批量 API。
+- 版本 `1.1.5006 → 1.1.5007`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5007.md`。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **271 passed**（+4 elicitation）；tsc 0 错；npm build ✓；vitest 55 passed；契约脚本 0 mismatch；**76 套 E2E 全绿零失败**。
+- **同步后独立复核（6 代理并行 + fix-of-fixes 1 代理）**：修复 4 项——①[H] `builtin_in_scope` 早退拦截 ui:// fallback（apps_ui A3 场景）→ gate 加 `!uri.starts_with("ui://")`；②[H] vi.json 22 个新键未翻译（英文直拷）→ 从 origin vi 回填；③[M] `server.updateAvailable` vi/fr/tr 缺 `{{version}}` 占位符（存量缺陷）→ 补齐；④[L] vi `activity.cleanupSuccess` 多余 `{{count}}` → 对齐。elicitation 陈旧请求误归属记为已知限制（注释钉死）。E2E 断言影响审计：r36x G9/G10 正向分支因内置作用域收紧成死代码（覆盖损失非失败，记录）。
+- **影响功能点与结果**：服务器卡片显示 MCP 协议版本与上游上报版本；工具配置弹窗支持搜索/注解过滤/风险分组批量勾选；per-session 隔离调用支持 elicitation 交互转发；新增越南语；ui:// 读取与内置内容作用域收紧（安全）。**用户需重启生效**。
+
+#### 2026-10-26（第七轮）：`8d8debf` -> `08740a1`（4 commit，串行实现 + 两波复核 + 76 套 E2E 全绿）
+
+- **Rust/前端镜像（3 特性，串行执行避免 migration/locales 共享文件 clobber）**：
+  - `e3bef67` #1382 **protocolNegotiation 配置**：`ServerConfig.protocol_negotiation`（migration **v36**，对齐 enableKeepAlive 的实列模式）+ `server_service::resolve_protocol_mode`（origin resolveUpstreamProtocolMode 逐字 parity：非法值拒绝、auto 仅限 streamable-http、None=auto）+ rmcp_http_transport `legacy_only`（`ClientLifecycleMode::Initialize` 跳过 discover 探测；auto=既有行为不变）+ settings_import 双 casing 透传 + ServerForm 下拉（仅 streamable-http）+ locales ×6。**桌面本就默认 modern 探测（A1），镜像点在 legacy 逃生门**。
+  - `e4c46bf` #1384 **on-demand 工具快照持久化**：migration **v37** `capability_snapshots(server_name PK, tools_json, fingerprint, updated_at)` + 新 `capability_snapshot_service`（save/load/delete_tx/rename_tx + `launch_fingerprint`——**BTreeMap 排序 env/headers 后再哈希**，HashMap 迭代序跨进程不稳定会被复核抓出后修正）+ 睡眠占位符插入时按指纹恢复 tools/tool_count（状态仍 sleeping）+ `mark_on_demand_awake` 持久化（**空列表不保存**——唤醒期 tools/list 瞬态失败不得抹掉旧快照，复核抓出）+ **条件 upsert**（`WHERE EXISTS servers 行`——delete 事务与在途唤醒竞态不复活孤儿行）+ delete/rename 同事务级联 + 2 单测。
+  - `08740a1` #1385 **远程连接退避重连**：新 `mcp/recovery.rs`（内存态 recovery map + `backoff_ceiling_ms`/`jittered_delay_ms` 纯函数 2 单测）+ mcp_manager 1s 轮询调度器（无定时器可泄漏；身份守卫：删除/禁用/改名/on-demand/非远程全 clear，starting → abort_attempt 让位，post-connect still-enabled fail-closed 复查保留）+ `session_rebuild` 跳过 sse/streamable-http（stdio/openapi 行为不变，历史守卫全保留）+ `ServerInfo.recovery{attempts,lastAttemptAt,nextAttemptAt}` + ServerCard 恢复状态块 + keepAlive 文案诚实化（只控健康检查）+ locales ×6。**`reclaim_stalled`（420s 上限 > 最坏在途 ~300s）复核抓出 200s 会误收编活尝试导致双连接/双计数后修正**。
+  - `687de3e` #1383 测试目录隔离：origin 测试基建，跳过。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **280 passed**（+9：v36 模式 4 + v37 快照 2 + recovery 2 + fingerprint 1）；tsc 0 错；npm build ✓；vitest 55 ✓；契约 0 mismatch；**76 套 E2E 全绿**（full_regress/r107 首跑失败系热重建窗口瞬态，稳定后复跑 41/41 + 43/43）。
+- **同步后独立复核（4 代理并行 + fix-of-fixes 1 代理）**：修复 6 项——①[H] 唤醒期空 tools/list 覆盖旧快照；②[H] launch_fingerprint HashMap 序跨进程不稳定（快照功能对 ≥2 env 的服务器整体失效）；③[M] 快照未随启动配置失效（origin 有 scrypt 指纹，桌面补 fingerprint 列）；④[M] recovery 丢失任务永久卡 attempting（reclaim_stalled 落地）；⑤[M] reclaim 200s 上限小于最坏在途时长（→420s）；⑥[L] save 与 delete 竞态孤儿行（条件 upsert）。E2E 影响审计：三特性对 76 套零断言击穿（休眠快照/退避重连/recovery 字段均为增量或仅加速）。
+
+#### 2026-10-26（第八轮）：第三/四波独立复核（6+1 代理）——修复 10 项 + 全量回归
+
+- **第三波 6 代理（安全对抗/并发/origin parity/前端/迁移数据完整性/真机运行时）修复 8 项**：
+  - ①[H] **migration v37 fingerprint 列修复不可达**——中间构建已给 DB 盖 v37 版本戳，版本门控使 migrate_v37 永不再入（真机 DB 实证缺列，快照功能静默失效）→ 新增 `db::repair_schema()`（非版本门控、幂等、每次启动运行）；
+  - ②[H] **export/copy 丢 protocolNegotiation**（import 侧已支持而两个导出面漏——与 oauth 同类）→ config.rs 两处 JSON builder 补齐，round-trip 闭环；
+  - ③[H] **mark_on_demand_awake 持 pool 写锁跨 DB await**（SQLite 写竞争时冻结全部池操作）→ 快照保存移出写锁（条件 upsert 使释放后竞态无害）；
+  - ④[H] **CapabilitySelection 注解过滤状态跨 tab 泄漏**（Tools 页选 readOnlyHint → Prompts 页全空且过滤器不可见）→ `key={server.name}:{capability}` 重挂载重置；
+  - ⑤[H·#1385 核心缺口] **共享远程连接会话中途死亡永不翻转池状态**——transport 的 connected 原子无池状态消费者，退避恢复调度器永不触发（origin mcpService 半边未镜像）→ 新 `mark_pool_disconnected_if_dead`（call_tool_with_meta/read_resource 出口检查 is_connected + `Arc::ptr_eq` 身份守卫防误杀并发重连的新客户端）；
+  - ⑥[M] 快照指纹 MD5 无盐（origin 因低熵密钥用 scrypt）→ 对齐 `v1:salt:scrypt` 格式（N=2^11，逐保存随机盐，verify 解析盐重算）；
+  - ⑦[M] reclaim 420s 仍小于最坏在途 ~542s（tools/list 超时 continue 重试）→ 600s；
+  - ⑧[L] OAuth pending 期间后台重连空转（origin 语义）→ 调度器身份守卫补 pending → clear。
+  - 另修 0037.sql 快照缺 fingerprint 列（文档对齐）。
+- **第四波 fix-of-fixes（1 代理）**：8 项修复全清（锁序/早退/盐熵/round-trip/key 重挂载逐项验证）；lib 280 passed。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **280 passed**；tsc 0 错；npm build ✓；契约 0 mismatch；**E2E 74/76 绿 + r1800/r1900 环境污染定性**——热重启窗口（复核编译触发 tauri dev 重建）中 start_all 连接了中断套件残留的 DB 测试行，池条目无法从套件侧清除，**重启应用后自愈**（运行时 tick 不拾取 DB-only 行的既有保证不变：session_rebuild/recovery 均池门控，代码逐行核实）。
+- **记录**：①keepAlive 健康检查循环桌面仍未消费（既有待办，接线时 modern 上游须用 discover/list 而非 ping）；②elicitation 下游 /mcp 不广告能力系正确设计（elicitation 是客户端能力，hub 作为 server 无需声明；上游方向由 BridgeClientHandler 广播）；③REST /servers 面不暴露 protocolVersion/recovery（Tauri 命令面专属，与 server_version 同模式）。
+- **影响功能点与结果**：streamable-http 服务器可选 legacy 协议协商；按需启动服务器重启后仍显示上次工具列表；断连远程服务器自动退避重连且卡片可见重连进度。**用户需重启生效**。
+
+#### 2026-10-26（第九轮）：第五/六波独立复核（6+1 代理）——修复 10 项（含 elicitation 整体失效级缺陷）+ 76 套 E2E 全绿收官
+
+- **第五波 6 代理（fresh full-diff / elicitation 端到端 / recovery 并发 / 前端 origin 对比 / locales / E2E 健康）修复 8 项**：
+  - ①[H·功能整体失效] **elicitation slot 双轨断裂**——`BridgeClientHandler::new()` 自建 ElicitationSlot 而 session_pool 经 `client.elicitation_slot()`（transport 字段）注册 relay，两个不同 Arc → handler 永远读到空 slot，**整个 elicitation 转发功能自 #1370 落地起从未生效**（此前所有轮次未抓到——E2E 无 mock elicitation 上游）→ transport 创建 slot 并传入 handler 构造（stdio+http 两 transport），跨组件共享状态必须验证同一 Arc 实例；
+  - ②[H] forward 无超时——下游客户端不响应时 relay 永久挂起占住 client mutex → 600s 超时 + 超时后 `session_pool::evict_isolated`（仅 timeout 时调用，匹配 "timed out"）；
+  - ③[M] notification 连接生命周期 fallback 缺失——`on_custom_notification` 仅在调用在飞时注册，连接级通知（如上游主动 elicitation）丢失 → 两 transport 连接生命周期注册 notify slot（不被 guard 清除）；
+  - ④[M] ui:// builtin 查找门控重构——`builtin_in_scope_now` 变量，非 ui:// 早退保留、builtin 查找仅在 in_scope 时执行（消除重复判断）；
+  - ⑤[M] jsonImport.ts 缺 protocolNegotiation 校验（origin e3bef67 hunk）→ KNOWN_KEYS + auto|legacy 校验（auto 仅 streamable-http，违规 push issue）；
+  - ⑥[L] recovery 文本在 90px 固定列溢出 → `.hub-server-card-recovering` white-space: normal + min-width: max-content；
+  - ⑦[L] r1800 套件固定服务器名跨 run 碰撞 → per-run 唯一名（pid+时间）+ main() 开头中毒环境 preflight（孤儿池条目明确报「重启 hub」而非 A0 混淆失败）；
+  - ⑧elicitation 真机验证待办记录（修复未经运行时验证，需 mock elicitation 上游）。
+- **第六波 fix-of-fixes（1 代理）**：8 项修复全清（slot 共享链路/超时路径/notify 生命周期/门控变量逐项验证）。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **280 passed**；tsc 0 错；npm build ✓；vitest 55 ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**（r1800 22/22 + r1900 23/23 加固后复跑，环境污染已自愈）。
+- **教训**：①跨组件共享状态（slot/registry/handle）必须断言 Arc 身份一致——「字段存在」≠「同一实例」；②无 mock 上游的特性（elicitation）E2E 全绿是假绿，落地时必须同步建 mock 或真机验证清单；③套件固定名 + 热重启 = 中毒环境，per-run 唯一名 + preflight 自诊断是标准解。
+- **影响功能点与结果**：elicitation 转发修复后真实可用（per-session 隔离调用中上游可向下游客户端发起表单交互）；导入校验补 protocolNegotiation；recovery 状态块文本不再溢出。**用户需重启生效**。
+
+#### 2026-10-26（第十轮）：第五波独立复核（5 代理）——修复 7 项（1H+2M+4L）+ 76 套 E2E 全绿
+
+- **5 代理切片（elicitation 修复链 / recovery+快照并发 / 前端 diff 对比 origin / locales+契约 / 迁移+导入+命令）**：
+  - **修复 7 项**：
+    - ①[H] **`pool::call_tool` 普通路径漏 `mark_pool_disconnected_if_dead`**——dead-marking 只接在 call_tool_with_meta/read_resource，而 Tauri UI/REST/MCP HTTP API 主路径走 `call_tool`：远程 transport 空闲期死亡后 pool status 恒 connected → 恢复调度器不播种、session_rebuild 跳过 → 服务器永久假活直到重启 → 补齐（与 call_tool_with_meta 同构）；
+    - ②[M] **超时驱逐 "timed out" 子串误匹配**——上游工具级错误文本（如 "git fetch timed out"）会驱逐健康隔离 client（销毁 per-session 状态）→ 改匹配自有前缀 `upstream tool call timed out`（mcp/time.rs 文案）；
+    - ③[M] **reclaim 600s 未计 connect-lock 排队**——claim 在 take_due 打戳而 attempt 可能排队慢 connect（最坏 ~542s），超时误收编会拆掉新建连接 → 新 `recovery::touch_claim`，connect_server 拿到 per-name 锁后刷新；
+    - ④[M] **CSS `min-width: max-content` 抵消换行**——recovery 文本横向溢出 90px track 叠画相邻列（与修复意图相反）→ 删 min-width/overflow/z-index，改 `min-width: 0` 依赖换行；
+    - ⑤[L] **repair_schema 对表整体缺失硬失败**——盖 37 戳但 capability_snapshots 不存在（手改版本戳/部分恢复备份）时 ALTER 报 no such table 中止启动 → 前置 `CREATE TABLE IF NOT EXISTS`（与 v37 同 DDL）；
+    - ⑥[L] **repair 路径零单测**→ 补 2 测试（盖戳缺列修复 + 表缺失重建，均验证可写入与幂等）；
+    - ⑦[L] **fr/tr `builtinPrompts.templatePlaceholder` 占位符名被翻译**（`{{paramètre}}`/`{{parametre}}` 运行时不插值，历史遗留）→ 还原 `{{parameter}}`。
+  - **记录不修**：①超时驱逐与并发新调用的窄竞态（同 session 错配非跨 session 泄漏，注释已披露）；②notify slot 在 elicitation=None 后续调用保留陈旧回调（同 peer 无害）；③2026 下游 elicitation 转发必以 SEP-2260 失败但 relay 已注册（与 origin 一致的已知偏差）；④快照 delete+同名重建 TOCTOU（窄窗口暂时性工具列表错配）；⑤jsonImport auto 校验用原始 type 与桌面宽松检测的组合严格性（origin 逐字 parity 保留）；⑥vi 历史 792 键未翻存量（后续批次）。
+  - **清洁确认**：slot Arc 单实例贯穿全链、锁序无环、调度器身份守卫闭环、快照事务级联、指纹 verify 畸形输入安全、locales 6 语言 2098 键零缺失零孤儿、tauriClient↔serde 契约逐项对账、fresh-DB v1→v37 全链、导入导出 round-trip、命令门控——全部通过。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **282 passed**（+2 repair 测试）；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**。
+- **影响功能点与结果**：远程服务器经 UI/REST 调用死亡后可被恢复调度器正确播种（假活修复）；超时驱逐不再误伤健康会话；recovery 状态块文本正常折行。**用户需重启生效**。
+
+#### 2026-10-27（第十一轮）：第六波独立复核（4 代理）——修复 3 项（1H+1M+1L）+ 76 套 E2E 全绿
+
+- **4 代理切片（修复合回炉 / dead-marking 同族穷举 / 套件断言审计 / 真机运行时）**：
+  - **修复 3 项**：
+    - ①[H] **手写 SSE transport 回退模式连接类错误不翻转 `connected`**——no-background-reader 模式（POST 非 SSE/无 endpoint 事件回退）下 `post_request` 的 send 失败/非 2xx 只 return Err，全文件翻转点仅 reader 循环退出（该模式不存在）与显式 disconnect → `mark_pool_disconnected_if_dead` 恒见 connected=true，**退避重连对 SSE 回退模式服务器完全失效**（正是 #1385 目标场景的残留盲区）→ 两个连接类错误分支补 `connected.store(false)`（应用层 MCP 错误不触碰，对齐 rmcp transport 语义）；
+    - ②[M] **jsonImport protocolNegotiation 校验时序**——校验用原始 `config.type` 而桌面宽松检测接受 `streamablehttp`/url-only 变体，合法导入带 `auto` 被误拒 → 校验移到类型归一化之后、用 `normalizedConfig.type` 判断；
+    - ③[L] `touch_claim` 无单测（记录缺口，recovery 模块整体无测试基建）。
+  - **回炉通过**：call_tool dead-marking 调用点同构、starts_with 前缀与 mcp/time.rs 文案精确匹配（无包装层改前缀）、touch_claim 非 recovery 路径 no-op、CSS 换行不被裁剪、repair DDL 逐列一致、fr/tr 无误改。
+  - **dead-marking 家族穷举零遗漏**：共享 pool（call_tool/call_tool_with_meta/read_resource 三点全接）、per-session（is_connected→ptr_eq 驱逐闭环）、on-demand（驱逐+mark_on_demand_error 闭环）、builtin（不适用）；恢复调度器读写键对齐；`is_remote` 在全部 7 处 PoolEntry 构造点统一谓词。openapi transport 不翻转 connected 记录为模型固有语义（is_remote=false 由 session_rebuild 接管，自洽）。
+  - **套件断言审计通过**：r1800 唯一名贯穿全部用例、PREFLIGHT check 签名一致且失败不阻断、r1900 E.rerun 实质断言、2 个 repair 测试真实断言无恒真。
+  - **真机运行时全 PASS**：/health 200；/servers 4 台全 connected 无池中毒；MCP 冒烟（initialize 2025-06-18 → tools/list 111 工具 → 真实调用 isError:false 返回公网 IP → DELETE 202）；DB schema_version=37、capability_snapshots 含 fingerprint 列、servers 含 protocol_negotiation 列；app_log 0 panic（仅 2 条历史 r1800ssrf error 残留）。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **282 passed**；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**。
+- **影响功能点与结果**：SSE 上游服务器（含回退模式）死亡后可被退避重连正确恢复；导入含 `auto` 协议协商的宽松形态配置不再被误拒。**用户需重启生效**。
+
+#### 2026-10-27（补充）：allowInsecureTokenEndpoint 桌面文案诚实化
+
+- 用户指出 #1293 镜像的「允许 HTTP OAuth 令牌端点」帮助文案含 origin 的管理员语义（「仅管理员可用/只有管理员可以编辑/非管理员的所有者无法编辑」）——桌面 skipAuth 单用户无管理员概念，文案误导 → 新增 `server.oauth.allowInsecureTokenEndpointHelpDesktop` 键 ×6（去除管理员句，保留 TLS 风险提示），ServerForm 按 `isTauri()` 分流渲染；web 模式保持 origin 原文。checkbox 的 `disabled={!auth.user?.isAdmin}` 在桌面恒 false（guest admin）行为不变。
+- **验证**：tsc 0 错；npm build ✓；6 语言 JSON 校验通过。
+
+#### 2026-10-27（补充）：多语言未翻译条目全量补翻（fr/tr/vi，以 zh 语义为基准）
+
+- 键集合审计：6 语言 × 2099 键，0 缺失 0 孤儿（zh/en 双基准均对齐）——缺口在**值**：fr 196 条、tr 147 条、vi 757 条为英文直拷（vi==en 且 zh!=en）。
+- 3 个并行翻译代理补翻（语义以 zh 为基准、en 辅助）：fr 实改 136 条（60 条法语与英文同形属正确）、tr 实改 139 条（8 条术语同形保留）、vi 实改 757 条（13 条专有名词有意保留英文）。规则：占位符/URL/路径/技术术语原样保留、`******` 系终端对 Bearer 的显示打码（按真实语义译）、键序不动。
+- **顺带修复 2 处 i18next 复数格式漂移**：`cloud.toolsAvailable` 的 en 用 `{{count}} a||{{count}} b` 复数双形式，tr 缺 `||` 后半、zh 完全没有 → tr/zh 补齐双形式（土耳其语/中文两形式相同但格式必须存在，否则 i18next 复数查找回退异常）。
+- **验证**：6 语言占位符逐键 parity 0 drift；句级未翻译残留 fr/tr/es/vi 全部归零；tsc 0 错；npm build ✓。
+
+#### 2026-10-27（补充）：免登录模式用户名硬编码修复
+
+- 用户指出「免登陆模式」文案缺失——根因非 locale 键缺失，而是 `AuthContext.tsx` guest 用户名**硬编码中文** `'免登陆模式'`（UserProfileMenu 渲染，非中文语言下也显示中文）→ 新增 `auth.skipAuthGuestName` 键 ×6（en Guest Mode / zh 免登录模式 / fr Mode invité / tr Misafir Modu / es Modo invitado / vi Chế độ khách）+ AuthContext 接 `useTranslation`（deps 补 `t`）。
+- 全仓硬编码 CJK 字符串扫描：其余命中均为 `t(key, 中文fallback)` 模式（键齐全不触发）与语言自身名称（LanguageSwitch `中文`），无同类问题。
+- **验证**：6 语言键 parity 0 缺失 0 占位符 drift；tsc 0 错；npm build ✓。
+
+#### 2026-10-27（补充）：代码引用但 locale 缺失的 15 键补全（accessUrl ×9 + pages.rag 扫描阶段 ×6）
+
+- 用户指出「rag、endpoints mcp」文案缺失——新增**代码↔locale 对账**维度（此前只对账 locale 之间）：扫描全部 `t('key')` 引用（1568 键）与 en/zh 对比，抓出 **15 个被代码引用但所有语言都没有的键**（历史遗留，UI 显示中文 fallback 或裸键名）：
+  - `accessUrl.*` ×9（AccessUrlDialog 接入端点对话框：intro/bearerNotice/exposeHttpDisabled/四路由 description/sse/smartApi）；
+  - `pages.rag.scan*` ×6（RagPage 扫描进度阶段：CollapsedHint/PhaseMetas/Git/Scan/Checking/CheckingCount）。
+- 6 语言全补（zh 取代码 fallback 原文，en/fr/tr/es/vi 按 zh 语义翻译；`{{count}}/{{sel}}/{{current}}/{{total}}/{{name}}` 插值与 `{groupName}/{serverName}` 字面占位逐键 parity 校验通过）。`bearerNotice` 的 "Bearer/Bearer Token" 经字节级核验系终端打码伪影，实际为正常 ASCII。
+- **验证**：代码引用键缺失归零（1568/1568 全覆盖）；新键占位符 parity ALL OK；tsc 0 错；npm build ✓。**教训**：locale 对账必须含「代码引用→locale」方向，仅 locale 间对比会漏掉从未建键的引用。
+
+#### 2026-10-27（补充）：RAG 术语本地化（用户裁定「知识库」）
+
+- 用户指出菜单与 RAG 页面标题仍是英文缩写 → 裁定中文名「知识库」：`nav.rag` + `pages.rag.title` ×6（en Knowledge Base / zh 知识库 / fr Base de connaissances / tr Bilgi Tabanı / es Base de conocimiento / vi Cơ sở tri thức）。
+- 顺带修复 `ModelVectorSettings` 消费方标签硬编码 `RAG` 字面量 → 新 `settings.mvSourceRag` 键 ×6 + i18n 接线（与既有 `mvSourceSmartRouting` 同模式）。
+- **验证**：tsc 0 错；npm build ✓；6 语言 JSON 校验通过。
+
+#### 2026-10-27（补充）：版本号规则变更 + changelog 合并（26.1027.7）
+
+- **新版本规则（用户裁定）**：`2位年.月日.迭代号`，首版 **26.1027.7**。Cargo semver 实测拒绝前导零（`invalid leading zero in patch version number`，与 1.1.00001 弃用同因），迭代号写 7 而非 007（用户确认全四源一致方案）。
+- 四源 + 双 lockfile + Cargo.lock 全部更新为 26.1027.7；`doc/upgrade/1.1.5001~5007.md` 七个文档合并为 `doc/upgrade/26.1027.7.md`（新功能/修复/基线同步三分节，含本轮 i18n 补翻、elicitation 修复、退避重连等全部累计内容），旧文档已删除。
+- AGENTS.md §4.4 版本号行与 §6 四源行同步更新（含新规则说明）。
+- **验证**：cargo check 通过（Cargo.lock 再生）；tsc 0 错；npm build ✓；契约 0 mismatch。
+
+#### 2026-10-27（补充）：stdio 下载进度恒 100% 修复（用户报告）
+
+- **根因**：`parse_progress_pct` 的 `12/34` 分数分支无 `num <= total` 校验——stderr 日期前缀行 `[2026/10/27 ...]` 被解析为 `2026/10 → 2026×100/10 → min(100) = 100%`，且 `looks_like_download_progress` 含 `parse.is_some()` 分支 → 任何含日期/路径形态数字的 stderr 行都触发「下载中 100%」事件并钉满进度条。
+- **修复**（`mcp/stdio_transport.rs`）：①分数分支要求 `num <= total`（否则跳过该数字继续扫描）；②斜杠链守卫——候选数字前一字符为 `/`（日期 `2026/10/27`、路径 `a/b/c` 特征）直接跳过，防 `10/27` 子对误命中（37%）。
+- **测试**：+3 单测（百分比/分数正例、日期/版本/路径反例、looks_like 分类含日期行排除）→ lib **285 passed**；E2E spot（r1800 22 + full_regress 41 + matrix_v2 152）全绿。
+- **教训**：无界启发式解析器对「服务器可控的 stderr」必须假设最坏输入——分数语义（num≤total）与 token 边界（斜杠链）都要显式校验，`min(100)` 饱和掩盖了语义错误。
 
 #### 2026-10-21（第五轮）：`209b74d` -> `fd1abaa`（4 commit，纯依赖升级）
 
@@ -898,4 +1038,6 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **1.1.5006**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.1027.7**。
+
+**规则（2026-10-27 起，详见 §4.4）**：`2位年.月日.迭代号`，不跟随 origin tag；同日多次发布迭代号递增，跨天重置为 1；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。

@@ -66,6 +66,16 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
 
   const isInstalling = installPhase === 'downloading' || installPhase === 'installing';
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   // Mirror the parent's update info into local state, but only when it
   // represents a detected update — otherwise this would clobber an in-flight
   // or just-completed self-check triggered on open (the parent's "no-update"
@@ -261,7 +271,12 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="hub-card w-full max-w-[520px] max-h-[85vh] flex flex-col shadow-xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="about-dialog-title"
+        className="hub-card flex max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col overflow-hidden shadow-xl"
+      >
         <div className="p-5 pb-3 relative shrink-0">
           <button
             onClick={onClose}
@@ -272,12 +287,12 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
           </button>
 
           <div className="pr-8">
-            <h3 className="hub-h1">{t('about.title')}</h3>
+            <h3 id="about-dialog-title" className="hub-h1">{t('about.title')}</h3>
             <p className="hub-sub">{t('about.versionInfo', { version })}</p>
           </div>
         </div>
 
-        <div className="px-5 pb-5 space-y-4 overflow-y-auto min-h-0 flex-1">
+        <div className="px-5 pb-5 space-y-4 overflow-y-auto overscroll-contain min-h-0 flex-1">
             {isChecking || updateInfo?.source === 'checking' ? (
               <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-2)' }}>
                 <RefreshCw className="h-4 w-4 animate-spin" style={{ color: 'var(--hub-accent)' }} />

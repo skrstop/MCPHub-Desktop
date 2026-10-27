@@ -224,6 +224,14 @@ pub struct ServerConfig {
     /// Keep-alive ping interval in milliseconds (frontend round-trip only).
     #[serde(default)]
     pub keep_alive_interval: Option<u64>,
+    /// Upstream protocol negotiation mode (origin #1382): `auto` probes
+    /// `server/discover` (2026 modern) before falling back to legacy
+    /// initialize — only valid for streamable-http servers; `legacy` skips
+    /// the modern probe entirely. None = auto for streamable-http, legacy
+    /// for every other transport. Frontend sends camelCase
+    /// `protocolNegotiation`.
+    #[serde(default)]
+    pub protocol_negotiation: Option<String>,
     /// Extra headers passed through to the upstream on every request
     /// (sse/streamable-http). Persisted for round-trip; consumed by the rmcp
     /// transport's request headers once wired.
@@ -264,6 +272,10 @@ pub struct ServerStatus {
     /// check for package updates (npx/uvx).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
+    /// MCP protocol version negotiated during the `initialize` handshake
+    /// (origin #1379). Populated for rmcp stdio/streamable-http transports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<String>,
 }
 
 /// A single MCP tool exposed by a server
@@ -330,6 +342,19 @@ pub struct ToolCallResult {
     pub raw_meta: Option<serde_json::Value>,
 }
 
+/// Origin #1385: background reconnect recovery state for remote
+/// (sse/streamable-http) servers. Runtime-only (never persisted); exposed to
+/// the dashboard so ServerCard can show "Reconnecting…"/"Retry at {time}".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryInfo {
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<String>,
+}
+
 /// Combined server info returned to the dashboard
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,6 +371,10 @@ pub struct ServerInfo {
     /// only for the builtin "mcphub-desktop" server.
     #[serde(default)]
     pub resources: Vec<crate::models::resource::BuiltinResource>,
+    /// Origin #1385 reconnect recovery state (remote servers only). `None`
+    /// when the server is not recovering (connected / stdio / disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryInfo>,
 }
 
 /// A page of server-search results: the items on the current page + the total

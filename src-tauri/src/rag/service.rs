@@ -2354,6 +2354,7 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
             proxy: None,
             enable_keep_alive: None,
             keep_alive_interval: None,
+            protocol_negotiation: None,
             passthrough_headers: None,
             oauth: None,
             enabled: true,
@@ -2367,10 +2368,12 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
             error: None,
             last_connected: None,
             server_version: None,
+            protocol_version: None,
         },
         tools,
         prompts,
         resources,
+        recovery: None,
     })
 }
 
