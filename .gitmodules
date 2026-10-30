@@ -1,4 +1,0 @@
-[submodule "mcphub-origin"]
-	path = mcphub-origin
-	url = https://github.com/samanhappy/mcphub.git
-	branch = main
