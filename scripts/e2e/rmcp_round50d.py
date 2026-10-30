@@ -74,6 +74,23 @@ def call_ok(st, obj):
 # ============ D1: REST 端点真实调用 ============
 print("== D1 REST 端点 ==")
 from urllib.parse import quote
+
+def _ensure_own_bearer_key(con):
+    # v38 (#1387) hashes legacy plaintext rows and clears the token column, so
+    # reading an existing row's token no longer works. Insert (or replace) our
+    # own plaintext row instead — find_by_token's legacy-fallback path accepts
+    # rows with a plaintext token and NULL token_hash (same pattern as
+    # carpet_r200).
+    key = "e2e-bk-own-0123456789abcdef"
+    con.execute(
+        "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) "
+        "VALUES ('e2e-bk-own','e2e-own',?,1,'all','[]','[]') "
+        "ON CONFLICT(id) DO UPDATE SET token=excluded.token, enabled=1",
+        (key,),
+    )
+    con.commit()
+    return key
+
 srv = quote(IP_SERVER)
 st, obj, ct, data = http_req("GET", f"/rest/{srv}/tools")
 tools = obj if isinstance(obj, list) else (obj or {}).get("tools", [])
@@ -145,7 +162,8 @@ def set_bearer(on):
     con.commit(); con.close()
 def get_key():
     con = sqlite3.connect(DB)
-    row = con.execute("SELECT token FROM bearer_keys LIMIT 1").fetchone()
+    _ensure_own_bearer_key(con)
+    row = con.execute("SELECT token FROM bearer_keys WHERE id='e2e-bk-own'").fetchone()
     con.close()
     return row[0] if row else None
 KEY = get_key()

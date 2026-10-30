@@ -97,6 +97,9 @@ fn parse_server_type(type_str: &str) -> ServerType {
 
 /// Import from a JSON string (contents of mcp_settings.json)
 pub async fn import_from_json(json: &str) -> Result<ImportSummary> {
+    // Origin #1400 parity: tolerate a UTF-8 BOM (Windows editors add one);
+    // serde_json rejects it outright.
+    let json = json.strip_prefix('\u{feff}').unwrap_or(json);
     let settings: McpSettings = serde_json::from_str(json)?;
     let mut summary = ImportSummary::default();
 

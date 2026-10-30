@@ -8,6 +8,23 @@ tasks 全生命周期全版本、subscriptions/listen 逐版本、group allow-li
 """
 import http.client, json, sqlite3, os, re, sys, time, ipaddress, urllib.parse, base64
 
+def _ensure_own_bearer_key(con):
+    # v38 (#1387) hashes legacy plaintext rows and clears the token column, so
+    # reading an existing row's token no longer works. Insert (or replace) our
+    # own plaintext row instead — find_by_token's legacy-fallback path accepts
+    # rows with a plaintext token and NULL token_hash (same pattern as
+    # carpet_r200).
+    key = "e2e-bk-own-0123456789abcdef"
+    con.execute(
+        "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) "
+        "VALUES ('e2e-bk-own','e2e-own',?,1,'all','[]','[]') "
+        "ON CONFLICT(id) DO UPDATE SET token=excluded.token, enabled=1",
+        (key,),
+    )
+    con.commit()
+    return key
+
+
 def mcp_name_header(tool_name):
     """SEP-2243 线格式（rmcp mcp_headers.rs: =?base64?<b64>?=）。"""
     try:
@@ -71,7 +88,8 @@ def get_bearer_state():
 
 def get_key():
     con = sqlite3.connect(DB)
-    row = con.execute("SELECT token FROM bearer_keys WHERE enabled=1 LIMIT 1").fetchone()
+    _ensure_own_bearer_key(con)
+    row = con.execute("SELECT token FROM bearer_keys WHERE id='e2e-bk-own'").fetchone()
     con.close()
     return row[0] if row else None
 

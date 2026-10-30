@@ -13,6 +13,23 @@ import http.client, json, sqlite3, sys, time, re, ipaddress, base64
 from pathlib import Path
 from urllib.parse import quote
 
+def _ensure_own_bearer_key(con):
+    # v38 (#1387) hashes legacy plaintext rows and clears the token column, so
+    # reading an existing row's token no longer works. Insert (or replace) our
+    # own plaintext row instead — find_by_token's legacy-fallback path accepts
+    # rows with a plaintext token and NULL token_hash (same pattern as
+    # carpet_r200).
+    key = "e2e-bk-own-0123456789abcdef"
+    con.execute(
+        "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) "
+        "VALUES ('e2e-bk-own','e2e-own',?,1,'all','[]','[]') "
+        "ON CONFLICT(id) DO UPDATE SET token=excluded.token, enabled=1",
+        (key,),
+    )
+    con.commit()
+    return key
+
+
 HOST, PORT = "127.0.0.1", 23333
 PASS, FAIL, SKIP = [], [], []
 IP_SERVER = "本机公网ip查询"
@@ -194,7 +211,8 @@ def main():
     # ── N-BEARER-SMART ──────────────────────────────────────────────────────
     print("== N-BEARER-SMART ==")
     con = sqlite3.connect(DB)
-    key_row = con.execute("SELECT token FROM bearer_keys WHERE enabled=1 LIMIT 1").fetchone()
+    _ensure_own_bearer_key(con)
+    key_row = con.execute("SELECT token FROM bearer_keys WHERE id='e2e-bk-own'").fetchone()
     con.close()
     old_b = set_flag(["routing"], "enableBearerAuth", True); time.sleep(0.4)
     try:

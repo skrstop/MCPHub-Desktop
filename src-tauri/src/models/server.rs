@@ -131,6 +131,13 @@ pub struct ServerOauthConfig {
     /// for this upstream. Gated in `services::oauth_upstream`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_insecure_token_endpoint: Option<bool>,
+    /// Origin #1390: explicit upstream authorization-server metadata (issuer +
+    /// endpoints). Stored for config round-trip parity with origin deployments;
+    /// the desktop flow uses the hand-filled `authorization_endpoint` /
+    /// `token_endpoint` static mode instead (rmcp AuthorizationManager runs
+    /// its own discovery), so this object has no runtime consumer yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_server_metadata: Option<serde_json::Value>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     /// Space-joined on the wire; stored as the frontend sends it (string[]).

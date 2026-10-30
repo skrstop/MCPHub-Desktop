@@ -49,7 +49,9 @@ i18n
 
     detection: {
       // Order of detection; prioritize localStorage to respect user language choice
-      order: ['localStorage', 'cookie', 'htmlTag', 'navigator'],
+      // #1404: navigator (browser locale) should win over the static html
+      // lang attribute — the served html lang is a build-time default.
+      order: ['localStorage', 'cookie', 'navigator', 'htmlTag'],
       // Cache the language in localStorage
       caches: ['localStorage', 'cookie'],
     },

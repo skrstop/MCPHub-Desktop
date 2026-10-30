@@ -1156,6 +1156,7 @@ mod flow_e2e {
 
         let cfg = ServerOauthConfig {
             allow_insecure_token_endpoint: None,
+            authorization_server_metadata: None,
             client_id: None, // dynamic registration path
             client_secret: None,
             scopes: Some(vec!["read".into()]),

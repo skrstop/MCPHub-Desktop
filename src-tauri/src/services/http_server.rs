@@ -730,6 +730,41 @@ async fn call_server_tool(
             return (StatusCode::FORBIDDEN, Json(json!({ "error": "Access denied for this server" }))).into_response();
         }
     }
+    // #1399: unified tool access policy (origin enforces it through the
+    // shared handleCallToolRequest handler; the desktop REST face checks
+    // directly — deny → 403).
+    {
+        let policy = crate::services::tool_policy::get_tool_policy(
+            None,
+            bearer_key.as_ref().map(|k| k.id.as_str()),
+        )
+        .await;
+        if policy.is_active() {
+            let decision = policy.authorize(&server_name, Some(&req.tool));
+            if decision.decision == "deny" {
+                let _ = log_service::write_activity(
+                    &server_name,
+                    &req.tool,
+                    Some(0),
+                    "error",
+                    None,
+                    None,
+                    Some(&crate::services::tool_policy::audit_text(
+                        &decision,
+                        policy.server_id(&server_name),
+                        policy.group_id(),
+                    )),
+                    None,
+                )
+                .await;
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": format!("Tool not available: {}", req.tool) })),
+                )
+                    .into_response();
+            }
+        }
+    }
     let _rest_call_ip = client_ip_of(&headers);
     // Meta tools are exclusive to $smart — never resolvable via the plain
     // single-server REST call path even when the target is the builtin.
@@ -967,6 +1002,40 @@ async fn call_group_tool(
         Some(s) => s,
         None => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Tool '{}' not found in group '{}'", tool_name, group_name) }))).into_response(),
     };
+    // #1399: unified tool access policy — the group route resolves the
+    // policy's groupId so group-scoped rules apply (deny → 403).
+    {
+        let policy = crate::services::tool_policy::get_tool_policy(
+            Some(group_name.as_str()),
+            bearer_key.as_ref().map(|k| k.id.as_str()),
+        )
+        .await;
+        if policy.is_active() {
+            let decision = policy.authorize(&server_name, Some(tool_name));
+            if decision.decision == "deny" {
+                let _ = log_service::write_activity(
+                    &server_name,
+                    tool_name,
+                    Some(0),
+                    "error",
+                    None,
+                    None,
+                    Some(&crate::services::tool_policy::audit_text(
+                        &decision,
+                        policy.server_id(&server_name),
+                        policy.group_id(),
+                    )),
+                    None,
+                )
+                .await;
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": format!("Tool not available: {tool_name}") })),
+                )
+                    .into_response();
+            }
+        }
+    }
     // Disabled-tool gate (origin #1178): tools disabled via server_tool_config
     // must not remain executable through the REST group endpoint.
     if let Ok(tools) = pool::list_tools_for(&server_name).await {
@@ -1074,6 +1143,9 @@ pub(crate) struct ServerFilter {
     pub(crate) tools: Option<Vec<String>>,  // None = all tools, Some = specific tools
     pub(crate) prompts: Option<Vec<String>>,
     pub(crate) resources: Option<Vec<String>>,
+    /// Expose this member's tools without the `{server}{sep}` prefix
+    /// (origin #1391). Only ever true for group-scope filters.
+    pub(crate) preserve_tool_names: bool,
 }
 
 /// Extract server filters from group servers config
@@ -1081,18 +1153,22 @@ fn extract_server_filters(servers: &[serde_json::Value]) -> Vec<ServerFilter> {
     servers
         .iter()
         .filter_map(|s| {
-            let (name, tools, prompts, resources) = if let Some(name) = s.as_str() {
-                (name.to_string(), None, None, None)
+            let (name, tools, prompts, resources, preserve_tool_names) = if let Some(name) = s.as_str() {
+                (name.to_string(), None, None, None, false)
             } else if let Some(obj) = s.as_object() {
                 let name = obj.get("name")?.as_str()?.to_string();
                 let tools = extract_filter_list(obj.get("tools"));
                 let prompts = extract_filter_list(obj.get("prompts"));
                 let resources = extract_filter_list(obj.get("resources"));
-                (name, tools, prompts, resources)
+                let preserve_tool_names = obj
+                    .get("preserveToolNames")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                (name, tools, prompts, resources, preserve_tool_names)
             } else {
                 return None;
             };
-            Some(ServerFilter { name, tools, prompts, resources })
+            Some(ServerFilter { name, tools, prompts, resources, preserve_tool_names })
         })
         .collect()
 }
@@ -1151,6 +1227,7 @@ pub(crate) async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
                 tools: None,
                 prompts: None,
                 resources: None,
+                preserve_tool_names: false,
             })
         } else {
             None
@@ -1171,6 +1248,7 @@ pub(crate) async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
                 tools: None,
                 prompts: None,
                 resources: None,
+                preserve_tool_names: false,
             })
             .collect();
         if let Some(rf) = rag_filter() {
@@ -1213,6 +1291,7 @@ pub(crate) async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
             tools: None,
             prompts: None,
             resources: None,
+            preserve_tool_names: false,
         }];
     }
     vec![]
@@ -2390,6 +2469,77 @@ async fn openapi_stats(headers: HeaderMap) -> Response {
     .into_response()
 }
 
+/// Strict full-decimal matcher (origin #1392 regex parity):
+/// optional sign, digits with optional fraction (`12`, `12.`, `12.5`, `.5`),
+/// optional case-insensitive exponent. Rejects `inf`/`NaN`/hex/prefix junk.
+fn is_full_decimal(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let int_digits = i - int_start;
+    let mut frac_digits = 0;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        frac_digits = i - frac_start;
+    }
+    if int_digits + frac_digits == 0 {
+        return false;
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
+/// Coerce a string query parameter to a declared numeric type without
+/// truncation (origin #1392): only complete decimal strings (including
+/// scientific notation) convert; fractional values for `integer`, non-finite
+/// results, and invalid strings are preserved verbatim.
+fn convert_numeric_param(value: &str, prop_type: &str) -> serde_json::Value {
+    let normalized = value.trim();
+    if !is_full_decimal(normalized) {
+        return json!(value);
+    }
+    let n: f64 = match normalized.parse::<f64>() {
+        Ok(n) if n.is_finite() => n,
+        _ => return json!(value),
+    };
+    if prop_type == "integer" && n.fract() != 0.0 {
+        // Fractional value for an integer parameter — keep the string.
+        return json!(value);
+    }
+    // Strict upper bound: i64::MAX as f64 rounds UP to 2^63, so `<=` would
+    // let 2^63 through and `as i64` would saturate to i64::MAX (off-by-one
+    // vs origin, which forwards the exact float). Use an open bound at 2^63.
+    if n.fract() == 0.0 && n >= i64::MIN as f64 && n < 9_223_372_036_854_775_808.0 {
+        // Integral values serialize as JSON integers (origin Number parity:
+        // Number("1e3") === 1000, not 1000.0).
+        json!(n as i64)
+    } else {
+        json!(n)
+    }
+}
+
 /// Coerce string query-parameter values to the types declared in the tool's
 /// inputSchema (origin convertParametersToTypes equivalent).
 fn coerce_query_args(query: std::collections::HashMap<String, String>, tool: &Tool) -> serde_json::Value {
@@ -2404,8 +2554,8 @@ fn coerce_query_args(query: std::collections::HashMap<String, String>, tool: &To
             .and_then(|p| p.get("type"))
             .and_then(|t| t.as_str());
         let value = match ty {
-            Some("number") => v.parse::<f64>().map(|n| json!(n)).unwrap_or(json!(v)),
-            Some("integer") => v.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(v)),
+            Some("number") => convert_numeric_param(&v, "number"),
+            Some("integer") => convert_numeric_param(&v, "integer"),
             Some("boolean") => match v.to_lowercase().as_str() {
                 "true" => json!(true),
                 "false" => json!(false),
@@ -2440,6 +2590,39 @@ async fn execute_openapi_impl(
                 Json(json!({ "error": "Access denied for this server" })),
             )
                 .into_response();
+        }
+    }
+    // #1399: unified tool access policy (deny → 403).
+    {
+        let policy = crate::services::tool_policy::get_tool_policy(
+            scope.as_deref(),
+            bearer_key.as_ref().map(|k| k.id.as_str()),
+        )
+        .await;
+        if policy.is_active() {
+            let decision = policy.authorize(&server_name, Some(&tool_name));
+            if decision.decision == "deny" {
+                let _ = log_service::write_activity(
+                    &server_name,
+                    &tool_name,
+                    Some(0),
+                    "error",
+                    None,
+                    None,
+                    Some(&crate::services::tool_policy::audit_text(
+                        &decision,
+                        policy.server_id(&server_name),
+                        policy.group_id(),
+                    )),
+                    source_ip,
+                )
+                .await;
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": format!("Tool not available: {tool_name}") })),
+                )
+                    .into_response();
+            }
         }
     }
     // Meta tools are exclusive to $smart — never resolvable via the plain
@@ -4286,6 +4469,49 @@ mod openapi_tests {
     }
 
     #[test]
+    fn convert_numeric_param_matches_origin_1392() {
+        // Positive cases (origin test values).
+        assert_eq!(convert_numeric_param("1e3", "integer"), json!(1000));
+        assert_eq!(convert_numeric_param("2.5e-2", "number"), json!(0.025));
+        assert_eq!(convert_numeric_param("42", "integer"), json!(42));
+        assert_eq!(convert_numeric_param(".5", "number"), json!(0.5));
+        assert_eq!(convert_numeric_param("+2", "integer"), json!(2));
+        assert_eq!(convert_numeric_param("-1.5e-2", "number"), json!(-0.015));
+        assert_eq!(convert_numeric_param("  3.14  ", "number"), json!(3.14));
+        // Large integral value stays numeric (Number.isInteger(1e20) === true).
+        assert_eq!(convert_numeric_param("1e20", "integer"), json!(1e20));
+        // 2^63 exactly: must NOT saturate to i64::MAX (origin forwards the
+        // exact float 9223372036854775808).
+        assert_eq!(
+            convert_numeric_param("9223372036854775808", "integer"),
+            json!(9223372036854775808.0f64)
+        );
+        // i64::MAX string: f64 rounds it to 2^63 — origin's Number() does the
+        // same, so the forwarded value is the float, not a saturated i64.
+        assert_eq!(
+            convert_numeric_param("9223372036854775807", "integer"),
+            json!(9223372036854775808.0f64)
+        );
+        // Rejected / preserved verbatim.
+        assert_eq!(convert_numeric_param("3.14abc", "number"), json!("3.14abc"));
+        assert_eq!(convert_numeric_param("12oops", "number"), json!("12oops"));
+        assert_eq!(convert_numeric_param("Infinity", "number"), json!("Infinity"));
+        assert_eq!(convert_numeric_param("-inf", "number"), json!("-inf"));
+        assert_eq!(convert_numeric_param("NaN", "number"), json!("NaN"));
+        assert_eq!(convert_numeric_param("1,234", "number"), json!("1,234"));
+        assert_eq!(convert_numeric_param("0x10", "number"), json!("0x10"));
+        assert_eq!(convert_numeric_param("", "number"), json!(""));
+        assert_eq!(convert_numeric_param("   ", "number"), json!("   "));
+        assert_eq!(convert_numeric_param("1e400", "number"), json!("1e400"));
+        assert_eq!(convert_numeric_param("1e", "number"), json!("1e"));
+        assert_eq!(convert_numeric_param(".", "number"), json!("."));
+        assert_eq!(convert_numeric_param("+", "number"), json!("+"));
+        // Integer special cases.
+        assert_eq!(convert_numeric_param("3.5", "integer"), json!("3.5"));
+        assert_eq!(convert_numeric_param("3.0", "integer"), json!(3));
+    }
+
+    #[test]
     fn spec_options_parse_origin_query_params() {
         let mut q = std::collections::HashMap::new();
         q.insert("title".to_string(), "Custom".to_string());
@@ -4527,13 +4753,21 @@ async fn smart_rest_search(
     let limit = p.get("limit").cloned().unwrap_or(json!(10));
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
+    // #1399: unified tool access policy — search results are filtered to
+    // tools the subject may call (origin smartRoutingService allowedToolIds).
+    let policy = crate::services::tool_policy::get_tool_policy(
+        Some("$smart"),
+        bearer_key.as_ref().map(|k| k.id.as_str()),
+    )
+    .await;
+    let policy_ref = if policy.is_active() { Some(&policy) } else { None };
     // Root $smart scope has no group tool whitelist — gate applies only to
     // /$smart/{group} (bridge handles that path).
     // NOTE (deliberate, matches /call below): the REST $smart face does NOT
     // narrow to pinned tools — REST search and REST call both see the full
     // scope, internally consistent. Pin parity (search=list=call) applies to
     // the MCP $smart face inside the bridge.
-    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed, None, None).await {
+    match crate::smart_routing::meta::handle_search_tools(query, limit, allowed, None, None, policy_ref).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
@@ -4556,7 +4790,15 @@ async fn smart_rest_describe(
     let tool_name = p.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
-    match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None, None).await {
+    // #1399: unified tool access policy — describe must not hand out the
+    // schema of a denied tool.
+    let policy = crate::services::tool_policy::get_tool_policy(
+        Some("$smart"),
+        bearer_key.as_ref().map(|k| k.id.as_str()),
+    )
+    .await;
+    let policy_ref = if policy.is_active() { Some(&policy) } else { None };
+    match crate::smart_routing::meta::handle_describe_tool(tool_name, allowed, None, None, policy_ref).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         // handle_describe_tool returns Ok with an error body for unknown
         // tools (origin parity) — Err here is always a server fault.
@@ -4581,6 +4823,13 @@ async fn smart_rest_call(
     let args = p.get("arguments").cloned().unwrap_or(json!({}));
     let (_, _, scope_allowed) = crate::smart_routing::meta::compute_scope("$smart").await;
     let allowed = smart_allowed_from_bearer(bearer_key.as_ref(), scope_allowed).await;
+    // #1399: unified tool access policy — deny before any execution.
+    let policy = crate::services::tool_policy::get_tool_policy(
+        Some("$smart"),
+        bearer_key.as_ref().map(|k| k.id.as_str()),
+    )
+    .await;
+    let policy_ref = if policy.is_active() { Some(&policy) } else { None };
     // NOTE (no pin gate here, deliberately): the REST lane's search results
     // are NOT narrowed to pinned tools (REST /api/$smart/search returns the
     // full $smart scope), so /call must stay consistent with that surface.
@@ -4596,7 +4845,7 @@ async fn smart_rest_call(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
     }
     let start = std::time::Instant::now();
-    match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None, None).await {
+    match crate::smart_routing::meta::handle_call_tool(tool_name, args, allowed, None, None, policy_ref).await {
         Ok(v) => {
             // isError:true results are tool-level failures — don't log them
             // as "success" (parity with execute_openapi_impl's is_error split).
@@ -4642,7 +4891,11 @@ async fn smart_rest_call(
             // whose text happens to contain it (e.g. "config not found") as a
             // client mistake (400) instead of a server-side execution failure
             // (500).
-            let status = if e.starts_with("[tool-not-found]")
+            let status = if e.starts_with("[tool-policy]") {
+                // #1399: policy denial → 403 (task ruling; origin's REST face
+                // funnels through the shared handler and answers 500).
+                StatusCode::FORBIDDEN
+            } else if e.starts_with("[tool-not-found]")
                 || e.starts_with("Tool not available")
                 || (e.starts_with("Tool '")
                     && (e.contains("' is excluded by") || e.contains("' is disabled")))

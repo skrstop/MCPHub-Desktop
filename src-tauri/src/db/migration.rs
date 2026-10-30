@@ -130,6 +130,47 @@ async fn set_version(pool: &SqlitePool, version: i64) -> Result<()> {
 /// at TARGET_VERSION by an intermediate build whose DDL was later amended.
 /// Runs on every startup; every statement is idempotent.
 pub async fn repair_schema(pool: &SqlitePool) -> Result<()> {
+    // v38 rollback cleanup: an intermediate build migrated bearer keys to
+    // SHA-256 hash storage (schema_version=38, token column emptied to
+    // `hashed:{id}` sentinels). That mirror was reverted — the code target
+    // is back to 37 with plaintext tokens — so scrub the residue: drop the
+    // unusable rows (the original plaintext is unrecoverable), remove the
+    // hash columns, and rewind the version stamp so run_pending() never
+    // sees a v38 it no longer has. Idempotent: a DB already at ≤37 (or a
+    // fresh one) skips the whole block.
+    let stamped: Option<i64> = sqlx::query("SELECT version FROM schema_version WHERE id = 1")
+        .fetch_optional(pool)
+        .await?
+        .and_then(|r| r.try_get::<i64, _>("version").ok());
+    if stamped == Some(38) {
+        let removed = sqlx::query(
+            "DELETE FROM bearer_keys WHERE token = '' OR token LIKE 'hashed:%'",
+        )
+        .execute(pool)
+        .await?
+        .rows_affected();
+        for col in ["token_hash", "token_prefix"] {
+            let exists: bool = sqlx::query(
+                "SELECT COUNT(*) FROM pragma_table_info('bearer_keys') WHERE name = ?",
+            )
+            .bind(col)
+            .fetch_one(pool)
+            .await?
+            .try_get::<i64, _>(0)?
+            != 0;
+            if exists {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "ALTER TABLE bearer_keys DROP COLUMN {col}"
+                )))
+                    .execute(pool)
+                    .await?;
+            }
+        }
+        set_version(pool, 37).await?;
+        log::info!(
+            "[db] repair_schema: rolled back v38 bearer-key hash residue (removed {removed} unusable row(s), version rewound to 37)"
+        );
+    }
     // v37 amendment: an intermediate build created capability_snapshots
     // without the fingerprint column and stamped schema_version=37 — the
     // version-gated migrate_v37 never re-enters on those DBs. Also cover the
@@ -2398,6 +2439,53 @@ mod tests {
     /// repair_schema 的目标场景：DB 已盖 37 戳但 capability_snapshots 缺
     /// fingerprint 列（中间构建）——repair 必须补列且可写入；表整体缺失时
     /// 也必须自愈建表而非启动失败。
+    /// repair_schema 的目标场景：DB 已盖 37 戳但 capability_snapshots 缺
+    /// fingerprint 列（中间构建）——repair 必须补列且可写入；表整体缺失时
+    /// 也必须自愈建表而非启动失败。
+    #[tokio::test]
+    async fn repair_schema_rolls_back_v38_bearer_hash_residue() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations");
+
+        // Simulate the reverted v38 state: hash columns + sentinel rows.
+        sqlx::query("ALTER TABLE bearer_keys ADD COLUMN token_hash TEXT").execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE bearer_keys ADD COLUMN token_prefix TEXT").execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, token_hash, token_prefix, enabled, access_type, allowed_groups, allowed_servers) \
+             VALUES ('h1', 'hashed', 'hashed:h1', 'deadbeef', 'mcph', 1, 'all', '[]', '[]')",
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) \
+             VALUES ('ok1', 'plain', 'mcphub_plain', 1, 'all', '[]', '[]')",
+        ).execute(&pool).await.unwrap();
+        set_version(&pool, 38).await.unwrap();
+
+        repair_schema(&pool).await.expect("repair must succeed");
+
+        let v: i64 = sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(v, 37, "version rewound to 37");
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('bearer_keys')")
+            .fetch_all(&pool).await.unwrap()
+            .into_iter().map(|r| r.get::<String, _>("name")).collect();
+        assert!(!cols.iter().any(|c| c == "token_hash" || c == "token_prefix"));
+        let remaining: Vec<String> = sqlx::query("SELECT id FROM bearer_keys")
+            .fetch_all(&pool).await.unwrap()
+            .into_iter().map(|r| r.get::<String, _>("id")).collect();
+        assert_eq!(remaining, vec!["ok1".to_string()], "only usable plaintext rows survive");
+
+        // Idempotent: re-run at 37 must be a no-op.
+        repair_schema(&pool).await.expect("re-repair idempotent");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM schema_version WHERE id = 1")
+                .fetch_one(&pool).await.unwrap(),
+            37
+        );
+    }
+
     #[tokio::test]
     async fn repair_schema_fixes_stamped_v37_without_fingerprint() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

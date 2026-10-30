@@ -59,6 +59,34 @@ pub async fn call_tool(
         }
     }
 
+    // #1399: unified tool access policy. The Tauri face has no bearer-key
+    // context (subject key_id = None): key-scoped rules never apply here,
+    // global rules do — same semantics as origin's keyless callers.
+    {
+        let policy = crate::services::tool_policy::get_tool_policy(None, None).await;
+        if policy.is_active() {
+            let decision = policy.authorize(&server_name, Some(&tool_name));
+            if decision.decision == "deny" {
+                let _ = log_service::write_activity(
+                    &server_name,
+                    &tool_name,
+                    Some(0),
+                    "error",
+                    Some(arguments.clone()),
+                    None,
+                    Some(&crate::services::tool_policy::audit_text(
+                        &decision,
+                        policy.server_id(&server_name),
+                        policy.group_id(),
+                    )),
+                    None,
+                )
+                .await;
+                return Err(format!("Tool not available: {tool_name}"));
+            }
+        }
+    }
+
     let start = std::time::Instant::now();
     // 600s dead-transport guard (mcp::time): the rmcp HTTP upstream has no
     // internal call timeout; without this the UI tool-call command pends

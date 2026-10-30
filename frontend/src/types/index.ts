@@ -668,6 +668,7 @@ export interface ProxychainsConfig {
 
 // Server config types
 export interface ServerConfig {
+  id?: string;
   type?: 'stdio' | 'sse' | 'streamable-http' | 'openapi' | 'builtin';
   description?: string;
   url?: string;
@@ -818,6 +819,7 @@ export interface Server {
 export interface IGroupServerConfig {
   name: string; // Server name
   alias?: string; // Optional exposed name for this server within the group
+  preserveToolNames?: boolean; // Expose upstream tool names without a server prefix
   tools?: string[] | 'all'; // Array of specific tool names to include, or 'all' for all tools (default: 'all')
   prompts?: string[] | 'all'; // Array of specific prompt names to include, or 'all' for all prompts (default: 'all')
   resources?: string[] | 'all'; // Array of specific resource URIs to include, or 'all' for all resources (default: 'all')
@@ -1364,4 +1366,21 @@ export interface SkillPage {
   total: number;
   page: number;
   pageSize: number;
+}
+
+// Tool access policy types (origin #1399)
+export interface ToolPolicyRule {
+  id: string;
+  effect: 'allow' | 'deny';
+  username?: string;
+  keyId?: string;
+  groupId?: string;
+  serverId?: string;
+  tool?: string;
+}
+
+export interface PolicyDecision {
+  decision: 'allow' | 'deny';
+  reason: string;
+  policyId?: string;
 }

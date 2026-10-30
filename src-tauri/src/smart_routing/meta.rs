@@ -362,6 +362,7 @@ pub async fn handle_search_tools(
     allowed: Option<Vec<String>>,
     group_gate: Option<&GroupToolGate>,
     pinned: Option<&std::collections::HashSet<(String, String)>>,
+    policy: Option<&crate::services::tool_policy::ToolPolicy>,
 ) -> Result<Value, String> {
     if query.is_empty() {
         return Err("Query parameter is required and must be a string".to_string());
@@ -376,7 +377,7 @@ pub async fn handle_search_tools(
     // candidates through the merge (merge_limit = 4x window): truncating to
     // the window before filtering could hide valid gated/pinned hits ranked
     // below the cut (the old over-fetch was exactly the final window size).
-    let filtered = group_gate.is_some() || pinned.is_some();
+    let filtered = group_gate.is_some() || pinned.is_some() || policy.is_some();
     let search_limit = if filtered {
         settings.max_results.max(1)
     } else {
@@ -471,6 +472,13 @@ pub async fn handle_search_tools(
             pinned
                 .map(|p| p.contains(&(r.server_name.clone(), r.tool_name.clone())))
                 .unwrap_or(true)
+        })
+        // #1399: unified tool access policy — a hit the subject is not
+        // allowed to call must not surface in search results either.
+        .filter(|r| {
+            policy.map_or(true, |p| {
+                p.authorize(&r.server_name, Some(&r.tool_name)).decision == "allow"
+            })
         })
         .map(|r| {
             let idx = hit_index;
@@ -766,6 +774,7 @@ pub async fn handle_describe_tool(
     allowed: Option<Vec<String>>,
     group_tools: Option<&GroupToolGate>,
     pinned: Option<&std::collections::HashSet<(String, String)>>,
+    policy: Option<&crate::services::tool_policy::ToolPolicy>,
 ) -> Result<Value, String> {
     if tool_name.is_empty() {
         return Err("toolName parameter is required and must be a string".to_string());
@@ -786,6 +795,16 @@ pub async fn handle_describe_tool(
                 return Ok(text_response(json!({
                     "error": format!("Tool '{tool_name}' is not available in this $smart scope"),
                     "metadata": {"message": "Only pinned tools are exposed on this scope. Use smart_route_search to discover available tools."}
+                })));
+            }
+        }
+        // #1399: unified tool access policy — describe must not hand out the
+        // schema of a tool the subject is denied (list/call parity).
+        if let Some(p) = policy {
+            if p.authorize(&server, Some(&orig)).decision == "deny" {
+                return Ok(text_response(json!({
+                    "error": format!("Tool not available: {tool_name}"),
+                    "metadata": {"message": "The tool is denied by the tool access policy. Use smart_route_search to discover available tools."}
                 })));
             }
         }
@@ -863,6 +882,7 @@ pub async fn handle_call_tool(
     allowed: Option<Vec<String>>,
     group_tools: Option<&GroupToolGate>,
     upstream_meta: Option<Value>,
+    policy: Option<&crate::services::tool_policy::ToolPolicy>,
 ) -> Result<Value, String> {
     if tool_name.is_empty() {
         return Err("toolName parameter is required".to_string());
@@ -874,6 +894,14 @@ pub async fn handle_call_tool(
         return Err(format!(
             "Tool '{orig}' is excluded by the group's tool filter"
         ));
+    }
+    // #1399: unified tool access policy — deny before any execution. The
+    // `[tool-policy]` sentinel lets the REST face classify the denial as 403
+    // and the MCP face surface it like the disabled gate.
+    if let Some(p) = policy {
+        if p.authorize(&server, Some(&orig)).decision == "deny" {
+            return Err(format!("[tool-policy] Tool not available: {tool_name}"));
+        }
     }
     // Enabled check (index may be stale after a post-index disable).
     // NOT fail-open: a filter-store read error must refuse the call, not
@@ -1056,6 +1084,7 @@ pub async fn builtin_meta_tools() -> Vec<crate::models::server::Tool> {
 pub async fn call_meta_tool_builtin(
     tool_name: &str,
     args: &serde_json::Value,
+    policy: Option<&crate::services::tool_policy::ToolPolicy>,
 ) -> anyhow::Result<crate::models::server::ToolCallResult> {
     use crate::models::server::ToolCallResult;
     if let Some(msg) = not_ready_message().await {
@@ -1070,16 +1099,16 @@ pub async fn call_meta_tool_builtin(
         "smart_route_search" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").cloned().unwrap_or(json!(10));
-            handle_search_tools(q, limit, None, None, None).await
+            handle_search_tools(q, limit, None, None, None, policy).await
         }
         "smart_route_describe" => {
             let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-            handle_describe_tool(tn, None, None, None).await
+            handle_describe_tool(tn, None, None, None, policy).await
         }
         "smart_route_call" => {
             let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
             let a = args.get("arguments").cloned().unwrap_or(json!({}));
-            handle_call_tool(tn, a, None, None, None).await
+            handle_call_tool(tn, a, None, None, None, policy).await
         }
         _ => Err(format!("Unknown meta tool: {tool_name}")),
     };

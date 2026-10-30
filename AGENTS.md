@@ -597,7 +597,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 4.4 最近同步基线
 
-> **版本号规则（2026-10-27 起）**：`2位年.月日.迭代号`（如 `26.1027.7`），**不再跟随 origin tag**。
+> **版本号规则（2026-10-27 起，2026-10-30 勘误年份段）**：`2位年.月日.迭代号`（如 `26.1030.1`，**26 = 2026 年**——2026-10-29~30 曾误用 29 段，已全部归位 26），**不再跟随 origin tag**。
 > - **迭代号**：同一天内每次发布/同步递增（7 → 8 → …）；跨天则年.月日更新、迭代号重置为 1。
 > - **semver 约束**：Cargo/Tauri 拒绝前导零——迭代号写 `7` 而非 `007`（实测 `invalid leading zero in patch version number`）。
 > - **同步时**：每次基线同步收口即递增迭代号并更新四源 + 双 lockfile + `Cargo.lock`；changelog 文件名用新版本号（`doc/upgrade/{版本}.md`，CI 取为 latest.json notes）。
@@ -605,12 +605,94 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `08740a1`（origin/main，= v1.1.10 后 5 commit） |
-| **对应 origin tag** | `v1.1.10`（后 5 commit，未发布新 tag） |
-| **桌面端版本号** | `26.1027.7`（**新规则 2026-10-27**：`2位年.月日.迭代号`；Cargo semver 拒绝前导零，迭代号写 7 而非 007；changelog 已合并 1.1.5001~5007 为 `doc/upgrade/26.1027.7.md`） |
-| **同步执行日期** | 2026-10-25/26（fd1abaa 后 18 commit 同步 + 两日复核） |
+| **当前已同步到 origin commit** | `4378e08`（origin/main，= v1.1.10 后 19 commit；#1387/#1396/#1393/#1394/#1398/#1405 经用户裁定不镜像） |
+| **对应 origin tag** | `v1.1.10`（后 19 commit，未发布新 tag） |
+| **桌面端版本号** | `26.1030.1`（**新规则 2026-10-27**：`2位年.月日.迭代号`（26=2026 年），跨天重置迭代号；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → **`doc/upgrade/26.1030.1.md`**） |
+| **同步执行日期** | 2026-10-29（4bd0474 后 2 commit 同步） |
 
-> 下次同步以 `08740a1` 为基线起点（`git log --oneline 08740a1..HEAD`）。
+> 下次同步以 `4378e08` 为基线起点（`git log --oneline 4378e08..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405 已裁定不镜像，勿重复评估）。
+
+#### 2026-10-30（桌面功能）：模型下载支持 Git 仓库源（版本 26.1030.1，非 origin 同步）
+
+- **需求**（用户）：`downloadUrls` 支持 git 地址 `https://<host>/<repo>.git?useGit=true&branch=xxxx`——`useGit=true` query 是唯一判定（http 直链可能自带 query/以 .git 结尾，无法靠形态区分）；`branch` 指定分支（percent-decode）；仓库工作树根放 `model.gguf`；下载要支持进度展示。
+- **实现**（`src/mv/models.rs` + `src/rag/git.rs`）：
+  - `parse_git_source`：query 解析 `useGit`（true/1）/`branch`（percent-decode），剥离整个 query 得 repo_url（gix 不接受 query）；无 `useGit=true` 一律按 HTTP 直链。
+  - `download_from_git`：per-attempt 唯一临时目录浅克隆（depth=1，复用 `rag::git::clone_blocking`）→ 工作树根 `model.gguf` 分块复制进共享 `.downloadtemp` 槽 → 复用既有 rename 发布；`CloneDirCleanup` Drop 兜底清理（成功/失败/取消）。
+  - **进度**：clone 阶段 spawn 进度泵（200ms 轮询 `CloneByteCounters` → downloaded/speed，total 未知 percent=0）；复制阶段真实文件大小 → percent/eta 正常推进；前端进度条零改动。
+  - **取消/超时**：`clone_blocking` 新增 `interrupt: &AtomicBool` 参数（gix fetch/checkout 两处轮询，协作式取消）——既有调用点传恒 false；下载取消标志置 interrupt + 3600s 超时后同样置位。
+  - **失败回退**：git 源失败 `continue 'sources` 走下一源（与 HTTP 源一致）。
+  - **LFS 内置支持（2026-10-30 补，用户指出「用户电脑不可能安装 git-lfs」）**：gix **无内置 LFS**（纯 Rust git 实现，无 smudge filter；此前 live 测试通过系本机装了 git-lfs，gix 调外部 git-lfs）→ 检测到指针文件（<1KB 且 `version https://git-lfs` 开头）后**自己解析 oid/size，调 LFS batch API**（`{repo}.git/info/lfs/objects/batch`，公开仓库免认证）拿真实下载地址，reqwest 流式下载（复用进度/取消链路，`on_progress` 回调注入共享状态）。`parse_lfs_pointer`/`lfs_batch_url`/`download_lfs_object`（进度回调参数化，测试传 no-op）+ 4 单测；live 测试改验证内置 LFS 路径（`#[ignore]`）。私有仓库 LFS 需认证暂不支持（回退下一源）。
+  - **三平台真机测试（2026-10-30，用户指定 atomgit/gitee F2LLM_v2_160M 分支）**：①**修复 [M] Content-Type**——LFS 规范要求 `application/vnd.git-lfs+json`，atomgit 对 application/json 直接 406（GitHub 宽容两种）→ 补显式头；②**修复 [M] error-first 解析**——atomgit 返回「href 空 + objects[0].error」形态，原实现先取 href 得空串 → 改先查 objects[0].error（code+message）再取非空 href；③**atomgit**：batch API 可达但对象 404（"The requested resource is not available"）——**官方 git-lfs 同样 404**（LFS 对象推送时未上传到 atomgit，非代码问题）→ 优雅报错回退下一源；④**gitee**：batch API 403 付费墙（"LFS only supported repository in paid or trial enterprise"）→ 优雅报错回退；⑤**GitHub 正向对照**：同 oid（76ac98a4…，175MB F2LLM_v2_160M）batch API 返回预签名 href 可下载——同一仓库三平台，只有 GitHub 的 LFS 对象真实存在。**结论：git 源 + 内置 LFS 在 GitHub 全链路可用；atomgit/gitee 失败系平台侧对象缺失/付费墙，代码行为正确（明确报错 + 回退）**。
+  - **ModelScope 支持（2026-10-30 补，用户要求支持指定文件下载）**：`downloadUrls` 支持 `https://modelscope.cn/models/{org}/{model}?useModelScope=true&file=<必填，支持子目录 percent-encode>&revision=<可选默认 master>&token=<可选，私有仓库>`——解析为单文件直链 `resolve/{revision}/{file}` 复用既有 HTTP 下载路径（进度/取消/回退全复用）；**file 必填**（缺省报错回退，绝不下载整个仓库）。调研结论：无可用 Rust crate（crates.io modelscope 0.1.5 仅 435 下载、薄封装、无进度/取消/回退能力）→ 手写。**真机验证（用户私有仓库 skrstop4086824/MCPHub-Desktop-Embedding）**：①匿名 404（私有仓库）→ `token` query 参数以 `Authorization: Bearer` 发初始 resolve 请求（302 后 CDN URL 自带时效 auth_key 签名，无需再认证）；②**修复 [M] CDN UA 黑名单**——reqwest 默认 UA 被阿里 CDN 拒（`denied by UA ACL = blacklist`，官方 Python SDK 同样因此发 Chrome UA）→ `MODELSCOPE_UA` 常量（Chrome UA）仅对 modelscope 源附加；③**修复 [M] total 回退**——modelscope HEAD 无 Content-Length → GET 响应（重定向后）content_length 兜底（惠及所有 HTTP 源）；④live 测试全链路通过（91MB F2LLM-v2-80M.gguf，4.5s，字节校验 + GGUF 魔数断言）。**安全注意**：token 明文写在 deploy.json（随应用分发），仅用于用户自有私有仓库场景。
+- **真机验证**：live 测试（`#[ignore]`，gitee→GitHub）——gitee 免费版 **LFS batch API 报付费错误**（"LFS only supported repository in paid or trial enterprise"，model.gguf 119MB 超 gitee 非 LFS 单文件限制才被迫 LFS）；**GitHub 同内容分支全链路通过**（gix + git-lfs smudge 拉到真实 113MiB GGUF，1248s，字节计数推进、model.gguf 在根、>1MB 断言过）。deploy.json `bekko/v1-a8m` 追加 `git` 源（指向 GitHub 分支）作演示，默认源保持原直链。
+- **deploy.json 全量接入 ModelScope 源（2026-10-30，用户要求放第一位）**：全部 5 个 size 目录（F2LLM/v2-160M、F2LLM/v2-80M、bekko/v1-a25m、bekko/v1-a8m、granite/97m-r2）的 `downloadUrls` 首位插入 `modelscope` 源（指向用户私有仓库 skrstop4086824/MCPHub-Desktop-Embedding 的对应 gguf 文件 + token），5 个 URL 全部实测 302 可下载；原 github/huggingface/hf-mirror 源保持为回退。**末位追加 `atomgit-git` 源**（`https://atomgit.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=embedding-{模型名}`，分支名与模型一一对应）——当前 atomgit 侧 LFS 对象未上传（`lfs_objects_size: 0`），该源在用户补传 `git lfs push` 前会失败并回退，补传后自动可用。
+- **测试**：+14 单测（useGit=true/1、branch decode、无 useGit 各形态不算 git、无 branch 用默认、query 剥离、LFS 指针解析/拒绝/坏 oid、batch URL 形态、modelscope 解析/revision+编码 file/token/负形态）+ 2 live（ignored：内置 LFS 全链路 + modelscope 私有仓库 token 全链路）；cargo test --lib **319 passed**；cargo check 0 错 0 警。
+- **影响功能点与结果**：模型下载新增 Git 仓库源形态（useGit=true 判定 + branch 分支 + 进度/取消/回退/LFS 防御）。**用户需重启生效**；使用 git 源需本机 git-lfs（LFS 仓库）。
+
+#### 2026-10-29（第十六轮）：`4bd0474` -> `4378e08`（2 commit，版本 26.1029.2 → 26.1029.3 + 复核 + 修复 1M）
+
+- `9da0089` #1406 **分组改名保留密钥组 scope：确认桌面已有等价实现，无需镜像**——桌面 R19 轮已落 `cascade_bearer_groups_rename_tx`（rename 事务内改写 bearer_keys.allowed_groups 旧组名）；origin 额外的 `assertGroupNameAvailable`（组名≠其他组 ID）系 origin key 按名或 ID 双匹配语义所致，桌面 key 只按名匹配、无此攻击面。
+- `4378e08` #1399 **统一 MCP 工具访问策略（完整镜像，用户裁定「会用多个密钥并需要限制能力」）**：
+  - **语义**：规则 `{id, effect: allow|deny, username?, keyId?, groupId?, serverId?, tool?}`；deny 优先（matching-deny）；存在 applicable allow 时未匹配即 deny（no-matching-allow 白名单语义）；potential 模式（列表过滤）tool-scoped deny 不 fire、tool-scoped allow 匹配 tool 未设 target。subject 过滤在先（username/keyId 不适用的规则整体跳过）。
+  - **Rust**：新 `services/tool_policy.rs`（888 行，validate/evaluate/find_missing/get_tool_policy/audit_text/warn_missing_tool_policy_references + 15 单测）；接线全执行面——bridge aggregate_tools 三处（服务器级 potential + 每工具 filter_tools + $smart pinned）、execute_tool_call deny → invalid_params("Tool not available")、$smart meta 三工具（search 过滤/describe/call 门控 `[tool-policy]` 哨兵）、REST 4 面 deny → 403、Tauri call_tool（key_id=None）、smart_routing search 候选过滤；update_system_config 校验 toolPolicies；启动诊断挂 lib.rs。**无 DB 迁移**（toolPolicies 走 system_config JSON 深合并）。
+  - **前端**：`utils/toolPolicy.ts`（纯函数）+ `ToolPolicyPanel.tsx`（314 行）+ SettingsContext（toolPolicies state + updateToolPolicies）+ SettingsPage 挂载（isAdmin，桌面可见无 !isTauri 门控）+ ConfirmDialog 补 confirmDisabled prop + locales `settings.toolPolicies.*` 27 键 ×6。
+  - **桌面差异**：①username 选择器保留但恒不匹配（单用户）；②读失败 fail-closed（get_strict Err → 恒 deny + warn，origin 抛异常）；③REST deny 403（origin 经共享 handler 500）；④活动日志 policy 决策写 error_message JSON（origin 独立列，桌面禁新增迁移）；⑤$smart pinned 工具也做 per-tool 过滤（桌面 list/call parity 惯例）。
+- **复核修复 1 项**：①[M] Tauri call_tool 经 `smart_route_call` meta 中转绕过 serverId/tool 作用域 deny——pool builtin 分支 `call_meta_tool_builtin` 传 policy=None，meta lane 内部解析真实服务器后不做检查 → `call_meta_tool_builtin` 加 policy 参数透传三 handle_*，pool 构建 `get_tool_policy(None, None)` 传入（全局规则对 Tauri meta lane 生效）。
+- **伪影事故（第 6 次）**：前端代理把终端脱敏字面量 `****** ID` 写进 locales en/zh/tr 的 keyId 键——base64/codepoint 字节级定谳 origin 真实文本（en "Bearer key ID"/zh "Bearer 密钥 ID"/tr "Bearer anahtar kimliği"）后修复；6 语言 toolPolicies 段与 origin 全量 base64 对比 0 mismatch。**教训升级：代理写 locales 前必须对含敏感词（Bearer/key/token）的值做 base64 核验，脱敏是间歇性显示层行为（同一值两次读取结果不同）。**
+- **验证**：cargo check 0 错 0 警；cargo test --lib **305 passed**（+15）；tsc 0 错；npm build ✓；locales ×6 JSON 校验 + origin 对比 0 mismatch；**E2E spot 325/325 全绿**（full_regress 41 + matrix_v2 152 + pin_matrix 31 + carpet 101）+ **功能探针 ALL PASS**（deny-all 全局规则真机验证：tools/list 过滤为 0、MCP 调用 -32602 "Tool not available"、REST 403、还原后恢复——DB 直写配置模式，测毕还原干净）。
+- **影响功能点与结果**：设置页新增工具访问策略面板（按密钥限制可调用的服务器/分组/工具，deny 优先 + allow 白名单）；全接入面生效。**用户需重启生效**。
+
+#### 2026-10-29（第十五轮）：`267cdb9` -> `4bd0474`（2 commit，版本 26.1029.1 → 26.1029.2）
+
+- `4bd0474` #1405 **resolvedLanguage 传递给 SponsorDialog：评估未镜像**——桌面 SponsorDialog 组件未引用（grep 零命中）、UserProfileMenu 无 sponsor 入口（桌面已移除 sponsor/wechat/discord），无落点。
+- `ef88f66` #1404 **i18n 语言检测顺序修复（镜像）**：`frontend/src/i18n.ts` detection order 调整为 `['localStorage', 'cookie', 'navigator', 'htmlTag']`（navigator 提到 htmlTag 前）——修复浏览器 locale 优先于静态 html lang 的检测顺序，用户系统语言设置不再被 html 标签覆盖。
+- **验证**：cargo check 0 错 0 警（Cargo.lock 再生 26.1029.2）；tsc 0 错；npm build ✓；契约 0 mismatch；cargo test --lib 290 passed（#1404 前基线，纯前端改动）；E2E spot 确认无回归（i18n 检测顺序不在 E2E 覆盖面）。
+- **影响功能点与结果**：界面语言检测顺序修正——无 localStorage/cookie 记录时优先用浏览器语言而非 html lang 静态值。**用户需重启生效**。
+
+#### 2026-10-29（第十四轮）：子模块重指 main + `e457e5a` -> `267cdb9`（3 commit，版本 26.1029.1 + 76 套 E2E 全绿）
+
+- **子模块指针修正**：上轮同步 checkout origin/main 导致 detached HEAD → 重新 `git checkout main` + ff（SOP 分支模式恢复）。
+- **镜像**：
+  - `267cdb9` #1401 **密钥编辑器操作可访问性（完整镜像）**：BearerKeyRow 编辑表单改兄弟行渲染（修复编辑时操作按钮消失）+ 编辑按钮 toggle 化（Edit/X + aria-expanded）+ disabled 补 saving + Pagination/CursorPagination/Badge 尺寸统一（Badge/CursorPagination 与 origin 逐字节一致；Pagination 保留桌面响应式不换行设计，未采纳 origin flex-wrap）；跳过 onReset hunk（#1396 未镜像）。
+  - `e79c0fe` #1400 **导入容错 UTF-8 BOM（镜像）**：`import_from_json` strip `\u{feff}` 前缀（serde_json 原生拒绝 BOM）。
+  - `6c1fd7e` #1398 **评估未镜像**：嵌入编码运行时协商（桌面自研 GGUF 嵌入栈，无对应链路）。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **290 passed**；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**。
+- **影响功能点与结果**：编辑 API 密钥时不再丢失操作按钮；分页/徽章视觉统一；导入 BOM 文件不再失败。**用户需重启生效**。
+
+#### 2026-10-28（第十三轮·已回退）：bearer 哈希镜像全程撤销（用户裁定「按现有明文处理」）
+
+- **过程**：镜像 #1387（SHA-256 哈希存储，migration v38）+ #1396（重置密钥）→ 复核修复 4 项（含真机 v38 UNIQUE 崩溃）→ **用户裁定不需要，全程回退**。
+- **回退**：bearer 相关 10 文件恢复 HEAD 明文形态（models/service/commands/lib/migration v38 删除/0038.sql 删除/SettingsPage/mcpConfig/tauriClient/ResetBearerKeyDialog 删除/locales 4 键 ×6 删除）；#1392 等非 bearer 改动完整保留。
+- **DB 修复**：`repair_schema` 新增 v38 残留清理（38 戳 → 删不可用行（token='' 或 'hashed:%'）→ DROP token_hash/token_prefix 列 → 版本回写 37），幂等 + 单测；**真机已验证**（版本 37、列已删）。
+- **⚠️ 用户须知**：已被哈希的存量密钥明文不可恢复，**需在设置页重新创建 bearer key**。
+- **E2E 治理保留**：6 个 bearer 套件改自插明文行模式（不再依赖存量行明文，对两种存储形态都稳健）。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **290 passed**；tsc 0 错；build ✓；契约 0 mismatch；**76 套 E2E 全绿**；版本回退 26.1027.8（.9 无内容，changelog 已删）。
+- **教训**：镜像安全类改动前先确认需求成立（本轮完整实现+复核+真机崩溃修复后才发现不需要）；UNIQUE 列批量清值必须用行唯一哨兵；「清偿存量债」类改动需用户确认再动。
+
+#### 2026-10-28（第十三轮）：`edc885d` -> `e457e5a`（4 commit，版本 26.1027.8 → 26.1027.9 + 复核波 + 76 套 E2E 全绿）
+
+- **镜像（1 代理实现 + 2 代理复核 + 亲核修复 4 项 + 真机迁移崩溃修复）**：
+  - `6bc940c` #1387 **Bearer Key SHA-256 哈希存储（完整镜像，清偿存量债）**：`hash_bearer_token`/`bearer_token_prefix`（min(12,len/3)）/`mask_bearer_key` 纯函数 + `BearerKey.token_hash/token_prefix`（永不序列化）+ 存储读写切哈希 + `find_by_token` 常数时间比较（未迁移明文行兜底接受）+ create 一次性明文 + list 全脱敏 + **migration v38**（加列 + 存量明文哈希 + 清 routing.bearerAuthKey 遗留）+ fresh-DB 单测；
+  - `5e2e497` #1396 **重置密钥保留权限（完整镜像）**：`reset_bearer_key` 命令（require_admin，保留 name/enabled/access_type/allowed_*，旧 token 立即失效）+ ResetBearerKeyDialog（一次性展示+复制）+ SettingsPage 接线 + 创建后一次性 token 横幅（替代原行内明文复制）+ tauriClient 映射 + locales ×6；
+  - `797101a` #1393 / `e457e5a` #1394 **评估未镜像**：per-user 凭证绑定体系（桌面无该体系，历史裁定 #1368/#1318 同族）。
+- **复核修复 4 项**：
+  - ①[H] **复制 MCP 配置嵌入脱敏假 token**——`mcpConfig.ts` 单密钥分支把列表返回的 masked token 当真实凭据嵌入（用户粘贴必 401）→ 对齐 origin：一律 `<your-bearer-token>` 占位符 + `mcpConfigUsesTokenPlaceholder` 简化（auth 开启即 true）；
+  - ②[L] create/reset 响应泄漏 `token_hash/token_prefix`（违反「永不序列化」注释 + origin sanitizeKey parity）→ 响应构造置 None；
+  - ③[L] token 熵 122-bit（uuid）与 origin 256-bit 不一致且注释错误 → `rand::random::<[u8;32]>()` hex（注释钉死熵假设与哈希无盐论证的依赖关系）；
+  - ④[H·真机] **v38 迁移崩溃**——`bearer_keys.token` 有 UNIQUE 约束（早期 schema），多行存量明文清空 `''` 撞 UNIQUE（`UNIQUE constraint failed: bearer_keys.token`，应用启动失败）→ 每行写唯一哨兵 `hashed:{id}`（find_by_token 明文兜底仅在 token_hash 空时触发，哨兵不可匹配）+ reset 路径同步修 + 多行回归单测。**教训：清列值前必须查该列约束——UNIQUE 列不能批量清成同一值；fresh-DB 单测只有单行没抓到**。
+- **E2E 套件治理**：6 个套件直读 `bearer_keys.token` 存量明文被 v38 清空击穿（4 硬失败 + 2 静默覆盖丢失）→ 全部改自插明文行模式（carpet_r200 范式，依赖已单测覆盖的明文兜底路径）。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **297 passed**（+8）；tsc 0 错；npm build ✓；契约 0 mismatch；**真机 v38 迁移成功**（版本 38、存量行哈希+哨兵、应用正常启动）；**76 套 E2E 全绿零失败**。
+- **影响功能点与结果**：API 密钥不再明文落库（安全清偿）；支持不丢权限重置密钥；复制 MCP 配置改用占位符。**用户需重启生效**（首次启动自动迁移，已验证）。
+
+#### 2026-10-27（第十二轮）：`08740a1` -> `edc885d`（3 commit，版本 26.1027.7 → 26.1027.8 + 复核波 + 76 套 E2E 全绿）
+
+- **镜像（2 代理并行实现 + 4 代理复核 + 亲核修复 2 项）**：
+  - `edc885d` #1391 **分组保留原始工具名（完整镜像）**：`GroupServerConfig.preserve_tool_names`（serde camelCase 透传，无新列）+ rmcp_bridge `assert_valid_group_tool_names`（重复名/meta 冲突拒绝，origin 同款文案）+ aggregate_tools preserve 成员暴露裸名 + tools/list 尾部全目录校验（-32603）+ resolve_target preserve 前置解析（裸名精确匹配，尊重 selection 白名单）+ ServerToolConfig 复选框（取消勾选删键，wire 干净）+ types + locales ×6（origin 原文）。**复核修复**：①[M] 前置 pass 假歧义——hit 计数未过滤禁用/隐藏工具，A 成员禁用的重名导致 B 成员已广告的工具不可调 → hit 口径对齐 aggregate_tools（apply_tool_filters + enabled）；②[L] call 面歧义拒绝折叠成通用 not-found（origin 有具体原因）——记录不修（fail-closed 语义正确，排障信息损失）。
+  - `cadd686` #1392 **数值参数完整解析（镜像）**：`convert_numeric_param`（严格十进制 matcher 拒 inf/NaN/hex/前缀截断；integer 分数保留字符串；`1e3`→1000）替换 http_server coerce 两行 parse。**复核修复**：[M] i64 上界饱和——`i64::MAX as f64` 舍入为 2^63，`"9223372036854775808"` 经 `as i64` 静默偏差 1 → 改开区间 `< 2^63`（origin 同样转发 float，parity 修正）。
+  - `734ae30` #1390 **上游 OAuth 显式 metadata（透明存储）**：`ServerOauthConfig.authorization_server_metadata: Option<Value>`（serde round-trip，导入 raw Value 透传/导出整结构体序列化自动覆盖）；桌面运行时走静态端点模式（rmcp AuthorizationManager 自发现），无消费方——注释钉死。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **289 passed**（+4：group_tool_names 3 + convert_numeric 1 含 2^63 边界）；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**（preserve 默认关闭路径零击穿，断言审计确认）。
+- **记录**：①preserveToolNames 无 E2E 覆盖（组内重名歧义需两台同名工具服务器，单测覆盖校验函数；覆盖缺口记录）；②桌面 meta 工具名 `smart_route_*` 与 origin `search_tools` 不同，冲突校验按桌面 is_meta_tool 判定；③origin withModernLists requestedName 豁免分支不镜像（桌面无该机制）。
+- **影响功能点与结果**：分组可按成员保留原始工具名（免前缀暴露）；REST/OpenAPI 数值参数不再截断；stdio 下载进度条恢复正常。**用户需重启生效**。
 
 #### 2026-10-25（第六轮）：`fd1abaa` -> `8d8debf`（14 commit + 复核两波 + 76 套 E2E 全绿）
 
@@ -1038,6 +1120,6 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.1027.7**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.1030.1**。
 
 **规则（2026-10-27 起，详见 §4.4）**：`2位年.月日.迭代号`，不跟随 origin tag；同日多次发布迭代号递增，跨天重置为 1；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。

@@ -9,6 +9,7 @@ interface ConfirmDialogProps {
   message: string;
   confirmText?: string;
   cancelText?: string;
+  confirmDisabled?: boolean;
   variant?: 'danger' | 'warning' | 'info';
 }
 
@@ -20,6 +21,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   message,
   confirmText,
   cancelText,
+  confirmDisabled = false,
   variant = 'warning'
 }) => {
   const { t } = useTranslation();
@@ -129,6 +131,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             <button
               onClick={onConfirm}
               className={confirmBtnClass}
+              disabled={confirmDisabled}
             >
               {confirmText || t('common.confirm')}
             </button>

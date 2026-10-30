@@ -64,6 +64,11 @@ pub async fn update_system_config(session: State<'_, SessionState>, config: serd
     // Admin-gated: without this gate any caller could write routing.skipAuth
     // (disabling authentication) or permissions — a privilege escalation.
     require_admin(&session).await?;
+    // #1399: validate toolPolicies before persisting (origin serverController
+    // updateSystemConfig — invalid rules answer 400 with the message).
+    if let Some(tp) = config.get("toolPolicies") {
+        crate::services::tool_policy::validate_tool_policies(tp)?;
+    }
     // Capture the PREVIOUS smartRouting.enabled so a false→true transition can
     // pull the model + index up immediately (otherwise the user must restart
     // the app before Smart Routing works — the UI switch implies live effect).

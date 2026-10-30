@@ -423,7 +423,14 @@ pub(crate) struct CloneByteCounters {
 }
 
 impl CloneByteCounters {
-    fn snapshot(&self) -> (u64, u64) {
+    pub(crate) fn new() -> Self {
+        Self {
+            received: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            total: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> (u64, u64) {
         (
             self.received
                 .load(std::sync::atomic::Ordering::Relaxed) as u64,
@@ -599,6 +606,8 @@ async fn emit_clone_progress(
 
 /// Shallow-clone `url` into `dest` (depth, branch optional) and return the
 /// checked-out HEAD commit sha. Blocking — must run inside spawn_blocking.
+/// `interrupt` is polled by gix between fetch/checkout steps (cooperative
+/// cancellation — a stalled connection still blocks until the next poll).
 pub(crate) fn clone_blocking(
     url: &str,
     dest: &Path,
@@ -606,6 +615,7 @@ pub(crate) fn clone_blocking(
     depth: u32,
     ssh_password: Option<&str>,
     counters: std::sync::Arc<CloneByteCounters>,
+    interrupt: &std::sync::atomic::AtomicBool,
 ) -> Result<String> {
     let depth = depth.clamp(1, 100);
     // The dest must not exist for gix clone (it creates it).
@@ -663,13 +673,10 @@ pub(crate) fn clone_blocking(
     ));
     // Fetch + checkout the main worktree (fetch_only alone leaves the tree empty).
     let (mut prep_checkout, _outcome) = prep
-        .fetch_then_checkout(
-            CloneProgress::new(counters),
-            &std::sync::atomic::AtomicBool::new(false),
-        )
+        .fetch_then_checkout(CloneProgress::new(counters), interrupt)
         .map_err(|e| anyhow!("fetch: {}", scrub_credentials(&format!("{e:#}"))))?;
     let (repo, _checkout) = prep_checkout
-        .main_worktree(gix::progress::Discard, &std::sync::atomic::AtomicBool::new(false))
+        .main_worktree(gix::progress::Discard, interrupt)
         .map_err(|e| anyhow!("checkout: {}", scrub_credentials(&e.to_string())))?;
     let head = repo
         .head_commit()
@@ -818,7 +825,15 @@ async fn clone_async(
     let branch = branch.map(|s| s.to_string());
     let ssh_password = ssh_password.map(|s| s.to_string());
     let fut = tauri::async_runtime::spawn_blocking(move || {
-        clone_blocking(&url, &dest, branch.as_deref(), depth, ssh_password.as_deref(), counters)
+        clone_blocking(
+            &url,
+            &dest,
+            branch.as_deref(),
+            depth,
+            ssh_password.as_deref(),
+            counters,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(CLONE_TIMEOUT_SECS),

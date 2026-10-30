@@ -8,6 +8,10 @@ pub struct GroupServerConfig {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// Expose this member's tools on the group route without the
+    /// `{server}{sep}` prefix (origin #1391 parity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_tool_names: Option<bool>,
     #[serde(default = "default_all")]
     pub tools: JsonValue,  // "all" or ["tool1", "tool2"]
     #[serde(default = "default_all")]

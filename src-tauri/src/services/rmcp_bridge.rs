@@ -341,6 +341,25 @@ impl HubBridge {
         filters
     }
 
+    /// #1399: servers whose potential tool access the policy denies are
+    /// excluded from every listing face (origin withToolPolicy candidate
+    /// filtering — `authorize(name, undefined, potential=true)`).
+    async fn policy_visible_filters(
+        &self,
+        scope: &str,
+        bearer: Option<&crate::models::bearer_key::BearerKey>,
+        policy: &crate::services::tool_policy::ToolPolicy,
+    ) -> Vec<ServerFilter> {
+        let filters = self.scope_filters(scope, bearer).await;
+        if !policy.is_active() {
+            return filters;
+        }
+        filters
+            .into_iter()
+            .filter(|sf| policy.authorize_potential(&sf.name, None, true).decision == "allow")
+            .collect()
+    }
+
     /// Per-member pinned tool names for a `$smart/{group}` scope (origin
     /// `getPinnedSmartRoutingTools` selection rules at the name level): each
     /// member's `pinnedTools`, narrowed to its tools selection ("all" / absent
@@ -519,6 +538,7 @@ impl HubBridge {
         scope: &str,
         bearer: Option<&crate::models::bearer_key::BearerKey>,
         strip_2024: bool,
+        policy: &crate::services::tool_policy::ToolPolicy,
     ) -> Result<Vec<rmcp::model::Tool>, ErrorData> {
         // $smart scopes expose the meta tools plus — on group scopes only —
         // each member's pinned tools (origin parity). The root $smart scope
@@ -547,7 +567,7 @@ impl HubBridge {
             let mut tools = to_rmcp_tools(&meta)?;
             let scope_clean = scope.trim_start_matches('/').trim();
             if scope_clean.starts_with("$smart/") {
-                let server_filters = self.scope_filters(scope, bearer).await;
+                let server_filters = self.policy_visible_filters(scope, bearer, policy).await;
                 let name_sep = name_separator().await;
                 let use_prefix = server_filters.len() > 1;
                 let member_pins: std::collections::HashMap<String, Vec<String>> =
@@ -598,6 +618,13 @@ impl HubBridge {
                                 continue;
                             }
                         }
+                        // #1399: a policy-denied tool must not surface as a
+                        // pin either (list/call parity).
+                        if policy.is_active()
+                            && policy.authorize(&sf.name, Some(&t.name)).decision != "allow"
+                        {
+                            continue;
+                        }
                         // A pin named like a meta tool would be intercepted by
                         // it on call — never list it (origin parity).
                         if crate::smart_routing::meta::is_meta_tool(&t.name) {
@@ -631,7 +658,7 @@ impl HubBridge {
                 // Root smart scope with server-level pins: the desktop-only
                 // "server smart" surface — meta tools plus every visible
                 // server's own pinned tools (origin only pins at group level).
-                let server_filters = self.scope_filters(scope, bearer).await;
+                let server_filters = self.policy_visible_filters(scope, bearer, policy).await;
                 let name_sep = name_separator().await;
                 let use_prefix = server_filters.len() > 1;
                 for sf in &server_filters {
@@ -664,6 +691,13 @@ impl HubBridge {
                                 continue;
                             }
                         }
+                        // #1399: a policy-denied tool must not surface as a
+                        // pin either (list/call parity).
+                        if policy.is_active()
+                            && policy.authorize(&sf.name, Some(&t.name)).decision != "allow"
+                        {
+                            continue;
+                        }
                         if crate::smart_routing::meta::is_meta_tool(&t.name) {
                             continue;
                         }
@@ -695,7 +729,7 @@ impl HubBridge {
             return Ok(tools);
         }
 
-        let server_filters = self.scope_filters(scope, bearer).await;
+        let server_filters = self.policy_visible_filters(scope, bearer, policy).await;
         let name_sep = name_separator().await;
         let use_prefix = server_filters.len() > 1;
         let mut tools: Vec<Value> = Vec::new();
@@ -733,7 +767,18 @@ impl HubBridge {
                         continue;
                     }
                 }
-                let exposed_name = if use_prefix {
+                // #1399: unified tool access policy — per-tool filter
+                // (origin filterToolsByGroup → policy.filterTools).
+                if policy.is_active()
+                    && policy.authorize(&sf.name, Some(&t.name)).decision != "allow"
+                {
+                    continue;
+                }
+                let exposed_name = if sf.preserve_tool_names {
+                    // Origin #1391: preserve members expose the raw upstream
+                    // tool name, even in multi-server groups.
+                    t.name.clone()
+                } else if use_prefix {
                     format!("{}{}{}", sf.name, name_sep, t.name)
                 } else {
                     t.name.clone()
@@ -752,6 +797,18 @@ impl HubBridge {
                     }
                 }
                 tools.push(entry);
+            }
+        }
+        // Origin #1391: validate the full catalog before answering tools/list
+        // (uniqueness + no meta-tool collision) whenever any member preserves
+        // original names. Failure surfaces as a -32603 protocol error.
+        if server_filters.iter().any(|sf| sf.preserve_tool_names) {
+            let names: Vec<&str> = tools
+                .iter()
+                .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+                .collect();
+            if let Err(msg) = assert_valid_group_tool_names(&names) {
+                return Err(ErrorData::new(ErrorCode::INTERNAL_ERROR, msg, None));
             }
         }
         to_rmcp_tools(&tools)
@@ -776,6 +833,51 @@ impl HubBridge {
             } else {
                 pool::list_tools_for(&sf.name).await.ok()
             }
+        }
+
+        // Origin #1391: members with `preserveToolNames` are called by their
+        // raw upstream tool name. Resolve those first — a bare name matching
+        // more than one preserve member (or a Smart Routing meta tool name)
+        // is ambiguous and refused, mirroring the tools/list validation even
+        // when the client skips tools/list.
+        if server_filters.iter().any(|sf| sf.preserve_tool_names) {
+            if crate::smart_routing::meta::is_meta_tool(tool_name) {
+                return None;
+            }
+            let mut hits: Vec<(String, String)> = Vec::new();
+            for sf in server_filters.iter().filter(|sf| sf.preserve_tool_names) {
+                if let Some(ref allowed_tools) = sf.tools {
+                    if !allowed_tools.contains(&tool_name.to_string()) {
+                        continue;
+                    }
+                }
+                if let Some(ts) = tools_for(sf).await {
+                    // Same visibility口径 as aggregate_tools: disabled tools
+                    // and hidden/filtered params must not count toward the
+                    // ambiguity decision, otherwise a disabled duplicate on
+                    // member A makes the advertised (enabled) tool on member
+                    // B uncallable.
+                    let visible = crate::services::server_tool_config_service::apply_tool_filters(
+                        &sf.name, ts,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!("[{}] apply_tool_filters failed: {}", sf.name, e);
+                        Vec::new()
+                    });
+                    if visible.iter().any(|t| t.enabled && t.name == tool_name) {
+                        hits.push((sf.name.clone(), tool_name.to_string()));
+                    }
+                }
+            }
+            if hits.len() > 1 {
+                return None;
+            }
+            if let Some(hit) = hits.pop() {
+                return Some(hit);
+            }
+            // No preserve-member match: fall through to the legacy
+            // prefix-strip / bare-name resolution below.
         }
 
         if use_prefix {
@@ -818,6 +920,27 @@ impl HubBridge {
         }
         None
     }
+}
+
+/// Origin #1391 parity: when any group member sets `preserveToolNames`, the
+/// full exposed catalog must be unambiguous — no duplicate names and no
+/// collision with the Smart Routing meta tools (a raw tool named like a meta
+/// tool would be shadowed on the `$smart/{group}` endpoint).
+pub(crate) fn assert_valid_group_tool_names(names: &[&str]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        if crate::smart_routing::meta::is_meta_tool(name) {
+            return Err(
+                "Original tool names must not collide with Smart Routing meta-tools".to_string(),
+            );
+        }
+        if !seen.insert(*name) {
+            return Err(format!(
+                "Ambiguous group tool name '{name}'; use a server prefix to disambiguate"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Convert our JSON tool entries (dispatch wire shape) into rmcp `Tool`s.
@@ -1093,6 +1216,15 @@ impl HubBridge {
         let tool_name = tool_name.to_string();
         let scope_clean = scope.trim_start_matches('/').trim().to_string();
 
+        // #1399: unified tool access policy — resolved once per call and
+        // applied to both the meta lane and the direct lane below.
+        let policy = crate::services::tool_policy::get_tool_policy(
+            if scope_clean.is_empty() { None } else { Some(scope_clean.as_str()) },
+            bearer.as_ref().map(|k| k.id.as_str()),
+        )
+        .await;
+        let policy_ref = if policy.is_active() { Some(&policy) } else { None };
+
         // #1299 parity: opt-in pre-call guard for high-risk arguments.
         // Origin surfaces a block as a tool-level error result (isError:true
         // + errorCode -32001 in the result), NOT a protocol-level JSON-RPC
@@ -1160,6 +1292,16 @@ impl HubBridge {
                     (None, Some(keys_allowed)) => Some(keys_allowed.into_iter().collect()),
                     (None, None) => None,
                 }
+            };
+            // #1399 (origin getAvailableServers): servers the policy denies
+            // outright are not searchable either (potential evaluation).
+            let allowed = match allowed {
+                Some(list) if policy.is_active() => Some(
+                    list.into_iter()
+                        .filter(|s| policy.authorize_potential(s, None, true).decision == "allow")
+                        .collect::<Vec<_>>(),
+                ),
+                other => other,
             };
             let group_gate: Option<GroupToolGate> = if scope_clean.starts_with("$smart/") {
                 Some(
@@ -1241,11 +1383,11 @@ impl HubBridge {
                 "smart_route_search" => {
                     let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     let limit = args.get("limit").cloned().unwrap_or(json!(10));
-                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed, group_gate.as_ref(), pinned_ref).await
+                    crate::smart_routing::meta::handle_search_tools(q, limit, allowed, group_gate.as_ref(), pinned_ref, policy_ref).await
                 }
                 "smart_route_describe" => {
                     let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
-                    crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref(), pinned_ref).await
+                    crate::smart_routing::meta::handle_describe_tool(tn, allowed, group_gate.as_ref(), pinned_ref, policy_ref).await
                 }
                 "smart_route_call" => {
                     let tn = args.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
@@ -1265,7 +1407,7 @@ impl HubBridge {
                         )));
                     }
                     let tool_args = args.get("arguments").cloned().unwrap_or(json!({}));
-                    crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref(), Some(upstream_meta.clone())).await
+                    crate::smart_routing::meta::handle_call_tool(tn, tool_args, allowed, group_gate.as_ref(), Some(upstream_meta.clone()), policy_ref).await
                 }
                 other => Err(format!(
                     "Unknown smart routing tool '{}'. Available: smart_route_search, smart_route_describe, smart_route_call",
@@ -1286,6 +1428,11 @@ impl HubBridge {
                         source_ip.as_deref(),
                     )
                     .await;
+                    // #1399: a policy denial surfaces like the disabled gate
+                    // (protocol-level invalid_params), not a generic 500.
+                    if let Some(msg) = e.strip_prefix("[tool-policy] ") {
+                        return Err(Self::invalid_params(msg.to_string()));
+                    }
                     return Err(Self::err(e));
                 }
             };
@@ -1347,6 +1494,32 @@ impl HubBridge {
                 tool_name
             )));
         };
+
+        // #1399: unified tool access policy — deny before any execution
+        // (origin reserveHostedIfNeeded authorize + ToolUnavailableError).
+        if policy.is_active() {
+            let decision = policy.authorize(&sn, Some(&orig_name));
+            if decision.decision == "deny" {
+                let _ = crate::services::log_service::write_activity(
+                    &sn,
+                    &orig_name,
+                    Some(0),
+                    "error",
+                    Some(args.clone()),
+                    None,
+                    Some(&crate::services::tool_policy::audit_text(
+                        &decision,
+                        policy.server_id(&sn),
+                        policy.group_id(),
+                    )),
+                    source_ip.as_deref(),
+                )
+                .await;
+                return Err(Self::invalid_params(format!(
+                    "Tool not available: {orig_name}"
+                )));
+            }
+        }
 
         // Disabled-tool check — MUST run before the RAG builtin early-return:
         // the servers panel can disable rag_* tools like any other server and
@@ -1715,8 +1888,14 @@ impl ServerHandler for HubBridge {
         let bearer = Self::bearer_from_ctx(&context).await?;
         let scope = Self::scope_from_ctx(&context);
         let scope_clean = scope.trim_start_matches('/').trim().to_string();
+        // #1399: unified tool access policy for the listing face.
+        let policy = crate::services::tool_policy::get_tool_policy(
+            if scope_clean.is_empty() { None } else { Some(scope_clean.as_str()) },
+            bearer.as_ref().map(|k| k.id.as_str()),
+        )
+        .await;
         let tools = self
-            .aggregate_tools(&scope, bearer.as_ref(), Self::is_2024_session(&context))
+            .aggregate_tools(&scope, bearer.as_ref(), Self::is_2024_session(&context), &policy)
             .await?;
         let result = ListToolsResult::with_all_items(tools);
         Ok(if Self::is_2026_session(&context) {
@@ -2523,6 +2702,36 @@ impl ServerHandler for HubBridge {
     }
 }
 
+
+#[cfg(test)]
+mod group_tool_names_tests {
+    use super::assert_valid_group_tool_names;
+
+    #[test]
+    fn unique_names_pass() {
+        assert!(assert_valid_group_tool_names(&["a", "b", "c"]).is_ok());
+    }
+
+    #[test]
+    fn duplicate_name_is_ambiguous() {
+        let err = assert_valid_group_tool_names(&["a", "b", "a"]).unwrap_err();
+        assert_eq!(
+            err,
+            "Ambiguous group tool name 'a'; use a server prefix to disambiguate"
+        );
+    }
+
+    #[test]
+    fn meta_tool_collision_is_refused() {
+        for meta in ["smart_route_search", "smart_route_describe", "smart_route_call"] {
+            let err = assert_valid_group_tool_names(&[meta]).unwrap_err();
+            assert_eq!(
+                err,
+                "Original tool names must not collide with Smart Routing meta-tools"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod native_notify_tests {

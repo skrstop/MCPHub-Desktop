@@ -24,4 +24,5 @@ pub mod skill_service;
 pub mod fts_service;
 pub mod mcpb_service;
 pub mod tool_call_guard;
+pub mod tool_policy;
 pub mod capability_snapshot_service;

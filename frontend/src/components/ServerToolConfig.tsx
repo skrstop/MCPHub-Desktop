@@ -657,6 +657,27 @@ export const ServerToolConfig: React.FC<ServerToolConfigProps> = ({
                         onChange={(event) => updateServerAlias(server.name, event.target.value)}
                         className="hub-input"
                       />
+                      <label className="flex items-center gap-2 text-xs text-[var(--hub-ink-2)]">
+                        <input
+                          type="checkbox"
+                          checked={serverConfig.preserveToolNames === true}
+                          onChange={(event) => {
+                            const existing = normalizedValue.find((config) => config.name === server.name);
+                            if (!existing) return;
+                            const nextConfig: IGroupServerConfig = { ...existing };
+                            if (event.target.checked) {
+                              nextConfig.preserveToolNames = true;
+                            } else {
+                              delete nextConfig.preserveToolNames;
+                            }
+                            onChange(normalizedValue.map((config) => (config.name === server.name ? nextConfig : config)));
+                          }}
+                        />
+                        {t('groups.preserveToolNames')}
+                      </label>
+                      <p className="text-xs text-[var(--hub-ink-3)]">
+                        {t('groups.preserveToolNamesHint')}
+                      </p>
                     </div>
                   )}
                   {(() => {

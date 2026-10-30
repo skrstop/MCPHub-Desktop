@@ -896,12 +896,20 @@ pub async fn call_tool(server_name: &str, tool_name: &str, arguments: Value) -> 
         // global scope, executed in-process. Checked BEFORE RAG dispatch —
         // names never collide (rag_* vs meta names).
         if crate::smart_routing::meta::is_meta_tool(tool_name) {
+            // #1399: the Tauri face has no bearer context (key_id=None), but
+            // global rules (no subject selectors) must still gate meta-lane
+            // calls — otherwise smart_route_call would bypass serverId/tool
+            // scoped denies that the command-level check correctly enforces
+            // on direct targets.
+            let policy = crate::services::tool_policy::get_tool_policy(None, None).await;
+            let policy_ref = policy.is_active().then_some(&policy);
             // Box::pin: meta call_tool re-enters pool::call_tool for the
             // RESOLVED real tool (different name) — a legal mutual recursion
             // the compiler can't size without boxing.
             return Box::pin(crate::smart_routing::meta::call_meta_tool_builtin(
                 tool_name,
                 &arguments,
+                policy_ref,
             ))
             .await;
         }

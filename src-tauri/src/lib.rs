@@ -309,6 +309,10 @@ pub fn run() {
                     log::error!("Failed to create default admin user: {}", e);
                 }
 
+                // #1399: startup diagnostics — warn for tool-policy rules that
+                // reference missing server/key/group ids (origin parity).
+                services::tool_policy::warn_missing_tool_policy_references().await;
+
                 // Load persisted active runtime versions from DB and apply them
                 if let Ok(cfg) = services::config_service::get().await {
                     if let Some(node_ver) = cfg

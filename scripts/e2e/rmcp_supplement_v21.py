@@ -13,6 +13,23 @@
 """
 import http.client, json, sqlite3, os, re, sys, time, urllib.parse
 
+def _ensure_own_bearer_key(con):
+    # v38 (#1387) hashes legacy plaintext rows and clears the token column, so
+    # reading an existing row's token no longer works. Insert (or replace) our
+    # own plaintext row instead — find_by_token's legacy-fallback path accepts
+    # rows with a plaintext token and NULL token_hash (same pattern as
+    # carpet_r200).
+    key = "e2e-bk-own-0123456789abcdef"
+    con.execute(
+        "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) "
+        "VALUES ('e2e-bk-own','e2e-own',?,1,'all','[]','[]') "
+        "ON CONFLICT(id) DO UPDATE SET token=excluded.token, enabled=1",
+        (key,),
+    )
+    con.commit()
+    return key
+
+
 HOST, PORT = "localhost", 23333
 DB = os.path.expanduser("~/Library/Application Support/app.mcphub.desktop/mcphub.db")
 IP_SERVER = "本机公网ip查询"
@@ -53,7 +70,8 @@ def set_bearer(on):
 
 def get_key():
     con = sqlite3.connect(DB)
-    row = con.execute("SELECT token FROM bearer_keys WHERE enabled=1 LIMIT 1").fetchone()
+    _ensure_own_bearer_key(con)
+    row = con.execute("SELECT token FROM bearer_keys WHERE id='e2e-bk-own'").fetchone()
     con.close()
     return row[0] if row else None
 
