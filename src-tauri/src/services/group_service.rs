@@ -309,33 +309,51 @@ fn group_fts_text(name: &str, description: Option<&str>, instructions: Option<&s
 }
 
 /// Rewrite `old_name` → `new_name` in every bearer key's `allowed_groups`
-/// (group rename). Mirrors server_service's allowed_servers cascade. Must run
-/// inside the caller's transaction.
+/// AND `excluded_groups` (#1413: exclude keys reference groups by name too).
+/// Mirrors server_service's allowed_servers cascade. Must run inside the
+/// caller's transaction.
 async fn cascade_bearer_groups_rename_tx(
     tx: &mut sqlx::SqliteConnection,
     old_name: &str,
     new_name: &str,
 ) -> Result<()> {
-    let rows = sqlx::query("SELECT id, allowed_groups FROM bearer_keys")
+    let rows = sqlx::query("SELECT id, allowed_groups, excluded_groups FROM bearer_keys")
         .fetch_all(&mut *tx)
         .await?;
     for row in rows {
         let id: String = row.try_get("id")?;
-        let groups_str: String = row.try_get("allowed_groups")?;
-        let mut groups: Vec<String> = serde_json::from_str(&groups_str).unwrap_or_default();
-        if !groups.iter().any(|g| g == old_name) {
+        let mut changed = false;
+        let mut new_allowed: Option<String> = None;
+        let mut new_excluded: Option<String> = None;
+        for (col, store) in [
+            ("allowed_groups", &mut new_allowed),
+            ("excluded_groups", &mut new_excluded),
+        ] {
+            let groups_str: String = row.try_get(col)?;
+            let mut groups: Vec<String> = serde_json::from_str(&groups_str).unwrap_or_default();
+            if !groups.iter().any(|g| g == old_name) {
+                continue;
+            }
+            for g in groups.iter_mut() {
+                if g == old_name {
+                    *g = new_name.to_string();
+                }
+            }
+            *store = Some(serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into()));
+            changed = true;
+        }
+        if !changed {
             continue;
         }
-        for g in groups.iter_mut() {
-            if g == old_name {
-                *g = new_name.to_string();
-            }
-        }
-        sqlx::query("UPDATE bearer_keys SET allowed_groups=? WHERE id=?")
-            .bind(serde_json::to_string(&groups).unwrap_or_else(|_| "[]".into()))
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE bearer_keys SET allowed_groups=COALESCE(?, allowed_groups), \
+             excluded_groups=COALESCE(?, excluded_groups) WHERE id=?",
+        )
+        .bind(&new_allowed)
+        .bind(&new_excluded)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
     }
     Ok(())
 }
@@ -435,5 +453,47 @@ mod tests {
         let created = create(&payload(&name, None)).await.unwrap();
         assert!(created.instructions.is_none());
         delete(&created.id).await.unwrap();
+    }
+
+    /// #1413: group rename rewrites the old name in BOTH allowed_groups and
+    /// excluded_groups; keys without the old name are left untouched.
+    #[tokio::test]
+    async fn bearer_group_rename_cascade_rewrites_both_lists() {
+        crate::db::ensure_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let old = format!("casc-old-{suffix}");
+        let new = format!("casc-new-{suffix}");
+
+        let mut p = crate::models::bearer_key::BearerKeyPayload {
+            name: format!("k-{suffix}"),
+            enabled: true,
+            access_type: "exclude".to_string(),
+            allowed_groups: vec![old.clone(), "keep-a".to_string()],
+            allowed_servers: Vec::new(),
+            excluded_groups: vec![old.clone(), "keep-b".to_string()],
+            excluded_servers: vec!["srv".to_string()],
+        };
+        let key = crate::services::bearer_key_service::create(&p).await.unwrap();
+        // A second key that must stay untouched.
+        p.name = format!("k2-{suffix}");
+        p.allowed_groups = vec!["other".to_string()];
+        p.excluded_groups = vec!["other2".to_string()];
+        let untouched = crate::services::bearer_key_service::create(&p).await.unwrap();
+
+        let mut tx = db::pool().begin().await.unwrap();
+        cascade_bearer_groups_rename_tx(&mut tx, &old, &new).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let rows = crate::services::bearer_key_service::list_all().await.unwrap();
+        let hit = rows.iter().find(|k| k.id == key.id).unwrap();
+        assert_eq!(hit.allowed_groups, vec![new.clone(), "keep-a".to_string()]);
+        assert_eq!(hit.excluded_groups, vec![new, "keep-b".to_string()]);
+        assert_eq!(hit.excluded_servers, vec!["srv"], "server lists untouched");
+        let other = rows.iter().find(|k| k.id == untouched.id).unwrap();
+        assert_eq!(other.allowed_groups, vec!["other"]);
+        assert_eq!(other.excluded_groups, vec!["other2"]);
+
+        crate::services::bearer_key_service::delete(&key.id).await.unwrap();
+        crate::services::bearer_key_service::delete(&untouched.id).await.unwrap();
     }
 }

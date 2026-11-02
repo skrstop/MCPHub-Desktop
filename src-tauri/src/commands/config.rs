@@ -7,25 +7,68 @@ use tauri_plugin_dialog::DialogExt;
 use crate::commands::auth::SessionState;
 
 /// Get public configuration (skipAuth setting) without authentication
+/// Validate + normalize an incoming `dashboardName` (origin serverController
+/// parity: must be a string of at most 100 chars after trimming, stored
+/// trimmed). `Ok(None)` = key absent (nothing to do). Extracted for unit
+/// testing (review round 13).
+fn validate_dashboard_name(
+    config: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    match config.get("dashboardName") {
+        None => Ok(None),
+        Some(v) => {
+            const MSG: &str = "dashboardName must be a string of at most 100 characters";
+            let s = v.as_str().ok_or_else(|| MSG.to_string())?;
+            let trimmed = s.trim();
+            if trimmed.chars().count() > 100 {
+                return Err(MSG.to_string());
+            }
+            Ok(Some(trimmed.to_string()))
+        }
+    }
+}
+
 /// This is used by the frontend to determine if login should be skipped
 #[tauri::command]
 pub async fn get_public_config() -> Result<serde_json::Value, String> {
-    let config = config_service::get().await.map_err(|e| e.to_string())?;
-
-    let skip_auth = config
-        .get("routing")
-        .and_then(|r| r.get("skipAuth"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true); // Default to true for desktop app
+    // Strict read: a corrupt stored config must NOT read as skipAuth=true
+    // here — require_admin's is_skip_auth_enabled() is fail-closed
+    // (get_strict Err -> skipAuth=false), and a non-strict read would make
+    // the frontend render the no-login UI while every gated command answers
+    // 401: an unrecoverable dead interface. Fail the same way (skipAuth
+    // false -> login page shows) so both sides agree. A NULL row (fresh
+    // install) is Ok({}) and keeps the desktop default of true (review
+    // round 10).
+    let (skip_auth, config) = match config_service::get_strict().await {
+        Ok(c) => (
+            c.get("routing")
+                .and_then(|r| r.get("skipAuth"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true), // Default to true for desktop app
+            c,
+        ),
+        Err(e) => {
+            log::warn!("[config] get_public_config: stored config corrupt ({e}); reporting skipAuth=false (fail-closed)");
+            (false, serde_json::json!({}))
+        }
+    };
 
     let permissions = config
         .get("permissions")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
+    // Branding: optional custom dashboard name (#1411 parity). Empty/missing
+    // falls back to the frontend default title.
+    let dashboard_name = config
+        .get("dashboardName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
     Ok(serde_json::json!({
         "skipAuth": skip_auth,
-        "permissions": permissions
+        "permissions": permissions,
+        "dashboardName": dashboard_name
     }))
 }
 
@@ -69,6 +112,20 @@ pub async fn update_system_config(session: State<'_, SessionState>, config: serd
     if let Some(tp) = config.get("toolPolicies") {
         crate::services::tool_policy::validate_tool_policies(tp)?;
     }
+    // #1411: validate dashboardName before persisting (origin serverController
+    // updateSystemConfig: must be a string of at most 100 chars, stored
+    // trimmed; anything else answered 400). Without this, a non-string or
+    // oversized value is transparently stored and silently ignored by
+    // get_public_config's as_str() — "saved" but never displayed.
+    let config = match validate_dashboard_name(&config) {
+        Ok(Some(trimmed)) => {
+            let mut c = config.clone();
+            c["dashboardName"] = serde_json::Value::String(trimmed);
+            c
+        }
+        Ok(None) => config,
+        Err(e) => return Err(e),
+    };
     // Capture the PREVIOUS smartRouting.enabled so a false→true transition can
     // pull the model + index up immediately (otherwise the user must restart
     // the app before Smart Routing works — the UI switch implies live effect).
@@ -109,12 +166,22 @@ pub async fn update_system_config(session: State<'_, SessionState>, config: serd
                 Err(e) => log::error!("[smart] post-enable model start failed: {:#}", e),
             }
         });
-    } else if prev_smart_enabled && !new_smart_enabled {
-        // Only release when RAG isn't holding the model too. Release INSIDE a
-        // spawned task that first waits for any in-flight enable-load: a fast
-        // enable→disable would otherwise take the (still empty) runtime slot
-        // and leak the model running with zero consumers once the load
-        // completes.
+    } else if !new_smart_enabled
+        && config
+            .get("smartRouting")
+            .and_then(|r| r.get("enabled"))
+            .is_some()
+    {
+        // Idempotent disable hook: fires on EVERY update whose patch sets
+        // smartRouting.enabled=false (not just prev=true transitions). A
+        // concurrent enable+disable pair both reading the same prev would
+        // otherwise lose the disable hook entirely (review round 10).
+        // release("smart") is a no-op when smart holds no consumer, so
+        // running it unconditionally here is safe. Only release when RAG
+        // isn't holding the model too. Release INSIDE a spawned task that
+        // first waits for any in-flight enable-load: a fast enable→disable
+        // would otherwise take the (still empty) runtime slot and leak the
+        // model running with zero consumers once the load completes.
         let rag_enabled = crate::rag::service::config_enabled().await;
         if !rag_enabled {
             tauri::async_runtime::spawn(async move {
@@ -491,4 +558,58 @@ pub async fn save_settings_json(
     let path = file_path.into_path().map_err(|e| e.to_string())?;
     std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod dashboard_name_tests {
+    use super::validate_dashboard_name;
+
+    #[test]
+    fn missing_key_is_noop() {
+        assert_eq!(validate_dashboard_name(&serde_json::json!({})), Ok(None));
+    }
+
+    #[test]
+    fn non_string_is_rejected() {
+        for v in [
+            serde_json::json!(123),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!({"a": 1}),
+            serde_json::json!([1]),
+        ] {
+            let cfg = serde_json::json!({ "dashboardName": v });
+            assert!(validate_dashboard_name(&cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn valid_name_is_trimmed() {
+        let cfg = serde_json::json!({ "dashboardName": "  My Hub  " });
+        assert_eq!(
+            validate_dashboard_name(&cfg).unwrap(),
+            Some("My Hub".to_string())
+        );
+    }
+
+    #[test]
+    fn exactly_100_chars_ok_101_rejected() {
+        let ok = "字".repeat(100);
+        let cfg = serde_json::json!({ "dashboardName": ok });
+        assert!(validate_dashboard_name(&cfg).is_ok(), "100 CJK chars (chars().count, not bytes) must pass");
+        let too_long = "字".repeat(101);
+        let cfg = serde_json::json!({ "dashboardName": too_long });
+        assert!(validate_dashboard_name(&cfg).is_err());
+    }
+
+    #[test]
+    fn whitespace_padding_counts_after_trim() {
+        // 99 chars padded with spaces to 199 total: trim first, then count.
+        let padded = format!("{}{}", " ".repeat(99), "x".repeat(99));
+        let cfg = serde_json::json!({ "dashboardName": padded });
+        assert!(validate_dashboard_name(&cfg).is_ok());
+        let padded_over = format!("{}{}", " ".repeat(99), "x".repeat(101));
+        let cfg = serde_json::json!({ "dashboardName": padded_over });
+        assert!(validate_dashboard_name(&cfg).is_err());
+    }
 }

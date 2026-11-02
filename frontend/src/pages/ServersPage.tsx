@@ -14,6 +14,7 @@ import { apiPost } from '@/utils/fetchInterceptor';
 import { ApiResponse, ServerPage } from '@/types';
 import { useServerData } from '@/hooks/useServerData';
 import { useCostData } from '@/hooks/useCostData';
+import { serverCostRevision } from '@/utils/costRevision';
 import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/utils/serverFilters';
 import { resolveDuplicateResponse } from '@/utils/serverDuplicate';
 
@@ -42,12 +43,10 @@ const ServersPage: React.FC = () => {
     triggerRefresh,
   } = useServerData({ refreshOnMount: true });
 
-  const { serverCosts, refetch: refetchCost } = useCostData();
-
-  // Re-fetch context footprint whenever server data changes (toggle, reload, edit).
-  useEffect(() => {
-    refetchCost();
-  }, [servers, refetchCost]);
+  // Memoized: the revision serializes every server's full tool schemas —
+  // recomputing per render (every keystroke/poll) is O(full catalog).
+  const costRevision = useMemo(() => serverCostRevision(allServers), [allServers]);
+  const { serverCosts } = useCostData(costRevision);
 
   const [editingServer, setEditingServer] = useState<Server | null>(null);
   const [duplicateServer, setDuplicateServer] = useState<Server | null>(null);

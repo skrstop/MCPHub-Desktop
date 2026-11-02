@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { SimpleSelect } from '@/components/ui/SimpleSelect';
 
 interface RuntimeVersion {
   version: string;
@@ -109,8 +110,7 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
   const activeVersion = versions.find((v) => v.active);
   const selectedVersion = activeVersion?.version ?? 'system';
 
-  const handleSelectChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const ver = e.target.value;
+  const handleSelectChange = async (ver: string) => {
     const entry = versions.find((v) => v.version === ver);
     if (!entry) return;
 
@@ -251,13 +251,12 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
 
       <div className="flex items-center gap-3">
         <div className="relative flex-1 min-w-0">
-          <select
+          <SimpleSelect
             value={selectedVersion}
             onChange={handleSelectChange}
             disabled={actionLoading}
-            className="w-full py-1.5 pl-3 pr-8 border border-gray-300 rounded-md shadow-sm text-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 bg-white form-input"
-          >
-            {versions.map((v) => {
+            ariaLabel={t('settings.nodeVersion', 'Node.js Version')}
+            options={versions.map((v) => {
               let label: string;
               if (v.version === 'system') {
                 const sysLabel = t('settings.runtimeSystemDefault');
@@ -271,13 +270,9 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
               } else {
                 label = `v${v.version}`;
               }
-              return (
-                <option key={v.version} value={v.version}>
-                  {label}
-                </option>
-              );
+              return { value: v.version, label };
             })}
-          </select>
+          />
           {actionLoading && (
             <div className="absolute right-8 top-1/2 -translate-y-1/2">
               <div className="animate-spin h-3.5 w-3.5 border-2 border-blue-500 border-t-transparent rounded-full" />

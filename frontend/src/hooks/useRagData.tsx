@@ -6,6 +6,7 @@ import { useSettings } from '@/contexts/SettingsContext';
 import { reindexSmartRouting } from '@/services/smartRoutingService';
 import { useToast } from '@/contexts/ToastContext';
 import { isTauri } from '@/utils/tauriClient';
+import ReindexDialog from '@/components/ReindexDialog';
 import { BatchPreview, RagChunk, RagDoc, RagDocInfo, RagFolderScan, RagModelInfo, RagModelLimits, RagOcrStatus, RagPickedFile, RagSettings, RagSearchResult, RagUpdateCheck } from '@/types';
 import {
   listRagDocs,
@@ -65,6 +66,10 @@ const useRagDataState = () => {
   // (RagPage 的 ragDocSearchPaged effect)——它无法感知 ragDocs 变化。这个
   // 版本号作为「数据已变」信号暴露出去,分页 effect 把它加入依赖即可联动刷新。
   const [docsVersion, setDocsVersion] = useState(0);
+  // Total doc count across pages (fed by RagPage's paged fetch) — the global
+  // ReindexDialog uses it for the confirm-stage doc count; ragDocs alone is
+  // just the current page and would under-report.
+  const [docCountTotal, setDocCountTotal] = useState<number | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [initializing, setInitializing] = useState(false);
   // Target state of an in-flight toggle ('on' | 'off' | null) so the loading
@@ -146,6 +151,10 @@ const useRagDataState = () => {
   // switch + re-embed runs on 开始重载 (`startReindex`); cancel drops the
   // parked choice with zero side effects.
   const [reindexConfirm, setReindexConfirm] = useState(false);
+  // Startup model-mismatch check: fire the reload prompt at most once per
+  // session (syncStatus + the initializing poll both inspect needsReindex;
+  // without the latch a dismiss during the polling window would re-pop).
+  const startupReindexPromptedRef = useRef(false);
   // Model selection: available sizes (dropdown), the current size, and the
   // download progress for a size being fetched via its download.url.
   const [models, setModels] = useState<RagModelInfo[]>([]);
@@ -285,6 +294,17 @@ const useRagDataState = () => {
       if (mounted.current) {
         setEnabled(st.enabled);
         setInitializing(st.initializing);
+        // Startup check: the loaded model differs from the one that built the
+        // vector index (rag.indexedModel) — prompt the reload dialog, same as
+        // the post-toggle needsReindex prompt. Mode 'reload' (NOT the default
+        // 'switch'): no model change is happening, so the dialog must show
+        // reload copy and the cancel button must not claim to revert a model.
+        if (st.enabled && st.needsReindex && !startupReindexPromptedRef.current) {
+          startupReindexPromptedRef.current = true;
+          setReindexMode('reload');
+          setReindexScope('both');
+          setReindexConfirm(true);
+        }
       }
     } catch {
       // ignore
@@ -480,6 +500,15 @@ const useRagDataState = () => {
         if (mounted.current) {
           setEnabled(st.enabled);
           setInitializing(st.initializing);
+          // Auto-start on boot settles here (initializing → ready): apply the
+          // same startup model-mismatch prompt as syncStatus (mode 'reload' —
+          // see syncStatus comment).
+          if (!st.initializing && st.enabled && st.needsReindex && !startupReindexPromptedRef.current) {
+            startupReindexPromptedRef.current = true;
+            setReindexMode('reload');
+            setReindexScope('both');
+            setReindexConfirm(true);
+          }
         }
       } catch {
         // ignore
@@ -1107,6 +1136,8 @@ const useRagDataState = () => {
     reindexConfirm,
     reindexMode,
     reindexScope,
+    smartEnabled,
+    docCountTotal,
     requestReload,
     startReindex,
     dismissReindex,
@@ -1151,13 +1182,34 @@ const useRagDataState = () => {
     dismissOcrMissing,
     reportOcrMissingIf,
     refresh: fetchDocs,
+    setDocCountTotal,
   };
 };
 
 /** Provider that mounts the shared RAG store once at the app root. */
 export const RagDataProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const value = useRagDataState();
-  return <RagDataContext.Provider value={value}>{children}</RagDataContext.Provider>;
+  return (
+    <RagDataContext.Provider value={value}>
+      {children}
+      {/* Startup model-mismatch reload prompt — rendered globally so the
+          dialog pops on any page, not just the RAG page. Same dialog/mode as
+          the Settings → 模型和向量 reload flow (pendingModel is null here, so
+          startReindex runs a plain reload + re-embed, no model switch). */}
+      {value.reindexConfirm && (
+        <ReindexDialog
+          open
+          mode={value.reindexMode}
+          scope={value.reindexScope}
+          targetModel={value.pendingModel ?? value.currentModel ?? ''}
+          smartEnabled={value.smartEnabled}
+          ragDocCount={value.docCountTotal ?? value.ragDocs.length}
+          onClose={value.dismissReindex}
+          onStart={value.startReindex}
+        />
+      )}
+    </RagDataContext.Provider>
+  );
 };
 
 /** Consume the shared RAG store. Must be used inside <RagDataProvider>. */

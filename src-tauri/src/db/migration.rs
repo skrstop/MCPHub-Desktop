@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 37;
+pub const TARGET_VERSION: i64 = 38;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -130,19 +130,33 @@ async fn set_version(pool: &SqlitePool, version: i64) -> Result<()> {
 /// at TARGET_VERSION by an intermediate build whose DDL was later amended.
 /// Runs on every startup; every statement is idempotent.
 pub async fn repair_schema(pool: &SqlitePool) -> Result<()> {
-    // v38 rollback cleanup: an intermediate build migrated bearer keys to
-    // SHA-256 hash storage (schema_version=38, token column emptied to
-    // `hashed:{id}` sentinels). That mirror was reverted — the code target
-    // is back to 37 with plaintext tokens — so scrub the residue: drop the
-    // unusable rows (the original plaintext is unrecoverable), remove the
-    // hash columns, and rewind the version stamp so run_pending() never
-    // sees a v38 it no longer has. Idempotent: a DB already at ≤37 (or a
-    // fresh one) skips the whole block.
-    let stamped: Option<i64> = sqlx::query("SELECT version FROM schema_version WHERE id = 1")
-        .fetch_optional(pool)
-        .await?
-        .and_then(|r| r.try_get::<i64, _>("version").ok());
-    if stamped == Some(38) {
+    // Bearer-key hash-era residue cleanup (reverted 2026-10-28 mirror): an
+    // intermediate build migrated bearer keys to SHA-256 hash storage and
+    // emptied `token` to `hashed:{id}` sentinels. Detected by the residue
+    // signature itself (token_hash/token_prefix columns), NOT the version
+    // stamp — TARGET_VERSION is legitimately 38 again (#1413 exclude scope),
+    // so a stamp of 38 alone proves nothing and must not trigger a rewind.
+    // On genuine residue: drop the unusable rows (the original plaintext is
+    // unrecoverable), remove the hash columns, and rewind the stamp so
+    // run_pending() re-migrates with the current v38. Idempotent: a DB
+    // without the signature (including one with no bearer_keys table at all)
+    // skips the whole block.
+    let hash_col_count: i64 = match sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('bearer_keys') \
+         WHERE name IN ('token_hash', 'token_prefix')",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(n) => n,
+        // Detection failure must not be silent: skipping the residue cleanup
+        // leaves permanently-unauthenticatable rows behind (review round 8).
+        Err(e) => {
+            log::warn!("[db] repair_schema: bearer_keys residue probe failed: {e}; skipping hash-era cleanup");
+            0
+        }
+    };
+    if hash_col_count > 0 {
         let removed = sqlx::query(
             "DELETE FROM bearer_keys WHERE token = '' OR token LIKE 'hashed:%'",
         )
@@ -167,8 +181,15 @@ pub async fn repair_schema(pool: &SqlitePool) -> Result<()> {
             }
         }
         set_version(pool, 37).await?;
+        // Re-apply v38 in-session: db::initialize runs run_pending() BEFORE
+        // repair_schema(), so a rewound stamp would otherwise leave this
+        // session without the excluded_groups/excluded_servers columns while
+        // every bearer-key query already selects them ("no such column" until
+        // the next restart). migrate_v38 is idempotent
+        // (add_column_if_missing), so unconditionally re-running is safe.
+        migrate_v38(pool).await?;
         log::info!(
-            "[db] repair_schema: rolled back v38 bearer-key hash residue (removed {removed} unusable row(s), version rewound to 37)"
+            "[db] repair_schema: rolled back bearer-key hash residue (removed {removed} unusable row(s), version rewound to 37 and v38 re-applied in-session)"
         );
     }
     // v37 amendment: an intermediate build created capability_snapshots
@@ -259,6 +280,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         35 => migrate_v35(pool).await,
         36 => migrate_v36(pool).await,
         37 => migrate_v37(pool).await,
+        38 => migrate_v38(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -492,6 +514,28 @@ async fn migrate_v34(pool: &SqlitePool) -> Result<()> {
 /// JSON array string on `server_tool_config.hidden_params`; NULL = unset.
 async fn migrate_v35(pool: &SqlitePool) -> Result<()> {
     add_column_if_missing(pool, "server_tool_config", "hidden_params", "TEXT").await
+}
+
+/// v37 → v38 (#1413 parity): bearer-key "all-except" exclusion scope.
+/// `excluded_groups` / `excluded_servers` hold JSON string arrays (same shape
+/// as `allowed_groups` / `allowed_servers`); `[]` = nothing excluded. Only
+/// meaningful when `access_type = 'exclude'`.
+async fn migrate_v38(pool: &SqlitePool) -> Result<()> {
+    add_column_if_missing(
+        pool,
+        "bearer_keys",
+        "excluded_groups",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    .await?;
+    add_column_if_missing(
+        pool,
+        "bearer_keys",
+        "excluded_servers",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    .await?;
+    Ok(())
 }
 
 /// v36 → v37 (#1384 parity): last-known tool snapshots for on-demand servers.
@@ -2436,6 +2480,54 @@ mod tests {
         run_pending(&pool).await.expect("re-run migrations idempotent");
     }
 
+    /// v38（#1413 bearer exclude scope）：fresh DB 直升 TARGET_VERSION 后
+    /// bearer_keys 必须带 excluded_groups / excluded_servers 两列（默认 '[]'），
+    /// 可直插直查；重跑幂等。
+    #[tokio::test]
+    async fn v38_bearer_keys_exclude_columns() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        run_pending(&pool).await.expect("run migrations");
+
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers, excluded_groups, excluded_servers) \
+             VALUES ('ex1', 'exclude-key', 'mcphub_x', 1, 'exclude', '[]', '[]', '[\"g1\"]', '[\"srv-a\"]')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert with exclusions must succeed");
+        // Default-path insert: omitted exclusion columns fall back to '[]'.
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) \
+             VALUES ('ex2', 'plain-key', 'mcphub_y', 1, 'all', '[]', '[]')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert without exclusion columns must succeed");
+
+        let (eg, es): (String, String) = sqlx::query_as(
+            "SELECT excluded_groups, excluded_servers FROM bearer_keys WHERE id = 'ex1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(eg, "[\"g1\"]");
+        assert_eq!(es, "[\"srv-a\"]");
+
+        let (eg2, es2): (String, String) = sqlx::query_as(
+            "SELECT excluded_groups, excluded_servers FROM bearer_keys WHERE id = 'ex2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(eg2, "[]", "column default must be '[]'");
+        assert_eq!(es2, "[]", "column default must be '[]'");
+
+        // Idempotent: re-running pending migrations must not fail.
+        run_pending(&pool).await.expect("re-run migrations idempotent");
+    }
+
     /// repair_schema 的目标场景：DB 已盖 37 戳但 capability_snapshots 缺
     /// fingerprint 列（中间构建）——repair 必须补列且可写入；表整体缺失时
     /// 也必须自愈建表而非启动失败。
@@ -2483,6 +2575,61 @@ mod tests {
             sqlx::query_scalar::<_, i64>("SELECT version FROM schema_version WHERE id = 1")
                 .fetch_one(&pool).await.unwrap(),
             37
+        );
+    }
+
+    /// Real residue shape (regression for the in-session re-apply fix): a DB
+    /// stamped 38 by the reverted hash build has hash columns but NO
+    /// excluded_* columns (v38 of that era was the hash migration, not the
+    /// exclude-scope migration). db::initialize runs run_pending() (38>=38,
+    /// no-op) BEFORE repair_schema(), so repair must re-apply v38 itself —
+    /// otherwise every bearer-key query fails with "no such column" for the
+    /// whole session.
+    #[tokio::test]
+    async fn repair_schema_reapplies_v38_on_hash_residue_without_exclude_columns() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations");
+
+        // Reshape to the genuine residue form: drop the exclude columns the
+        // current v38 added, add the hash-era columns, stamp 38.
+        sqlx::query("ALTER TABLE bearer_keys DROP COLUMN excluded_groups").execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE bearer_keys DROP COLUMN excluded_servers").execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE bearer_keys ADD COLUMN token_hash TEXT").execute(&pool).await.unwrap();
+        sqlx::query("ALTER TABLE bearer_keys ADD COLUMN token_prefix TEXT").execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, token_hash, token_prefix, enabled, access_type, allowed_groups, allowed_servers) \
+             VALUES ('h1', 'hashed', 'hashed:h1', 'deadbeef', 'mcph', 1, 'all', '[]', '[]')",
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bearer_keys (id, name, token, enabled, access_type, allowed_groups, allowed_servers) \
+             VALUES ('ok1', 'plain', 'mcphub_plain', 1, 'all', '[]', '[]')",
+        ).execute(&pool).await.unwrap();
+        set_version(&pool, 38).await.unwrap();
+
+        repair_schema(&pool).await.expect("repair must succeed");
+
+        // The exclude columns must exist IN THIS SESSION (re-applied by repair).
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('bearer_keys')")
+            .fetch_all(&pool).await.unwrap()
+            .into_iter().map(|r| r.get::<String, _>("name")).collect();
+        assert!(cols.iter().any(|c| c == "excluded_groups"), "excluded_groups re-applied in-session");
+        assert!(cols.iter().any(|c| c == "excluded_servers"), "excluded_servers re-applied in-session");
+        assert!(!cols.iter().any(|c| c == "token_hash" || c == "token_prefix"));
+        // A full column-list SELECT (the shape bearer_key_service uses) works,
+        // and the usable plaintext row survived the residue cleanup.
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT id, excluded_groups, excluded_servers FROM bearer_keys WHERE id = 'ok1'",
+        )
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(row.0, "ok1");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bearer_keys")
+                .fetch_one(&pool).await.unwrap(),
+            1,
+            "hashed sentinel row removed, plaintext row survives"
         );
     }
 

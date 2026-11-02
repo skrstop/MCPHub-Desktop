@@ -6,6 +6,7 @@ import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
 import { useEmbeddingSync } from '@/contexts/EmbeddingSyncContext';
+import { useBranding } from '@/contexts/BrandingContext';
 import { openExternal } from '@/utils/externalLink';
 
 interface HeaderProps {
@@ -16,10 +17,11 @@ const useCrumbs = (): string[] => {
   const { t } = useTranslation();
   const location = useLocation();
   const params = useParams();
+  const { dashboardTitle } = useBranding();
 
   return useMemo(() => {
     const path = location.pathname;
-    const root = t('app.title');
+    const root = dashboardTitle;
     if (path === '/') return [root, t('nav.dashboard')];
     if (path.startsWith('/servers')) return [root, t('nav.servers')];
     if (path.startsWith('/groups')) return [root, t('nav.groups')];
@@ -38,7 +40,7 @@ const useCrumbs = (): string[] => {
     if (path.startsWith('/activity')) return [root, t('nav.activity')];
     if (path.startsWith('/settings')) return [root, t('nav.settings')];
     return [root];
-  }, [location.pathname, params, t]);
+  }, [location.pathname, params, t, dashboardTitle]);
 };
 
 const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {

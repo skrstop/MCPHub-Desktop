@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, ChevronDown, X } from 'lucide-react';
 
 interface MultiSelectProps {
@@ -30,6 +31,12 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // Portal rendering (fix: the settings bearer-keys table wraps rows in an
+  // `overflow-x-auto` container, which clipped the absolutely-positioned
+  // dropdown — "排除的服务器/分组" lists were cut off). The menu renders
+  // into document.body with fixed coordinates computed from the trigger.
+  const [menuRect, setMenuRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   // ── 后端分页搜索状态（searchFn 传入时启用）──
   const [remoteItems, setRemoteItems] = useState<{ value: string; label: string }[]>([]);
@@ -95,7 +102,12 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
   // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+      const t = event.target as Node;
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(t) &&
+        !(menuRef.current && menuRef.current.contains(t))
+      ) {
         setIsOpen(false);
         setSearchTerm('');
       }
@@ -129,13 +141,61 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
     onChange(selected.filter((item) => item !== value));
   };
 
+  const syncMenuRect = () => {
+    const el = dropdownRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Flip above when there is no room below but there is above.
+    const up = window.innerHeight - r.bottom < 160 && r.top > window.innerHeight - r.bottom;
+    // When opening upward, anchor the menu's BOTTOM to the trigger's top
+    // using its measured height (a short menu must hug the trigger — using
+    // the max height left a large gap between menu and trigger).
+    const h = menuRef.current?.offsetHeight ?? 0;
+    setMenuRect({
+      top: up ? Math.max(8, r.top - h - 4) : r.bottom + 4,
+      left: r.left,
+      width: r.width,
+    });
+  };
+
   const handleToggleDropdown = () => {
     if (disabled) return;
+    if (!isOpen) syncMenuRect();
     setIsOpen(!isOpen);
     if (!isOpen) {
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   };
+
+  // Keep the portaled menu anchored: reposition on scroll/resize. Scroll
+  // INSIDE the options list must not trigger this (it bubbles from listRef,
+  // not window) — window-level scroll only.
+  useEffect(() => {
+    if (!isOpen) return;
+    const onReposition = () => syncMenuRect();
+    window.addEventListener('scroll', onReposition, true);
+    window.addEventListener('resize', onReposition);
+    return () => {
+      window.removeEventListener('scroll', onReposition, true);
+      window.removeEventListener('resize', onReposition);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  // After the menu mounts, re-measure: the first sync ran before the menu
+  // existed (height 0), and upward placement needs the real height. A
+  // ResizeObserver keeps it anchored when content height changes later
+  // (search filtering shrinks/grows the list).
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    syncMenuRect();
+    const menu = menuRef.current;
+    if (!menu || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => syncMenuRect());
+    ro.observe(menu);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   const getSelectedLabels = () => {
     return selected
@@ -185,9 +245,20 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
         />
       </div>
 
-      {/* Dropdown menu */}
-      {isOpen && !disabled && (
-        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-gray-800 border border-gray-300 rounded-md shadow-lg max-h-60 overflow-hidden">
+      {/* Dropdown menu — portaled to document.body so `overflow-x-auto`
+          table wrappers and sibling stacking contexts can neither clip nor
+          cover it (settings bearer keys exclude selectors, review fix). */}
+      {isOpen && !disabled && menuRect && createPortal(
+        <div
+          ref={menuRef}
+          style={{
+            position: 'fixed',
+            top: menuRect.top,
+            left: menuRect.left,
+            width: menuRect.width,
+            zIndex: 1000,
+          }}
+          className="bg-white dark:bg-gray-800 border border-gray-300 rounded-md shadow-lg max-h-60 overflow-hidden">
           {/* Search input */}
           <div className="p-2 border-b border-gray-200 dark:border-gray-700">
             <input
@@ -239,7 +310,8 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

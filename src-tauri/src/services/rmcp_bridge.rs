@@ -244,7 +244,8 @@ use crate::smart_routing::meta::GroupToolGate;
 use super::http_server::builtin_allowed;
 
 use super::http_server::{
-    check_bearer_auth, get_allowed_servers, mcp_scope_server_filters, name_separator, ServerFilter,
+    bearer_excludes_group, check_bearer_auth, get_allowed_servers, mcp_scope_server_filters,
+    name_separator, ServerFilter,
 };
 use crate::mcp::pool;
 use crate::models::server::Tool;
@@ -331,6 +332,26 @@ impl HubBridge {
         scope: &str,
         bearer: Option<&crate::models::bearer_key::BearerKey>,
     ) -> Vec<ServerFilter> {
+        // #1413: an 'exclude' key that names this group (by name or id) in
+        // excludedGroups denies the whole group route — empty catalog here,
+        // and resolve_target finds nothing on the call side. The "all members
+        // excluded" variant needs no extra check: the allowed-set difference
+        // from get_allowed_servers already intersects every member away.
+        if let Some(key) = bearer {
+            if key.access_type == "exclude" {
+                let g = scope.trim_start_matches('/').trim().trim_end_matches('/');
+                let g = g.strip_prefix("$smart/").unwrap_or(g);
+                if !g.is_empty() && g != "$smart" {
+                    if let Ok(groups) = crate::services::group_service::list_all().await {
+                        if let Some(grp) = groups.iter().find(|gr| gr.name == g || gr.id == g) {
+                            if bearer_excludes_group(bearer, &grp.name, &grp.id).await {
+                                return Vec::new();
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut filters = mcp_scope_server_filters(scope).await;
         // A group listing the same server twice must not duplicate tools/pins.
         let mut seen = std::collections::HashSet::new();

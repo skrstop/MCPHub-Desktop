@@ -127,11 +127,17 @@ impl ModernBertArch {
         let hidden = get_u32(&format!("{}embedding_length", pfx), None)?; // 384
         let block_count = get_u32(&format!("{}block_count", pfx), None)?; // 12
         let n_head = get_u32(&format!("{}attention.head_count", pfx), None)?; // 12
+        if n_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_head must be > 0"));
+        }
         let head_dim = hidden / n_head; // 32
         let ffn = get_u32(&format!("{}feed_forward_length", pfx), None)?; // 1536
         let sliding_window =
             get_u32(&format!("{}attention.sliding_window", pfx), Some(128))?;
         let pattern = get_u32(&format!("{}attention.sliding_window_pattern", pfx), Some(3))?;
+        if pattern == 0 {
+            return Err(anyhow!("invalid GGUF metadata: pattern must be > 0"));
+        }
         let rope_full = get_f32(&format!("{}rope.freq_base", pfx), 150_000.0);
         let rope_swa = get_f32(&format!("{}rope.freq_base_swa", pfx), rope_full);
         let eps = get_f32(&format!("{}attention.layer_norm_rms_epsilon", pfx), 1e-5) as f64;

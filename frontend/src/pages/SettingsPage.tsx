@@ -5,8 +5,10 @@ import { emit } from '@tauri-apps/api/event';
 import ChangePasswordForm from '@/components/ChangePasswordForm';
 import { Switch } from '@/components/ui/ToggleGroup';
 import { MultiSelect } from '@/components/ui/MultiSelect';
+import { SimpleSelect } from '@/components/ui/SimpleSelect';
 import RuntimeVersionManager from '@/components/RuntimeVersionManager';
 import { useSettingsData } from '@/hooks/useSettingsData';
+import { useRagData } from '@/hooks/useRagData';
 import { searchGroups } from '@/services/groupService';
 import { useToast } from '@/contexts/ToastContext';
 import { PermissionChecker } from '@/components/PermissionChecker';
@@ -21,6 +23,7 @@ import type { BearerKey, User } from '@/types';
 import { useServerContext } from '@/contexts/ServerContext';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useAuth } from '@/contexts/AuthContext';
+import { useBranding } from '@/contexts/BrandingContext';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import ToolPolicyPanel from '@/components/ToolPolicyPanel';
 import SmartRoutingIndexPanel from '@/components/SmartRoutingIndexPanel';
@@ -46,9 +49,11 @@ interface BearerKeyRowProps {
     payload: {
       name: string;
       enabled: boolean;
-      accessType: 'all' | 'groups' | 'servers' | 'custom';
+      accessType: 'all' | 'groups' | 'servers' | 'custom' | 'exclude';
       allowedGroups: string;
       allowedServers: string;
+      excludedGroups: string;
+      excludedServers: string;
     },
   ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -68,11 +73,13 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [name, setName] = useState(keyData.name);
   const [enabled, setEnabled] = useState<boolean>(keyData.enabled);
-  const [accessType, setAccessType] = useState<'all' | 'groups' | 'servers' | 'custom'>(
+  const [accessType, setAccessType] = useState<'all' | 'groups' | 'servers' | 'custom' | 'exclude'>(
     keyData.accessType || 'all',
   );
   const [selectedGroups, setSelectedGroups] = useState<string[]>(keyData.allowedGroups || []);
   const [selectedServers, setSelectedServers] = useState<string[]>(keyData.allowedServers || []);
+  const [excludedGroups, setExcludedGroups] = useState<string[]>(keyData.excludedGroups || []);
+  const [excludedServers, setExcludedServers] = useState<string[]>(keyData.excludedServers || []);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -83,6 +90,8 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
       setAccessType(keyData.accessType || 'all');
       setSelectedGroups(keyData.allowedGroups || []);
       setSelectedServers(keyData.allowedServers || []);
+      setExcludedGroups(keyData.excludedGroups || []);
+      setExcludedServers(keyData.excludedServers || []);
     }
   }, [keyData, isEditing]);
 
@@ -108,6 +117,14 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
       );
       return;
     }
+    if (isSystemKey && accessType === 'exclude' && excludedGroups.length === 0 && excludedServers.length === 0) {
+      showToast(
+        t('settings.selectAtLeastOneExcludedGroupOrServer') ||
+          'Please select at least one group or server to exclude',
+        'error',
+      );
+      return;
+    }
 
     setSaving(true);
     try {
@@ -117,6 +134,8 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
         accessType,
         allowedGroups: selectedGroups.join(', '),
         allowedServers: selectedServers.join(', '),
+        excludedGroups: excludedGroups.join(', '),
+        excludedServers: excludedServers.join(', '),
       });
       setIsEditing(false);
     } catch {
@@ -142,6 +161,7 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
 
   const isGroupsMode = accessType === 'groups';
   const isCustomMode = accessType === 'custom';
+  const isExcludeMode = accessType === 'exclude';
 
   // Helper function to format access type display text
   const formatAccessTypeDisplay = (key: BearerKey): string => {
@@ -166,6 +186,20 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
         parts.push(`${t('settings.bearerKeyAccessServers') || 'Servers'}: ${key.allowedServers}`);
       }
       return `${t('settings.bearerKeyAccessCustom') || 'Custom'}: ${parts.join('; ')}`;
+    }
+    if (key.accessType === 'exclude') {
+      const parts: string[] = [];
+      if (key.excludedGroups && key.excludedGroups.length > 0) {
+        parts.push(
+          `${t('settings.bearerKeyExcludedGroups') || 'Excluded groups'}: ${key.excludedGroups}`,
+        );
+      }
+      if (key.excludedServers && key.excludedServers.length > 0) {
+        parts.push(
+          `${t('settings.bearerKeyExcludedServers') || 'Excluded servers'}: ${key.excludedServers}`,
+        );
+      }
+      return `${t('settings.bearerKeyAccessExclude') || 'All except'}: ${parts.join('; ')}`;
     }
     return '';
   };
@@ -218,29 +252,26 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {t('settings.bearerKeyAccessType') || 'Access scope'}
                 </label>
-                <select
-                  className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                <SimpleSelect
+                  className="w-full"
+                  ariaLabel={t('settings.bearerKeyAccessType') || 'Access scope'}
                   value={accessType}
-                  onChange={(e) =>
-                    setAccessType(e.target.value as 'all' | 'groups' | 'servers' | 'custom')
+                  onChange={(v) =>
+                    setAccessType(v as 'all' | 'groups' | 'servers' | 'custom' | 'exclude')
                   }
                   disabled={loading}
-                >
-                  <option value="all">{t('settings.bearerKeyAccessAll') || 'All Resources'}</option>
-                  <option value="groups">
-                    {t('settings.bearerKeyAccessGroups') || 'Specific Groups'}
-                  </option>
-                  <option value="servers">
-                    {t('settings.bearerKeyAccessServers') || 'Specific Servers'}
-                  </option>
-                  <option value="custom">
-                    {t('settings.bearerKeyAccessCustom') || 'Custom (Groups & Servers)'}
-                  </option>
-                </select>
+                  options={[
+                    { value: 'all', label: t('settings.bearerKeyAccessAll') || 'All Resources' },
+                    { value: 'groups', label: t('settings.bearerKeyAccessGroups') || 'Specific Groups' },
+                    { value: 'servers', label: t('settings.bearerKeyAccessServers') || 'Specific Servers' },
+                    { value: 'custom', label: t('settings.bearerKeyAccessCustom') || 'Custom (Groups & Servers)' },
+                    { value: 'exclude', label: t('settings.bearerKeyAccessExclude') || 'All except selected groups/servers' },
+                  ]}
+                />
               </div>}
 
               {/* Show single selector for groups or servers mode */}
-              {isAdmin && isSystemKey && !isCustomMode && accessType !== 'all' && (
+              {isAdmin && isSystemKey && !isCustomMode && !isExcludeMode && accessType !== 'all' && (
                 <div className="flex-1 min-w-[200px]">
                   <label
                     className="block text-sm font-medium mb-1 text-gray-700"
@@ -288,6 +319,37 @@ const BearerKeyRow: React.FC<BearerKeyRowProps> = ({
                       options={availableServers}
                       selected={selectedServers}
                       onChange={setSelectedServers}
+                      placeholder={t('settings.selectServers') || 'Select servers...'}
+                      disabled={loading}
+                    />
+                  </div>
+                </>
+              )}
+
+              {/* Show both selectors for exclude mode */}
+              {isAdmin && isSystemKey && isExcludeMode && (
+                <>
+                  <div className="flex-1 min-w-[200px]">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {t('settings.bearerKeyExcludedGroups') || 'Excluded groups'}
+                    </label>
+                    <MultiSelect
+                      options={availableGroups}
+                      selected={excludedGroups}
+                      onChange={setExcludedGroups}
+                      searchFn={groupSearchFn}
+                      placeholder={t('settings.selectGroups') || 'Select groups...'}
+                      disabled={loading}
+                    />
+                  </div>
+                  <div className="flex-1 min-w-[200px]">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {t('settings.bearerKeyExcludedServers') || 'Excluded servers'}
+                    </label>
+                    <MultiSelect
+                      options={availableServers}
+                      selected={excludedServers}
+                      onChange={setExcludedServers}
                       placeholder={t('settings.selectServers') || 'Select servers...'}
                       disabled={loading}
                     />
@@ -716,9 +778,10 @@ const SettingsPage: React.FC = () => {
   // OAuth Provider registered clients (desktop): loaded when the section
   // expands; revoke drops the client + all its tokens.
   const [oauthClients, setOauthClients] = useState<
-    { clientId: string; name: string; scopes: string[]; createdAt: number; revoked: boolean }[]
+    { clientId: string; name: string; redirectUris: string[]; scopes: string[]; createdAt: number; revoked: boolean }[]
   >([]);
   const [revokeClientTarget, setRevokeClientTarget] = useState<string | null>(null);
+  const [showOAuthClientsList, setShowOAuthClientsList] = useState(false);
 
   const [tempBetterAuthConfig, setTempBetterAuthConfig] = useState<{
     baseUrl: string;
@@ -737,6 +800,28 @@ const SettingsPage: React.FC = () => {
     oidcScopes: DEFAULT_OIDC_SCOPES.join(', '),
     oidcPrompt: '',
   });
+
+  const { dashboardName, setDashboardName } = useBranding();
+  const [tempDashboardName, setTempDashboardName] = useState(dashboardName);
+  const [savingDashboardName, setSavingDashboardName] = useState(false);
+  useEffect(() => {
+    setTempDashboardName(dashboardName);
+  }, [dashboardName]);
+  const saveDashboardName = async () => {
+    setSavingDashboardName(true);
+    try {
+      const name = tempDashboardName.trim();
+      const result = await apiPut('/system-config', { dashboardName: name });
+      if (!result.success) throw new Error(result.message || result.error);
+      setDashboardName(name);
+      setTempDashboardName(name);
+      showToast(t('settings.systemConfigUpdated'));
+    } catch {
+      showToast(t('settings.dashboardNameSaveFailed'), 'error');
+    } finally {
+      setSavingDashboardName(false);
+    }
+  };
 
   const [tempNameSeparator, setTempNameSeparator] = useState<string>('-');
   const [showAddBearerKeyForm, setShowAddBearerKeyForm] = useState(false);
@@ -786,6 +871,9 @@ const SettingsPage: React.FC = () => {
     deleteBearerKey,
     refreshBearerKeys,
   } = useSettingsData();
+  // Startup model-reload dialog state (Provider-level): suppress the local
+  // Smart Routing reload dialog while it is open (no stacked modals).
+  const { reindexConfirm: startupReindexConfirm } = useRagData();
 
   const [tempAllowedCidrs, setTempAllowedCidrs] = useState('');
   useEffect(() => {
@@ -1085,8 +1173,10 @@ const SettingsPage: React.FC = () => {
 
   const loadOauthClients = async () => {
     try {
-      const result = await apiGet<{ success: boolean; data?: { clientId: string; name: string; scopes: string[]; createdAt: number; revoked: boolean }[] }>('/oauth-clients');
-      setOauthClients(result.data ?? []);
+      const result = await apiGet<{ success: boolean; data?: OAuthClientRow[] }>('/oauth-clients');
+      setOauthClients(
+        (result.data ?? []).map((c) => ({ ...c, redirectUris: c.redirectUris ?? [] })),
+      );
     } catch {
       showToast(t('settings.oauthClientsLoadFailed'));
     }
@@ -2021,19 +2111,25 @@ const SettingsPage: React.FC = () => {
   const [newBearerKey, setNewBearerKey] = useState<{
     name: string;
     enabled: boolean;
-    accessType: 'all' | 'groups' | 'servers' | 'custom';
+    accessType: 'all' | 'groups' | 'servers' | 'custom' | 'exclude';
     allowedGroups: string;
     allowedServers: string;
+    excludedGroups: string;
+    excludedServers: string;
   }>({
     name: '',
     enabled: true,
     accessType: 'all',
     allowedGroups: '',
     allowedServers: '',
+    excludedGroups: '',
+    excludedServers: '',
   });
 
   const [newSelectedGroups, setNewSelectedGroups] = useState<string[]>([]);
   const [newSelectedServers, setNewSelectedServers] = useState<string[]>([]);
+  const [newSelectedExcludedGroups, setNewSelectedExcludedGroups] = useState<string[]>([]);
+  const [newSelectedExcludedServers, setNewSelectedExcludedServers] = useState<string[]>([]);
 
   // Prepare options for MultiSelect
   const availableServers = servers.map((server) => ({
@@ -2067,6 +2163,13 @@ const SettingsPage: React.FC = () => {
     }
     if (newBearerKey.accessType !== 'servers' && newBearerKey.accessType !== 'custom') {
       setNewSelectedServers([]);
+    }
+    // Symmetric exclude clearing: without this, selections made in exclude
+    // mode silently reappear when the user switches away and back (review
+    // round 10).
+    if (newBearerKey.accessType !== 'exclude') {
+      setNewSelectedExcludedGroups([]);
+      setNewSelectedExcludedServers([]);
     }
   }, [newBearerKey.accessType]);
 
@@ -2202,6 +2305,18 @@ const SettingsPage: React.FC = () => {
       );
       return;
     }
+    if (
+      newBearerKey.accessType === 'exclude' &&
+      newSelectedExcludedGroups.length === 0 &&
+      newSelectedExcludedServers.length === 0
+    ) {
+      showToast(
+        t('settings.selectAtLeastOneExcludedGroupOrServer') ||
+          'Please select at least one group or server to exclude',
+        'error',
+      );
+      return;
+    }
 
     const created = await createBearerKey({
       name: newBearerKey.name,
@@ -2217,6 +2332,14 @@ const SettingsPage: React.FC = () => {
         newSelectedServers.length > 0
           ? newSelectedServers
           : undefined,
+      excludedGroups:
+        newBearerKey.accessType === 'exclude' && newSelectedExcludedGroups.length > 0
+          ? newSelectedExcludedGroups
+          : undefined,
+      excludedServers:
+        newBearerKey.accessType === 'exclude' && newSelectedExcludedServers.length > 0
+          ? newSelectedExcludedServers
+          : undefined,
     } as any);
     if (!created) return;
     // The new key now appears in the list (with a per-row copy button), so we
@@ -2230,9 +2353,13 @@ const SettingsPage: React.FC = () => {
       accessType: 'all',
       allowedGroups: '',
       allowedServers: '',
+      excludedGroups: '',
+      excludedServers: '',
     });
     setNewSelectedGroups([]);
     setNewSelectedServers([]);
+    setNewSelectedExcludedGroups([]);
+    setNewSelectedExcludedServers([]);
     await refreshBearerKeys();
   };
 
@@ -2241,9 +2368,11 @@ const SettingsPage: React.FC = () => {
     payload: {
       name: string;
       enabled: boolean;
-      accessType: 'all' | 'groups' | 'servers' | 'custom';
+      accessType: 'all' | 'groups' | 'servers' | 'custom' | 'exclude';
       allowedGroups: string;
       allowedServers: string;
+      excludedGroups: string;
+      excludedServers: string;
     },
   ) => {
     // Propagate failure: BearerKeyRow only closes the editor on success —
@@ -2254,6 +2383,8 @@ const SettingsPage: React.FC = () => {
       accessType: payload.accessType,
       allowedGroups: parseCommaSeparated(payload.allowedGroups),
       allowedServers: parseCommaSeparated(payload.allowedServers),
+      excludedGroups: parseCommaSeparated(payload.excludedGroups),
+      excludedServers: parseCommaSeparated(payload.excludedServers),
     } as any);
     if (ok === null) {
       throw new Error(t('errors.failedToUpdateBearerKey') || 'Failed to update bearer key');
@@ -2383,18 +2514,13 @@ const SettingsPage: React.FC = () => {
                       <label htmlFor="bearer-key-scope-filter" className="text-sm text-gray-600 whitespace-nowrap">
                         {t('settings.bearerKeyScopeFilter') || 'Filter by scope'}
                       </label>
-                      <select
-                        id="bearer-key-scope-filter"
-                        className="block min-w-48 py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
+                      <SimpleSelect
+                        className="w-full"
+                        ariaLabel={t('settings.bearerKeyScopeFilter') || 'Filter by scope'}
                         value={bearerKeyScopeFilter}
-                        onChange={(e) => setBearerKeyScopeFilter(e.target.value as BearerKeyScopeFilterValue)}
-                      >
-                        {bearerKeyScopeFilterOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(v) => setBearerKeyScopeFilter(v as BearerKeyScopeFilterValue)}
+                        options={bearerKeyScopeFilterOptions}
+                      />
                     </div>
                   )}
                   {!showAddBearerKeyForm && (
@@ -2550,36 +2676,32 @@ const SettingsPage: React.FC = () => {
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           {t('settings.bearerKeyAccessType') || 'Access scope'}
                         </label>
-                        <select
-                          className="block w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select transition-shadow duration-200"
-                          value={newBearerKey.accessType}
-                          onChange={(e) =>
-                            setNewBearerKey((prev) => ({
-                              ...prev,
-                              accessType: e.target.value as 'all' | 'groups' | 'servers' | 'custom',
-                            }))
-                          }
-                          disabled={loading}
-                        >
-                          <option value="all">
-                            {t('settings.bearerKeyAccessAll') || 'All Resources'}
-                          </option>
-                          <option value="groups">
-                            {t('settings.bearerKeyAccessGroups') || 'Specific Groups'}
-                          </option>
-                          <option value="servers">
-                            {t('settings.bearerKeyAccessServers') || 'Specific Servers'}
-                          </option>
-                          <option value="custom">
-                            {t('settings.bearerKeyAccessCustom') || 'Custom (Groups & Servers)'}
-                          </option>
-                        </select>
-                      </div>
-                      )}
+                      <SimpleSelect
+                        className="w-full"
+                        ariaLabel={t('settings.bearerKeyAccessType') || 'Access scope'}
+                        value={newBearerKey.accessType}
+                        onChange={(v) =>
+                          setNewBearerKey((prev) => ({
+                            ...prev,
+                            accessType: v as 'all' | 'groups' | 'servers' | 'custom' | 'exclude',
+                          }))
+                        }
+                        disabled={loading}
+                        options={[
+                          { value: 'all', label: t('settings.bearerKeyAccessAll') || 'All Resources' },
+                          { value: 'groups', label: t('settings.bearerKeyAccessGroups') || 'Specific Groups' },
+                          { value: 'servers', label: t('settings.bearerKeyAccessServers') || 'Specific Servers' },
+                          { value: 'custom', label: t('settings.bearerKeyAccessCustom') || 'Custom (Groups & Servers)' },
+                          { value: 'exclude', label: t('settings.bearerKeyAccessExclude') || 'All except selected groups/servers' },
+                        ]}
+                      />
+                    </div>
+                  )}
 
                       {isAdmin &&
                         newBearerKey.accessType !== 'all' &&
-                        newBearerKey.accessType !== 'custom' && (
+                        newBearerKey.accessType !== 'custom' &&
+                        newBearerKey.accessType !== 'exclude' && (
                         <div className="flex-1 min-w-[200px]">
                           <label
                             className="block text-sm font-medium mb-1 text-gray-700"
@@ -2636,6 +2758,36 @@ const SettingsPage: React.FC = () => {
                               options={availableServers}
                               selected={newSelectedServers}
                               onChange={setNewSelectedServers}
+                              placeholder={t('settings.selectServers') || 'Select servers...'}
+                              disabled={loading}
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {isAdmin && newBearerKey.accessType === 'exclude' && (
+                        <>
+                          <div className="flex-1 min-w-[200px]">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('settings.bearerKeyExcludedGroups') || 'Excluded groups'}
+                            </label>
+                            <MultiSelect
+                              options={availableGroups}
+                              selected={newSelectedExcludedGroups}
+                              onChange={setNewSelectedExcludedGroups}
+                              placeholder={t('settings.selectGroups') || 'Select groups...'}
+                              disabled={loading}
+                              searchFn={groupSearchFn}
+                            />
+                          </div>
+                          <div className="flex-1 min-w-[200px]">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('settings.bearerKeyExcludedServers') || 'Excluded servers'}
+                            </label>
+                            <MultiSelect
+                              options={availableServers}
+                              selected={newSelectedExcludedServers}
+                              onChange={setNewSelectedExcludedServers}
                               placeholder={t('settings.selectServers') || 'Select servers...'}
                               disabled={loading}
                             />
@@ -2821,7 +2973,11 @@ const SettingsPage: React.FC = () => {
                       type="button"
                       className="hub-btn"
                       disabled={!smartRoutingConfig.enabled}
-                      onClick={() => setSrReloadOpen(true)}
+                      onClick={() => {
+                        // The Provider-level startup ReindexDialog owns the
+                        // same flow — never stack two full-screen modals.
+                        if (!startupReindexConfirm) setSrReloadOpen(true);
+                      }}
                     >
                       {t('settings.smartReindex') || 'Reload'}
                     </button>
@@ -3615,20 +3771,19 @@ const SettingsPage: React.FC = () => {
                       {t('settings.serverDescriptionModeDescription')}
                     </p>
                   </div>
-                  <select
+                  <SimpleSelect
+                    className="w-full"
+                    ariaLabel={t('settings.serverDescriptionMode')}
                     value={smartRoutingConfig.serverDescriptionMode || 'names'}
-                    onChange={(e) =>
-                      updateSmartRoutingConfig(
-                        'serverDescriptionMode',
-                        e.target.value as 'names' | 'full',
-                      )
+                    onChange={(v) =>
+                      updateSmartRoutingConfig('serverDescriptionMode', v as 'names' | 'full')
                     }
-                    className="w-full py-2 px-3 border border-gray-300 bg-white dark:bg-[var(--hub-item)] rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm form-select"
                     disabled={loading}
-                  >
-                    <option value="names">{t('settings.serverDescriptionModeNames')}</option>
-                    <option value="full">{t('settings.serverDescriptionModeFull')}</option>
-                  </select>
+                    options={[
+                      { value: 'names', label: t('settings.serverDescriptionModeNames') },
+                      { value: 'full', label: t('settings.serverDescriptionModeFull') },
+                    ]}
+                  />
                 </div>
               )}
 
@@ -4209,36 +4364,16 @@ const SettingsPage: React.FC = () => {
                       <h3 className="font-medium text-gray-700">{t('settings.oauthClients')}</h3>
                       <p className="text-sm text-gray-500">{t('settings.oauthClientsDescription')}</p>
                     </div>
-                    {oauthClients.length === 0 ? (
-                      <p className="text-sm text-gray-500">{t('settings.oauthClientsEmpty')}</p>
-                    ) : (
-                      <ul className="divide-y divide-[var(--hub-line-2)]">
-                        {oauthClients.map((c) => (
-                          <li key={c.clientId} className="flex items-center justify-between py-2 gap-3">
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium text-gray-700 truncate">
-                                {c.name || c.clientId}
-                                {c.revoked && (
-                                  <span className="ml-2 text-xs text-red-500">{t('settings.oauthClientRevoked')}</span>
-                                )}
-                              </div>
-                              <div className="text-xs text-gray-500 truncate">{c.clientId}</div>
-                              <div className="text-xs text-gray-400 truncate">
-                                {c.scopes.join(' ') || 'mcp:all'} · {new Date(c.createdAt * 1000).toLocaleString()}
-                              </div>
-                            </div>
-                            {!c.revoked && (
-                              <button
-                                className="hub-btn danger shrink-0"
-                                disabled={loading}
-                                onClick={() => setRevokeClientTarget(c.clientId)}
-                              >
-                                {t('settings.oauthClientRevoke')}
-                              </button>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
+                    <button
+                      className="hub-btn"
+                      disabled={oauthClients.length === 0}
+                      onClick={() => setShowOAuthClientsList(true)}
+                    >
+                      {t('settings.oauthClientsViewList')}
+                      {oauthClients.length > 0 && ` (${oauthClients.length})`}
+                    </button>
+                    {oauthClients.length === 0 && (
+                      <p className="text-sm text-gray-500 mt-2">{t('settings.oauthClientsEmpty')}</p>
                     )}
                   </div>
                 )}
@@ -4256,6 +4391,40 @@ const SettingsPage: React.FC = () => {
                 confirmText={t('settings.oauthClientRevoke')}
                 variant="danger"
               />
+              {showOAuthClientsList && (
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+                  onClick={() => setShowOAuthClientsList(false)}
+                >
+                  <div
+                    className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] overflow-y-auto"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-800 z-10">
+                      <h3 className="text-base font-medium text-gray-900 dark:text-gray-100">
+                        {t('settings.oauthClients')}
+                        {oauthClients.length > 0 && ` (${oauthClients.length})`}
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => setShowOAuthClientsList(false)}
+                        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                        aria-label="close"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+                    <div className="px-5 py-4">
+                      <OAuthClientsPager
+                        clients={oauthClients}
+                        t={t}
+                        onRevoke={(id) => setRevokeClientTarget(id)}
+                        disabled={loading}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -4682,6 +4851,33 @@ const SettingsPage: React.FC = () => {
 
           {sectionsVisible.nameSeparator && (
             <div className="space-y-4 pb-4 px-6 pt-4 border-t border-[var(--hub-line-2)]">
+              <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
+                <label htmlFor="dashboard-name" className="block font-medium text-gray-700">
+                  {t('settings.dashboardName')}
+                </label>
+                <p id="dashboard-name-description" className="text-sm text-gray-500 mb-2">
+                  {t('settings.dashboardNameDescription')}
+                </p>
+                <div className="flex items-center gap-3">
+                  <input
+                    id="dashboard-name"
+                    aria-describedby="dashboard-name-description"
+                    value={tempDashboardName}
+                    onChange={(e) => setTempDashboardName(e.target.value)}
+                    maxLength={100}
+                    placeholder={t('app.title')}
+                    disabled={savingDashboardName}
+                    className="flex-1 min-w-0 py-2 px-3 border border-gray-300 rounded-md form-input"
+                  />
+                  <button
+                    onClick={saveDashboardName}
+                    disabled={savingDashboardName}
+                    className="hub-btn primary"
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </div>
               <div className="p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
                 <div className="mb-2">
                   <h3 className="font-medium text-gray-700">{t('settings.nameSeparatorLabel')}</h3>
@@ -5134,6 +5330,174 @@ const SettingsPage: React.FC = () => {
           onClose={() => setSrReloadOpen(false)}
           onStart={handleSrReloadStart}
         />
+      )}
+    </div>
+  );
+};
+
+/** 已注册客户端分页列表（每页 5 条，避免长列表撑爆设置页） */
+const OAUTH_CLIENTS_PAGE_SIZE = 5;
+interface OAuthClientRow {
+  clientId: string;
+  name: string;
+  redirectUris: string[];
+  scopes: string[];
+  createdAt: number;
+  revoked: boolean;
+}
+const OAuthClientsPager: React.FC<{
+  clients: OAuthClientRow[];
+  t: ReturnType<typeof useTranslation>['t'];
+  onRevoke: (clientId: string) => void;
+  disabled: boolean;
+}> = ({ clients, t, onRevoke, disabled }) => {
+  const [page, setPage] = useState(0);
+  const [viewTarget, setViewTarget] = useState<OAuthClientRow | null>(null);
+  const totalPages = Math.max(1, Math.ceil(clients.length / OAUTH_CLIENTS_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const start = safePage * OAUTH_CLIENTS_PAGE_SIZE;
+  const visible = clients.slice(start, start + OAUTH_CLIENTS_PAGE_SIZE);
+  const tr = t as (key: string, fallback?: string) => string;
+  return (
+    <div>
+      <ul className="divide-y divide-[var(--hub-line-2)]">
+        {visible.map((c) => (
+          <li key={c.clientId} className="flex items-center justify-between py-2 gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-gray-700 truncate">
+                {c.name || c.clientId}
+                {c.revoked && (
+                  <span className="ml-2 text-xs text-red-500">{tr('settings.oauthClientRevoked')}</span>
+                )}
+              </div>
+              <div className="text-xs text-gray-500 truncate">{c.clientId}</div>
+              <div className="text-xs text-gray-400 truncate">
+                {c.scopes.join(' ') || 'mcp:all'} · {new Date(c.createdAt * 1000).toLocaleString()}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                className="hub-btn px-2 py-1 text-xs"
+                disabled={disabled}
+                onClick={() => setViewTarget(c)}
+              >
+                {tr('settings.oauthClientView')}
+              </button>
+              {!c.revoked && (
+                <button
+                  className="hub-btn danger shrink-0"
+                  disabled={disabled}
+                  onClick={() => onRevoke(c.clientId)}
+                >
+                  {tr('settings.oauthClientRevoke')}
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-2 pt-2 border-t border-[var(--hub-line-2)]">
+          <span className="text-xs text-gray-500">
+            {start + 1}-{Math.min(start + OAUTH_CLIENTS_PAGE_SIZE, clients.length)} / {clients.length}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="hub-btn px-2 py-1 text-xs"
+              disabled={safePage === 0}
+              onClick={() => setPage(safePage - 1)}
+            >
+              {tr('common.previous', 'Previous')}
+            </button>
+            <span className="text-xs text-gray-500">
+              {safePage + 1} / {totalPages}
+            </span>
+            <button
+              type="button"
+              className="hub-btn px-2 py-1 text-xs"
+              disabled={safePage >= totalPages - 1}
+              onClick={() => setPage(safePage + 1)}
+            >
+              {tr('common.next', 'Next')}
+            </button>
+          </div>
+        </div>
+      )}
+      {viewTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => setViewTarget(null)}
+        >
+          <div
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[80vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-base font-medium text-gray-900 dark:text-gray-100">
+                {tr('settings.oauthClientDetail')}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setViewTarget(null)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                aria-label="close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-3 text-sm">
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">{tr('settings.oauthClientName')}</div>
+                <div className="text-gray-900 dark:text-gray-100 break-all">
+                  {viewTarget.name || '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Client ID</div>
+                <div className="font-mono text-xs text-gray-900 dark:text-gray-100 break-all">
+                  {viewTarget.clientId}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">{tr('settings.oauthClientRedirectUris')}</div>
+                {viewTarget.redirectUris.length > 0 ? (
+                  <ul className="font-mono text-xs text-gray-900 dark:text-gray-100 break-all list-disc list-inside">
+                    {viewTarget.redirectUris.map((u) => (
+                      <li key={u} className="break-all">{u}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-gray-400">—</div>
+                )}
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">{tr('settings.oauthClientScopes')}</div>
+                <div className="text-gray-900 dark:text-gray-100 break-all">
+                  {viewTarget.scopes.join(' ') || 'mcp:all'}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">{tr('settings.oauthClientCreatedAt')}</div>
+                <div className="text-gray-900 dark:text-gray-100">
+                  {new Date(viewTarget.createdAt * 1000).toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">{tr('settings.oauthClientStatus')}</div>
+                <div>
+                  {viewTarget.revoked ? (
+                    <span className="text-xs text-red-500">{tr('settings.oauthClientRevoked')}</span>
+                  ) : (
+                    <span className="text-xs text-green-600 dark:text-green-400">
+                      {tr('settings.oauthClientStatusActive')}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

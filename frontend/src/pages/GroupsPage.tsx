@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Plus, Download, Upload, AlertCircle, X, RefreshCw } from 'lucide-react';
 import { Group } from '@/types';
@@ -11,6 +11,7 @@ import GroupImportForm from '@/components/GroupImportForm';
 import TemplateExportForm from '@/components/TemplateExportForm';
 import TemplateImportForm from '@/components/TemplateImportForm';
 import { useCostData } from '@/hooks/useCostData';
+import { serverCostRevision } from '@/utils/costRevision';
 
 const GroupsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -23,12 +24,12 @@ const GroupsPage: React.FC = () => {
     triggerRefresh,
   } = useGroupData();
   const { allServers } = useServerData({ refreshOnMount: true });
-  const { groupCosts, refetch: refetchCost } = useCostData();
-
-  // Re-fetch context footprint whenever group definitions or server connection state change.
-  useEffect(() => {
-    refetchCost();
-  }, [groups, allServers, refetchCost]);
+  // Memoized: see ServersPage — per-render re-serialization is O(full catalog).
+  const costRevision = useMemo(
+    () => JSON.stringify([groups, serverCostRevision(allServers)]),
+    [groups, allServers],
+  );
+  const { groupCosts } = useCostData(costRevision);
 
   const [editingGroup, setEditingGroup] = useState<Group | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);

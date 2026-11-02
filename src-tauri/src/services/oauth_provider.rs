@@ -674,6 +674,16 @@ pub async fn cleanup_expired() {
     .execute(pool())
     .await;
 
+    // Revoked clients are kept for audit for 7 days after creation, then
+    // purged (their tokens were already dropped at revoke time). Runs in the
+    // same periodic job as log/activity cleanup (6h loop in lib.rs).
+    let _ = sqlx::query(
+        "DELETE FROM oauth_clients WHERE revoked = 1 AND created_at < ?",
+    )
+    .bind(now - 7 * 24 * 3600)
+    .execute(pool())
+    .await;
+
     // dynamicRegistration.clientTtl reaper (UI promise: "reap dynamically
     // registered clients with no live tokens ... older than this age; 0 =
     // disabled"). A client is reapable when it has NO live token rows at all

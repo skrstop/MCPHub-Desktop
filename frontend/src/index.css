@@ -822,6 +822,34 @@ textarea.form-input:focus {
 }
 .dark .form-input::placeholder { color: var(--hub-ink-3) !important; }
 
+/* Form selects — no @tailwindcss/forms plugin in Tailwind v4, so
+   `form-select` has no built-in styles and renders as a native OS select
+   (system double-arrow, default padding). Mirror the form-input design and
+   draw a chevron so selects match neighboring inputs. */
+select.form-select {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background: var(--hub-surface)
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%238a8f98' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    no-repeat right 10px center / 12px !important;
+  border: 1px solid var(--hub-line) !important;
+  border-radius: 7px !important;
+  color: var(--hub-ink) !important;
+  box-shadow: none !important;
+  padding-right: 30px !important;
+  transition: border-color 0.15s ease !important;
+}
+select.form-select:focus {
+  border-color: var(--hub-ink-2) !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+.dark select.form-select {
+  background-color: var(--hub-surface) !important;
+  border-color: var(--hub-line) !important;
+  color: var(--hub-ink) !important;
+}
+
 /* Status badges → dot + text style */
 .status-badge-online,
 .status-badge-offline,

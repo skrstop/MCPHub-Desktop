@@ -8,10 +8,14 @@ pub struct BearerKey {
     pub name: String,
     pub token: String,
     pub enabled: bool,
-    /// "all" | "groups" | "servers" | "custom"
+    /// "all" | "groups" | "servers" | "custom" | "exclude"
     pub access_type: String,
     pub allowed_groups: Vec<String>,
     pub allowed_servers: Vec<String>,
+    /// #1413 "all-except" scope (access_type "exclude" only): group names/ids
+    /// and server names hidden from this key. Dormant for other access types.
+    pub excluded_groups: Vec<String>,
+    pub excluded_servers: Vec<String>,
     pub created_at: String,
 }
 
@@ -28,6 +32,10 @@ pub struct BearerKeyPayload {
     pub allowed_groups: Vec<String>,
     #[serde(default)]
     pub allowed_servers: Vec<String>,
+    #[serde(default)]
+    pub excluded_groups: Vec<String>,
+    #[serde(default)]
+    pub excluded_servers: Vec<String>,
 }
 
 fn default_enabled() -> bool {

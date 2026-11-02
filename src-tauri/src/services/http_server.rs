@@ -15,7 +15,7 @@ use crate::{
     models::{bearer_key::BearerKey, server::Tool},
     services::{
         app_logger, bearer_key_service, config_service, group_service, log_service, oauth_provider,
-        mcp_tasks, server_tool_config_service,
+        mcp_tasks, server_service, server_tool_config_service,
     },
 };
 use axum::response::IntoResponse;
@@ -515,6 +515,9 @@ pub(crate) async fn check_bearer_auth_at(
                     access_type,
                     allowed_groups,
                     allowed_servers,
+                    // OAuth scope mapping never produces exclusions.
+                    excluded_groups: Vec::new(),
+                    excluded_servers: Vec::new(),
                     created_at: String::new(),
                 }));
             }
@@ -583,6 +586,49 @@ pub(crate) async fn get_allowed_servers(key: Option<&BearerKey>) -> Option<HashS
             }
             Some(servers)
         }
+        // #1413 "all-except": everything is visible except the excluded
+        // servers and the members of excluded groups (groups matched by name
+        // OR id). Stale references fail safe — excluding something that no
+        // longer exists denies nothing extra.
+        "exclude" => {
+            let mut excluded: HashSet<String> = key.excluded_servers.iter().cloned().collect();
+            match group_service::list_all().await {
+                Ok(groups) => {
+                    for g in &groups {
+                        if key.excluded_groups.contains(&g.name)
+                            || key.excluded_groups.contains(&g.id)
+                        {
+                            excluded.extend(extract_server_names(&g.servers));
+                        }
+                    }
+                }
+                // Fail CLOSED: an unreadable group table must not shrink the
+                // exclusion set (that would silently widen access).
+                Err(e) => {
+                    log::warn!(
+                        "[bearer] exclude key '{}': group lookup failed ({}), denying all servers",
+                        key.name, e
+                    );
+                    return Some(HashSet::new());
+                }
+            }
+            let mut all: HashSet<String> = match server_service::list_all().await {
+                Ok(list) => list.into_iter().map(|s| s.name).collect(),
+                Err(e) => {
+                    log::warn!(
+                        "[bearer] exclude key '{}': server lookup failed ({}), denying all servers",
+                        key.name, e
+                    );
+                    return Some(HashSet::new());
+                }
+            };
+            // The RAG builtin server rides the same listing/call surfaces as
+            // real servers — an exclude key keeps it visible unless it is
+            // excluded directly or via an excluded group member.
+            all.insert(crate::rag::service::BUILTIN_SERVER_NAME.to_string());
+            all.retain(|n| !excluded.contains(n));
+            Some(all)
+        }
         // Legacy rows may carry an empty access_type — treat as unrestricted
         // (pre-fix behaviour) so existing keys keep working.
         "" => None,
@@ -595,6 +641,41 @@ pub(crate) async fn get_allowed_servers(key: Option<&BearerKey>) -> Option<HashS
                 other, key.name
             );
             Some(HashSet::new())
+        }
+    }
+}
+
+/// #1413: whether an 'exclude'-scoped key denies a whole group route — the
+/// group is referenced (by name or id) in the key's `excludedGroups`. Origin
+/// denies the group before member checks; on desktop the allowed-set
+/// intersection in `get_allowed_servers` already empties the group's member
+/// filters, so this helper is the explicit statement of the same rule (used
+/// by the bridge's group-scope filter to short-circuit the whole scope).
+/// A group lookup failure returns false — the intersection path fails closed
+/// on its own, so this helper never widens access.
+pub(crate) async fn bearer_excludes_group(
+    key: Option<&BearerKey>,
+    group_name: &str,
+    group_id: &str,
+) -> bool {
+    let Some(key) = key else {
+        return false;
+    };
+    if key.access_type != "exclude" {
+        return false;
+    }
+    match group_service::list_all().await {
+        Ok(groups) => groups
+            .iter()
+            .any(|g| (g.name == group_name || g.id == group_id)
+                && (key.excluded_groups.contains(&g.name)
+                    || key.excluded_groups.contains(&g.id))),
+        Err(e) => {
+            log::warn!(
+                "[bearer] exclude key '{}': group lookup failed ({}); falling back to the allowed-set intersection",
+                key.name, e
+            );
+            false
         }
     }
 }
@@ -5021,5 +5102,221 @@ mod protected_resource_metadata_tests {
         assert_eq!(protected_resource_transport_path("/mcp"), None);
         assert_eq!(protected_resource_transport_path("/"), None);
         assert_eq!(protected_resource_transport_path(""), None);
+    }
+}
+
+#[cfg(test)]
+mod bearer_exclude_tests {
+    use super::*;
+    use crate::db;
+    use crate::models::bearer_key::BearerKeyPayload;
+    use crate::models::group::GroupPayload;
+    use serde_json::json;
+
+    fn key_payload(name: &str, access_type: &str) -> BearerKeyPayload {
+        BearerKeyPayload {
+            name: name.to_string(),
+            enabled: true,
+            access_type: access_type.to_string(),
+            allowed_groups: Vec::new(),
+            allowed_servers: Vec::new(),
+            excluded_groups: Vec::new(),
+            excluded_servers: Vec::new(),
+        }
+    }
+
+    async fn insert_server(name: &str) {
+        sqlx::query("INSERT INTO servers (id, name) VALUES (?, ?)")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(name)
+            .execute(db::pool())
+            .await
+            .unwrap();
+    }
+
+    async fn remove_server(name: &str) {
+        sqlx::query("DELETE FROM servers WHERE name = ?")
+            .bind(name)
+            .execute(db::pool())
+            .await
+            .unwrap();
+    }
+
+    /// #1413: an exclude key hides the named server but keeps everything
+    /// else (including the RAG builtin server) visible.
+    #[tokio::test]
+    async fn exclude_single_server_hides_only_that_server() {
+        crate::db::ensure_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let srv_x = format!("ex-srv-x-{suffix}");
+        let srv_y = format!("ex-srv-y-{suffix}");
+        insert_server(&srv_x).await;
+        insert_server(&srv_y).await;
+
+        let mut p = key_payload("k", "exclude");
+        p.excluded_servers = vec![srv_x.clone()];
+        let key = bearer_key_service::create(&p).await.unwrap();
+
+        let allowed = get_allowed_servers(Some(&key)).await.unwrap();
+        assert!(!allowed.contains(&srv_x), "excluded server must be hidden");
+        assert!(allowed.contains(&srv_y), "non-excluded server stays visible");
+        assert!(
+            allowed.contains(crate::rag::service::BUILTIN_SERVER_NAME),
+            "builtin server stays visible unless explicitly excluded"
+        );
+
+        bearer_key_service::delete(&key.id).await.unwrap();
+        remove_server(&srv_x).await;
+        remove_server(&srv_y).await;
+    }
+
+    /// #1413: excluding a group hides every current member (group matched by
+    /// name); stale references deny nothing extra.
+    #[tokio::test]
+    async fn exclude_group_expands_members_and_tolerates_stale_refs() {
+        crate::db::ensure_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let srv_a = format!("ex-grp-a-{suffix}");
+        let srv_b = format!("ex-grp-b-{suffix}");
+        let srv_c = format!("ex-grp-c-{suffix}");
+        insert_server(&srv_a).await;
+        insert_server(&srv_b).await;
+        insert_server(&srv_c).await;
+
+        let group_name = format!("ex-grp-{suffix}");
+        let group = crate::services::group_service::create(&GroupPayload {
+            name: group_name.clone(),
+            description: None,
+            instructions: None,
+            servers: vec![json!({"name": srv_a}), json!({"name": srv_b})],
+        })
+        .await
+        .unwrap();
+
+        let mut p = key_payload("k", "exclude");
+        p.excluded_groups = vec![group_name.clone(), "no-such-group".to_string()];
+        p.excluded_servers = vec!["no-such-server".to_string()];
+        let key = bearer_key_service::create(&p).await.unwrap();
+
+        let allowed = get_allowed_servers(Some(&key)).await.unwrap();
+        assert!(!allowed.contains(&srv_a), "group member a must be hidden");
+        assert!(!allowed.contains(&srv_b), "group member b must be hidden");
+        assert!(allowed.contains(&srv_c), "non-member server stays visible");
+        // Stale references fail safe: the key still resolves, nothing panics.
+
+        bearer_key_service::delete(&key.id).await.unwrap();
+        crate::services::group_service::delete(&group.id).await.unwrap();
+        remove_server(&srv_a).await;
+        remove_server(&srv_b).await;
+        remove_server(&srv_c).await;
+    }
+
+    /// #1413: excludedGroups entries may reference the group by id.
+    #[tokio::test]
+    async fn exclude_group_matched_by_id() {
+        crate::db::ensure_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let srv_a = format!("ex-id-a-{suffix}");
+        insert_server(&srv_a).await;
+
+        let group_name = format!("ex-id-grp-{suffix}");
+        let group = crate::services::group_service::create(&GroupPayload {
+            name: group_name.clone(),
+            description: None,
+            instructions: None,
+            servers: vec![json!({"name": srv_a})],
+        })
+        .await
+        .unwrap();
+
+        let mut p = key_payload("k", "exclude");
+        p.excluded_groups = vec![group.id.clone()];
+        let key = bearer_key_service::create(&p).await.unwrap();
+
+        let allowed = get_allowed_servers(Some(&key)).await.unwrap();
+        assert!(!allowed.contains(&srv_a), "id-referenced group member must be hidden");
+
+        bearer_key_service::delete(&key.id).await.unwrap();
+        crate::services::group_service::delete(&group.id).await.unwrap();
+        remove_server(&srv_a).await;
+    }
+
+    /// #1413: excluding a group that carries the builtin server as a member
+    /// hides the builtin too (it rides the same member semantics).
+    #[tokio::test]
+    async fn exclude_group_with_builtin_member_hides_builtin() {
+        crate::db::ensure_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let group_name = format!("ex-builtin-grp-{suffix}");
+        let group = crate::services::group_service::create(&GroupPayload {
+            name: group_name.clone(),
+            description: None,
+            instructions: None,
+            servers: vec![json!({"name": crate::rag::service::BUILTIN_SERVER_NAME})],
+        })
+        .await
+        .unwrap();
+
+        let mut p = key_payload("k", "exclude");
+        p.excluded_groups = vec![group_name.clone()];
+        let key = bearer_key_service::create(&p).await.unwrap();
+
+        let allowed = get_allowed_servers(Some(&key)).await.unwrap();
+        assert!(
+            !allowed.contains(crate::rag::service::BUILTIN_SERVER_NAME),
+            "builtin must be hidden when its group is excluded"
+        );
+
+        bearer_key_service::delete(&key.id).await.unwrap();
+        crate::services::group_service::delete(&group.id).await.unwrap();
+    }
+
+    /// #1413: bearer_excludes_group — name/id hit true, miss false, and
+    /// non-exclude keys never exclude.
+    #[tokio::test]
+    async fn bearer_excludes_group_matches_name_or_id_only_for_exclude_keys() {
+        crate::db::ensure_test_pool().await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let group_name = format!("ex-gate-grp-{suffix}");
+        let group = crate::services::group_service::create(&GroupPayload {
+            name: group_name.clone(),
+            description: None,
+            instructions: None,
+            servers: vec![],
+        })
+        .await
+        .unwrap();
+
+        let mut p = key_payload("k", "exclude");
+        p.excluded_groups = vec![group_name.clone()];
+        let exclude_key = bearer_key_service::create(&p).await.unwrap();
+        let all_key = bearer_key_service::create(&key_payload("k2", "all"))
+            .await
+            .unwrap();
+
+        assert!(
+            bearer_excludes_group(Some(&exclude_key), &group_name, &group.id).await,
+            "exclude key must deny its excluded group (by name)"
+        );
+        assert!(
+            bearer_excludes_group(Some(&exclude_key), "unrelated-rename", &group.id).await,
+            "exclude key must deny its excluded group (by id)"
+        );
+        assert!(
+            !bearer_excludes_group(Some(&exclude_key), "other-group", "other-id").await,
+            "unrelated groups are not denied"
+        );
+        assert!(
+            !bearer_excludes_group(Some(&all_key), &group_name, &group.id).await,
+            "non-exclude keys never deny a group route"
+        );
+        assert!(
+            !bearer_excludes_group(None, &group_name, &group.id).await,
+            "no key = no denial"
+        );
+
+        bearer_key_service::delete(&exclude_key.id).await.unwrap();
+        bearer_key_service::delete(&all_key.id).await.unwrap();
+        crate::services::group_service::delete(&group.id).await.unwrap();
     }
 }

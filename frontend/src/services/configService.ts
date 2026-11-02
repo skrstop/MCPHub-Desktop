@@ -98,6 +98,7 @@ export interface PublicConfigResponse {
     skipAuth?: boolean;
     permissions?: any;
     betterAuth?: BetterAuthConfig;
+    dashboardName?: string;
   };
   message?: string;
 }
@@ -117,6 +118,7 @@ export const getPublicConfig = async (): Promise<{
   skipAuth: boolean;
   permissions?: any;
   betterAuth?: BetterAuthConfig;
+  dashboardName?: string;
 }> => {
   try {
     const data = await apiGet<PublicConfigResponse>('/public-config');
@@ -125,6 +127,7 @@ export const getPublicConfig = async (): Promise<{
         skipAuth: data.data?.skipAuth === true,
         permissions: data.data?.permissions || {},
         betterAuth: data.data?.betterAuth,
+        dashboardName: data.data?.dashboardName,
       };
     }
     return { skipAuth: true }; // Default to skipAuth for desktop

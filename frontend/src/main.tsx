@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import { BrandingProvider } from './contexts/BrandingContext';
 import './index.css';
 // Import the i18n configuration
 import './i18n';
@@ -65,7 +66,9 @@ async function initializeApp() {
       // 注意：StrictMode 在 dev 下会把 setState updater 以不同 base 重放两次，
       // toggle 类 updater 会自我抵消导致更新丢失（实测踩坑，见 AGENTS.md）。
       // 桌面端开发不需要 StrictMode 的副作用检查，故不启用。
-      <App />,
+      <BrandingProvider>
+        <App />
+      </BrandingProvider>,
     );
   } catch (error) {
     console.error('Failed to initialize app:', error);
@@ -82,7 +85,9 @@ async function initializeApp() {
       // 注意：StrictMode 在 dev 下会把 setState updater 以不同 base 重放两次，
       // toggle 类 updater 会自我抵消导致更新丢失（实测踩坑，见 AGENTS.md）。
       // 桌面端开发不需要 StrictMode 的副作用检查，故不启用。
-      <App />,
+      <BrandingProvider>
+        <App />
+      </BrandingProvider>,
     );
   }
 

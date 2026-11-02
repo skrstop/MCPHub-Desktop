@@ -403,7 +403,31 @@ pub async fn reindex_participants() -> Result<(usize, usize)> {
     Ok((n, tools_total))
 }
 
+/// Set for the duration of a full smart reindex so `select_model` cannot
+/// switch models mid-loop (mixed embeddings + purge_stale_model_rows would
+/// silently drop early servers' rows — review round 12; mirrors the rag
+/// side's REINDEX_ALL_RUNNING).
+static SMART_REINDEX_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True while a full smart reindex is in progress (select_model consults
+/// this alongside the rag-side flag).
+pub fn reindex_running() -> bool {
+    SMART_REINDEX_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub async fn reindex_all() -> Result<usize> {
+    if SMART_REINDEX_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err(anyhow!("a smart reindex is already in progress"));
+    }
+    // Panic-safe: a panic mid-reindex must not latch the flag forever.
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SMART_REINDEX_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard;
     if !smart_enabled().await {
         return Ok(0);
     }

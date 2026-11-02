@@ -326,6 +326,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     reportOcrMissingIf,
     docsVersion,
     refresh: refreshDocs,
+    setDocCountTotal,
   } = useRagData();
   const { smartRoutingConfig } = useSettingsData();
 
@@ -1368,6 +1369,11 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   // UI page 1-based，调用时传 `page - 1`。
   const [pageDocs, setPageDocs] = useState<RagDocInfo[]>([]);
   const [pageTotal, setPageTotal] = useState(0);
+  // Feed the paged total to the shared RAG store: the global ReindexDialog
+  // (mounted at the Provider level) reports the true doc count, not just the
+  // current page (ragDocs.length). Only synced while NO search/tag filter is
+  // active — a filtered total would understate the real doc count in the
+  // dialog's confirm phase. Reset on unmount so a stale value never lingers.
   const [pageLoading, setPageLoading] = useState(false);
   const [docPage, setDocPage] = useState(1);
   const [docPageSize, setDocPageSize] = useState(10);
@@ -1379,6 +1385,15 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
     () => [...selectedTagFilter].sort().join(''),
     [selectedTagFilter],
   );
+
+  useEffect(() => {
+    if (searchKey.trim() === '' && selectedTagFilter.size === 0) {
+      setDocCountTotal(pageTotal);
+    }
+  }, [pageTotal, searchKey, selectedTagFilter, setDocCountTotal]);
+  useEffect(() => {
+    return () => setDocCountTotal(null);
+  }, [setDocCountTotal]);
 
   useEffect(() => {
     const id = ++docReqId.current;
@@ -2573,22 +2588,9 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           rag_get / rag_tag_search) with their description + input schema. */}
       {showTools && <ToolsDialog onClose={() => setShowTools(false)} />}
 
-      {/* Reindex dialog (v2, shared with Settings model card): a model swap
-          changed the embedding dim, so the old vector table was dropped. Runs
-          the doc re-embed + Smart Routing index reload with live progress;
-          cancel reverts to the previous model. */}
-      {reindexConfirm && (
-        <ReindexDialog
-          open
-          mode={reindexMode}
-          scope={reindexScope}
-          targetModel={pendingModel ?? currentModel ?? ''}
-          smartEnabled={smartRoutingConfig.enabled}
-          ragDocCount={Math.max(ragDocs.length, pageTotal)}
-          onClose={dismissReindex}
-          onStart={startReindex}
-        />
-      )}
+      {/* Reindex dialog moved to RagDataProvider (global) — the startup
+          model-mismatch check must pop it on any page, so RagPage no longer
+          renders its own copy (would double-render with the provider's). */}
 
       {/* Import / single-doc update progress — unified with the model-reload
           dialog UI (ReindexDialog import mode): same running/done phases and

@@ -16,6 +16,7 @@ import {
   Library,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useBranding } from '@/contexts/BrandingContext';
 import { useServerContext } from '@/contexts/ServerContext';
 import { useBuiltinData } from '@/contexts/BuiltinDataContext';
 import { useGroupData } from '@/hooks/useGroupData';
@@ -41,6 +42,7 @@ interface MenuItem {
 
 const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
   const { t } = useTranslation();
+  const { dashboardTitle } = useBranding();
   const { auth } = useAuth();
   const { allServers } = useServerContext();
   const { groups } = useGroupData();
@@ -157,12 +159,12 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
         <img
           src="/assets/logo.png"
           alt="MCPHub Desktop"
-          className="h-7 w-7 rounded-md"
+          className="relative grid shrink-0 h-7 w-7 rounded-md"
         />
         {!collapsed && (
-          <div className="flex items-baseline gap-1.5 min-w-0">
-            <span className="font-semibold tracking-tight text-[var(--hub-ink)] truncate">
-              MCPHub Desktop
+          <div className="flex flex-wrap items-baseline gap-x-1.5 min-w-0">
+            <span className="font-semibold tracking-tight text-[var(--hub-ink)] break-words min-w-0 max-w-full">
+              {dashboardTitle}
             </span>
           </div>
         )}

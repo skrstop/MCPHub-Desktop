@@ -255,6 +255,11 @@ fn emit_preview_progress(app: &AppHandle, current: u32, total: u32, name: &str, 
 /// Single running batch-update task handle. Guards against a second trigger
 /// restarting the task while one is in flight (the frontend button re-open the
 /// progress dialog instead of re-triggering, but this is the backend guard).
+/// Set for the duration of `reindex_all` so `select_model`/`stop` cannot
+/// interleave a model switch into the middle of a full re-embed.
+static REINDEX_ALL_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 static BATCH_UPDATE_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1657,7 +1662,7 @@ pub async fn start(app: &AppHandle) -> Result<()> {
                 Some(_) => persisted.unwrap(),
                 None => {
                     // No selection, OR the persisted one is gone (deleted) -
-                    // fall back to the default ready size and persist it.
+                    // fall back to the default ready size for this session.
                     let default = mv::models::default_size(app)
                         .ok_or_else(|| anyhow!("no ready model - download one first"))?;
                     if persisted.as_deref() != Some(&default) {
@@ -1669,8 +1674,14 @@ pub async fn start(app: &AppHandle) -> Result<()> {
                                 default
                             ),
                         );
-                        mv::models::persist_selection(&default).await;
                     }
+                    // Session-scoped fallback: use the default for THIS run
+                    // but do NOT persist yet — if the process dies mid-reload
+                    // the next startup re-runs the same fallback instead of
+                    // booting with a committed selection whose index was
+                    // never rebuilt. Committed in reindex_all after a
+                    // successful full re-embed.
+                    mv::models::set_session_override(&default);
                     default
                 }
             }
@@ -1924,6 +1935,18 @@ pub async fn model_chunk_recommendation(app: &AppHandle) -> (u32, Option<u32>, O
 /// next enable loads it. Returns the post-restart status (with
 /// `needs_reindex` if the dim changed OR a same-dim model swap was detected).
 pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
+    // A model switch mid-reindex would embed half the docs with the old
+    // model and half with the new one, then stamp the index as "built with
+    // B" — permanently固化 a mixed embedding. Reject explicitly (review
+    // round 8); the UI surfaces the error and the user retries after the
+    // reindex finishes.
+    if REINDEX_ALL_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+        || crate::smart_routing::index::reindex_running()
+    {
+        return Err(anyhow::anyhow!(
+            "a reindex is in progress - wait for it to finish before switching models"
+        ));
+    }
     mv::ensure_model_ready(app, size)?;
     // Per-model retrieval defaults (deploy.json `defaultScore` /
     // `defaultWeightVector` / `defaultWeightKeyword`): thresholds and
@@ -5608,6 +5631,17 @@ async fn zero_all_chunk_counts(app: &AppHandle) -> Result<()> {
 /// The content files are never touched (only embeddings are regenerated), so
 /// tags / titles / display names survive a model swap untouched.
 pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
+    if REINDEX_ALL_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err(anyhow::anyhow!("a reindex is already in progress"));
+    }
+    // Panic-safe: a panic mid-reindex must not latch the flag forever.
+    struct ReindexGuard;
+    impl Drop for ReindexGuard {
+        fn drop(&mut self) {
+            REINDEX_ALL_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _reindex_guard = ReindexGuard;
     let dir = files_dir(app)?;
     if !dir.exists() {
         NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -5624,6 +5658,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
     rag_log("info", format!("reindexing all docs ({} docs, model swapped)…", total));
     emit_reindex_progress(app, 0, total, "");
     let mut done = 0usize;
+    let mut failed = 0usize;
     for (i, (meta_path, meta)) in docs.into_iter().enumerate() {
         emit_reindex_progress(app, i as u32, total, &meta.name);
         // Read the doc content. MUST use `content_path_for` (not `dir.join(id)`)
@@ -5651,6 +5686,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                             "warn",
                             format!("reindex: symlink '{}' md cache unreadable: {e}, skipped", meta.name),
                         );
+                        failed += 1;
                         continue;
                     }
                 }
@@ -5682,6 +5718,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                                     meta.original_path.as_deref().unwrap_or("")
                                 ),
                             );
+                            failed += 1;
                             continue;
                         }
                         Err(e) => {
@@ -5693,6 +5730,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                                     meta.original_path.as_deref().unwrap_or("")
                                 ),
                             );
+                            failed += 1;
                             continue;
                         }
                     },
@@ -5705,6 +5743,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                                 m.len()
                             ),
                         );
+                        failed += 1;
                         continue;
                     }
                     Err(e) => {
@@ -5716,7 +5755,8 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                                 meta.original_path.as_deref().unwrap_or("")
                             ),
                         );
-                        continue;
+                        failed += 1;
+                    continue;
                     }
                 }
             }
@@ -5729,6 +5769,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                             meta.original_path.as_deref().unwrap_or("")
                         ),
                     );
+                    failed += 1;
                     continue;
                 }
             }
@@ -5747,7 +5788,8 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                             e
                         ),
                     );
-                    continue;
+                    failed += 1;
+                        continue;
                 }
             }
         };
@@ -5793,6 +5835,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
                     "warn",
                     format!("reindex: re-embed failed for '{}': {:#}", meta.name, e),
                 );
+                failed += 1;
             }
         }
     }
@@ -5800,7 +5843,7 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
     // done == 0 the failures stand and NEEDS_REINDEX must stay true so the
     // next start() re-requests a reindex (failed docs would otherwise get no
     // automatic retry path).
-    if done > 0 {
+    if done > 0 && failed == 0 {
         NEEDS_REINDEX.store(false, std::sync::atomic::Ordering::SeqCst);
         // Record the model the index was just rebuilt with, so the same-dim swap
         // detection at start() doesn't force another reindex next time.
@@ -5813,6 +5856,56 @@ pub async fn reindex_all(app: &AppHandle) -> Result<usize> {
             None => {
                 rag_log("warn", "reindex: could not resolve active model to persist rag.indexedModel");
             }
+        }
+        // Commit a startup fallback selection: the full re-embed just
+        // succeeded under the session-override model, so it is now safe to
+        // persist it (before this point a crash would re-run the fallback).
+        // Generation guard: a concurrent user select_model(B) bumps the
+        // selection generation — even if its runtime restart has not flipped
+        // active_model yet, the stale fallback (A) must NOT clobber the
+        // user's persisted choice. Skipped commits are safe: the override is
+        // gone, so the next start() re-runs the fallback only if the
+        // persisted selection is still unresolvable (user's B is ready, so no
+        // fallback and no re-embed loop).
+        if let Some((o, gen)) = crate::mv::models::take_session_override() {
+            if crate::mv::models::commit_allowed(gen) {
+                crate::mv::models::persist_selection(&o).await;
+            } else {
+                rag_log(
+                    "info",
+                    format!(
+                        "reindex: skip committing fallback '{}': model selection changed during reindex (generation {} -> {})",
+                        o,
+                        gen,
+                        crate::mv::models::selection_generation()
+                    ),
+                );
+            }
+        }
+    } else if done > 0 && failed > 0 {
+        // Partial success: keep NEEDS_REINDEX so the next start re-prompts
+        // (failed docs have no automatic retry path), but still record the
+        // model the (mostly) rebuilt index used and commit the fallback —
+        // the majority of docs re-embedded under it (review round 8).
+        rag_log(
+            "warn",
+            format!(
+                "reindex: partial success ({} ok, {} failed) - keeping needsReindex for retry",
+                done, failed
+            ),
+        );
+        NEEDS_REINDEX.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some((o, gen)) = crate::mv::models::take_session_override() {
+            if crate::mv::models::commit_allowed(gen) {
+                crate::mv::models::persist_selection(&o).await;
+            }
+        }
+        let built_with = match crate::mv::active_model().await {
+            Some(m) => Some(m),
+            None => crate::mv::current_model().await,
+        };
+        if let Some(m) = built_with {
+            set_indexed_model(&m).await;
         }
     }
     emit_reindex_progress(app, total, total, "");

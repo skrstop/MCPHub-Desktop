@@ -260,9 +260,13 @@ pub(crate) fn resolve_model_paths(app: &AppHandle, size: &str) -> Result<Option<
     Ok(None)
 }
 
-/// The persisted selected model size. Read order: `mv.model` (new key) →
-/// `rag.model` (legacy fallback, existing installs) → None.
+/// The persisted selected model size. Read order: session override (startup
+/// fallback, not yet committed) → `mv.model` → `rag.model` (legacy fallback)
+/// → None.
 pub async fn current_model() -> Option<String> {
+    if let Some(o) = session_override() {
+        return Some(o);
+    }
     let c = crate::services::config_service::get().await.ok()?;
     c.get("mv")
         .and_then(|m| m.get("model"))
@@ -276,9 +280,64 @@ pub async fn current_model() -> Option<String> {
         })
 }
 
+/// Session-scoped model override: set when startup falls back to the default
+/// because the persisted selection is gone. The fallback is NOT persisted
+/// immediately — if the process dies mid-reload, the next startup re-runs the
+/// same fallback (idempotent) instead of booting with a committed selection
+/// whose index was never rebuilt. Committed (persisted + cleared) only after
+/// a successful full re-embed.
+///
+/// The stored tuple carries the selection generation at override-install
+/// time; `set_current_model` bumps `SELECTION_GEN`, so the commit path can
+/// detect a concurrent user selection that landed between take() and persist
+/// (lost-update guard — the active_model check alone cannot see a selection
+/// whose runtime restart has not flipped yet).
+static SESSION_OVERRIDE: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
+
+static SELECTION_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn session_override() -> Option<String> {
+    SESSION_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(s, _)| s.clone()))
+}
+
+/// Install the session override (does not touch persisted config).
+pub(crate) fn set_session_override(size: &str) {
+    let gen = SELECTION_GEN.load(std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut g) = SESSION_OVERRIDE.lock() {
+        *g = Some((size.to_string(), gen));
+    }
+}
+
+/// Take the override if present (commit path: caller persists it). Returns
+/// `(size, generation_at_install)` — the caller must verify the generation is
+/// still current before persisting (see `selection_generation`).
+pub(crate) fn take_session_override() -> Option<(String, u64)> {
+    SESSION_OVERRIDE.lock().ok().and_then(|mut g| g.take())
+}
+
+/// Current model-selection generation: bumped on every explicit persist.
+pub(crate) fn selection_generation() -> u64 {
+    SELECTION_GEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Commit-path guard: the override may be persisted only when the selection
+/// generation is unchanged since the override was installed (no concurrent
+/// user selection landed between take() and persist).
+pub(crate) fn commit_allowed(gen_at_install: u64) -> bool {
+    gen_at_install == selection_generation()
+}
+
 /// Persist `mv.model = <size>` (deep-merge). The legacy `rag.model` key is
 /// left untouched as a read fallback for downgrades / existing installs.
+/// Clears any session override — an explicit persist always wins.
 pub(crate) async fn set_current_model(size: &str) {
+    SELECTION_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut g) = SESSION_OVERRIDE.lock() {
+        *g = None;
+    }
     let patch = json!({ "mv": { "model": size } });
     if let Err(e) = crate::services::config_service::update(&patch).await {
         rag_log("warn", format!("failed to persist mv.model: {}", e));
@@ -552,6 +611,7 @@ fn lfs_batch_url(repo_url: &str) -> Option<String> {
 /// pass a no-op).
 async fn download_lfs_object(
     repo_url: &str,
+    branch: Option<&str>,
     ptr: &LfsPointer,
     temp_path: &Path,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -569,12 +629,17 @@ async fn download_lfs_object(
         .map_err(|e| anyhow!("http client: {}", e))?;
 
     // 1. Batch API: resolve the real download href.
-    let body = json!({
+    let mut body = json!({
         "operation": "download",
         "transfer": ["basic"],
         "objects": [{"oid": ptr.oid, "size": ptr.size}],
-        "ref": {"name": "refs/heads/main"},
     });
+    // LFS servers may authorize/validate per-ref — declaring a hardcoded
+    // refs/heads/main breaks non-main branches on strict hosts. Omit the ref
+    // entirely when the branch is unknown (spec: optional for downloads).
+    if let Some(b) = branch {
+        body["ref"] = json!({"name": format!("refs/heads/{b}")});
+    }
     // LFS spec content type: some hosts (atomgit) reject plain
     // application/json with 406.
     let resp = client
@@ -743,6 +808,12 @@ pub(crate) async fn download_from_git(
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if pump_cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 pump_interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Self-terminate on cancel: if the whole download future is
+                // dropped at an await point (cancel_download aborts the task),
+                // the outer pump.abort() below never runs — without this break
+                // the pump would leak forever and fight a later re-download's
+                // progress writes for the same size.
+                break;
             }
             let (received, _total) = pump_counters.snapshot();
             let elapsed = last_t.elapsed().as_secs_f64().max(0.001);
@@ -753,7 +824,14 @@ pub(crate) async fn download_from_git(
                 let snapshot = {
                     let mut st = state_lock();
                     if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                        if p.size == pump_size {
+                        // Phase guard: never write into a slot that is no
+                        // longer actively downloading (cancelled/errored).
+                        // Known cosmetic residual (review round 11): a same-
+                        // size re-download inside the 200ms wake window is
+                        // indistinguishable from the old slot — one stale
+                        // progress write can land before the new pump takes
+                        // over; self-heals on the next tick.
+                        if p.size == pump_size && p.phase == "downloading" {
                             p.downloaded = received;
                             p.speed = speed;
                             p.percent = 0;
@@ -840,9 +918,21 @@ pub(crate) async fn download_from_git(
                     emit_model_download(&app2, &p);
                 }
             };
-            let copied =
-                download_lfs_object(&git.repo_url, &lfs, temp_path, &cancel, on_progress)
-                    .await?;
+            let copied = download_lfs_object(
+                &git.repo_url,
+                git.branch.as_deref(),
+                &lfs,
+                temp_path,
+                &cancel,
+                on_progress,
+            )
+            .await?;
+            if copied != lfs.size {
+                return Err(anyhow!(
+                    "lfs object truncated: {copied}/{} bytes",
+                    lfs.size
+                ));
+            }
             return Ok(copied);
         }
     }
@@ -961,8 +1051,14 @@ pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Resu
             progress: Some(p), ..
         }) = st.as_ref()
         {
-            if p.size == size && p.phase == "downloading" {
-                return Err(anyhow!("model '{}' is already downloading", size));
+            if p.phase == "downloading" {
+                // Single-slot download state: a second (different-size)
+                // download would orphan the running task's cancel flag,
+                // handle and progress — reject instead.
+                return Err(anyhow!(
+                    "another model download ('{}') is in progress",
+                    p.size
+                ));
             }
         }
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -990,13 +1086,102 @@ pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Resu
         let app2 = app.clone();
         let size2 = size.to_string();
         state.task = Some(tauri::async_runtime::spawn(async move {
-            if let Err(e) = run_download(app2, size2, family, sources, cancel).await {
-                log::warn!("[RAG] model download ended: {e}");
+            // Panic guard: a panic inside run_download would leave the
+            // shared state's phase stuck at "downloading", which (since the
+            // round-8 concurrency guard) blocks ALL new downloads until
+            // restart. Catch it and mark the slot errored.
+            let result = futures_util::FutureExt::catch_unwind(
+                std::panic::AssertUnwindSafe(run_download(
+                    app2.clone(),
+                    size2.clone(),
+                    family,
+                    sources,
+                    cancel,
+                )),
+            )
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log::warn!("[RAG] model download ended: {e}"),
+                Err(_panic) => {
+                    // NOTE: release builds run with panic="abort", so this
+                    // branch only fires in dev/test profiles — there the
+                    // process survives and the slot must be released
+                    // properly (terminal event + temp cleanup), otherwise
+                    // the phase latches at "downloading" and (since the
+                    // round-8 guard) blocks every new download.
+                    log::warn!("[RAG] model download panicked; marking errored");
+                    let temp_snapshot = {
+                        let mut st = state_lock();
+                        let temp = st
+                            .as_ref()
+                            .and_then(|ds| ds.temp_path.clone());
+                        if let Some(ds) = st.as_mut() {
+                            if let Some(p) = ds.progress.as_mut() {
+                                if p.size == size2 && p.phase == "downloading" {
+                                    p.phase = "error".into();
+                                    p.message = Some("internal error".into());
+                                }
+                            }
+                            ds.done_at = Some(std::time::Instant::now());
+                        }
+                        temp
+                    };
+                    if let Some(t) = temp_snapshot {
+                        let _ = std::fs::remove_file(&t);
+                    }
+                    // Terminal event: the frontend is event-driven and only
+                    // queries the status once on mount — without this emit
+                    // its progress bar would stay on "downloading" forever.
+                    {
+                        let snapshot = {
+                            let st = state_lock();
+                            match st.as_ref() {
+                                Some(DownloadState {
+                                    progress: Some(p), ..
+                                }) if p.size == size2 => Some(p.clone()),
+                                _ => None,
+                            }
+                        };
+                        if let Some(p) = snapshot {
+                            emit_model_download(&app2, &p);
+                        }
+                    }
+                }
             }
         }));
         *st = Some(state);
     }
     rag_log("info", format!("model '{}' download started (background)", size));
+    Ok(())
+}
+
+/// Publish a finished temp file as `model.gguf`. Tries an atomic
+/// overwrite-rename first (Unix semantics); only removes the existing file
+/// when the platform refuses to overwrite (Windows). Known narrow window
+/// (review round 9): on the Windows fallback path, a task abort between the
+/// remove and the retry rename loses both old file and temp — accepted
+/// because the fallback only runs when the first rename already failed and
+/// the old file was being replaced deliberately (re-download repair).
+async fn publish_temp(temp_path: &Path, final_path: &Path) -> Result<()> {
+    if tokio::fs::rename(temp_path, final_path).await.is_ok() {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(final_path);
+    tokio::fs::rename(temp_path, final_path)
+        .await
+        .map_err(|e| anyhow!("publish {}: {}", final_path.display(), e))
+}
+
+/// Truncation guard for streamed downloads: a body shorter than the
+/// advertised Content-Length must never be published (a truncated GGUF with
+/// a valid magic would be called "ready"). `total == 0` means the server
+/// sent no Content-Length (chunked) — length unknowable, keep the old
+/// accept semantics (review round 8; extracted for unit testing round 13).
+fn check_truncation(total: u64, downloaded: u64) -> Result<(), String> {
+    if total > 0 && downloaded != total {
+        return Err(format!("truncated: {downloaded}/{total} bytes"));
+    }
     Ok(())
 }
 
@@ -1079,8 +1264,7 @@ async fn run_download(
             match result {
                 Ok(copied) => {
                     // Publish atomically (same contract as the HTTP path).
-                    let _ = std::fs::remove_file(&final_path);
-                    match tokio::fs::rename(&temp_path, &final_path).await {
+                    match publish_temp(&temp_path, &final_path).await {
                         Ok(()) => {
                             set_phase("done", Some("done".into()));
                             {
@@ -1255,11 +1439,17 @@ async fn run_download(
         .await;
         match result {
             Ok(()) => {
+                // Truncation guard: with no Content-Length a prematurely
+                // closed chunked stream ends the loop without an error —
+                // never publish a short body (review round 8).
+                if let Err(msg) = check_truncation(total, downloaded) {
+                    last_err = Some(anyhow!("{} {}", source_name, msg));
+                    continue 'sources;
+                }
                 // Publish atomically: rename temp -> model.gguf ONLY after the
                 // full body landed, so an interrupted download never leaves a
                 // truncated file that detect_format would call ready.
-                let _ = std::fs::remove_file(&final_path);
-                match tokio::fs::rename(&temp_path, &final_path).await {
+                match publish_temp(&temp_path, &final_path).await {
                     Ok(()) => {
                         set_phase("done", Some("done".into()));
                         {
@@ -1315,8 +1505,20 @@ async fn run_download(
         return Ok(());
     }
     let err = last_err.unwrap_or_else(|| anyhow!("download failed"));
-    set_phase("error", Some(err.to_string()));
-    emit_current(&app);
+    // A concurrent cancel_download may have already written "cancelled"
+    // (abort only prevents future polls; the current poll can still finish
+    // and reach here) — never overwrite that terminal state with "error".
+    let cancelled_already = {
+        let st = state_lock();
+        matches!(
+            st.as_ref().and_then(|ds| ds.progress.as_ref()),
+            Some(p) if p.size == size && p.phase == "cancelled"
+        )
+    };
+    if !cancelled_already {
+        set_phase("error", Some(err.to_string()));
+        emit_current(&app);
+    }
     rag_log("error", format!("model '{}' download failed: {}", size, err));
     Err(err)
 }
@@ -1559,8 +1761,12 @@ mod git_download_live {
                 .unwrap()
                 .as_nanos()
         ));
-        let (url, token) = resolve_modelscope_source(
-            "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=F2LLM-v2-80M.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
+        let token = std::env::var("MODELSCOPE_TEST_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .expect("set MODELSCOPE_TEST_TOKEN to run this live test");
+        let (url, _) = resolve_modelscope_source(
+            "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=F2LLM-v2-80M.gguf",
         )
         .expect("resolve");
         let client = reqwest::Client::builder()
@@ -1568,9 +1774,7 @@ mod git_download_live {
             .build()
             .unwrap();
         let mut req = client.get(&url);
-        if let Some(t) = &token {
-            req = req.bearer_auth(t);
-        }
+        req = req.bearer_auth(&token);
         req = req.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
         let resp = req.send().await.expect("GET");
         let st = resp.status();
@@ -1636,6 +1840,7 @@ mod git_download_live {
         let temp = dir.join("model.gguf.downloadtemp");
         let copied = download_lfs_object(
             "https://github.com/skrstop/MCPHub-Desktop.git",
+            None,
             &ptr,
             &temp,
             &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1648,5 +1853,178 @@ mod git_download_live {
         let magic = std::fs::read(&temp).unwrap();
         assert!(magic.starts_with(b"GGUF"), "downloaded object must be a GGUF file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod session_override_tests {
+    use super::*;
+
+    /// Serializes tests that touch the process-global SESSION_OVERRIDE.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn override_roundtrip_and_take_clears() {
+        let _g = LOCK.lock().unwrap();
+        // Force a clean slate (never assert one: a panicking earlier test in
+        // this module could leave an override behind and cascade failures).
+        take_session_override();
+
+        set_session_override("test-size-a");
+        assert_eq!(session_override().as_deref(), Some("test-size-a"));
+        // Set is idempotent (last write wins).
+        set_session_override("test-size-b");
+        assert_eq!(session_override().as_deref(), Some("test-size-b"));
+
+        // take clears: second take sees None. The tuple carries the
+        // generation at install time for the commit-path lost-update guard.
+        let (taken, gen) = take_session_override().expect("override present");
+        assert_eq!(taken, "test-size-b");
+        assert_eq!(gen, selection_generation());
+        assert_eq!(take_session_override(), None);
+        assert_eq!(session_override(), None);
+    }
+
+    /// The commit-path lost-update guard: a user selection (set_current_model)
+    /// between override install and commit bumps the generation, so the stale
+    /// fallback must be detectable and skipped.
+    #[tokio::test]
+    async fn generation_bumps_on_persist_detect_stale_override() {
+        let _g = LOCK.lock().unwrap();
+        crate::db::ensure_test_pool().await;
+        let original = current_model().await;
+
+        set_session_override("fallback-a");
+        let (o, gen) = take_session_override().expect("override present");
+        assert_eq!(o, "fallback-a");
+
+        // No user selection: generation unchanged → commit is legitimate.
+        assert_eq!(gen, selection_generation());
+
+        // Re-install, then simulate a concurrent user selection (persist B).
+        set_session_override("fallback-a");
+        let (o2, gen2) = take_session_override().expect("override present");
+        set_current_model("user-b").await;
+        assert_ne!(
+            gen2,
+            selection_generation(),
+            "user persist must bump the generation"
+        );
+        // Commit path: stale generation → skip persist (caller would not
+        // write fallback-a over user-b). This asserts the REAL guard the
+        // commit path uses (extracted so the test cannot silently rot).
+        assert!(
+            !commit_allowed(gen2),
+            "stale generation must be rejected by the commit guard"
+        );
+        assert!(
+            commit_allowed(selection_generation()),
+            "current generation must be accepted by the commit guard"
+        );
+
+        restore_persisted(original).await;
+    }
+
+    #[tokio::test]
+    async fn current_model_prefers_override_over_persisted() {
+        let _g = LOCK.lock().unwrap();
+        crate::db::ensure_test_pool().await;
+        // Snapshot the real persisted value so the test restores it exactly
+        // (no cross-test / cross-suite state pollution from a hardcoded name).
+        let original = current_model().await;
+        // Persist a known selection, then verify the override shadows it.
+        set_current_model("persisted-size").await;
+        assert_eq!(
+            current_model().await.as_deref(),
+            Some("persisted-size"),
+            "precondition: persisted value readable with no override set"
+        );
+        set_session_override("override-size");
+        assert_eq!(
+            current_model().await.as_deref(),
+            Some("override-size"),
+            "session override must shadow the persisted mv.model"
+        );
+        // Cleanup: persist clears the override (explicit persist wins).
+        set_current_model("persisted-size").await;
+        assert_eq!(session_override(), None, "persist must clear the override");
+        assert_eq!(current_model().await.as_deref(), Some("persisted-size"));
+        restore_persisted(original).await;
+    }
+
+    /// Restore the persisted selection exactly: `None` must actually clear
+    /// `mv.model` (writing a value would pollute the shared test pool for
+    /// every later reader of `current_model`).
+    async fn restore_persisted(original: Option<String>) {
+        match original {
+            Some(orig) => set_current_model(&orig).await,
+            None => {
+                let _ = crate::services::config_service::update(
+                    &serde_json::json!({"mv": {"model": serde_json::Value::Null}}),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod publish_and_truncation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_temp_renames_when_target_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcphub-pub-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let temp = dir.join("model.gguf.downloadtemp");
+        let final_path = dir.join("model.gguf");
+        std::fs::write(&temp, b"new-bytes").unwrap();
+        publish_temp(&temp, &final_path).await.expect("publish");
+        assert!(final_path.is_file());
+        assert!(!temp.exists(), "temp must be gone after publish");
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn publish_temp_atomically_overwrites_existing_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "mcphub-pub-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let temp = dir.join("model.gguf.downloadtemp");
+        let final_path = dir.join("model.gguf");
+        std::fs::write(&final_path, b"old-bytes").unwrap();
+        std::fs::write(&temp, b"new-bytes").unwrap();
+        publish_temp(&temp, &final_path).await.expect("publish");
+        // Unix: the first (atomic overwrite) rename succeeds — old content
+        // replaced, no temp left, no window where the target is missing.
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new-bytes");
+        assert!(!temp.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_truncation_rejects_short_body() {
+        assert!(check_truncation(100, 99).is_err());
+        assert!(check_truncation(100, 0).is_err());
+    }
+
+    #[test]
+    fn check_truncation_accepts_exact_and_unknown_length() {
+        assert!(check_truncation(100, 100).is_ok());
+        // No Content-Length (chunked): length unknowable — old semantics.
+        assert!(check_truncation(0, 0).is_ok());
+        assert!(check_truncation(0, 12345).is_ok());
     }
 }

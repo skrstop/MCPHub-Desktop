@@ -138,7 +138,7 @@ npm run build                     # 生产构建
 
 #### 3.4.2 DB 版本化迁移（MUST FOLLOW）
 
-- `db/migration.rs`：`schema_version` 表 + `run_pending()` 幂等执行；兼容旧 `_sqlx_migrations`。当前 `TARGET_VERSION = 33`（v26 keepalive/passthrough、v27 builtin 唯一索引、v28 server pin、v29 全新装 bearer_keys token 形态修复、v30 servers.oauth + oauth_upstream_tokens、v31 OAuth Provider 三表、v32-v33 OAuth 战役后续迁移）。
+- `db/migration.rs`：`schema_version` 表 + `run_pending()` 幂等执行；兼容旧 `_sqlx_migrations`。当前 `TARGET_VERSION = 38`（v26 keepalive/passthrough、v27 builtin 唯一索引、v28 server pin、v29 全新装 bearer_keys token 形态修复、v30 servers.oauth + oauth_upstream_tokens、v31 OAuth Provider 三表、v32-v33 OAuth 战役后续迁移、v34 groups.instructions、v35 hidden_params、v36 protocolNegotiation、v37 capability_snapshots+fingerprint、v38 bearer_keys excluded_groups/excluded_servers（#1413）；另有 `repair_schema` 非版本门控自愈（v37 fingerprint 补列 / bearer-hash 残留回滚 + 会话内重跑 v38））。
 - 新增迁移步骤：①递增 `TARGET_VERSION`；②新增 `migrate_v{N}`；③`apply_migration` 加 match 分支；④配套 `migrations/000N_xxx.sql`；⑤更新文档。
 - 迁移前自动备份：有 pending 时 `VACUUM INTO` 生成 `mcphub.db.bak`（回滚：关应用 → .bak 覆盖 mcphub.db → 删 -wal/-shm → 重启）。
 - 迁移保证 schema 完整后，service 层 SQL 直接引用全部列，**不需要运行时列检测**。
@@ -605,12 +605,38 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `4378e08`（origin/main，= v1.1.10 后 19 commit；#1387/#1396/#1393/#1394/#1398/#1405 经用户裁定不镜像） |
-| **对应 origin tag** | `v1.1.10`（后 19 commit，未发布新 tag） |
-| **桌面端版本号** | `26.1030.1`（**新规则 2026-10-27**：`2位年.月日.迭代号`（26=2026 年），跨天重置迭代号；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → **`doc/upgrade/26.1030.1.md`**） |
-| **同步执行日期** | 2026-10-29（4bd0474 后 2 commit 同步） |
+| **当前已同步到 origin commit** | `a10c7df`（origin/main，= b805474 后 3 commit；3 个依赖升级全部无桌面对应面，评估跳过） |
+| **对应 origin tag** | `v1.1.10`（后 43 commit，未发布新 tag） |
+| **桌面端版本号** | `26.1102.1`（**新规则 2026-10-27**：`2位年.月日.迭代号`（26=2026 年），跨天重置迭代号；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1） |
+| **同步执行日期** | 2026-11-02（b805474 后 3 commit 同步，纯依赖升级） |
 
-> 下次同步以 `4378e08` 为基线起点（`git log --oneline 4378e08..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405 已裁定不镜像，勿重复评估）。
+> 下次同步以 `a10c7df` 为基线起点（`git log --oneline a10c7df..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405 已裁定不镜像，勿重复评估）。
+
+> **记录精简（2026-11-02）**：同步记录只保留最近 3 次（第十九/二十/二十一轮）+ 桌面功能条目（2026-10-30 Git 下载源，非同步）；更早轮次（≤第十八轮）已删除，逐 commit 评估见 git 历史或 `AGENTS.md.bak`。
+> **历史「已评估不镜像」台账**（防重复评估，按轮次序）：#1437 Better Auth OIDC、#1435 上游 OAuth 过期持久化/个人 token 续期、#1434/#1428 个人凭证预览/掩码、#1433 HA 文档、#1431 PG 副本、#1430 Node 22 要求、#1429 用户组共享、#1427 分组服务通知、#1416 事件总线、#1422/#1407 凭证 broker、#1412 CI 脚本、#1406 分组改名密钥 scope（桌面已有等价）、#1405 resolvedLanguage、#1404 i18n 检测顺序（已镜像）、#1401 密钥编辑器可访问性（已镜像）、#1400 导入 BOM（已镜像）、#1398 嵌入编码协商（无链路）、#1396 重置密钥、#1394/#1393 per-user 凭证绑定、#1387 bearer 哈希（用户裁定维持明文）。
+
+#### 2026-11-01（第二十轮）：`8d5bb5a` -> `b805474`（3 commit，版本 26.1031.3 → 26.1031.4，纯评估轮）
+
+- **评估全部无需镜像**：3 个 commit 均为 origin 依赖升级（i18next-browser-languagedetector 8.2.1→8.2.3、openai 6.45.0→7.45.1、tailwind-merge 3.6.0→3.7.0）——桌面按 SOP 不同步 origin 的 package.json/lockfile；openai 为 origin LLM provider 依赖，桌面无此依赖面。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **338 passed**；tsc 0 错；vitest **58 passed**；契约 0 mismatch；E2E spot（full_regress 41 + matrix_v2 152）全绿；版本四源 + 双 lockfile + Cargo.lock = 26.1031.4。
+- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
+
+#### 2026-11-01（第十九轮）：`ae9c9be` -> `8d5bb5a`（5 commit，版本 26.1031.2 → 26.1031.3，纯评估轮）
+
+- **评估全部无需镜像**（逐 commit 核查桌面落点）：
+  - `8d5bb5a` #1437 Better Auth 1.7 OIDC 登录修复——桌面不做 Better Auth（历史裁定，skipAuth 单用户）；
+  - `03d13c2` #1435 上游 OAuth 过期持久化 + 个人 token 续期——origin 手写 mcpOAuthProvider/per-user 体系修复；桌面上游 OAuth 走 rmcp AuthorizationManager（SDK 内管 expiry/refresh），oauth_upstream_tokens 是其存储，无手写续期链路；
+  - `d0983e8` #1434 管理员个人凭证安全预览——无 per-user 凭证体系（#1407/#1428 同族）；
+  - `1ab8001` #1433 Home Assistant 文档——docs 不同步；
+  - `9ce3cbd` #1431 PostgreSQL 副本模式——origin Node/PG 特性，桌面 SQLite 单机。
+- **验证**：cargo check 0 错 0 警；cargo test --lib **338 passed**；tsc 0 错；vitest **58 passed**；契约 0 mismatch；E2E spot（full_regress 41 + matrix_v2 152）全绿；版本四源 + 双 lockfile + Cargo.lock = 26.1031.3。
+- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
+
+#### 2026-11-02（第二十一轮）：`b805474` -> `a10c7df`（3 commit，版本 26.1031.4 → 26.1102.1，纯依赖升级）
+
+- `a10c7df` concurrently 9.2.0→10.0.6（dev-dep）/ `87d8151` uuid 14.0.0→14.0.3 / `160d2be` @huggingface/tokenizers 0.1.3→0.2.0：**全部无需镜像**——origin Node 侧依赖，桌面为 Rust + 本地 GGUF 栈，无对应依赖面；3 commit 均零 frontend/locales 改动（git show --stat 验证）。
+- 同日第十一轮独立复核修复 mv/mod.rs 2H+2M（ensure_started TOCTOU panic + release 竞态泄漏 + waiter 放弃 + 阻塞加载）+ 同步完整性 2 项文档遗漏，详见 `doc/sync_report_26.1031.1.md` 第十一轮。
+- **影响功能点与结果**：无（纯版本号推进 + 复核修复）。**用户需重启生效**。
 
 #### 2026-10-30（桌面功能）：模型下载支持 Git 仓库源（版本 26.1030.1，非 origin 同步）
 
@@ -628,464 +654,6 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 - **deploy.json 全量接入 ModelScope 源（2026-10-30，用户要求放第一位）**：全部 5 个 size 目录（F2LLM/v2-160M、F2LLM/v2-80M、bekko/v1-a25m、bekko/v1-a8m、granite/97m-r2）的 `downloadUrls` 首位插入 `modelscope` 源（指向用户私有仓库 skrstop4086824/MCPHub-Desktop-Embedding 的对应 gguf 文件 + token），5 个 URL 全部实测 302 可下载；原 github/huggingface/hf-mirror 源保持为回退。**末位追加 `atomgit-git` 源**（`https://atomgit.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=embedding-{模型名}`，分支名与模型一一对应）——当前 atomgit 侧 LFS 对象未上传（`lfs_objects_size: 0`），该源在用户补传 `git lfs push` 前会失败并回退，补传后自动可用。
 - **测试**：+14 单测（useGit=true/1、branch decode、无 useGit 各形态不算 git、无 branch 用默认、query 剥离、LFS 指针解析/拒绝/坏 oid、batch URL 形态、modelscope 解析/revision+编码 file/token/负形态）+ 2 live（ignored：内置 LFS 全链路 + modelscope 私有仓库 token 全链路）；cargo test --lib **319 passed**；cargo check 0 错 0 警。
 - **影响功能点与结果**：模型下载新增 Git 仓库源形态（useGit=true 判定 + branch 分支 + 进度/取消/回退/LFS 防御）。**用户需重启生效**；使用 git 源需本机 git-lfs（LFS 仓库）。
-
-#### 2026-10-29（第十六轮）：`4bd0474` -> `4378e08`（2 commit，版本 26.1029.2 → 26.1029.3 + 复核 + 修复 1M）
-
-- `9da0089` #1406 **分组改名保留密钥组 scope：确认桌面已有等价实现，无需镜像**——桌面 R19 轮已落 `cascade_bearer_groups_rename_tx`（rename 事务内改写 bearer_keys.allowed_groups 旧组名）；origin 额外的 `assertGroupNameAvailable`（组名≠其他组 ID）系 origin key 按名或 ID 双匹配语义所致，桌面 key 只按名匹配、无此攻击面。
-- `4378e08` #1399 **统一 MCP 工具访问策略（完整镜像，用户裁定「会用多个密钥并需要限制能力」）**：
-  - **语义**：规则 `{id, effect: allow|deny, username?, keyId?, groupId?, serverId?, tool?}`；deny 优先（matching-deny）；存在 applicable allow 时未匹配即 deny（no-matching-allow 白名单语义）；potential 模式（列表过滤）tool-scoped deny 不 fire、tool-scoped allow 匹配 tool 未设 target。subject 过滤在先（username/keyId 不适用的规则整体跳过）。
-  - **Rust**：新 `services/tool_policy.rs`（888 行，validate/evaluate/find_missing/get_tool_policy/audit_text/warn_missing_tool_policy_references + 15 单测）；接线全执行面——bridge aggregate_tools 三处（服务器级 potential + 每工具 filter_tools + $smart pinned）、execute_tool_call deny → invalid_params("Tool not available")、$smart meta 三工具（search 过滤/describe/call 门控 `[tool-policy]` 哨兵）、REST 4 面 deny → 403、Tauri call_tool（key_id=None）、smart_routing search 候选过滤；update_system_config 校验 toolPolicies；启动诊断挂 lib.rs。**无 DB 迁移**（toolPolicies 走 system_config JSON 深合并）。
-  - **前端**：`utils/toolPolicy.ts`（纯函数）+ `ToolPolicyPanel.tsx`（314 行）+ SettingsContext（toolPolicies state + updateToolPolicies）+ SettingsPage 挂载（isAdmin，桌面可见无 !isTauri 门控）+ ConfirmDialog 补 confirmDisabled prop + locales `settings.toolPolicies.*` 27 键 ×6。
-  - **桌面差异**：①username 选择器保留但恒不匹配（单用户）；②读失败 fail-closed（get_strict Err → 恒 deny + warn，origin 抛异常）；③REST deny 403（origin 经共享 handler 500）；④活动日志 policy 决策写 error_message JSON（origin 独立列，桌面禁新增迁移）；⑤$smart pinned 工具也做 per-tool 过滤（桌面 list/call parity 惯例）。
-- **复核修复 1 项**：①[M] Tauri call_tool 经 `smart_route_call` meta 中转绕过 serverId/tool 作用域 deny——pool builtin 分支 `call_meta_tool_builtin` 传 policy=None，meta lane 内部解析真实服务器后不做检查 → `call_meta_tool_builtin` 加 policy 参数透传三 handle_*，pool 构建 `get_tool_policy(None, None)` 传入（全局规则对 Tauri meta lane 生效）。
-- **伪影事故（第 6 次）**：前端代理把终端脱敏字面量 `****** ID` 写进 locales en/zh/tr 的 keyId 键——base64/codepoint 字节级定谳 origin 真实文本（en "Bearer key ID"/zh "Bearer 密钥 ID"/tr "Bearer anahtar kimliği"）后修复；6 语言 toolPolicies 段与 origin 全量 base64 对比 0 mismatch。**教训升级：代理写 locales 前必须对含敏感词（Bearer/key/token）的值做 base64 核验，脱敏是间歇性显示层行为（同一值两次读取结果不同）。**
-- **验证**：cargo check 0 错 0 警；cargo test --lib **305 passed**（+15）；tsc 0 错；npm build ✓；locales ×6 JSON 校验 + origin 对比 0 mismatch；**E2E spot 325/325 全绿**（full_regress 41 + matrix_v2 152 + pin_matrix 31 + carpet 101）+ **功能探针 ALL PASS**（deny-all 全局规则真机验证：tools/list 过滤为 0、MCP 调用 -32602 "Tool not available"、REST 403、还原后恢复——DB 直写配置模式，测毕还原干净）。
-- **影响功能点与结果**：设置页新增工具访问策略面板（按密钥限制可调用的服务器/分组/工具，deny 优先 + allow 白名单）；全接入面生效。**用户需重启生效**。
-
-#### 2026-10-29（第十五轮）：`267cdb9` -> `4bd0474`（2 commit，版本 26.1029.1 → 26.1029.2）
-
-- `4bd0474` #1405 **resolvedLanguage 传递给 SponsorDialog：评估未镜像**——桌面 SponsorDialog 组件未引用（grep 零命中）、UserProfileMenu 无 sponsor 入口（桌面已移除 sponsor/wechat/discord），无落点。
-- `ef88f66` #1404 **i18n 语言检测顺序修复（镜像）**：`frontend/src/i18n.ts` detection order 调整为 `['localStorage', 'cookie', 'navigator', 'htmlTag']`（navigator 提到 htmlTag 前）——修复浏览器 locale 优先于静态 html lang 的检测顺序，用户系统语言设置不再被 html 标签覆盖。
-- **验证**：cargo check 0 错 0 警（Cargo.lock 再生 26.1029.2）；tsc 0 错；npm build ✓；契约 0 mismatch；cargo test --lib 290 passed（#1404 前基线，纯前端改动）；E2E spot 确认无回归（i18n 检测顺序不在 E2E 覆盖面）。
-- **影响功能点与结果**：界面语言检测顺序修正——无 localStorage/cookie 记录时优先用浏览器语言而非 html lang 静态值。**用户需重启生效**。
-
-#### 2026-10-29（第十四轮）：子模块重指 main + `e457e5a` -> `267cdb9`（3 commit，版本 26.1029.1 + 76 套 E2E 全绿）
-
-- **子模块指针修正**：上轮同步 checkout origin/main 导致 detached HEAD → 重新 `git checkout main` + ff（SOP 分支模式恢复）。
-- **镜像**：
-  - `267cdb9` #1401 **密钥编辑器操作可访问性（完整镜像）**：BearerKeyRow 编辑表单改兄弟行渲染（修复编辑时操作按钮消失）+ 编辑按钮 toggle 化（Edit/X + aria-expanded）+ disabled 补 saving + Pagination/CursorPagination/Badge 尺寸统一（Badge/CursorPagination 与 origin 逐字节一致；Pagination 保留桌面响应式不换行设计，未采纳 origin flex-wrap）；跳过 onReset hunk（#1396 未镜像）。
-  - `e79c0fe` #1400 **导入容错 UTF-8 BOM（镜像）**：`import_from_json` strip `\u{feff}` 前缀（serde_json 原生拒绝 BOM）。
-  - `6c1fd7e` #1398 **评估未镜像**：嵌入编码运行时协商（桌面自研 GGUF 嵌入栈，无对应链路）。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **290 passed**；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**。
-- **影响功能点与结果**：编辑 API 密钥时不再丢失操作按钮；分页/徽章视觉统一；导入 BOM 文件不再失败。**用户需重启生效**。
-
-#### 2026-10-28（第十三轮·已回退）：bearer 哈希镜像全程撤销（用户裁定「按现有明文处理」）
-
-- **过程**：镜像 #1387（SHA-256 哈希存储，migration v38）+ #1396（重置密钥）→ 复核修复 4 项（含真机 v38 UNIQUE 崩溃）→ **用户裁定不需要，全程回退**。
-- **回退**：bearer 相关 10 文件恢复 HEAD 明文形态（models/service/commands/lib/migration v38 删除/0038.sql 删除/SettingsPage/mcpConfig/tauriClient/ResetBearerKeyDialog 删除/locales 4 键 ×6 删除）；#1392 等非 bearer 改动完整保留。
-- **DB 修复**：`repair_schema` 新增 v38 残留清理（38 戳 → 删不可用行（token='' 或 'hashed:%'）→ DROP token_hash/token_prefix 列 → 版本回写 37），幂等 + 单测；**真机已验证**（版本 37、列已删）。
-- **⚠️ 用户须知**：已被哈希的存量密钥明文不可恢复，**需在设置页重新创建 bearer key**。
-- **E2E 治理保留**：6 个 bearer 套件改自插明文行模式（不再依赖存量行明文，对两种存储形态都稳健）。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **290 passed**；tsc 0 错；build ✓；契约 0 mismatch；**76 套 E2E 全绿**；版本回退 26.1027.8（.9 无内容，changelog 已删）。
-- **教训**：镜像安全类改动前先确认需求成立（本轮完整实现+复核+真机崩溃修复后才发现不需要）；UNIQUE 列批量清值必须用行唯一哨兵；「清偿存量债」类改动需用户确认再动。
-
-#### 2026-10-28（第十三轮）：`edc885d` -> `e457e5a`（4 commit，版本 26.1027.8 → 26.1027.9 + 复核波 + 76 套 E2E 全绿）
-
-- **镜像（1 代理实现 + 2 代理复核 + 亲核修复 4 项 + 真机迁移崩溃修复）**：
-  - `6bc940c` #1387 **Bearer Key SHA-256 哈希存储（完整镜像，清偿存量债）**：`hash_bearer_token`/`bearer_token_prefix`（min(12,len/3)）/`mask_bearer_key` 纯函数 + `BearerKey.token_hash/token_prefix`（永不序列化）+ 存储读写切哈希 + `find_by_token` 常数时间比较（未迁移明文行兜底接受）+ create 一次性明文 + list 全脱敏 + **migration v38**（加列 + 存量明文哈希 + 清 routing.bearerAuthKey 遗留）+ fresh-DB 单测；
-  - `5e2e497` #1396 **重置密钥保留权限（完整镜像）**：`reset_bearer_key` 命令（require_admin，保留 name/enabled/access_type/allowed_*，旧 token 立即失效）+ ResetBearerKeyDialog（一次性展示+复制）+ SettingsPage 接线 + 创建后一次性 token 横幅（替代原行内明文复制）+ tauriClient 映射 + locales ×6；
-  - `797101a` #1393 / `e457e5a` #1394 **评估未镜像**：per-user 凭证绑定体系（桌面无该体系，历史裁定 #1368/#1318 同族）。
-- **复核修复 4 项**：
-  - ①[H] **复制 MCP 配置嵌入脱敏假 token**——`mcpConfig.ts` 单密钥分支把列表返回的 masked token 当真实凭据嵌入（用户粘贴必 401）→ 对齐 origin：一律 `<your-bearer-token>` 占位符 + `mcpConfigUsesTokenPlaceholder` 简化（auth 开启即 true）；
-  - ②[L] create/reset 响应泄漏 `token_hash/token_prefix`（违反「永不序列化」注释 + origin sanitizeKey parity）→ 响应构造置 None；
-  - ③[L] token 熵 122-bit（uuid）与 origin 256-bit 不一致且注释错误 → `rand::random::<[u8;32]>()` hex（注释钉死熵假设与哈希无盐论证的依赖关系）；
-  - ④[H·真机] **v38 迁移崩溃**——`bearer_keys.token` 有 UNIQUE 约束（早期 schema），多行存量明文清空 `''` 撞 UNIQUE（`UNIQUE constraint failed: bearer_keys.token`，应用启动失败）→ 每行写唯一哨兵 `hashed:{id}`（find_by_token 明文兜底仅在 token_hash 空时触发，哨兵不可匹配）+ reset 路径同步修 + 多行回归单测。**教训：清列值前必须查该列约束——UNIQUE 列不能批量清成同一值；fresh-DB 单测只有单行没抓到**。
-- **E2E 套件治理**：6 个套件直读 `bearer_keys.token` 存量明文被 v38 清空击穿（4 硬失败 + 2 静默覆盖丢失）→ 全部改自插明文行模式（carpet_r200 范式，依赖已单测覆盖的明文兜底路径）。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **297 passed**（+8）；tsc 0 错；npm build ✓；契约 0 mismatch；**真机 v38 迁移成功**（版本 38、存量行哈希+哨兵、应用正常启动）；**76 套 E2E 全绿零失败**。
-- **影响功能点与结果**：API 密钥不再明文落库（安全清偿）；支持不丢权限重置密钥；复制 MCP 配置改用占位符。**用户需重启生效**（首次启动自动迁移，已验证）。
-
-#### 2026-10-27（第十二轮）：`08740a1` -> `edc885d`（3 commit，版本 26.1027.7 → 26.1027.8 + 复核波 + 76 套 E2E 全绿）
-
-- **镜像（2 代理并行实现 + 4 代理复核 + 亲核修复 2 项）**：
-  - `edc885d` #1391 **分组保留原始工具名（完整镜像）**：`GroupServerConfig.preserve_tool_names`（serde camelCase 透传，无新列）+ rmcp_bridge `assert_valid_group_tool_names`（重复名/meta 冲突拒绝，origin 同款文案）+ aggregate_tools preserve 成员暴露裸名 + tools/list 尾部全目录校验（-32603）+ resolve_target preserve 前置解析（裸名精确匹配，尊重 selection 白名单）+ ServerToolConfig 复选框（取消勾选删键，wire 干净）+ types + locales ×6（origin 原文）。**复核修复**：①[M] 前置 pass 假歧义——hit 计数未过滤禁用/隐藏工具，A 成员禁用的重名导致 B 成员已广告的工具不可调 → hit 口径对齐 aggregate_tools（apply_tool_filters + enabled）；②[L] call 面歧义拒绝折叠成通用 not-found（origin 有具体原因）——记录不修（fail-closed 语义正确，排障信息损失）。
-  - `cadd686` #1392 **数值参数完整解析（镜像）**：`convert_numeric_param`（严格十进制 matcher 拒 inf/NaN/hex/前缀截断；integer 分数保留字符串；`1e3`→1000）替换 http_server coerce 两行 parse。**复核修复**：[M] i64 上界饱和——`i64::MAX as f64` 舍入为 2^63，`"9223372036854775808"` 经 `as i64` 静默偏差 1 → 改开区间 `< 2^63`（origin 同样转发 float，parity 修正）。
-  - `734ae30` #1390 **上游 OAuth 显式 metadata（透明存储）**：`ServerOauthConfig.authorization_server_metadata: Option<Value>`（serde round-trip，导入 raw Value 透传/导出整结构体序列化自动覆盖）；桌面运行时走静态端点模式（rmcp AuthorizationManager 自发现），无消费方——注释钉死。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **289 passed**（+4：group_tool_names 3 + convert_numeric 1 含 2^63 边界）；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**（preserve 默认关闭路径零击穿，断言审计确认）。
-- **记录**：①preserveToolNames 无 E2E 覆盖（组内重名歧义需两台同名工具服务器，单测覆盖校验函数；覆盖缺口记录）；②桌面 meta 工具名 `smart_route_*` 与 origin `search_tools` 不同，冲突校验按桌面 is_meta_tool 判定；③origin withModernLists requestedName 豁免分支不镜像（桌面无该机制）。
-- **影响功能点与结果**：分组可按成员保留原始工具名（免前缀暴露）；REST/OpenAPI 数值参数不再截断；stdio 下载进度条恢复正常。**用户需重启生效**。
-
-#### 2026-10-25（第六轮）：`fd1abaa` -> `8d8debf`（14 commit + 复核两波 + 76 套 E2E 全绿）
-
-- **前端/locales 已同步**（定制文件手动合并，桌面自定义全保留）：
-  - `cb72c75` #1379 协议版本展示：ServerCard 协议版本 chip（openapi 除外）+ types `Server.protocolVersion` + locales ×6；**Rust 镜像**——`ServerStatus.protocol_version`（serde camelCase）+ `McpTransport/McpClient::protocol_version()`（SSE/OpenAPI 默认 None）+ rmcp stdio/http transport 从 `peer_info()` 捕获 + pool 连接点/on_demand `mark_on_demand_awake` 四元组线程 + tauriClient `toFrontendServer` 映射。
-  - `adce2b7` #1372 工具批量筛选（仅前端）：`CapabilitySelection.tsx` + `capabilitySelection.ts` 逐字复制；ServerToolConfig render-prop 集成（桌面图钉/隐藏参数/描述覆盖 UI 保留在 render prop 内）；locales groups.* ×6。**后端批量状态 API 未镜像**（桌面走 Tauri 命令逐项 updateServerCapability）。
-  - `abf847a` #1363 越南语：`locales/vi.json`（origin vi ∪ 桌面键英文兜底，774 桌面专属键零丢失）+ i18n.ts + LanguageSwitch。
-  - `1e5d82b` #1367 上报版本展示：`displayedVersion = packageVersion || server.version` + `server.reportedVersion` ×6。
-  - `b331c93` #1378 行布局 / `431a2bf` #1377 展开完整描述 / `6011a10` #1376 AboutDialog 视口 / `014ba41` #1375 暗色统一（index.css 大改：color-scheme、统一灰阶映射块、删除 legacy 重复块；桌面 hub-* 与 cursor 规则保留；GroupVisibilityFields 桌面无此文件跳过）/ `8d8debf` #1380 名称提示删除（桌面无此行，no-op）。
-- **Rust 镜像**：
-  - `dd05c30` #1370 **elicitation 转发（完整实现）**：新 `mcp/elicitation.rs`（`ElicitationRelay`/`ElicitationSlot`/`SlotClearGuard`，4 单测）+ rmcp features 加 `elicitation` + 两 transport `BridgeClientHandler` 实现 `create_elicitation`（无 relay → "Elicitation requires an active tool call"）+ `on_custom_notification` 转发 `notifications/elicitation/complete` + `session_pool::call_tool_isolated` 接受 `Option<ElicitationRelay>`（client mutex 临界区内注册，guard 同步清除）+ bridge `downstream_elicitation_relay()`（`supported_elicitation_modes()` 处理 legacy 空能力=form-only）仅接 isolated 分支。**rmcp 原生请求 ID 关联 → origin 的 promise-tail relay 不需要**。已知限制：调用 future 被 drop（600s 超时）不取消上游 JSON-RPC 请求，迟到 elicitation 可达后继调用的 relay（同 session 误归属非跨 session 泄漏，注释钉死）；2026 下游受 SEP-2260 限制天然排除（与 origin 一致）。
-  - `f0867d5` **GHSA-vgj6-pm6x-8g97 对齐（桌面审计后修 2 处）**：①`read_resource` ui:// fallback 循环补两道门——分组资源选择（`ServerFilter.resources`）+ 单服务器资源禁用（`server_tool_config get_config(item_type="resource")`）；②新 `builtin_in_scope` helper——内置提示词/资源不再泄漏到未含内置服务器的单服务器/分组作用域（root 与含内置成员的分组行为不变；**ui:// 读取跳过该 gate** 以保持 fallback 可达——首版 gate 误拦 ui:// 被 E2E 影响审计代理抓出后修正）。Part 1/2（上游 prompt 禁用读路径/REST 目标绑定）桌面审计为 SAFE（桌面不代理上游 prompts、REST 无 prompt 端点）。
-- **评估未镜像**：`f9fe28b` #1374 直连路由工具名（桌面无 MCP Apps 路由上下文机制）；`c542fbe` #1368 凭证槽 / `d910ef2` #1364 个人 OAuth（无 per-user 体系）；`adce2b7` 后端批量 API。
-- 版本 `1.1.5006 → 1.1.5007`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5007.md`。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **271 passed**（+4 elicitation）；tsc 0 错；npm build ✓；vitest 55 passed；契约脚本 0 mismatch；**76 套 E2E 全绿零失败**。
-- **同步后独立复核（6 代理并行 + fix-of-fixes 1 代理）**：修复 4 项——①[H] `builtin_in_scope` 早退拦截 ui:// fallback（apps_ui A3 场景）→ gate 加 `!uri.starts_with("ui://")`；②[H] vi.json 22 个新键未翻译（英文直拷）→ 从 origin vi 回填；③[M] `server.updateAvailable` vi/fr/tr 缺 `{{version}}` 占位符（存量缺陷）→ 补齐；④[L] vi `activity.cleanupSuccess` 多余 `{{count}}` → 对齐。elicitation 陈旧请求误归属记为已知限制（注释钉死）。E2E 断言影响审计：r36x G9/G10 正向分支因内置作用域收紧成死代码（覆盖损失非失败，记录）。
-- **影响功能点与结果**：服务器卡片显示 MCP 协议版本与上游上报版本；工具配置弹窗支持搜索/注解过滤/风险分组批量勾选；per-session 隔离调用支持 elicitation 交互转发；新增越南语；ui:// 读取与内置内容作用域收紧（安全）。**用户需重启生效**。
-
-#### 2026-10-26（第七轮）：`8d8debf` -> `08740a1`（4 commit，串行实现 + 两波复核 + 76 套 E2E 全绿）
-
-- **Rust/前端镜像（3 特性，串行执行避免 migration/locales 共享文件 clobber）**：
-  - `e3bef67` #1382 **protocolNegotiation 配置**：`ServerConfig.protocol_negotiation`（migration **v36**，对齐 enableKeepAlive 的实列模式）+ `server_service::resolve_protocol_mode`（origin resolveUpstreamProtocolMode 逐字 parity：非法值拒绝、auto 仅限 streamable-http、None=auto）+ rmcp_http_transport `legacy_only`（`ClientLifecycleMode::Initialize` 跳过 discover 探测；auto=既有行为不变）+ settings_import 双 casing 透传 + ServerForm 下拉（仅 streamable-http）+ locales ×6。**桌面本就默认 modern 探测（A1），镜像点在 legacy 逃生门**。
-  - `e4c46bf` #1384 **on-demand 工具快照持久化**：migration **v37** `capability_snapshots(server_name PK, tools_json, fingerprint, updated_at)` + 新 `capability_snapshot_service`（save/load/delete_tx/rename_tx + `launch_fingerprint`——**BTreeMap 排序 env/headers 后再哈希**，HashMap 迭代序跨进程不稳定会被复核抓出后修正）+ 睡眠占位符插入时按指纹恢复 tools/tool_count（状态仍 sleeping）+ `mark_on_demand_awake` 持久化（**空列表不保存**——唤醒期 tools/list 瞬态失败不得抹掉旧快照，复核抓出）+ **条件 upsert**（`WHERE EXISTS servers 行`——delete 事务与在途唤醒竞态不复活孤儿行）+ delete/rename 同事务级联 + 2 单测。
-  - `08740a1` #1385 **远程连接退避重连**：新 `mcp/recovery.rs`（内存态 recovery map + `backoff_ceiling_ms`/`jittered_delay_ms` 纯函数 2 单测）+ mcp_manager 1s 轮询调度器（无定时器可泄漏；身份守卫：删除/禁用/改名/on-demand/非远程全 clear，starting → abort_attempt 让位，post-connect still-enabled fail-closed 复查保留）+ `session_rebuild` 跳过 sse/streamable-http（stdio/openapi 行为不变，历史守卫全保留）+ `ServerInfo.recovery{attempts,lastAttemptAt,nextAttemptAt}` + ServerCard 恢复状态块 + keepAlive 文案诚实化（只控健康检查）+ locales ×6。**`reclaim_stalled`（420s 上限 > 最坏在途 ~300s）复核抓出 200s 会误收编活尝试导致双连接/双计数后修正**。
-  - `687de3e` #1383 测试目录隔离：origin 测试基建，跳过。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **280 passed**（+9：v36 模式 4 + v37 快照 2 + recovery 2 + fingerprint 1）；tsc 0 错；npm build ✓；vitest 55 ✓；契约 0 mismatch；**76 套 E2E 全绿**（full_regress/r107 首跑失败系热重建窗口瞬态，稳定后复跑 41/41 + 43/43）。
-- **同步后独立复核（4 代理并行 + fix-of-fixes 1 代理）**：修复 6 项——①[H] 唤醒期空 tools/list 覆盖旧快照；②[H] launch_fingerprint HashMap 序跨进程不稳定（快照功能对 ≥2 env 的服务器整体失效）；③[M] 快照未随启动配置失效（origin 有 scrypt 指纹，桌面补 fingerprint 列）；④[M] recovery 丢失任务永久卡 attempting（reclaim_stalled 落地）；⑤[M] reclaim 200s 上限小于最坏在途时长（→420s）；⑥[L] save 与 delete 竞态孤儿行（条件 upsert）。E2E 影响审计：三特性对 76 套零断言击穿（休眠快照/退避重连/recovery 字段均为增量或仅加速）。
-
-#### 2026-10-26（第八轮）：第三/四波独立复核（6+1 代理）——修复 10 项 + 全量回归
-
-- **第三波 6 代理（安全对抗/并发/origin parity/前端/迁移数据完整性/真机运行时）修复 8 项**：
-  - ①[H] **migration v37 fingerprint 列修复不可达**——中间构建已给 DB 盖 v37 版本戳，版本门控使 migrate_v37 永不再入（真机 DB 实证缺列，快照功能静默失效）→ 新增 `db::repair_schema()`（非版本门控、幂等、每次启动运行）；
-  - ②[H] **export/copy 丢 protocolNegotiation**（import 侧已支持而两个导出面漏——与 oauth 同类）→ config.rs 两处 JSON builder 补齐，round-trip 闭环；
-  - ③[H] **mark_on_demand_awake 持 pool 写锁跨 DB await**（SQLite 写竞争时冻结全部池操作）→ 快照保存移出写锁（条件 upsert 使释放后竞态无害）；
-  - ④[H] **CapabilitySelection 注解过滤状态跨 tab 泄漏**（Tools 页选 readOnlyHint → Prompts 页全空且过滤器不可见）→ `key={server.name}:{capability}` 重挂载重置；
-  - ⑤[H·#1385 核心缺口] **共享远程连接会话中途死亡永不翻转池状态**——transport 的 connected 原子无池状态消费者，退避恢复调度器永不触发（origin mcpService 半边未镜像）→ 新 `mark_pool_disconnected_if_dead`（call_tool_with_meta/read_resource 出口检查 is_connected + `Arc::ptr_eq` 身份守卫防误杀并发重连的新客户端）；
-  - ⑥[M] 快照指纹 MD5 无盐（origin 因低熵密钥用 scrypt）→ 对齐 `v1:salt:scrypt` 格式（N=2^11，逐保存随机盐，verify 解析盐重算）；
-  - ⑦[M] reclaim 420s 仍小于最坏在途 ~542s（tools/list 超时 continue 重试）→ 600s；
-  - ⑧[L] OAuth pending 期间后台重连空转（origin 语义）→ 调度器身份守卫补 pending → clear。
-  - 另修 0037.sql 快照缺 fingerprint 列（文档对齐）。
-- **第四波 fix-of-fixes（1 代理）**：8 项修复全清（锁序/早退/盐熵/round-trip/key 重挂载逐项验证）；lib 280 passed。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **280 passed**；tsc 0 错；npm build ✓；契约 0 mismatch；**E2E 74/76 绿 + r1800/r1900 环境污染定性**——热重启窗口（复核编译触发 tauri dev 重建）中 start_all 连接了中断套件残留的 DB 测试行，池条目无法从套件侧清除，**重启应用后自愈**（运行时 tick 不拾取 DB-only 行的既有保证不变：session_rebuild/recovery 均池门控，代码逐行核实）。
-- **记录**：①keepAlive 健康检查循环桌面仍未消费（既有待办，接线时 modern 上游须用 discover/list 而非 ping）；②elicitation 下游 /mcp 不广告能力系正确设计（elicitation 是客户端能力，hub 作为 server 无需声明；上游方向由 BridgeClientHandler 广播）；③REST /servers 面不暴露 protocolVersion/recovery（Tauri 命令面专属，与 server_version 同模式）。
-- **影响功能点与结果**：streamable-http 服务器可选 legacy 协议协商；按需启动服务器重启后仍显示上次工具列表；断连远程服务器自动退避重连且卡片可见重连进度。**用户需重启生效**。
-
-#### 2026-10-26（第九轮）：第五/六波独立复核（6+1 代理）——修复 10 项（含 elicitation 整体失效级缺陷）+ 76 套 E2E 全绿收官
-
-- **第五波 6 代理（fresh full-diff / elicitation 端到端 / recovery 并发 / 前端 origin 对比 / locales / E2E 健康）修复 8 项**：
-  - ①[H·功能整体失效] **elicitation slot 双轨断裂**——`BridgeClientHandler::new()` 自建 ElicitationSlot 而 session_pool 经 `client.elicitation_slot()`（transport 字段）注册 relay，两个不同 Arc → handler 永远读到空 slot，**整个 elicitation 转发功能自 #1370 落地起从未生效**（此前所有轮次未抓到——E2E 无 mock elicitation 上游）→ transport 创建 slot 并传入 handler 构造（stdio+http 两 transport），跨组件共享状态必须验证同一 Arc 实例；
-  - ②[H] forward 无超时——下游客户端不响应时 relay 永久挂起占住 client mutex → 600s 超时 + 超时后 `session_pool::evict_isolated`（仅 timeout 时调用，匹配 "timed out"）；
-  - ③[M] notification 连接生命周期 fallback 缺失——`on_custom_notification` 仅在调用在飞时注册，连接级通知（如上游主动 elicitation）丢失 → 两 transport 连接生命周期注册 notify slot（不被 guard 清除）；
-  - ④[M] ui:// builtin 查找门控重构——`builtin_in_scope_now` 变量，非 ui:// 早退保留、builtin 查找仅在 in_scope 时执行（消除重复判断）；
-  - ⑤[M] jsonImport.ts 缺 protocolNegotiation 校验（origin e3bef67 hunk）→ KNOWN_KEYS + auto|legacy 校验（auto 仅 streamable-http，违规 push issue）；
-  - ⑥[L] recovery 文本在 90px 固定列溢出 → `.hub-server-card-recovering` white-space: normal + min-width: max-content；
-  - ⑦[L] r1800 套件固定服务器名跨 run 碰撞 → per-run 唯一名（pid+时间）+ main() 开头中毒环境 preflight（孤儿池条目明确报「重启 hub」而非 A0 混淆失败）；
-  - ⑧elicitation 真机验证待办记录（修复未经运行时验证，需 mock elicitation 上游）。
-- **第六波 fix-of-fixes（1 代理）**：8 项修复全清（slot 共享链路/超时路径/notify 生命周期/门控变量逐项验证）。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **280 passed**；tsc 0 错；npm build ✓；vitest 55 ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**（r1800 22/22 + r1900 23/23 加固后复跑，环境污染已自愈）。
-- **教训**：①跨组件共享状态（slot/registry/handle）必须断言 Arc 身份一致——「字段存在」≠「同一实例」；②无 mock 上游的特性（elicitation）E2E 全绿是假绿，落地时必须同步建 mock 或真机验证清单；③套件固定名 + 热重启 = 中毒环境，per-run 唯一名 + preflight 自诊断是标准解。
-- **影响功能点与结果**：elicitation 转发修复后真实可用（per-session 隔离调用中上游可向下游客户端发起表单交互）；导入校验补 protocolNegotiation；recovery 状态块文本不再溢出。**用户需重启生效**。
-
-#### 2026-10-26（第十轮）：第五波独立复核（5 代理）——修复 7 项（1H+2M+4L）+ 76 套 E2E 全绿
-
-- **5 代理切片（elicitation 修复链 / recovery+快照并发 / 前端 diff 对比 origin / locales+契约 / 迁移+导入+命令）**：
-  - **修复 7 项**：
-    - ①[H] **`pool::call_tool` 普通路径漏 `mark_pool_disconnected_if_dead`**——dead-marking 只接在 call_tool_with_meta/read_resource，而 Tauri UI/REST/MCP HTTP API 主路径走 `call_tool`：远程 transport 空闲期死亡后 pool status 恒 connected → 恢复调度器不播种、session_rebuild 跳过 → 服务器永久假活直到重启 → 补齐（与 call_tool_with_meta 同构）；
-    - ②[M] **超时驱逐 "timed out" 子串误匹配**——上游工具级错误文本（如 "git fetch timed out"）会驱逐健康隔离 client（销毁 per-session 状态）→ 改匹配自有前缀 `upstream tool call timed out`（mcp/time.rs 文案）；
-    - ③[M] **reclaim 600s 未计 connect-lock 排队**——claim 在 take_due 打戳而 attempt 可能排队慢 connect（最坏 ~542s），超时误收编会拆掉新建连接 → 新 `recovery::touch_claim`，connect_server 拿到 per-name 锁后刷新；
-    - ④[M] **CSS `min-width: max-content` 抵消换行**——recovery 文本横向溢出 90px track 叠画相邻列（与修复意图相反）→ 删 min-width/overflow/z-index，改 `min-width: 0` 依赖换行；
-    - ⑤[L] **repair_schema 对表整体缺失硬失败**——盖 37 戳但 capability_snapshots 不存在（手改版本戳/部分恢复备份）时 ALTER 报 no such table 中止启动 → 前置 `CREATE TABLE IF NOT EXISTS`（与 v37 同 DDL）；
-    - ⑥[L] **repair 路径零单测**→ 补 2 测试（盖戳缺列修复 + 表缺失重建，均验证可写入与幂等）；
-    - ⑦[L] **fr/tr `builtinPrompts.templatePlaceholder` 占位符名被翻译**（`{{paramètre}}`/`{{parametre}}` 运行时不插值，历史遗留）→ 还原 `{{parameter}}`。
-  - **记录不修**：①超时驱逐与并发新调用的窄竞态（同 session 错配非跨 session 泄漏，注释已披露）；②notify slot 在 elicitation=None 后续调用保留陈旧回调（同 peer 无害）；③2026 下游 elicitation 转发必以 SEP-2260 失败但 relay 已注册（与 origin 一致的已知偏差）；④快照 delete+同名重建 TOCTOU（窄窗口暂时性工具列表错配）；⑤jsonImport auto 校验用原始 type 与桌面宽松检测的组合严格性（origin 逐字 parity 保留）；⑥vi 历史 792 键未翻存量（后续批次）。
-  - **清洁确认**：slot Arc 单实例贯穿全链、锁序无环、调度器身份守卫闭环、快照事务级联、指纹 verify 畸形输入安全、locales 6 语言 2098 键零缺失零孤儿、tauriClient↔serde 契约逐项对账、fresh-DB v1→v37 全链、导入导出 round-trip、命令门控——全部通过。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **282 passed**（+2 repair 测试）；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**。
-- **影响功能点与结果**：远程服务器经 UI/REST 调用死亡后可被恢复调度器正确播种（假活修复）；超时驱逐不再误伤健康会话；recovery 状态块文本正常折行。**用户需重启生效**。
-
-#### 2026-10-27（第十一轮）：第六波独立复核（4 代理）——修复 3 项（1H+1M+1L）+ 76 套 E2E 全绿
-
-- **4 代理切片（修复合回炉 / dead-marking 同族穷举 / 套件断言审计 / 真机运行时）**：
-  - **修复 3 项**：
-    - ①[H] **手写 SSE transport 回退模式连接类错误不翻转 `connected`**——no-background-reader 模式（POST 非 SSE/无 endpoint 事件回退）下 `post_request` 的 send 失败/非 2xx 只 return Err，全文件翻转点仅 reader 循环退出（该模式不存在）与显式 disconnect → `mark_pool_disconnected_if_dead` 恒见 connected=true，**退避重连对 SSE 回退模式服务器完全失效**（正是 #1385 目标场景的残留盲区）→ 两个连接类错误分支补 `connected.store(false)`（应用层 MCP 错误不触碰，对齐 rmcp transport 语义）；
-    - ②[M] **jsonImport protocolNegotiation 校验时序**——校验用原始 `config.type` 而桌面宽松检测接受 `streamablehttp`/url-only 变体，合法导入带 `auto` 被误拒 → 校验移到类型归一化之后、用 `normalizedConfig.type` 判断；
-    - ③[L] `touch_claim` 无单测（记录缺口，recovery 模块整体无测试基建）。
-  - **回炉通过**：call_tool dead-marking 调用点同构、starts_with 前缀与 mcp/time.rs 文案精确匹配（无包装层改前缀）、touch_claim 非 recovery 路径 no-op、CSS 换行不被裁剪、repair DDL 逐列一致、fr/tr 无误改。
-  - **dead-marking 家族穷举零遗漏**：共享 pool（call_tool/call_tool_with_meta/read_resource 三点全接）、per-session（is_connected→ptr_eq 驱逐闭环）、on-demand（驱逐+mark_on_demand_error 闭环）、builtin（不适用）；恢复调度器读写键对齐；`is_remote` 在全部 7 处 PoolEntry 构造点统一谓词。openapi transport 不翻转 connected 记录为模型固有语义（is_remote=false 由 session_rebuild 接管，自洽）。
-  - **套件断言审计通过**：r1800 唯一名贯穿全部用例、PREFLIGHT check 签名一致且失败不阻断、r1900 E.rerun 实质断言、2 个 repair 测试真实断言无恒真。
-  - **真机运行时全 PASS**：/health 200；/servers 4 台全 connected 无池中毒；MCP 冒烟（initialize 2025-06-18 → tools/list 111 工具 → 真实调用 isError:false 返回公网 IP → DELETE 202）；DB schema_version=37、capability_snapshots 含 fingerprint 列、servers 含 protocol_negotiation 列；app_log 0 panic（仅 2 条历史 r1800ssrf error 残留）。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **282 passed**；tsc 0 错；npm build ✓；契约 0 mismatch；**76 套 E2E 全绿零失败**。
-- **影响功能点与结果**：SSE 上游服务器（含回退模式）死亡后可被退避重连正确恢复；导入含 `auto` 协议协商的宽松形态配置不再被误拒。**用户需重启生效**。
-
-#### 2026-10-27（补充）：allowInsecureTokenEndpoint 桌面文案诚实化
-
-- 用户指出 #1293 镜像的「允许 HTTP OAuth 令牌端点」帮助文案含 origin 的管理员语义（「仅管理员可用/只有管理员可以编辑/非管理员的所有者无法编辑」）——桌面 skipAuth 单用户无管理员概念，文案误导 → 新增 `server.oauth.allowInsecureTokenEndpointHelpDesktop` 键 ×6（去除管理员句，保留 TLS 风险提示），ServerForm 按 `isTauri()` 分流渲染；web 模式保持 origin 原文。checkbox 的 `disabled={!auth.user?.isAdmin}` 在桌面恒 false（guest admin）行为不变。
-- **验证**：tsc 0 错；npm build ✓；6 语言 JSON 校验通过。
-
-#### 2026-10-27（补充）：多语言未翻译条目全量补翻（fr/tr/vi，以 zh 语义为基准）
-
-- 键集合审计：6 语言 × 2099 键，0 缺失 0 孤儿（zh/en 双基准均对齐）——缺口在**值**：fr 196 条、tr 147 条、vi 757 条为英文直拷（vi==en 且 zh!=en）。
-- 3 个并行翻译代理补翻（语义以 zh 为基准、en 辅助）：fr 实改 136 条（60 条法语与英文同形属正确）、tr 实改 139 条（8 条术语同形保留）、vi 实改 757 条（13 条专有名词有意保留英文）。规则：占位符/URL/路径/技术术语原样保留、`******` 系终端对 Bearer 的显示打码（按真实语义译）、键序不动。
-- **顺带修复 2 处 i18next 复数格式漂移**：`cloud.toolsAvailable` 的 en 用 `{{count}} a||{{count}} b` 复数双形式，tr 缺 `||` 后半、zh 完全没有 → tr/zh 补齐双形式（土耳其语/中文两形式相同但格式必须存在，否则 i18next 复数查找回退异常）。
-- **验证**：6 语言占位符逐键 parity 0 drift；句级未翻译残留 fr/tr/es/vi 全部归零；tsc 0 错；npm build ✓。
-
-#### 2026-10-27（补充）：免登录模式用户名硬编码修复
-
-- 用户指出「免登陆模式」文案缺失——根因非 locale 键缺失，而是 `AuthContext.tsx` guest 用户名**硬编码中文** `'免登陆模式'`（UserProfileMenu 渲染，非中文语言下也显示中文）→ 新增 `auth.skipAuthGuestName` 键 ×6（en Guest Mode / zh 免登录模式 / fr Mode invité / tr Misafir Modu / es Modo invitado / vi Chế độ khách）+ AuthContext 接 `useTranslation`（deps 补 `t`）。
-- 全仓硬编码 CJK 字符串扫描：其余命中均为 `t(key, 中文fallback)` 模式（键齐全不触发）与语言自身名称（LanguageSwitch `中文`），无同类问题。
-- **验证**：6 语言键 parity 0 缺失 0 占位符 drift；tsc 0 错；npm build ✓。
-
-#### 2026-10-27（补充）：代码引用但 locale 缺失的 15 键补全（accessUrl ×9 + pages.rag 扫描阶段 ×6）
-
-- 用户指出「rag、endpoints mcp」文案缺失——新增**代码↔locale 对账**维度（此前只对账 locale 之间）：扫描全部 `t('key')` 引用（1568 键）与 en/zh 对比，抓出 **15 个被代码引用但所有语言都没有的键**（历史遗留，UI 显示中文 fallback 或裸键名）：
-  - `accessUrl.*` ×9（AccessUrlDialog 接入端点对话框：intro/bearerNotice/exposeHttpDisabled/四路由 description/sse/smartApi）；
-  - `pages.rag.scan*` ×6（RagPage 扫描进度阶段：CollapsedHint/PhaseMetas/Git/Scan/Checking/CheckingCount）。
-- 6 语言全补（zh 取代码 fallback 原文，en/fr/tr/es/vi 按 zh 语义翻译；`{{count}}/{{sel}}/{{current}}/{{total}}/{{name}}` 插值与 `{groupName}/{serverName}` 字面占位逐键 parity 校验通过）。`bearerNotice` 的 "Bearer/Bearer Token" 经字节级核验系终端打码伪影，实际为正常 ASCII。
-- **验证**：代码引用键缺失归零（1568/1568 全覆盖）；新键占位符 parity ALL OK；tsc 0 错；npm build ✓。**教训**：locale 对账必须含「代码引用→locale」方向，仅 locale 间对比会漏掉从未建键的引用。
-
-#### 2026-10-27（补充）：RAG 术语本地化（用户裁定「知识库」）
-
-- 用户指出菜单与 RAG 页面标题仍是英文缩写 → 裁定中文名「知识库」：`nav.rag` + `pages.rag.title` ×6（en Knowledge Base / zh 知识库 / fr Base de connaissances / tr Bilgi Tabanı / es Base de conocimiento / vi Cơ sở tri thức）。
-- 顺带修复 `ModelVectorSettings` 消费方标签硬编码 `RAG` 字面量 → 新 `settings.mvSourceRag` 键 ×6 + i18n 接线（与既有 `mvSourceSmartRouting` 同模式）。
-- **验证**：tsc 0 错；npm build ✓；6 语言 JSON 校验通过。
-
-#### 2026-10-27（补充）：版本号规则变更 + changelog 合并（26.1027.7）
-
-- **新版本规则（用户裁定）**：`2位年.月日.迭代号`，首版 **26.1027.7**。Cargo semver 实测拒绝前导零（`invalid leading zero in patch version number`，与 1.1.00001 弃用同因），迭代号写 7 而非 007（用户确认全四源一致方案）。
-- 四源 + 双 lockfile + Cargo.lock 全部更新为 26.1027.7；`doc/upgrade/1.1.5001~5007.md` 七个文档合并为 `doc/upgrade/26.1027.7.md`（新功能/修复/基线同步三分节，含本轮 i18n 补翻、elicitation 修复、退避重连等全部累计内容），旧文档已删除。
-- AGENTS.md §4.4 版本号行与 §6 四源行同步更新（含新规则说明）。
-- **验证**：cargo check 通过（Cargo.lock 再生）；tsc 0 错；npm build ✓；契约 0 mismatch。
-
-#### 2026-10-27（补充）：stdio 下载进度恒 100% 修复（用户报告）
-
-- **根因**：`parse_progress_pct` 的 `12/34` 分数分支无 `num <= total` 校验——stderr 日期前缀行 `[2026/10/27 ...]` 被解析为 `2026/10 → 2026×100/10 → min(100) = 100%`，且 `looks_like_download_progress` 含 `parse.is_some()` 分支 → 任何含日期/路径形态数字的 stderr 行都触发「下载中 100%」事件并钉满进度条。
-- **修复**（`mcp/stdio_transport.rs`）：①分数分支要求 `num <= total`（否则跳过该数字继续扫描）；②斜杠链守卫——候选数字前一字符为 `/`（日期 `2026/10/27`、路径 `a/b/c` 特征）直接跳过，防 `10/27` 子对误命中（37%）。
-- **测试**：+3 单测（百分比/分数正例、日期/版本/路径反例、looks_like 分类含日期行排除）→ lib **285 passed**；E2E spot（r1800 22 + full_regress 41 + matrix_v2 152）全绿。
-- **教训**：无界启发式解析器对「服务器可控的 stderr」必须假设最坏输入——分数语义（num≤total）与 token 边界（斜杠链）都要显式校验，`min(100)` 饱和掩盖了语义错误。
-
-#### 2026-10-21（第五轮）：`209b74d` -> `fd1abaa`（4 commit，纯依赖升级）
-
-- `2da710c` server-legacy 2.1.0→2.3.1 / `9f5ad57` @mcp/server 2.1.0→2.3.0 / `e130a97` vite 6.4.3→6.4.4 / `fd1abaa` hono 4.13.7→4.13.11：**全部无需镜像**——origin Node 后端/TS SDK 依赖，桌面为 Rust + rmcp 3.4.1 栈，无对应依赖面（唯一 .ts 变更是 origin 自身测试的环境隔离调整）。
-- **子模块指针模式修正**：此前 SOP 用 `git checkout origin/main` 导致 detached HEAD（指针游离、"每次都变"）→ 改为分支模式 `git checkout main && git pull --ff-only`（.gitmodules 已有 `branch = main`），SOP §4.3 与 §4.1 规则 1 已更新。
-- 版本 `1.1.5005 → 1.1.5006`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5006.md`。
-- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
-
-#### 2026-10-20（第四轮）：`4d1e84a` -> `209b74d`（1 commit，#1343 按工具隐藏 input-schema 参数全栈镜像）
-
-- `209b74d` #1343 hide input-schema parameters per tool：**完整镜像（Rust + 前端 + locales + IPC）**——
-  - **语义**：hidden_params 存配置列表（投影报告 configured），schema 移除 effective（required 过滤在读取时）；调用参数剥离在 pool::call_tool_with_meta/call_tool 与 session_pool::call_tool_isolated 三个 choke point；apply_tool_filters 是 tools-list/describe/openapi 的公共 schema 隐藏点。
-  - **Rust**：migration **v35**（server_tool_config.hidden_params TEXT + 0035 SQL）；models/server_tool_config.rs 加 hidden_params；server_tool_config_service.rs 重构（SELECT_COLS + row_to_config 消除三处重复，AssertSqlSafe 包裹 format! SQL）+ 新函数 update_hidden_params/effective_hidden_params/hide_schema_params/apply_hidden_params_to_tool/strip_hidden_arguments/remove_hidden_arguments/any_hidden_params + apply_tool_filters 接线；models/server.rs Tool 加 hidden_params 字段（8 处 Tool 初始化器补 None）；pool.rs 加 cached_tool_schema + 调用入口剥离；session_pool.rs 入口剥离；smart_routing/meta.rs 搜索跳过条件加 any_hidden_params + 标准模式优先用 live（post-filter）schema；commands/cost.rs 成本计算应用隐藏；新命令 update_server_tool_hidden_params（require_admin + live schema 校验：required 不可隐藏、参数必须存在）+ lib.rs 注册；tauriClient.ts 加 PUT /servers/:s/tools/:t/hidden-params 映射。
-  - **前端**：cp utils/hiddenParams.ts；types Tool.hiddenParams；toolService.updateToolHiddenParams；ToolCard「模型可见参数」复选框 UI；locales ×5（en/zh/fr/tr/es 各 4 键）。
-  - **测试**：server_tool_config_service +5 测试（effective/hide/apply 纯函数、update_hidden_params round-trip、strip noop 路径）+ migration v35 fresh-DB 测试；**legacy_config_functions_round_trip 测试已移除**——踩中 sqlx 0.9.0 测试池解码异常（NULL TEXT 读回 Some("")、`SqliteRow::current` 列数缓存越界 panic：语句在 schema 变更后 live 重 prepare 而 sqlx 缓存元数据不失效；生产路径 E2E 全绿不受影响），记录为已知测试环境问题。
-- 版本 `1.1.5004 → 1.1.5005`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5005.md`。
-- **验证**：cargo check 0 错 0 警；cargo test --lib **236 passed**（--test-threads=2）；tsc 0 错；npm build ✓；契约脚本 0 mismatch；50 轮新代码测试循环 0 失败；E2E spot（r109 32 + matrix_v2 152 + r1200 45 + pin_matrix 31 + r461 22 = 282 断言）全绿。
-- **影响功能点与结果**：服务器工具详情新增「模型可见参数」复选框——勾选后该工具 inputSchema 仅暴露所选参数（required 恒可见）、调用时多余参数被剥离、$smart 搜索/描述/成本计算同步应用。**用户需重启生效**。
-
-#### 2026-10-20（第三轮）：`040f7b9` -> `4d1e84a`（1 commit，用户会话失效安全修复镜像）
-
-- `4d1e84a` Merge commit from fork（用户离职/会话失效）：**部分镜像（JWT 凭证版本绑定）**——
-  - **桌面同类缺口确认**：`require_admin`（及 bearer_keys 本地副本、mcpb、get_current_user、change_password）只验 JWT 签名+role，不回查 DB——改密/删用户后旧 token 进程内 24h 仍有效（origin 修复的正是此类）。
-  - **镜像落地**：`Claims` 加 `session_version`（sha256(`username\0password_hash`)，`#[serde(default)]`）；`issue_token` 加 password_hash 参数（login 传入；guest 传空）；新 `verify_token_fresh`（签名验证 → guest 短路 → 回查 user 行 → 常数时间比较 session_version；用户不存在/版本不匹配一律 "Token is not valid"）——接线 5 处（config::require_admin、bearer_keys 本地 require_admin 副本、mcpb pick、auth::get_current_user、auth::change_password）。**兼容性**：JWT secret 每进程随机 + token 仅存内存 SessionState，重启即全失效，无跨版本兼容问题。
-  - **不镜像部分（桌面无对应面）**：①OAuth token sessionVersion（桌面 oauth_tokens 客户端域、无 username 绑定，consent 本地单用户）；②deleteUser 离职级联（bearer keys 无 owner 列、groups/servers 无 sharedWithUsers——桌面单用户无共享体系）；③auth 中间件 OAuth 分支移除（桌面无该分支）；④rateLimit 注释（无 /auth/register）。
-  - **测试**：+2 单测（session_version 随凭证轮换/确定性/64hex；fresh_verify 拒绝改密后旧 token 与已删用户 token——真实 DB round-trip）。
-- 版本 `1.1.5003 → 1.1.5004`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5004.md`。
-- **影响功能点与结果**：改密/删用户后旧令牌立即失效（安全修复）。**用户需重启生效**。
-
-#### 2026-10-20（第二轮）：`f318d0e` -> `040f7b9`（1 commit，安全修复评估收口）
-
-- `040f7b9` Merge commit from fork（私有漏洞报告修复）：**passthrough 头安全**——新增 `isSafePassthroughHeader`（拒绝 authorization/proxy-authorization/cookie/x-auth-token/x-api-key 及 bearer 自定义头名）+ 全部 passthrough 收集点门控（openapi client、mcpService collectPassthroughHeaders 与两处 handleCallToolRequestImpl）+ 配置了 passthroughHeaders 的服务器改为 admin-only（create/batchCreate/update/importTemplate 四入口错误文案细分）。**无需镜像**——桌面 passthrough_headers 仅从服务器自身静态 `cfg.headers` 取值（pool.rs:151-157），全仓无「转发调用方请求头」路径（grep request_headers/caller 转发零命中），漏洞类不存在；admin-only 半边由桌面单用户 + server create/update `require_admin` 覆盖。
-- 版本 `1.1.5002 → 1.1.5003`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5003.md`。
-- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
-
-#### 2026-10-20：`cc22b8b` -> `f318d0e`（15 commit，v1.1.5 后未发布）
-
-- **前端/locales 已同步**：
-  - `0d43ef7` #1340 分组指令：前端全链（types Group/GroupFormData.instructions、useGroupData、Add/EditGroupForm textarea 块）+ locales 3 键 ×5。
-  - `f318d0e` #1355 服务器状态轮询重写：新增 `utils/serverPolling.ts`（fast 2s 窗口/稳定采样/指数退避策略，桌面 NORMAL_INTERVAL 调 10000 保留桌面节奏）+ ServerContext 单 effect + AbortController 架构替换旧 startup/normal 双阶段（桌面保留：并行 allServers 拉取、import.meta.env.DEV、errors.serverConnection 错误映射；旧 pollRunRef 代际令牌被 origin active-flag 架构自然取代）。
-  - `3fb2254` #1328 es 语言（本轮补齐 origin 新增 21 键到 5 语言，es 只增合并）。
-  - `cc22b8b` #1331 smartRoutingPath 前端 plumbing（types/runtime + utils/runtime getSmartRoutingPath + Dashboard/SettingsPage URL 构造）——**桌面后端无此配置面，恒回退 '$smart'，no-op plumbing（origin parity 保留）**。
-  - `09fc35b` 附带 authService register 错误透传一行。
-  - **跳过**（桌面无对应体系）：#1318 PersonalOAuthControls/identityMode、#1354 allowRegistration、#1330 权限门控 UI（桌面后端 require_admin 已强制）、#1313 凭证槽 args target。
-- **Rust 镜像**：
-  - `0d43ef7` #1340 分组指令后端：**migration v34**（groups.instructions TEXT，add_column_if_missing 幂等 + 0034 SQL 快照）+ models/group.rs Group/GroupPayload + group_service（SELECT_COLS/row_to_group/create/update/FTS 文本）+ **rmcp_bridge initialize override**（set_peer_info + negotiate_initialize 后按 scope 注入：`$smart/{group}` 与 `/mcp/{group}`；名字碰撞时 server 路由也注入系 origin findRouteGroup 逐字 parity，注释钉死；空串 trim 后不注入）。
-  - `801c561` #1299 工具调用防护移植：新 `services/tool_call_guard.rs`（fancy-regex，9 规则 = 7 execution-tier + 2 always-on，全部线性扫描/OnceLock 编译缓存；1MB 扫描预算 fail-closed；execution key 归一化对齐 TS \s）+ 开关（env `TOOL_CALL_GUARD_ENABLED=true` 或 config `toolCallGuard.enabled`，默认关）+ **5 处接线**（bridge execute_tool_call / REST /rest/{server}/call、/rest/group/{g}/call、/api tools（execute_openapi_impl）、/api/$smart/call（smart_rest_call）+ Tauri call_tool 命令）。**阻断载体 parity**：MCP 面回 `CallToolResult::error`（isError:true + 规则 ID 文本，非协议级错误——origin 同载体，严格客户端不会误判传输故障）；REST 面 400 `{"error"}`；Tauri 面 Err(String)。
-- **评估无需镜像**（逐 commit）：`8229c98` #1345 Prometheus metrics（无运维抓取场景）；`92d9bc3` #1326 压缩连字符文件名（无 Tool Result Compression）；`609295f` #1337 bearer `******` 大小写（桌面 eq_ignore_ascii_case 已覆盖）；`c88a858` #1338 changelog TTL（无该服务）；`07c3f85` #1335 凭证槽 OAuth 共存（无凭证槽）；`3e1176d` #1318 / `fd30d57` #1313 per-user 体系；`8125141` #1320 apps 聚合路由；`94e1906` #1346 settings sync pruning（SQLite 单源）；`61d1e45` #1347 表单数组参数（rmcp-openapi 库处理）；`ed692e2` #1350 cl100k（本地 GGUF 嵌入）；`b3ec898` #1314 MCPB Windows rename（mcpb_service 已先 remove_dir_all 再 rename）；`bc3bc1d` #1325 page/limit 400（serde 类型系统覆盖）；`ac3b710` #1324 分组移除通知（update_group 无条件通知，超集）；`756d1ed` #1354 自注册（无 Better Auth）；`2dd0ea3` #1339 错误日志上下文（桌面已有 server/tool 上下文）。
-- 版本 `1.1.5001 → 1.1.5002`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5002.md`。
-- **影响功能点与结果**：分组可配置指令（initialize 下发）；可选工具调用防护（默认关）；服务器状态连接变化期 2s 快速轮询；新增西班牙语。**用户需重启生效**。
-- **同步后独立复核（3 波 7 代理 + 亲核修复 + 全量回归）**：
-  - **W1（4 代理）修复 7 项**：①[H] powershell-cradle executes 正则误用原始大小写文本（混合大小写 cradle 漏报）→ 改 &lower + 回归用例；②[H] /api/$smart/call 绕过守卫（smart_rest_call 直落 handle_call_tool）→ 补 assert_safe 400；③[M] bridge 守卫阻断用协议级 -32001 错误（origin 是 isError:true 工具结果，严格客户端会误判会话故障）→ 改 CallToolResult::error 载体（真机 E2E 验证 isError:true + 文本）；④[L] is_execution_key 空白归一化漏 tab/CR/LF → is_whitespace；⑤[L] Tauri call_tool 命令未接守卫 → 补；⑥[L] migrations/README .sql 清单失实 → 更新；⑦[L] __pycache__ 入 .gitignore。**测试补强**：每条 execution 规则正/负用例（此前 5 规则零覆盖正是 ① 漏网根源）。
-  - **W2（2 代理）**：修复合回炉全清（args 所有权/400 形状/顺序语义/origin parity 断言逐条验证成立）；E2E 断言面审计——80 套零击穿（instructions 键无精确集合断言、守卫默认关、版本号无断言）。
-  - **W3（1 代理终审）**：instructions 端到端契约闭环、守卫 5 处语义一致、安全横扫干净；#1324/#1314/#1322「无需镜像」抽查成立。
-  - **验证**：cargo check 0 错 0 警；cargo test --lib **201 passed**（+9 守卫单测）；tsc 0 错；npm build ✓；契约脚本 0 mismatch；**75 套 E2E：72 绿 + round50c 瞬态复跑 19/19 + r460 A1 / r1000 E1/E3 共 3 例定性为上游 IDE 服务器工具 schema 漂移**（analyze_calls/search_text 不再声明 outputSchema，43 个其他工具仍带；本轮 Rust diff 零触及工具字段路径，非回归）。守卫真机验证：config 开启 → 危险参数 isError:true 阻断、良性调用放行 → 还原关闭。
-
-#### 2026-10-17：`0ee8100` -> `cc22b8b`（11 commit，跨 v1.1.4/v1.1.5）
-
-- **前端/locales 已同步**：
-  - `3fb2254` #1328 西班牙语本地化：`locales/es.json` 重合并改造（HEAD 桌面西语 ∪ origin 西语词条，缺失键以 en 兜底，与 en.json 递归对账零缺失）+ `i18n.ts` + `LanguageSwitch.tsx` 新增 es 接线。
-  - `5dfc530` #1330 市场安装权限对齐：`serverPermissions.ts` 补 `getServerConfigPermissionError` + locales 2 键 ×5；**UI 门控未镜像**（桌面 `create_server` 后端 require_admin 已强制，前端门控为死代码；与 visibility 移除裁定一致）。
-- **Rust 镜像**：`5a979cd` #1322 路径感知 protected resource metadata——`/.well-known/oauth-protected-resource/{*resource_path}` 通配路由 + handler 按请求路径返回对应 `resource`（仅 `/mcp`/`/mcp/*` 合法，其余 404；根端点行为不变）。桌面无 basePath/installBaseUrl 概念，简化为路径直映射；`/mcp` 通道 401 挑战同步路径感知（见下方修复 ②），REST 面保持根 metadata URL。
-- **评估无需同步/镜像**：`cc22b8b` #1331 SMART_ROUTING_PATH env（桌面 `$smart` 硬编码产品形态，`$` 前缀名拒绝已覆盖）；`ac3b710` #1324 分组移除服务器通知（桌面 update_group 每次更新已通知）；`bc3bc1d` #1325 非数字 page/limit 400（Tauri IPC serde 已拒绝，无 /api/servers REST 面）；`b3ec898` #1314 MCPB（无该功能）；`3e1176d` #1318 个人上游 OAuth 绑定（无 per-user 体系）；`8125141` #1320 MCP Apps 聚合路由（桌面无 apps route context 机制）；`fd30d57` #1313 stdio 参数凭证槽（桌面未采用凭证槽 UI）；`dcb7a21` 测试配置。
-- 版本 `1.1.4001 → 1.1.5001`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.5001.md`。
-- **影响功能点与结果**：新增西班牙语界面；OAuth 客户端可按资源路径获取精确 metadata。**用户需重启生效**。
-- **同步后独立复核（3 波 6 代理 + 亲核修复 + 全量回归）**：
-  - **修复 4 项**：①[H] es.json 首版合并覆盖了 HEAD 既有 689 条西语翻译（误以为新文件）→ 重合并（HEAD 西语 ∪ origin 西语 ∪ en 兜底，递归对账零缺失；代理报的「689 回退」经逐键核验系 en.json 既有 `runtimePhase.*` 点号字面键遮蔽 flat 比较的假阳性，真实回归 6 键已还原）；②[M] `build_oauth_401` 未路径感知（与 #1322 同 commit 的 origin sseService 行为缺失）→ `build_oauth_401_at`/`check_bearer_auth_at(headers, path)`，mcp_bearer_middleware 传请求路径，REST 面保持根 URL 不变；③[L] 通配端点裸 `/` 后缀 404（origin regex parity）+ 单尾斜杠容忍；④[L] es.json 质量修复（usted→tú 统一 14 键、`{{parámetro}}` 占位符继承 bug、pull 英文动词 ×2、`password_login_disabled` 缺冠词、占位符 parity ×2（updateAvailable 补 {{version}}/cleanupSuccess 去 {{count}}）、origin-only 11 键剪除）。
-  - **套件治理**：oauth_provider_e2e P5c 大小写敏感 header 查找在 Python HTTPMessage 键大写化下恒败（环境漂移非回归）→ 大小写无关查找 + P5c-2 路径感知 URL 精确断言 + 新增 P9a-e per-path metadata 端点覆盖（42/42）；r458 G2 中文查询「公网 ip」对英文工具描述 0 命中（上游 spec 描述语言变化，非回归）→ 中英双查询兜底（16/16）。
-  - **验证**：cargo check 0 错 0 警；cargo test --lib **178 passed**（+8 `protected_resource_transport_path` 纯函数单测，新代码分支全覆盖）；tsc 0 错；npm build ✓；契约脚本 0 mismatch；**74 套 E2E 全绿**（oauth_provider 42 + r458 16 复跑确认，其余 72 套首跑即绿）。
-  - **复核波次记录**：W1 4 代理（Rust diff 逐行全清 / 前端+locales 全量对账 / 版本文档一致性 / E2E 断言审计）→ 修复 6 Low；W2 fix-of-fixes 1 代理（修复自身全清，抓出 es `password_login_disabled` 缺冠词 + AGENTS 计数不符 → 已修）。
-
-#### 2026-10-12：`22539eb` -> `0ee8100`（3 commit，v1.1.3 后未发布）
-
-- `88ea8d0` #1307 OpenAI session state fallback（origin Node 后端 mcpService.ts `acquireClientState` 增加 openAiSession fallback 参数 + sha256 `openai:` 前缀）：**无需镜像**——桌面端无 clientState/X-MCPHub-State-Id 机制（grep 零命中），session_pool 按 `mcp-session-id` 直接键控天然覆盖 OpenAI 客户端；sseService.ts 仅 2 行注释变更。
-- `0ee8100` #1308 README 更新：docs 不同步。
-- `713b706` FUNDING.yml：不同步。
-- 版本 `1.1.1005 → 1.1.3001`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.3001.md`（新增基线同步节）。
-- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**（版本号在 Rust 编译期烘焙）。
-
-#### 2026-10-10：`26805ec` -> `22539eb`（7 commit 收口；版本 `1.1.1004 → 1.1.1005`）
-
-- **前端/locales 已同步**：
-  - `c0f0965` #1300 上游 CIDR 管理：SettingsPage「网络」区新增 allowedCidrs 输入块（settings.allowedCidrs* 键 ×4）；SettingsContext 手动移植 `network.allowedCidrs` 类型 + `allowedCidrs` state + fetch 加载 + `updateAllowedCidrs`（apiPut /system-config，Tauri 走 tauriClient:370 → update_system_config 透明）——**patch 模糊误判 applied，需人工核对 hunks（教训）**；locales ×4。
-  - `22539eb` #1305 README AtomGit 链接：docs 不同步。
-- **评估无需同步**（sync-eval 代理逐 commit 判定）：`d8752c7` #1304 CLI 会话（无 CLI）；`bd1acc1` #1295 JWKS forward auth（桌面 OAuth 为上游 client 流，无 JWKS 面）；`9e9b546` #1294 CGNAT SSRF（无 SSRF 模块可修）。
-- **#1303 ui:// 动态资源读取镜像（用户裁定「要」，同日落地上文）**：`2489074` #1303 + `ce79113` #1296 经复核**桌面有对应面**（hub 是宿主客户端读 widget 的管道）→ 已镜像——transport trait 新增 `read_resource`（rmcp stdio/http 走 Peer；openapi/sse 默认不支持）；pool `read_resource`（builtin → Err / start_on_demand → 唤醒 / 否则锁内调用）；on_demand 冷启动机制抽取为 `ensure_on_demand_client` 共享（R31/36/39 语义原样保留）+ `read_resource_on_demand`/`run_read` 忙碌计数保读；bridge `read_resource` 内建 miss 后 `ui://` 回退：scope 直达 / root 按稳定序逐台探测 connected||start_on_demand 候选，2026 会话 TTL 0/Private 注入；$smart 保持 not-found（无 meta 泄漏）。cargo check 0 错 0 警；lib 148 passed。**专项验证**：新套件 `rmcp_round_apps_ui.py` 7/7（mock streamable-http + stdio 双上游；2026 stateless ui:// 与 builtin 共享 resultType/ttl 包装；$smart 无泄漏；未知 URI not-found 契约；list 不含动态 URI）+ 2 SKIP（A1/A3/B1 需应用重启后 DB 服务器才被 pickup——运行时连接仅存在于启动/Tauri 命令/session_rebuild，套件会在 pickup 成功时自动执行）；**全量回归 65 套一次全绿**（Apps 改动零回归）。**记录**：①2026 stateless 通道 handler 错误以 HTTP 400+JSON-RPC body 呈现（legacy 200，spec 正确，客户端文档化）；②已知但从未连接的服务器在单服务器 scope ui:// 读取时静默跳过候选（无懒连接）——origin-parity 改进候选。
-- `249b4be` #1297 取消排队 on-demand 预热（桌面无 boot-time priming 概念，grep 零命中）。
-- **Rust 其余零改动**：#1287（idle on-demand 可用性）桌面 `connected || start_on_demand` 过滤已逐一对照 meta.rs/index.rs 全等效；#1293 allowInsecureTokenEndpoint Rust serde/门控已在（models/server.rs:149 + oauth_upstream）；#1289 disablePasswordLogin 经 config JSON 深合并透明 round-trip 且桌面无 SSO 登录面（**有意不加盐**：无 SSO 替代路径时锁死账密登录会零恢复）；#1291 改名保留凭据（桌面凭据在 ServerConfig 内、rename 只改 name 列）。
-- **#1300 SSRF 守卫 Rust 落地（用户裁定立项，同日完成）**：新 `services/ssrf_guard.rs`——IPv4/IPv6 内网段黑名单逐行移植 origin ssrf.ts（含 #1294 CGNAT 修正：公共 100.x/8 不封、NAT64/Teredo/6to4/ULA/v4-mapped 全覆盖）+ `network.allowedCidrs` 逐请求读取（配置即时生效，无缓存）+ fail-closed（allow-list 畸形即拒绝）；`assert_safe_url` 校验 scheme/host/**全部解析 IP** 并返回地址列表供 reqwest `resolve_to_addrs` **DNS pinning**（校验后到连接前 DNS 重绑定无法绕过）；接入 `openapi_transport::fetch_spec`（桌面唯一用户 URL 出站点），拦截时 `UNSAFE_URL` 明确报错并指引配置项；单测 4 个（黑名单逐段/CIDR 校验与匹配/URL 端到端含 carve-out）→ **lib 152 passed**。
-- **验证**：tsc 0 错误；npm build ✓；locales JSON ×4 校验通过；cargo check 0 错 0 警（Rust 零改动）。**用户需重启生效**。
-
-#### 2026-10-08：`3b004d3` -> `26805ec`（5 commit，v1.1.1 后未发布）
-
-- `26805ec` #1293 OAuth 允许 HTTP 令牌端点：**前端完整镜像**——types 三处 oauth 块加 `allowInsecureTokenEndpoint`、serverFormPayload 携带、ServerForm（sse/streamable-http 专属 checkbox，admin 可改、非 admin 只读回显）+ locales 2 键 ×4；**Rust 无镜像**——桌面无服务级 OAuth Rust 落点（R10 裁定维持），配置字段 round-trip 透明存储。
-- `9e9b546` #1294 SSRF CGNAT 网段修正：**无需镜像**——桌面无该私有网段判定面（git 数据源走 canonicalize_url，无 is-private-ip 门）。
-- `b2b1ff0` #1291 改名保留个人凭证绑定：**无需镜像**——桌面无 per-user 凭证体系。
-- `3962e6b` #1289 SSO 启用期间禁用密码登录：**web 模式镜像**——SettingsContext/configService `disablePasswordLogin` 字段 + SettingsPage Better Auth 区块开关（桌面 `!isTauri()` 隐藏）+ LoginPage 密码表单条件渲染 + locales 3 键 ×4；**Rust 无镜像**——桌面无 SSO/Better Auth 后端，密码登录恒可用。
-- `230903b` #1287 Smart Routing 睡眠 on-demand 视为可用：**无需镜像**——桌面 `smart_routing/meta.rs` 三处（search 服务器清单/scope/describe）与 `index.rs` reindex 过滤早已对齐 `connected || start_on_demand`。
-- 版本 `1.1.1002 → 1.1.1003`（四源 + Cargo.lock）；changelog `doc/upgrade/1.1.1003.md`。
-- **验证**：tsc 0 错误；npm build ✓；cargo check 0 错 0 警。
-- **影响功能点**：服务器表单 OAuth 区块（SSE/Streamable HTTP）新增「允许 HTTP OAuth 令牌端点」复选框（仅 admin 可改，字段随配置存储）；web 模式 Better Auth 设置新增「禁用密码登录」开关、登录页密码表单条件隐藏；locales +5 键 ×4。桌面运行行为不变（新 OAuth 字段仅存储、Better Auth 区块桌面隐藏）。
-
-> 2026-10-05 补记：子模块从 detached `dd7e5d8` 重新指向分支 main（ff 至 `01f4bb8` #1281）。#1281「restore remote keepalive after tool-call reconnect」**评估无需镜像**：上游 keepalive 是其自研应用层 ping 包装（setupServerKeepAlive），桌面无应用层 ping 循环——rmcp 原生 transport 重连即重建完整连接，liveness 由 transport/SDK 层管理，无「重连后 keepalive 丢失」缺口。
-
-### 4.5 同步记录
-
-#### 2026-10-06：`dd7e5d8` -> `01f4bb8`（+1 commit 收口）+ 复核第十八轮（R109-R119：11 独立代理 + 亲核 11 项修复 + 全量回归）
-
-> 详见 `doc/review/rmcp_review_r109_r119_20261006.md`。对 10-04 同步记录的两处勘误：①同步终点实为 `01f4bb8`（#1281 keepalive 重连，非 dd7e5d8）；②「#1277 TTL 桌面固定 30s 保守等价」**不成立**——origin 契约是「正 TTL 需全部参与上游新鲜度记录 + ≤5s 封顶 + 网关自生成恒 0」，30s 违反之。
-
-**修复 11 项**：①[H] 新模块 `services/list_freshness.rs` 镜像 #1277（rmcp stdio/http 捕获上游单页 ttlMs、pool/on_demand 记录、bridge 列表按参与上游算 min(5000−elapsed,剩余)，prompts/resources/read → 0）；②[H] 组成员 cascade 支持对象成员 `{name,...}`（rename 只改 name 保 alias/tools/pinnedTools、remove 整体删，bearer_keys 强类型无此问题）；③[M] `$smart/{group}` 直呼 pinned 门控（list/call parity）；④[M] gate 仅按名门控、id 放行（origin getGroupByIdOrName 语义）；⑤[M] gate percent-decode 对齐 scope_from_ctx（`%24smart`/`strip_prefix` 同步修）；⑥[M] smart search 组 gate 下沉到截断前（over-fetch→filter→take）；⑦[M] server create/rename/delete/toggle 补 prompts/resources list_changed 三连发；⑧[M] group create/update/delete 补 tools/list_changed；⑨[M] r109 套件伪断言清除（`has_ip` ipaddress 语义校验 + isError + finally）；⑩[L] SSE 非法 header warn 日志；⑪ changelog 终点/分节修正。
-
-**老套件断言强化**：v18/matrix/public_ip_matrix/r158_fixes/round50b/supplement_v24 的 IP 断言升级语义校验 + isError；TTL 断言 30000→有界 ≤5000。**新套件** `rmcp_sync_baseline_r110.py` 22 项（REST×5 版本头、/rest/group×5、/api/$smart 三端点真实调用、TTL 有界回归、pinned 直呼门控、组路由开关矩阵）。
-
-**验证**：cargo check 0 错 0 警；cargo test --lib **102 passed**；tsc 0 错误；**48 套 E2E ~1050+ 用例全绿**（5 版本 × 6 通道 × 公网IP 真实调用 + 严格/宽松 + 2026 新特性）。记录不修 8 项（legacy 跨路由语义、similarityThreshold 桌面不消费系有意设计、freshness 仅 connect 时记录等，见报告 §3）。**教训**：行为变更必须全量 grep 断言面（TTL 变更击中 6 个老套件）；伪断言是慢性病（语义校验而非「非空」）；修复代码同样需独立二次复核（R118 又查出 4 Low）。
-
-#### 2026-10-08：第 5xx 轮独立复核（4 波 × 3 代理逐行 + 亲核修复 + 补充套件 + 全量回归）
-
-**修复 13 项**（Rust 9 + E2E 套件 4 类）：
-- [H] `mcp_route_gate_middleware` 尾斜杠绕过——`scope_clean` 只 trim 前导斜杠，`/mcp/$smart/`（及 `%24smart/`）落非全局分支且 decoded_name 为空 → `enableGlobalRoute=false` 被绕过而 bridge 侧 `scope_from_ctx` 归一后完整服务全局面 → 判定前补 `trim_end_matches('/')`。
-- [M] smart search 描述用索引期快照——描述覆盖编辑后 search 结果不刷新（origin 每请求实时取 live 描述；toolsetHash 刻意排除 description 不触发重索引）→ full-schema 与 progressive 两臂命中 live tool 时用 `t.description` 覆盖 metadata。
-- [M] tasks get/update/cancel 三 handler 的 $smart 早退先于 `bearer_from_ctx`（违反本文件 auth-first 自定惯例；wire 不可见——外层 mcp_bearer 中间件已 401，纵深防御层序修正）。
-- [M] stdio stderr drain 的 intentional 标志死代码（闭包内新建本地 Arc 恒 false，disconnect 写共享字段无人读）→ drain 持共享 flag + 新增 `drain_generation: Arc<AtomicU64>`（connect 时 bump），双重抑制有意断开/陈旧 drain 的伪 warn。
-- [M] on_demand 冷启动缺 connect 后 enabled 复查（session_pool round-8 同族第三路径）→ build_and_connect 成功后镜像 `get_by_name + enabled` 复查，失败 disconnect 半成品 client + mark_on_demand_error。
-- [M] `$smart` REST `/api/$smart/call` 错误分类缺 "is disabled"/"parameter is required" → 500 误判，补 400/403 parity。
-- [L] `SmartRoutingSettings::clamp` dedup 只去相邻重复 → HashSet seen retain。
-- [L] prompt update 缺空 name 校验（create/resource update 均有）+ group create/rename UNIQUE 裸 SQL 错误 → 友好映射。
-- [L] set_pinned 读失败把 unpin 静默变成功 no-op → unpin 传播真实错误；upsert changed 判定对 description=None（保持现状）误判已变更 → 仅 Some 参与；rag delete_doc refcount 归零清理补 `BATCH_UPDATE_RUNNING` defer；sse_transport 未知字段行不再 flush 事件（仅空行）；progress npx 补取值 flag 清单（--registry/--cache/--userconfig/--call/-c/--shell）；log_event message 4KB cap；node_version_installed 包 spawn_blocking；删除散落文件 defined.txt/reg.txt。
-
-**E2E 套件治理**：r111 B3 优先级恒真（`or cond` 尾巴）+ A0 NameError；carpet r200 retired 恒真断言（改检原始 body）+ strict 基线还原硬编码 False；r460 C 组 IP 主机名子串伪断言（升级 ipaddress 语义 + isError）+ E 组假版本矩阵（循环变量未进请求 → 补 MCP-Protocol-Version 头）；r461 G 组裸配置写补 try/finally；r109/rmatrix_v2 strict 还原改为 set_strict 返回旧值；leniency_pairs assert_ip 语义化；public_ip_matrix 补 isError；r462 IP_RE 去 `\b`（JSON 转义 `\n`+数字均 word char 的已知 harness 坑）。**新套件 `rmcp_audit_r5xx.py` 15 项**：N1 尾斜杠路由门三形态（开/关 globalRoute、groupRoute）+ N6 toolDefinitionFields × REST search 字段一致性（[]/全开/还原）+ N9 配置卫生首尾快照。**验证**：cargo check 0 错 0 警；cargo test --lib 103 passed；tsc 0 错误；**55 套 E2E 全部 exit 0 零失败**。
-
-**「为什么每轮都能跑出问题」复盘（本轮答案）**：①新面=盲区（尾斜杠门、six-field REST 面均为上轮新代码）；②测试环境与真实环境分离（存量 DB vs fresh install、上游限流 vs 语义断言）；③同族路径穷举不到零（tasks 三 handler、on_demand/session_pool 两条冷启动路径）；④harness 自己退化（恒真断言/假矩阵/还原泄漏——套件也需侵蚀审计）；⑤修复合自我复审缺位（dedup 非相邻、changed 误判均为本轮修复伴生）。**对策**：单点归一（scope_from_ctx）、修复签名 grep 侵蚀审计、fresh-DB 单测、套件配置卫生快照（N9 范式）、语义断言（ipaddress 而非子串）。
-
-**基线同步（01f4bb8→3b004d3 + smart/pin 特性）影响面总结**：功能=toolDefinitionFields 六字段可配置（search/describe 双面）+ fullSchemaTopN 截断 + no_match_message + stdio maxBufferSize（round-trip）+ 服务器级/分组 pin + 分组 pinnedTools $smart 直调 + TTL freshness（min(5000-elapsed)）+ 声明式设置同步（#1285 无需镜像）；范围=rmcp_bridge/smart_routing/http_server/server_tool_config/models/migrations v28-29 + 前端 SettingsPage/SettingsContext/ServerToolConfig/ToolCard/tauriClient/locales；影响点=$smart 端点 wire 形状（optional 字段出现/消失）、列表 TTL 有界化、图钉 UI 双端可见。
-
-- **独立复核第二十二轮（2026-10-08，R7xx：本会话新代码亲核 + SDK 对照代理 + reaper 语义验证）**：针对「每轮新代码引入新面」教训，本轮只审**本会话（第 5xx-6xx 轮）新增/修改的全部 Rust diff**（http_server ~360 行 / rmcp_bridge ~770 行 / smart index / mcp_manager / skills）+ 1 SDK 对照代理。**修复 3 项**：①[M] `spawn_session_reaper` 无守卫——每次 `start()`（含 restart 改端口/limit）都 spawn 一个 60s 循环，长驻进程 N 次重启 = N 个空转循环 → AtomicBool swap 守卫幂等；②[L] touch/reap 毫秒级竞态——expired 快照与 `sessions.write()` remove 之间到达的请求可能保不住活跃 session → write 锁内复检 last-seen（fresh 则跳过 remove）；③[注释] 「SDK LocalSessionManager has NO TTL」失实（SessionConfig::keep_alive 默认 300s worker 空闲退出，但 session 条目残留 + 上游隔离状态不清理）→ 注释改准。**SDK 对照代理结论：零缺陷**（sessions pub map/SessionId Borrow<str>/close_session 等价复刻/cancellation_token 全 serve 路径 child_token 级联/per-start token 无跨实例共享，逐项给出 vendored 源码行号）。**reaper 行为验证**：DELETE 202、活跃 session 在伪造 sid 噪声下不受影响、未知 sid 时间戳 30min TTL 自清（非无界）。**验证**：cargo check 0 错 0 警；cargo test --lib 103 passed；tsc 0 错；**56 套 E2E 全绿**（TOTAL PASS=144 FAIL=0，FAILED SUITES 空）。**复盘**：本轮零新缺陷来自行为面——印证「新代码引入新面」风险的窗口期是**修复落盘后的首次全量回归**（上轮已跑），本轮属收敛验证；剩余风险集中在 reaper 的长时行为（30min 阈值需真机长测，E2E 无法覆盖——已由 SDK 对照+竞态复检双重缓解）。
-- - **独立复核第二十一轮（2026-10-08，R6xx：SDK 对照深审收尾 + $smart meta 通道 pin parity 缺口修复 + 套件治理收口）**：承接第二十轮 A/B/C 波代理产出，本轮完成亲核修复落盘 + 新套件首跑调通 + 全量回归。**修复 3 项**：①[M] **$smart meta smart_route_call 的 pin 门禁缺口**——R7/R8 只把 pin parity 落在 raw 名直调分支（smart_group_direct），meta 包装器 smart_route_call 的 toolName 直通 handle_call_tool 不查 pin → unpin 后记名客户端仍可经 meta 通道调已 unpin 工具（列表/调用面分裂，E2E 实证：unpin 后 200+真实IP）→ bridge meta 分支补 resolve_pinned_target 门禁（-32602 not-pinned）；②[H·B波遗留] LAN Host 403（SDK allowed_hosts 默认 loopback）→ rmcp_service 加 disable_allowed_hosts()（实证 curl Host:192.168.x → 200）；③[H·B波遗留] legacy 会话永不回收（LocalSessionManager 无 TTL）→ shared_session_manager 单例 + SESSION_LAST_SEEN touch + spawn_session_reaper（60s tick/30min 阈值/remove+handle.close() 直操作 pub sessions map）+ cleanup middleware 对带 session-id 的 /mcp 请求 touch + CancellationToken 接线（tokio-util 新依赖）。**记录不修**：REST /api/$smart/call 不设 pin 门禁（有意）——REST 面 search 结果不做 pin 收窄，call 与 search 同面一致；MCP 面 tools/list 只暴露 pin（R7 设计）故 MCP 面有 list/call parity，两表面差异为桌面既定分层。**新套件 `rmcp_audit_r6xx.py` 20 项**（N-JR json_response×3 通道 SEP-2243 头、N-STRICT 严格×$smart 裸请求、N-BEARER×$smart、N-PIN-UNPIN unpin 后三面即时消失、N9 配置卫生）——首跑调通过程抓出 3 个套件级 bug（servers 表列名错误、set_flag 嵌套路径写坏 config、还原语义 None=键缺失应删键）；**5 个既有套件补 pin 自持**（v18/r35x/r460/r109/carpet：$smart 调用用例前置 pin + finally 还原，r460 B4 断言放宽为 -32602/-32603 双态，r109 D3 断言对齐 R7 pin 暴露语义、D5 改前缀名）。**验证**：cargo check 0 错 0 警；cargo test --lib **103 passed**；tsc 0 错误；**56 套 E2E 全绿**（round50c harness 内一次瞬时失败单跑复验 19/19 绿，定性公网 IP 瞬时抖动）。**本轮复盘——「为什么每轮都能跑出问题」**：本轮 3 项修复全部来自**语义补全类缺口**而非逻辑错误——pin parity 是 R7 修复时「按分支修补」而非「按数据面枚举全部调用路径」（raw 直调、meta 包装、REST 三面只修了一面半）；SDK 默认值陷阱（allowed_hosts/session TTL）是行为级测试全绿但换环境（LAN 客户端/长驻进程）必现——修复必须以 SDK 源码为事实标准逐字段对照而非信任 default() 的表面合理性。教训：**门控一致性按「同一数据面的全部执行入口」枚举（执行入口穷举清单应作为修复验收标准），SDK 默认值必须读 vendored 源码逐字段验证**。
-- - **独立复核第二十轮（2026-10-08，基线 3b004d3 复核收口：亲核全量 diff + 3 审查代理 + carpet 套件 + 53 套全量回归）**：扫描面 = 未提交 diff 逐行亲核（rmcp_bridge +764 / smart_routing/meta.rs +493 / http_server +350 / server_tool_config / group_service / rmcp_stdio·http transport diff / commands·skills·updater·runtime / rag git+service / log·prompt·skill_service / lib.rs / 前端 App·GroupCard·MarketPage·ServerCard·ToolCard·toolService）+ 3 审查代理（R5 services+commands+models+migration：0H/0M/5L/9Info；R6 前端 sync 面：0H/0M/2L/10Info；R4 transports+pool 运行中）。**修复 5 项**：①`validate_server_name` 拒 `$` 前缀（$smart 保留前缀防服务器名劫持 meta 通道）；②server update UNIQUE constraint 裸错误 → 友好 "Server name '{}' is already in use"；③`set_pinned` unpin 时（previous.is_none() && !pinned）早返回，不留死行；④`list_pinned_tools` 注释修正（created_at 秒级+字母序 tiebreak）；⑤前端 ServerToolConfig pin 改用 `item.value`（isPinned 检查 + togglePinnedTool 两处，对齐 origin key 语义）。**假阳性定谳**：toolService.ts `Bearer ******` 经 od -c 逐字节核验为终端脱敏伪影（实际 `Bearer ${localStorage.getItem('mcphub_token')}`）。**新套件 `rmcp_carpet_r200.py` 101 用例（A-J 10 组）**：5 版本×5 通道公网IP 真实调用+版本回显、5 版本×stdio(codegraph)/http(Idea) 真调、toolDefinitionFields 每字段逐一、fullSchemaTopN 0/1/2/未设置、组成员 pinnedTools、TTL freshness、宽松×5 版本裸请求升格、严格拒绝、bearer 顺序、退役端点、$smart 组搜索门控。harness 坑沉淀：has_ip 正则勿带 `\b`（JSON 转义 `\n`+数字均为 word char）、ip.3322.net 限流需 resilient 重试、会话 path-local（meta 工具调用须传 `path="/mcp/$smart"`）、meta 工具双层 envelope 解包。**验证**：**53 套既有 E2E 全绿零回归** + carpet 101/101；cargo check 0 错 0 警；cargo test --lib **103 passed**（注意：默认并行下 `v24_creates_fts_tables_and_backup_semantics` 曾在高负载时挂起 ~25min，`--test-threads=2` 复跑 31.8s 全过，定性为并行 runtime 环境性 flake 非代码缺陷）；tsc 0 错误；npm build ✓。
-- **独立复核第十九轮（2026-10-07 深夜，3 波 × 3 代理逐行扫描 + 六字段逐字段真实验证 + 新套件 ×2 + 全量回归）**：扫描面 = 六字段实现链全审计（含 origin #1286 对照 + rmcp 3.4.1 Tool 模型核对）+ http_server 全文（本轮新中间件重点）+ transport 本轮修复点回归（vendored rmcp 源码逐字段核对）+ pin 全链路 + rag/git/fts 修复区 + 前端 pin/settings。**修复 8 项**：①[M·核心] **toolDefinitionFields 六字段中四个（title/execution/icons/_meta）在传输转换处被整体丢弃**——desktop Tool 模型只有 annotations/output_schema，rmcp 3.4.1 `Tool` 明明携带 title/icons/meta（execution 为后续 SDK 才有）——用户勾选仅 title 也零效果（对照 origin 是 SDK spread 全量透传）→ Tool 模型加 4 个 Option 字段 + rmcp stdio/http 转换补齐（execution 因 rmcp 3.4.1 无此字段置 None）+ SSE 从原始 JSON 补齐 + meta.rs attach 源扩为六字段；逐字段 E2E 实证 annotations/outputSchema 正向样例（Idea-mcp-server-search_text 双带）出现/消失、title/execution/icons/_meta 因上游不发而不出现（origin `!== undefined` 语义）；②[M] 渐进披露模式 search 携带 optional fields（origin 只回 name/description/serverName，且与「names and descriptions only」自述矛盾）→ 对齐剔除；③[M] smart_rest_call 未知工具 400 映射死代码——真实 Err 串是 "Tool not available"/"is excluded by" 而非 "not found" → 补匹配串；④[M] mcp_route_gate_middleware 配置读失败 fail-open（复评升级：与 check_bearer_auth 自身 fail-closed 策略不一致）→ 404 fail-closed + warn；⑤[M] idleTimeoutMs 输入框每键击 clamp——首键 "6" 即被吞成 300000，手工输入永远打不进 → 自由输入 + blur 时 clamp；⑥[L] smart_rest_describe 未知工具 400 死分支（handle_describe_tool 对未知恒 Ok+error body）→ 删死分支注释对齐 origin parity；⑦[L] MRTR 提升只剥 canonical 键名（bare fallback 留在 _meta 会被上游读两次）→ 双拼写全剥；⑧[L] 重连重置 intentional_disconnect 会让上一代 drain 任务误报 "child stderr closed" → per-connect 独立 flag；另 path_under_root 大小写折叠收窄到 windows/macos（ext4 不折叠）、pin 容许「服务器存在但未连接」场景注释明确。**记录不修**：toggle/description 死行不可利用（全部消费点核实 inert）；pin 在从未连接服务器上隐藏（注释明确，unpin 恒可用）。**新套件**：`rmcp_review_r461.py` 22 项（六字段逐字段 enable-only/excluded 双向 × search+describe + 正向样例 + 渐进披露三态 + REST 状态码回归）；`rmcp_review_r462.py` 24 项（**4 版本 × 3 上游传输方式 stdio=codegraph/streamable-http=Idea/openapi=公网IP × 单服务器通道真实调用 + 版本回显**）。**验证**：cargo check 0 错 0 警；cargo test --lib 103 passed；tsc 0 错误；**53 套 E2E 1506/1506 全绿**。
-- **独立复核第十八轮（2026-10-07 晚，3 波 × 3 代理逐行扫描 + 亲核修复 + 新套件 + 全量回归；版本四源 → 1.1.1002）**：扫描面 = smart_routing 全目录（#1234/#1286/pin 重点）+ rmcp_bridge 全文（pin/scope/门控）+ 前端字段链（SettingsPage/Context/locales 四语言）+ mcp/ 传输层全目录 + commands/services 近期改动 + db/migration/lib/models + http_server 全文 + rag（service/git/fts）+ 前端页面 + prompt/resource/skill/user/log/market 服务；迁移清理 grep 审计零残留（mcp_version/request_cancel/旧 dispatch/http_transport.rs/2024 双端点）。**修复 12 项**：①[H] stdio 上游 MRTR 重试断裂——下游 inputResponses/requestState 留在 _meta 未提升为 params.input_responses（rmcp 服务端读 typed 字段），HTTP transport 有此逻辑 stdio 漏 → 对齐 downstream_mrtr_retry 提升并从 _meta 剥离；②[H] rag 目录排除 Windows 全废——path_under_root 只 trim `/` 且区分大小写，`C:\dir` 排除项永不匹配 `C:\dir\sub`（跳过索引/同步/删除全失效）→ 双侧 `\`→`/` 归一 + 忽略大小写；③[M] REST/OpenAPI POST body 在鉴权前被 Json extractor 缓冲（enableBearerAuth 下 N 个未鉴权 POST 可缓冲 N×64MB，/mcp 路径早已修而 REST 面遗漏）→ 新 rest_post_bearer_middleware 仅门控 /rest*/api* 的 POST；④[M] get_settings 全有或全无解析——单个错型字段（手改配置）静默禁用整个 Smart Routing 无日志 → 逐字段打捞 + warn；⑤[M] skill 四命令漏门控（list_skill_agents 泄 home 路径/scan_skills_for_import 枚举任意目录/open_skill_library_dir 启文件管理器/pick_directory）→ 补 require_admin；⑥[M] pin 写入不校验存在性——错名 pin 可调（冷启动后 tool-not-found）但列表不可见不可从 UI 摘除 → pin 时校验服务器存在 + 工具在缓存（睡眠 on-demand 放行，call 路径冷启动兜底）；⑦[M] git 持久刷新 clone 超时释放锁但孤儿线程仍在写 `{hash}.new`，下次 attempt `remove_dir_all(dest)` 竞写可腐化交换 → per-attempt 唯一目录 `{hash}.persist-new-{nanos}`（sweeper 已有 contains 分支兜底）；⑧[M] SSE 上游 list_tools 不跟随分页（静默截断首页，rmcp 两 transport 均已修唯手写 SSE 遗漏）→ cursor 跟随 + 100 页 cap + 重复 cursor 熔断；⑨[M] blocking_save_file 在 async 线程等原生模态框（可永久占用 worker）→ spawn_blocking；⑩[L] openapi 成功路径把工具响应 content 打进持久日志 DB（泄密面）→ 只记 count+size；⑪[L] leniency parse_cap 每请求抢全局 SERVER_HANDLE 锁（start 持锁重绑期间全部 /mcp POST 停 ~10s）→ BODY_LIMIT_SNAPSHOT AtomicUsize 快照；⑫[L 批] symlink 文档查看无上限读原文件（对齐 64MiB cap）/ intentional_disconnect 重连不复位 + stderr_tail 跨连接串扰（swap 新 Arc）/ kill_port_occupier 阻塞 spawn 出 executor / servers 三处 apply_tool_filters 静默吞错 / 前端 ServerCard check-update 无 catch（Unhandled rejection 永久 spinner）/ serverPageLoading 死状态 / env·header 行内突变（复制行）/ openapi 服务器 perSessionClient 无 UI 可清（save 时置 undefined）/ scope_filters 组重复成员去重 / 前缀解析最长优先（`web` 不再劫持 `web-search-x`）/ no_match_message 复用 settings 快照（TOCTOU）/ SSH debug log 移入 per-clone 0700 目录 / git with_ref_name 错误出口补 scrub_credentials / add_log 4000 字符 cap。**记录不修**：keepAlive/maxBufferSize 持久化未消费（既有待办）；legacy sqlx 迁移 >5 行映射已收紧为 cap 5（v6+ 结构修复强制重跑）；enabled default_true 更新契约（UI 已显式注入，记录）；root $smart 列 server 级 pin 为文档化桌面增强（测试覆盖）；技能导入 FTS 特例（文档化自愈）。**新套件 `rmcp_review_r460.py` 37 项**：toolDefinitionFields 六字段/[]/还原三态 × search+describe、fullSchemaTopN=1 截断+describe 指引、pin×4 版本×3 通道（$smart meta call/单服务器 scope/列表）公网IP 真调、宽松 4 版本裸请求升格真调 + 严格拒绝、REST/API POST 无 token 401（鉴权前置回归）。**验证**：cargo check 0 错 0 警；cargo test --lib 103 passed；tsc 0 错误；**37 套 E2E 1320/1320 全绿**。详见本轮会话记录。
-#### 2026-10-07（第二轮）：`b86de7f` -> `3b004d3`（1 commit，v1.1.0 后未发布）
-
-- `3b004d3` #1285 声明式数据库设置同步（`MCPHUB_SETTINGS_SYNC=upsert` 门控的 mcp_settings.json → DB 启动 reconcile，pbkdf2 指纹变更检测 + OAuth 运行时态剥离 + 事务 upsert）：**无需镜像**——该特性面向 origin「文件+DB 双持久化」架构的 GitOps 部署；桌面端 settings 为 SQLite 单源（config_service），无 mcp_settings.json 声明文件，无迁移 seed 双轨，无落点。前端/locales 零改动。
-- 版本 `1.1.1001 → 1.1.1002`（四源 + 双 lockfile + Cargo.lock）；changelog `doc/upgrade/1.1.1003.md`（新增基线同步节）。
-- **影响功能点与结果**：无（纯版本号推进）。
-
-#### 2026-10-04：`85a530f` -> `dd7e5d8`（54 commit，跨 v1.0.41~v1.1.0+2）
-
-**前端/locales 已同步（6 commit，定制文件手动合并）**：
-- `540d434` #1269 stdio 参数边界：桌面已有等价 quote-aware round-trip（quoteArg/splitArgs），保留桌面实现（未镜像 per-field UI）。
-- `079c5db` #1265 暗色对比度：Toast 桌面已重写含暗色（跳过）；AddServerForm 3 处 dark: 类补齐；MarketServerDetail/McpbUploadForm/TemplateExport/Import/ToolResult/PromptResult 直接同步。
-- `7806ffa` #1238 分组 Pin 工具：镜像（types `pinnedTools`、ServerToolConfig import/useSettingsData/pin-drop/togglePinnedTool/JSX 图钉按钮，保留桌面 hub-checkbox 类名）；**2026-10-05 晚更新：桌面端已完整实现**——rmcp_bridge `$smart/{group}` 列出并可直接调用 pinned 工具，图钉 UI 门控移除（见 §4.5「桌面端 pinnedTools 落地」）。
-- `ca6cc22` #1234 search_tools 调优：SettingsPage 完整镜像（parseOptionalSearchSettingForUpdate + 校验 + 两条保存路径 + JSX）；**JSX 区块 `!isTauri()` 门控**（桌面 Rust smart_routing 不消费 similarityThreshold/fullSchemaTopN，有桌面滑条体系）；SettingsContext 两字段类型/初值/加载映射全补。
-- `aea74ed` #1230 去 Google Fonts：index.html 3 行删除 + index.css Inter→system-ui。
-- `b05c7bb` #1218 隐藏 Cloud tab：桌面早已移除，App.tsx 两处重定向注释/路径对齐 origin；MarketPage 桌面与 origin-new 语义一致（保留桌面 slugifyServerName 修复）。
-- locales：14 新键 ×4 语言（server.addArgument 等 4 + groups.pin* 3 + settings.search* 7），仅增不删。
-
-**Rust 镜像**：#1251 REST `/rest/{server}/call` 与 `/rest/group/{g}/call` 返回补 `structuredContent` + `_meta`（ToolCallResult 已有字段，仅序列化遗漏）。
-
-**评估无需镜像**（24 后端 commit 节选）：#1270 env 隔离（桌面单用户全 admin = 上游 trusted 分支）、#1231/#1243 ${VAR} 展开（桌面不支持该语法）、#1240 改名级联（桌面 server_name 列 + rename 级联已有）、#1277/#1267 TTL（桌面固定 30s/Private 保守等价）、#1263 MCP Apps gating（桌面无）、#1273 modern 忽略 legacy scope（桌面 stateless 升格已有等价）、#1224 SDK v2/#1236 重构（origin 内部）、#1279 JSON DAO（Node-only）、#1228/#1249/#1223 OAuth（无链路）、deps bump ~14 个。**记录项**：#1237 per-user 凭证服务器索引（桌面无 per-user 连接）；941b575 /api auth gate 限流（桌面无该登录面）。
-
-- 版本 `1.0.40003 → 1.1.1`（四源 + Cargo.lock；新版本规则见 §4.4 注）；changelog 原 `doc/upgrade/1.1.1.md`，2026-10-06 晚改名 `doc/upgrade/1.1.1003.md`；原 1.0.40003.md 历史内容已并入其尾部并删除（用户指令「合并1.0.40003到1.1.01001」）。版本号随后再改为 **1.1.1001**（用户指令，1.1.1001 因 Cargo semver 拒绝 patch 前导零而弃用）。
-- **验证**：tsc 0 错误（基线已清零）；`npm run build` ✓；`cargo check` 0 错 0 警。
-
-**同步后 50 轮复核（2026-10-04，15 个独立视角 R1-R15 + 亲核修复 + 全量回归）**：15 个独立复核代理逐行审查（ServerToolConfig pin 全文 / SettingsPage 搜索调优全文 / contexts·types·App·html·css / locales 四语言 / REST 响应面 / 6 复制文件 blob 级 / MarketPage·cloud 路由 / 版本文档 / stdio env 审计 / E2E 断言形状 / openapi·smart 响应面 / 暗色类逐字 / 设置保存链端到端）。**修复 5 项**：
-- ①[M] 桌面 MarketPage 落后上游 2 个提交——b05c7bb 移除 cloud tab 未吸收 + #1076 registry 安装缺 `slugifyServerName`（reverse-DNS 名含 `/` 创建必失败）→ 整文件对齐 origin HEAD（slugify 保留）；
-- ②[M] `/api/{server}/{tool}` OpenAPI 兼容端点 4 条路由响应未同步 #1251（丢 structuredContent/_meta）→ 补齐；
-- ③[M] `$smart` 通道 `smart_route_call` 丢 `raw_meta`（MRTR resultType 经 smart 路由丢失）→ 条件透传；
-- ④[Minor] index.html splash 内联字体残留已卸载的 `'Inter'` → 改 system-ui；
-- ⑤[Low] 暗色类 AddServerForm 3 处补齐（#1265 桌面定制部分）。
-
-**记录不修**：①[M] 桌面 Rust 不消费 similarityThreshold/fullSchemaTopN（保存链 round-trip 透明，功能待 smart_routing 后端接入；桌面前端已 `!isTauri()` 门控搜索调优输入）——**pinnedTools 已于 2026-10-05 晚完整实现（图钉门控移除，见 §4.5 末条）**；②[Low] config 深合并对 null 存储而非删键（前端 `!= null` 读取兼容）；③[Low] REST `_meta:null` 恒 key vs 上游 spread 省略（wire-shape 漂移，E2E 无影响）；④[Low] AddServerForm 缺 `shareCandidatesFrom`（依赖 visibility=group 共享体系，桌面有意移除）；⑤[R15-H 判定降级] Rust HTTP 服务器无 `/api/system-config`·groups CRUD——web 模式（fetchInterceptor 非 Tauri 分支）本就面向 origin Node 后端，桌面 Rust HTTP 服务器面向外部 MCP 客户端，非本轮回归亦非缺陷。**stdio env 全量透传审计通过**（桌面单用户=上游 trusted 分支等价；0 处 set_var，JWT secret 仅内存 OnceLock，唯一 spawn 路径 rmcp_stdio_transport.rs:203-217）。**E2E 断言兼容**（全部取值式断言，无精确键集合匹配）。**验证终态**：cargo check 0 错 0 警；cargo test --lib **102 passed**；tsc 0 错误；npm build ✓。
-
-**二次地毯式复核（2026-10-05，9 视角 W1-W3 + 亲核修复）**：用户实测报告云端市场报错触发全面复审。三波 9 独立代理（前端 diff 全量/locales 交叉引用/Rust REST 面/云端链路端到端/Pin 链路端到端/搜索调优链路端到端/E2E 静态审计/文档一致性/构建回归）。**修复 3 项**：①[M] 桌面图钉静默失效——$smart 仅暴露 meta 工具（rmcp_bridge.rs:331「ONLY meta tools」）而图钉 UI 可见可存但零效果 → ServerToolConfig 图钉加 `!isTauri()` 门控（对齐搜索调优输入同模式），并修正 AGENTS/changelog「完整镜像」表述；②[L] smart `/call` OpenAPI 响应描述缺 structuredContent/_meta → 补；③[L] AGENTS §6 版本号过时（1.0.40001→1.1.1）。**用户新增云端报错溯源**：「获取云端服务器失败」来自旧构建；当前代码链路验证可用（MCPRouter 上游 200、cloud.rs 解析正确、tauriClient 变换链完整），但桌面 mcpRouter 配置区被 `!isTauri()` 隐藏且 cloud tab 已移除——**用户裁定跟随上游隐藏**，云端链路成为有意死链（cloud.rs/映射/4 组件死代码保留与上游一致，复活需同时恢复 tab+配置入口）。**Wave B 澄清**：搜索调优三态（null/number/undefined）桌面保存路径逐行验证无脏数据写入；pinnedTools round-trip 完整（group_service Vec<JsonValue> 透传）。**记录**：[L] cloud.rs HTTP 错误丢弃响应体/baseUrl 尾斜杠未归一化；[L] MCPRouterApiKeyError window.open 未走 open_external_url（死代码内，复活时需修）；[Info] cloud.* 键与 4 组件死代码（与上游一致保留）；[Low 既有] accessUrl.*/pages.rag.scan* 共 14 键缺 locales（带中文 fallback，非本轮引入）；[Low] MarketServerDetail 重复 dark:text-blue-300（上游原样照搬）。**终态验证**：cargo check 0 错 0 警；cargo test --lib 102 passed；tsc 0 错误；npm build ✓；45 套 E2E 静态审计零断言冲突。
-
-**第四轮 100 级复核（2026-10-05 上午，E1-E9 九视角逐行 + 全量真机 E2E×4 轮 + 专项新套件）**：应用重启至新二进制后执行。**rmcp 迁移完整性终审通过**（E1）：旧手写协议符号全仓零代码残留（仅注释提及）；mcp/ 12 文件全清单核对——rmcp 原生（stdio/http）+ 手写 SSE（登记保留）+ rmcp-openapi，pool build_client 四分支对应无旧 http_transport 残留；rmcp 3.4.1 单栈无版本分叉；HubBridge 覆盖 get_info/list/call/prompts/resources/subscribe/listen/tasks/discover/complete 全套。**宽松模式全版本放行清单核验通过**（E2）：16 类放行情形逐条在位、五版本 bare 升格语义正确、严格模式直通保留、mcp.strictValidation 嵌套键读取无回归。**真机全量 E2E**：既有 47 套 **1337/1337**（修复后重跑再 1337/1337，终轮第三跑）+ 新增专项套件 `rmcp_sync_baseline_r109.py` **32/32**（REST 三面 structuredContent/_meta 恒键 + 公网IP 真实调用 × REST/REST-group/$smart/api 四通道 + 五版本回显一致 + 宽松升格真实调用 + 2026 modern/bare + resultType=complete + 严格模式 DB 热切回归 + pinnedTools round-trip）。**修复 8 项**：①[M] $smart/{group} 的 smart_route_search 不经 GroupToolGate（被组排除的工具在 search 泄露 name/description，describe/call 才拒）→ handle_search_tools 增加 gate 参数过滤（root $smart REST 面 gate=None）；②[M] rmcp_bridge list_resources/get_prompt/read_resource 的 $smart 早退先于 bearer 校验（无效 key 得 200 空列表/not-found 而非 401）→ bearer 提前，对齐 list_prompts；③[M] updater install_update_cancelable + save_settings_json 无门控 → require_admin 补齐；④[M] extract_node_archive 未 spawn_blocking（几十 MB 解压阻塞 async worker）→ spawn_blocking 包裹；⑤[L] rmcp_http_transport poll_interval 缺 30s 上限（stdio 有 clamp）→ clamp(200,30_000)；⑥[L] sse_transport 用户非法 header 值致 reqwest panic（openapi 已防护 SSE 漏）→ 构造期过滤；⑦[L] tauriClient call_tool 丢弃 structuredContent/_meta（MRTR input_required 桌面静默降级）→ 透传两键；⑧[L] optionCommands 漏 get_rag_chunks/get_rag_chunks_paged（已删 doc 得空成功而非 not-found）→ 补齐；另清 compute_scope_with 死变量。**记录不修（有据）**：E4 stdio/http list·call「无超时」为误报——hub 侧 6 调用面全包 timeout（pool 60s list/600s call）；SSE response session 覆盖竞态（单 session 服务器场景无害）；openapi tool.call 无内部超时（hub 层覆盖）；tasks 轮询超时不发 tasks/cancel（上游任务泄漏，10min deadline 兜底）；smart search 向量候选未预过滤 content_type（规模小，reindex 兜底）；SR 禁用期写 no-op ghost 行（reindex_all 对账兜底）；log_event 无门控（前端埋点既定设计）；E2 三条 Info（错误 Content-Type 不纠正、无 id 请求不升格、旧顶层 strictValidation 键不读）。**「为何总能跑出问题」复盘**：每轮新代码引入新面（本轮 8 修全部位于「上一轮刚改动/新增」的区域——响应面扩展、pin 新功能、新套件），存量代码经 100 轮已收敛（E5/E6/E7 存量面零 High）。**终态**：cargo check 0 错 0 警；cargo test --lib 102 passed；tsc 0 错误；npm build ✓；E2E 1337+32 全绿。
-
-**第五轮 100 级复核（2026-10-05 下午，三独立代理增量复核 + 6 项修复 + 全量回归）**：工作树与第四轮终态一致（无新变更），对该同步 diff 全新独立三代理复核（Rust 同步 diff / 前端对齐 origin / rmcp 完整性+宽松严格+版本一致性+公网IP 链路）。**修复 6 项**：①[H] tauriClient call_tool 透传 `_meta` 读错键——`ToolCallResult` serde camelCase 序列化为 `rawMeta`，前端读 `_meta` 恒 null（MRTR input_required 桌面静默丢弃）→ 改读 `rawMeta`；②[H] **rmcp 迁移丢失 `routing.enableGlobalRoute`/`enableGroupNameRoute` 两个暴露面收口开关**（迁移前 dispatch 逐请求检查，迁移后全仓零引用、设置页开关变死开关=安全回退）→ 新增 `mcp_route_gate_middleware` 挂 `/mcp*`，语义/404 文案逐字复刻旧 dispatch（实测：global off→/mcp 404、group off→/mcp/{group} 404、root 不受 group 开关影响、配置还原）；③[M] REST 三响应面 `structuredContent/_meta` 恒键 null 不合规范（`_meta` 出现必须为 object；与 meta.rs 条件注入自相矛盾）→ 改条件键（`if let Some`），r109 套件断言同步改「缺省或对象」；④[M] **2024-11-05 会话响应形状剥离回归**——旧 dispatch 对 2024 剥 annotations/outputSchema/structuredContent（e2e TC-06/TC-07 契约），rmcp SDK 无 legacy 塑形 → `is_2024_session` 门控：aggregate_tools 跳过两键、to_call_response 清 structured_content（实测 2024 tools/list 无两键、2025-11 正常）；⑤[L] install_node_version `buf.clone()` 白白复制 30-80MB 下载缓冲 → move；⑥[L] http_server.rs 头注释仍宣称已退役的 `/mcp/{server}/call` REST 形状端点 → 更新。**rmcp 完整性复审零发现**：旧符号零残留（仅注释）、invoke_handler 180+ 命令无孤儿、5 版本 leniency 放行清单/严格直通（1963 提前 return）/热切换、openapi 公网IP 链路 5 版本×4 通道全核对无误。**验证**：cargo check 0 错 0 警；cargo test --lib 102 passed；tsc 0 错误；修复后全量 E2E 重跑 + r109 专项套件 32/32。**复盘**：本轮 6 修中 3 项为「上一轮修复自身引入或未覆盖」——恒键 null 系上轮 #1251 镜像未对照 meta.rs 既有条件语义；_meta 键名系上轮透传未实读 serde 契约；路由开关系 rmcp 迁移期丢失且 47 套件无一覆盖（新面=盲区）。
-
-**桌面端 pinnedTools 落地（2026-10-05 晚，用户要求「桌面端也需要实现」）**：镜像 origin `getPinnedSmartRoutingTools` + `handleCallToolRequestImpl` 语义——①`rmcp_bridge.rs` 新增 `pinned_tools_for_scope`（解析 `$smart/{group}` 各成员 `pinnedTools`，narrow 到成员 tools 选择，「all」/缺省=全放行）；②`aggregate_tools` $smart 分支：group 作用域在 meta 工具后追加 pinned 工具（bearer/组可见性 → pool tools → apply_tool_filters disabled 门控 → 组 selection 门控 → 排除 meta 同名 → 多服务器加 `{server}{sep}` 前缀；root `$smart` 保持 meta-only）；③`execute_tool_call`：`$smart/{group}` 作用域下非 meta 工具名直接 fall through 到正常组调用路径（scope_filters 已解析 `$smart/` 前缀 → resolve_target/bearer/disabled/perSession 全链复用，实测直接按名调用返回真实公网 IP）；④前端 `ServerToolConfig` 移除 `!isTauri()` 图钉门控（桌面 $smart 已消费 pinnedTools）。**验证**：端到端 DB 打 pin → `$smart/Test` tools/list = meta + `{本机公网ip查询}-{getPublicIp}` → 直接调用 isError:false 返回 121.230.19.139 → meta search 正常 → DB 还原；回归 11 套全绿（r109 32 + matrix 39 + full_regress 41 + matrix_v2 152 + round50 33 + leniency_v2 15 + strict 10 + r107 43 + round100 44 + public_ip_matrix 10 + r51 35）；cargo check 0 错 0 警；tsc 0 错误。记录不修：get_group_costs 的 smartRouting pinned 成本列（桌面组成本卡无该列，origin 仅 smart 启用时计算——跟随桌面 UI 既有形态）。
-
-**分组「0 工具」幽灵成员清理（2026-10-06 凌晨，用户报告分组卡片出现未勾选成员显示 0/N tools）**：溯源为**上游同源现象**——ServerToolConfig 逐项取消工具可留下 `tools: []` 空选择成员（UI 路径 `hasAnyCapabilitySelection` 已自动移除，但存量/接口写入数据无清理），GroupCard 按 `group.servers` 渲染即显示 0 工具成员；服务器断连快照为空也会瞬时显示 0/0（非缺陷）。桌面优化（用户裁定「清空全部选择的成员自动从分组移除」）：`EditGroupForm` 新增 `sanitizeGroupMembers`——编辑弹窗打开时过滤无任何 capability 选择的成员 + 保存时再过滤（存量脏数据在首次编辑保存时永久清除）；与 origin 交互差异记为桌面有意优化。验证：tsc 0 错误、npm build ✓。**二次溯源（用户反馈「编辑后还是显示」）——真根因是禁用服务器成员**：DB servers 表存在 7 个 enabled=0 服务器，其中 4 个仍是 Test 组成员；`list_servers` 返回全部（含禁用、tools 空）→ GroupCard 不过滤 disabled → 成员行渲染 `0/0 tools`；而编辑弹窗 `availableServers` 过滤 `enabled !== false` → 禁用成员在弹窗中不可见、**无法取消勾选**（这才是「编辑后还在」的原因，与空选择清理无关）。修复：①GroupCard `groupServers` 过滤 `s.enabled !== false`（禁用成员隐藏，成员身份保留、重新启用即恢复行）；②ServerToolConfig `availableServers` 改为「启用服务器 ∪ 当前成员中的禁用服务器」+ 行内「已禁用」标签（locales `server.disabled` ×4）——禁用成员在弹窗可见、可取消勾选移除成员资格。
-**第三轮地毯式复核（2026-10-05 晨，D1-D3 + 版本面专项，用户报告「版本还没修改」触发）**：**版本问题定论**：源码六处全为 1.1.1、dist 内嵌 1.1.1、无旧版本串残留——用户看到旧版本的原因 = ①**版本改动未提交**（HEAD 的 tauri.conf.json 仍 1.0.40003，CI release.yml:869 从提交的 conf 读版本，不提交则发布管线永远打旧版本——根因）；②运行的是旧二进制（getVersion()/generate_context! 在 Rust 编译期烘焙，target 下 .app Info.plist 仍 1.0.40003；仅前端热更新不变）；③双源错位风险：UI 显示用 PACKAGE_VERSION（vite 构建期）、更新比较用 getVersion()（Rust 编译期），只重建一侧会出现「显示新版但恒提示更新」。修复：package-lock.json（0.1.0→1.1.1）与 frontend/package-lock.json（1.0.28001→1.1.1）版本同步。**D2 终审通过**：MarketPage 与 origin 逐字一致；!isTauri() 图钉门控 web 恒渲染/桌面恒隐藏正确；三处 Rust 响应 + OpenAPI 描述 + locales 14 键全部复核通过；新 Low：aria-label 未随 pin 状态切换（上游原样，照搬）。**D3 云端清扫终审**：桌面云端完全不可达确认（无导航入口、/cloud 仅重定向、Settings 配置区 !isTauri() 门控自 init 既有、4 组件+hook 零 import 死代码、tauriClient 映射不可达）——与「跟随上游隐藏」裁定一致；清理候选（P3）：nav.cloud 孤儿键 ×4 语言、死组件删除、cloud 命令注销。**终态**：build ✓；全部绿。
-
-#### 2026-09-25：`f8615ab` -> `85a530f`（6 commit，v1.0.40 后未发布提交）
-**服务器级工具 Pin（2026-10-06 晨，用户要求「服务器也需要支持pin」——桌面差异点：origin 仅分组级 smart）**：存储 `server_tool_config` 表新增 `pinned` 列（migration **v28**，幂等 ALTER——版本回退重跑场景实测触发并修复）；`ServerToolConfig/Payload` 加 `pinned`（payload `Option<bool>`，None=保持现状，toggle/description 路径不破坏 pin——DO UPDATE 子句有意不含 pinned）；新 service `set_pinned`/`list_pinned_tools`（set 触发 notify_tools_list_changed 仅在真翻转时）；新命令 `set_server_tool_pinned`/`list_server_tool_pins`（require_admin）+ lib.rs 注册。**消费点（rmcp_bridge）**：①根 `$smart` = meta 工具 + 全部 bearer 可见服务器的服务器级 pin（桌面独有「服务器 smart」面，prefix 命名）；②`$smart/{group}` = 组员 pin ∪ 服务器级 pin（遍历全部可见成员——初版只遍历有组级 pin 的成员导致并集漏挂，已修）；③调用侧 pin 门禁同步两种作用域（根=scope_filters 服务器级 pin；组=组员∪服务器级并集），list/call parity 保持；④非 meta 名在根 `$smart` 也 fall through 直调（对齐 origin smart 会话原始名路由语义）。**前端**：`ToolCard` 图钉按钮（smart 开启或已 pin 时显示；Pin 自 lucide-react 非 LucideIcons shim）+ `ServerCard` pins 懒加载（tools tab 打开时 listToolPins）+ `handleToolPinToggle`（不可变 Set 更新）+ toolService `pinTool`/`listToolPins` + tauriClient 两映射（POST /servers/:s/tools/:t/pin、GET /servers/:s/tools/pins，PUT toggle 前“segs.length===5 精确匹配”不冲突）+ locales `server.disabled`（上轮）与 `groups.pinToolSuccess/unpinToolSuccess` ×4。**E2E 实测**：服务器级 pin → 根 $smart 列表含 `本机公网ip查询-getPublicIp`、根/组两作用域直调均返回真实公网 IP 121.230.19.186、meta search 正常、DB 还原；回归 8 套全绿（r109 32 + matrix 39 + full 41 + v2 152 + public_ip 10 + leniency 15 + strict 10 + round50 33）；cargo test --lib 102 passed（v28 幂等修复后）；tsc 0 错误；npm build ✓。
-**独立复核第六轮（2026-10-06 午，3 代理：pin 特性 / 前端会话改动 / rmcp 完整性重审 + 全量 E2E）**：全量 E2E 0 失败 0 Traceback。**修复 1 Medium + 2 Low**：①[M] **$smart 直调 bare 名跨服务器 parity 破坏**——门禁 bare 名匹配任意成员的 pin 即放行，resolve_target 裸名回退取第一台拥有同名工具的服务器（可能未 pin），列表只暴露 A 的 pin、调用却执行 B 的未 pin 同名工具；修复=**多服务器作用域（use_prefix）下门禁只接受 `{server}{sep}{tool}` 前缀形式**，bare 名仅单服务器作用域放行（与列表暴露形态严格一致；use_prefix 按 scope_filters 全量长度算而非仅有 pin 的服务器数）；②[L] 前缀形态 `{server}{sep}smart_route_*` 绕过 meta 排除（列表跳过 meta 名 pin、调用侧前缀形式放行）→ 门禁对 pin 名统一 is_meta_tool 检查；③[L] set_server_tool_pinned 的 item_type 限 'tool'（其他类型写入只产死行）。**前端会话改动（sanitize/幽灵成员/图钉 UI/pins 懒加载/locales/tauriClient 映射）零 High/Medium**——全链路契约核对无断点；2 Low 观察不修（pins tab 展开期间外部变化不刷新——关开恢复，单用户影响极小；GroupCard 缩进格式）。**rmcp 重审**：迁移完整性/命令注册/宽松严格/版本 ttl 门控/公网 IP 四通道矩阵全过；1 Low 已并入 ① 修复。**验证**：修复后 E2E 实测（前缀直调 ✓ 真实 IP、bare 名多服务器作用域正确拒绝、组作用域前缀直调 ✓、meta 正常、DB 还原）+ 回归 10 套全绿 + cargo test --lib 102 passed + tsc 0 错误。
-**独立复核第七轮（2026-10-06 午后，3 代理：pin 横切集成 / 新 pin E2E 套件 / 全量后台 E2E）**：后台全量 E2E 0 失败 0 Traceback；**新套件 `rmcp_pin_matrix_r111.py` 31/31**（A 作用域 9 + B 五版本矩阵 15——2026 走 _meta modern 直调、Mcp-Name 中文 latin-1 边界沿用省略头策略 + C 未 pin 负路径 2 + D REST 通道独立 2 + E 伪造前缀 1 + F 宽松裸请求升格直调 1 + Z 还原核验 1）。**修复 1 Low + 1 Medium（横切）**：①[L] **pinned 直调缺 not_ready 门禁**（SR 禁用时 tools/list 报错、meta 分支被拒，但记住 pin 名的客户端仍可直调——三入口唯一缺口）→ smart_group_direct 分支头部补 not_ready 检查，list/call 门禁对称；②[M] **睡眠 on-demand 服务器（从未唤醒）的 pin 不可见不可调**——pool 睡眠占位 tools 空，resolve_target 返回 None 报误导性 tool-not-found（冷启动只存在于 pool::call_tool，直调在到达前被拦）→ 抽取 `smart_pinned_servers`（门禁/解析共用单一来源）+ `resolve_pinned_target`（不查 pool 缓存、按 parity 规则从 pin 注册表解析）+ resolve_target 失败时的 smart 作用域 fallback——pool::call_tool 随后冷启动；列表侧仍需 schema（首次唤醒后可见，记录为已知边界）。③[L] GroupCard 缩进格式修正。**横切零发现项**：禁用服务器 pin 不泄漏（pool 过滤 connected||start_on_demand）、bearer 中间件层序 401 先于一切、per-session 隔离对 pinned 直调统一生效、tasks 拦截先于 pin 门禁且 $smart 建任务拒绝对 meta/直调一致、notify 扇出三路齐全（同值写不广播）、成本口径 pin 不污染 exposed/gross。**验证**：pin_matrix 31/31 + r109 32/32 + 回归 9 套全绿 + cargo test --lib 102 passed + tsc 0 错误。
-- **独立复核第八轮（2026-10-06 晚，3 代理横切审计 + 亲核修复 + 40 套 1423 用例全量回归）**：3 代理（pin 特性横切 / 前端 IPC 面 / rmcp 迁移完整性）+ 亲核修复。**修复 5 项（H×1 M×2 L×2）**：①[H] `resolve_pinned_target` 缺组 selection 白名单——server-level pin 未按成员 `tools` 选择收窄（列表侧一直有、调用侧漏），组内 selection 不含的工具可经服务器 pin 绕过白名单直调 → 白名单检查补齐（`sf.tools` Some 时必须 contains，None=all 放行）；②[M] `disabled_gate` 对 never-woken on-demand 服务器 pin 旁路——pool 空缓存 find 不到 → `unwrap_or(false)` 放行禁用工具 → 缺缓存时直查 `server_tool_config` fail-closed；③[M] `mcp_route_gate_middleware` 尾斜杠绕过——`/mcp/GroupA/` 的 decoded_name 带尾斜杠不匹配组名，`enableGroupNameRoute=false` 时 bridge（trim 后命中组）放行 → decoded_name `.trim().trim_end_matches('/')` 对齐 bridge 语义；④[L] `cancel_update_install` 无门控（guest 可 abort 管理员更新）→ `require_admin`；⑤[L] AGENTS.md:135 陈旧 bearer_keys 备注更新（本地副本已含 skipAuth 放行）+ build_router 排版修复。**测试断言修正**：`rmcp_sync_baseline_r110.py` E1 环境敏感断言——多服务器可见时裸名按六轮 parity 规则正确被拒（11:19 绿是因当时组内仅 1 台连接），改从 tools/list 实际暴露形态取调用名（裸名/前缀名自适应），新增 E0 形态断言；`full_matrix_v18` 两处严格真实调用失败复跑确认为上游公网延迟瞬态（262/262）。**验证**：cargo check 0 错 0 警；cargo test --lib 102 passed；tsc 0 错误；**40 套 E2E 1423/1423 全绿**（含 pin_matrix_r111 31、sync_baseline_r109 32、r110 23、matrix_v2 152、full_matrix_v18 262、supplement v19-v40 全绿、公网IP 矩阵 10/10）。
-- **独立复核第九轮（2026-10-06 深夜，3 代理切片 + 亲核修复 + 50 套 1423 用例全量回归）**：3 代理（命令/IPC 横切 / MCP 传输与连接生命周期 / 前端 pin 改动面）逐行真读。**修复 10 项（M×3 L×7）**：①[M] `server_tool_config_service::upsert` DO UPDATE 无条件写 `description=excluded.description`——toggle（description=None）会静默擦除已有描述覆盖 → `CASE WHEN excluded.description IS NULL THEN 原值 ELSE excluded.description`（clear 语义由 reset_description 独立承担）；②[M] 组 scope 尾斜杠不一致——route_gate 裁 `GroupA/` 但 `mcp_scope_server_filters`/bridge 不裁，带尾斜杠请求过门控后组查找失败静默空列表 → filters 入口补 `trim_end_matches('/')`；③[M] ServerToolConfig 禁用成员回补死代码——EditGroupForm/AddGroupForm 传入前先过滤 disabled，回补条件永不可达（禁用成员在编辑表单消失无法取消勾选）→ 两表单改传未过滤 allServers；④[L] ToolCard `toolDisplayName` 全串 replace 非前缀锚定（server 名为子串时误剥）→ startsWith+slice；⑤[L] ToolCard 描述保存失败分支不退出编辑态（与 catch 不一致）→ 补齐；⑥[L] updater `Update` 资源从不释放（resources_table 泄漏，插件自带命令会 remove）→ 安装终态/取消/替换旧任务三路径 `resources_table().close(rid)`（新增 CURRENT_RID 槽）；⑦[L] on_demand 空闲「较新调用」分支重挂定时器未注册 idle_handle（绕过句柄交换）→ `spawn_idle_timer_registered`（Box<dyn Future> 断开与 shutdown 的递归类型环——async fn 形式无法通过 Send 推断）；⑧[L] on_demand run_call 代际守卫把可自愈竞态抛给下游 → 原地重入 call_tool_on_demand（Box::pin 递归）；⑨[L] session_pool run_call 不透传 request `_meta`（隔离路径丢 MRTR/OTel）→ 记录为已知边界注释（扩展 call_tool_isolated 签名留待需 parity 时）；⑩[L] list_pinned_tools 同秒写入 ORDER BY created_at 丢插入序——记录不修（仅展示顺序）。**证伪/记录**：route_gate 在 leniency 内层 404 前白付 body 解析（仅性能，记录）；list_pinned_tools 排序同上。**验证**：cargo check 0 错 0 警；cargo test --lib 102 passed；tsc 0 错误；**50 套 E2E 1423/1423 全绿**（supplement v19-v40 22 套 + 核心 28 套，含公网IP 矩阵、五版本×四通道、pin 矩阵、宽松/严格全矩阵）。
-- **独立复核第十轮（2026-10-06 傍晚，3 代理切片：pin 专审 / 迁移清理终审 / 非 MCP 面+配置往返；修复 3M+3L；50 套 1423 用例全量回归）**：**pin 切片（3M 2L）**：①[M] `scope_from_ctx` 不裁尾斜杠——`/mcp/$smart/{group}/` 下组级 pin（group JSON pinnedTools）静默失效（server 级 pin 因 filters 已裁仍可达，同 scope 两类 pin 行为分裂）→ 归一点补 `trim_end_matches('/')`；②[M] 组 UI pinnedTools 经 `normalizeNamedCapability` 前缀剥离存裸短名，bridge 按裸名匹配不到 `{server}{sep}` 前缀形工具名 → 死 pin → 前端 pin 改存 `item.key`（原始裸名，与 ServerCard 服务器级 pin 语义统一）；③[M] builtin（RAG）工具可 pin 但永不上 $smart 面（既定排除边界）→ 死 pin → ServerCard 门控 `canManageServerActions` 对齐其他管理操作；L：pin 指向上游已删工具穿透报错（记录）、pin 列表加载失败静默吞（记录）。**清理终审（0H 0M 4L）**：dispatch_mcp/mcp_version/V2026_07_28/SESSION_STRATEGY/SSE_CHANNELS/jsonrpc_response/strategy_for_session/create_tool_task 全部 **0 残留**（仅注释命中）；x-mcphub-task-requested 恰为 leniency+bridge 两处合法面；smart_routing 生命周期/锁序/超时/ghost 对账全验证一致；L：pin 写入不拒 meta 名（→已修：set_server_tool_pinned 加 is_meta_tool 拒绝）、/api/$smart/call not-found 恒 500（→已修 400 parity）。**非 MCP 面+配置往返（1M 3L）**：①[M] 导出 round-trip 丢 `enableKeepAlive/keepAliveInterval/passthroughHeaders`（v26 持久化字段，导入端支持但两个导出 face 缺失，settings_import 注释声明失实）→ 两 face 补齐；L：group 名零校验（→已修：validate_group_name 拒空/含 `/`/前导 `$`）、origin 导入 admin 用户被保留名 skip（记录）、user_service::delete(user_id) 死代码无 last-admin 守卫（记录）。**验证**：cargo check 0 错 0 警；cargo test --lib 102 passed；tsc 0 错误；**50 套 E2E 1423/1423 全绿**（full_matrix_v18 首跑 261/262 为公网延迟瞬态，复跑 262/262）。**收敛态势**：连续两轮 0 High；本轮 3M 全部为前序修复（尾斜杠归一分散多点、pin 存储语义双面）引出的一致性缺口——单一归一点原则（scope_from_ctx）与单一存储语义（裸名 pin）已在代码内固化。
-- **独立复核第十一轮（2026-10-06 晚，3 代理切片：命令层大文件 / 前端页面与上下文 / 底座 auth+db+models；修复 1H+2M+3L；50 套 1423 用例全量回归）**：**底座切片（1H 1M 2L）**：①[H] **全新安装 bearer_keys 表 schema 失配**——migrate_v1 建 legacy 形态（key_hash/user_id/expires_at），正确列（token/enabled/access_type/allowed_groups/allowed_servers）只存在于已退役的 sqlx::migrate! 路径；存量开发机 DB 走遗留映射所以 16 轮 E2E 全绿，**真正全新安装（直升 v29）的 bearer CRUD 全部 no such column: token**，check_bearer_auth 恒失败、cascade rename/delete 同崩 → 新增 **migrate_v29**（pragma_table_info 守卫，无 token 列则 DROP+重建 token 形态 + 补 created_at 索引）+ 新单测 fresh_db_bearer_keys_token_schema（in-memory 全量 run_pending 后直插直查）；v21 既有索引断言同步修正（user_id 索引改列守卫条件断言，created_at 无条件断言）——**教训：16 轮 E2E 全部跑在存量 DB 上，迁移正确性对 fresh install 是盲区，新迁移必须有 fresh-DB 单测**；②[M] AGENTS.md §3.4.2 TARGET_VERSION 记 25 实为 28（v26-v28 三轮变更漏更新，违反 MUST 规则）→ 更新为 29；③[L] app_logger DualWriter 死代码（记录不修）、run_pending 单迁移无事务包裹（记录——v1..v29 逐个重入安全）；**命令层切片（1M 3L）**：①[M] runtime.rs tar 解压**悬空 symlink 逃逸**——link target 不存在时 canonicalize 失败走放行分支，相对 target 含 `..` 的两步逃逸（先建逃逸 symlink、后条目写穿）→ target 原始组件检查补 ParentDir/RootDir/Prefix 拒绝；②[L] install_python_version 内 cleanup_all_uv_python_minor_links 同步删 ~100MB 目录阻塞 async worker → spawn_blocking；③[L] node_version_installed 同步子进程（记录——bundled 分支数十 ms）；④[L] search_configs LIKE 转义——**代理误报证伪**（实读 108-116 行三字符转义俱全）。**前端切片（1M 7L）**：①[M] SettingsContext 11 处批量/单键更新用渲染期闭包对象展开（stale write-back：快速连续两写，第二次成功会静默回退第一次的本地状态，后端已持久化）→ 全部改函数式 `setX(prev => ({...prev, ...}))`（11 开 + 11 闭脚本化转换，tsc 验证）；L：RuntimeVersionManager listen 无 cancelled 守卫（快速切换泄漏监听）、ServersPage serverPageLoading 死状态、ActivityPage finally 无 seq 门控（仅 spinner 闪烁）、HTTP 端口 blur 提交失败不回滚草稿 + parseInt 截断小数、maxResults 滑条兜底 50 与默认 20 不一致、/users 拉取无 catch、导出失败双重 toast（前 5 项记录，maxResults 兜底/端口回滚属低危 UX）——本轮 L 项均为 UX/健壮性而非功能正确性，集中记录待 UX 清理批次。**验证**：cargo check 0 错 0 警；cargo test --lib **103 passed**（+v29 fresh-DB 单测）；tsc 0 错误；npm build 通过；**50 套 E2E 1423/1423 全绿**。**「为何总能跑出问题」本轮答案**：H 项的根源是**测试环境与真实安装环境分离**（存量 DB vs fresh DB 的迁移路径差异）——代码不变、测试全绿，换一个全新用户仍会崩；这类盲区只能靠「从零构造环境」的单测补齐，E2E 再多轮也扫不到。
-- **独立复核第十二轮（2026-10-07 晨，上游 #1234 镜像 #3+#4 + 全量回归；版本四源 → 1.1.1001）**：**版本四源**：用户指令 `1.0.40003 → 1.1.1 → 1.1.00001`（Cargo semver 拒绝 patch 前导零，弃用）→ 终值 **1.1.1001**（四源 + 双 lockfile + changelog 更名 `doc/upgrade/1.1.1003.md`，1.0.40003.md 历史内容按指令并入其尾部后删除）。**上游 #1234 镜像范围裁定**：①score 已有（此前 parity）不动；②similarityThreshold 用户裁定暂不镜像（待定）——模型层一版误加已回滚；③④本次落地。**#4 fullSchemaTopN（标准模式 schema 截断）**：`SmartRoutingSettings` 加 `full_schema_top_n: Option<u32>`（clamp 0-200，serde camelCase 透传前端既有 UI——此前"UI 可保存后端不消费"待办闭环）；`build_meta_tools` 加第 4 参（渐进披露恒 None 忽略；标准模式 Some 时 search 描述注入 schema 说明文案 + **动态列出 smart_route_describe 元工具**）；`handle_search_tools` 按命中序号截断（前 N 条带 inputSchema，其余 name/description/serverName/score）；guideline/nextSteps 在截断生效时指向 describe_tool。**#3 零结果明确文案**：新 `no_match_message`（阈值 + 已搜索服务器清单——connected||start_on_demand ∩ bearer allow-list ∩ group gate；空清单时「无可用服务器」独立文案），替换原 generic「换关键词」两分支。**测试**：meta_tools_shape 断言扩展（None=2 工具 / Some(3)=3 工具含 describe + 文案含 "first 3 results"）；实现中一度误删标准模式 smart_route_call 条目被该测试抓回（测试先行的实际价值）。**验证**：cargo check 0 错 0 警；cargo test --lib 103 passed；**50 套 E2E 1423/1423 全绿**（重建二进制实测，tauri dev 冷重建 12 分钟）。**记录**：similarityThreshold 前端 UI 字段已存在（SettingsContext/SettingsPage 同步先行），后端消费留待用户裁定；#1286（search_tools/describe_tool 字段可配置）与 #1284（stdio 缓冲上限）为下一同步候选。
-- **独立复核第十三轮（2026-10-07 上午，3 代理切片：#1234 镜像专审 / 前端+IPC 横切 / rag+fts+skill 低扫面；修复 1M+4L；50 套 1423 用例全量回归）**：**#1234 专审（对照 origin ca6cc22 diff 逐块）**：hit_index 语义与 origin 一致（group gate 过滤不消耗 index，over-fetch 后截前缀）；渐进披露三调用面均正确忽略 full_schema_top_n；settings round-trip 零缺陷（前端发 number、serde Option<u32>、无静默回退路径）。**修复**：①[M] 标准模式 trimmed guideline 在 N=0/N=1 文案失准（硬编码 "Only the first results"，N=0 时语义相反）→ 抽 `describe_full_schema_top_n` 共用 helper（build_meta_tools 与 guideline 同源，三分支文案与 origin 逐字对应）；②[L] ServerToolConfig 组表单 builtin 服务器可 pin（与 ServerCard canManageServerActions 门控不一致 → 死行）→ 加 `server.config?.type !== 'builtin'` 门控；③[L] prompt_service create_inner 缺空 name 校验（resource 有对应检查；空名产 FTS 不可达行）→ 补齐；④[L] open_skill_library 缺 valid_dir_name 守卫（本文件唯一漏网 join 点，defense-in-depth 对齐）→ 补；⑤[L] rag_file_create 工具描述漂移（仍写 "Overwrites"，P2b 已改共存语义）→ 更新描述。**记录不修**：score 3 位小数 vs origin 2 位（有意差异）、REST openapi spec 未注明 search 结果可能缺 inputSchema、fullSchemaTopN>200 前端不 clamp 漂移、tempRoutingConfig 重置 effect 无 dirty 守卫（origin 继承）。**近三轮修复回归验证**：SettingsContext 11 处函数式更新全部正确、pin item.key 双面读侧逐链路核对通过、Set 不可变更新/竞态守卫完好。**验证**：cargo check 0 错 0 警；cargo test --lib 103 passed；tsc 0 错误；**50 套 E2E 1423/1423 全绿**（重建二进制实测）。
-- **基线同步 `01f4bb8 → b86de7f`（2026-10-07，3 commit：#1284/#1286/#1290；版本 `1.1.1 → 1.1.1001`）**：
-  - `f3d464f` #1284 stdio 响应缓冲上限：**前端完整镜像**（types options/ServerFormData 加 maxBufferSize、serverFormPayload buildOptions 正整数校验与携带、ServerForm stdio 专属输入框 + handleOptionsChange 联合类型扩展、locales `server.maxBufferSize(+Description)` ×4）；**Rust 半镜像**——`ServerOptions` 加 `max_buffer_size`（serde round-trip 持久化 + 导入导出透传），**运行时不消费**：rmcp 3.4.1 `TokioChildProcessBuilder` 无 buffer 上限选项（JS SDK 特有的 10MiB 默认上限），桌面 tokio 管道无此约束，配置接受即为兼容 origin 部署的等价行为。
-  - `ec51044` #1286 search_tools/describe_tool 结果字段可配置：**前端完整镜像**（SettingsContext `toolDefinitionFields` 类型 + fetch 映射、SettingsPage 复选框组 `TOOL_DEFINITION_FIELDS` 六项/默认 title+annotations、键 union + temp 类型 + 双保存路径数组比对、locales ×4；**布局修正**：复选框组初版误插进 `!isTauri()` web-only「搜索结果调优」区块（桌面不可见，而 Rust 后端恰是桌面主战场）→ 移出为独立块双端可见（serverDescriptionMode 之前））；**Rust 完整镜像**——`SmartRoutingSettings.tool_definition_fields`（白名单六项 retain 去重、空列表=仅核心四字段、None=默认 title+annotations）、`optional_tool_fields` 从索引 metadata 注入 search 结果两臂、describe_tool 经 `attach_optional_fields_from_tool`（桌面 Tool 模型仅 annotations/output_schema 可选字段，title/execution/icons/_meta 上游本就不提供——与 origin `!== undefined` 过滤等价）。
-  - `b86de7f` #1290 OAuth state 过期误拒：**无需镜像**（桌面 OAuth provider 为 origin mcpOAuthProvider 的独立移植，无 serverInfo.config 共享别名问题；且桌面 OAuth Server 未实现）。
-  - 验证：cargo check 0 错 0 警；cargo test --lib 103 passed；tsc 0 错误；E2E **50 套 1423/1423 全绿**（重建二进制实测）。
-  - **影响功能点**：服务器表单 stdio 新增「Stdio 缓冲区上限」输入框（round-trip 保存）；设置页 Smart Routing 新增「结果中的工具字段」复查框组（$smart 端点 search/describe 结果随之增减 title/annotations/outputSchema 字段）；locales +4 键 ×4。**用户需重启生效**。
-
-**前端/locales 已同步**：
-- `f6e4cc8` #1210 env 变量遮蔽警示：`SettingsContext.SmartRoutingConfig` 加 `envOverriddenFields`（只读元数据，保存不回传）；`SettingsPage` 新增 `renderEnvOverrideWarning()` 并挂到 openai/azure 两分支 5 个输入框（llmProviderApiKey/BaseUrl、embeddingModel、azureOpenaiEndpoint/ApiKey）；locales +1 键 ×4。
-- `7b2822d` #1212 嵌入任务前缀：`SmartRoutingConfig` 加 `embeddingQueryPrefix`/`embeddingDocumentPrefix`；temp state/初始化/`handleSmartRoutingConfigChange` 键类型/两条保存路径（`handleSmartRoutingConfigChange` 批量 + `handleSaveSmartRoutingConfig`）同步；embeddingMaxTokens 与 progressiveDisclosure 之间新增「嵌入任务前缀」输入块（query/document 两输入框 + env 遮蔽警示）；locales +5 键 ×4（含补齐 `noChanges`——桌面代码此前已调用、缺键走 fallback）。
-- `815c91a` #1211 按钮指针光标：`index.css` 顶部 `@layer base` 全局 `button:not(:disabled)/[role='button']` cursor:pointer。
-
-**评估无需同步/镜像**：`f49ba5b`/`10736a2` #1213/`85a530f` #1214 纯 docs/CI（docs/ 不同步）；#1210/#1212 后端（smartRouting env 解析、vectorSearch 前缀应用、serverController 校验）——Smart Routing 未实现，无 Rust 落点；新配置键经 `config_service::update` JSON 深合并透明 round-trip。
-
-- 版本 `1.0.40001 → 1.0.40002`（四源 + Cargo.lock）；changelog **合并为 `doc/upgrade/1.0.40003.md`**（原 1.0.40002.md 已并入删除；该文件 2026-10-06 又并入 `doc/upgrade/1.1.1003.md` 后删除）。
-- **影响功能点**：设置页 Smart Routing 区块（桌面 Tauri 运行时隐藏，仅 web dev 可见）新增嵌入任务前缀输入块与 env 遮蔽警示（桌面后端不计算 `envOverriddenFields`，警示恒不显示，行为与 origin 部署一致需 origin 后端）；web 模式按钮 hover 指针光标；locales settings 段 +6 键 ×4。**结果**：桌面端运行行为不变（Smart Routing 未实现、隐藏区块代码保持与 origin 对齐）；新配置键 `embeddingQueryPrefix`/`embeddingDocumentPrefix`/`envOverriddenFields` 可透传存储。tsc 19 = 基线 19（0 新增）；`npm run build` 通过。用户无需操作。
-
-#### 2026-09-24（第二轮）：`8ed6478` -> `f8615ab`（2 commit，v1.0.40 + 1 未发布）
-
-- `984028e` #1205/#1206：pg 连接池加固 —— **无需镜像**（桌面 sqlx SQLite 本地，无 pg-pool）。
-- `f8615ab` #1209：Smart Routing 配置键白名单 —— **无需镜像**（Smart Routing 未实现；`config_service::update` JSON 深合并透明 round-trip）。
-- 无 frontend/locales/Rust 改动；版本 `1.0.39001 → 1.0.40001`；changelog **合并为 `doc/upgrade/1.0.40003.md`**（原 1.0.40002.md 已并入删除；该文件 2026-10-06 又并入 `doc/upgrade/1.1.1003.md` 后删除）。影响功能点：无。
-
-#### 2026-09-24（第一轮）：`6b1fdb7` -> `8ed6478`（43 commit，跨 v1.0.36~v1.0.39）
-
-**前端/locales 已同步**（节选）：
-- `b3d0dcb` #1143 tsconfig 去 baseUrl；`451102d` #1142 GroupCard 复制用 group 名；`ae5962c` #1153 log-stream 重连退避重置；`fb60844` #1160 slogan 措辞。
-- `319e191` #1129 per-user credentials：**部分采用**（locales/类型/ServerConfig.resources/ServerForm credentials slots）；跳过 CredentialsPage 路由与入口（桌面免登录单用户）。
-- `1772c7a` #1175 分组可见性：**仅类型 + locales**（桌面无用户体系，跳过 UI）。
-- `629ff61` #1180 `/api/` 端点 chip（ServerCard/GroupCard）；`ee124ff` #1186 包版本展示类型（运行时用自研 §3.5.1）。
-- `a793e38`/`47cd1fc` #1190/#1193 服务器复制到预填表单：完整镜像（`serverDuplicate.ts` + Add/Edit/Servers/ServerCard 接线 + 竞态守卫）。
-- `93fdb6f` #1191 per-client MCP 配置预设：完整镜像（`clipboard.ts`/`mcpClientSnippets.ts`/`CopyClientConfigDialog.tsx`）。
-- `5ac617f` #1184 OAuth client TTL：前端镜像（桌面无 OAuth server 后端）；`aa46861` #1199 Smart Routing 索引面板：代码保留对齐（Tauri 下隐藏）。
-
-**Rust 镜像**：#1178（REST disabled-tool gate）、#1164（on-demand 长调用保活）、#1182（npx scoped 缓存清理 `clear_npx_cache_for_specs`）。
-
-**评估无需镜像**（节选）：#1157（桌面有 is_starting 守卫）、#1156（独立 spawn 天然隔离）、#1149（session 策略 fallback 天然成立）、#1162（暂不镜像，已有 staggered startup）、#1135/#1155 等限流（无登录端点）、OAuth/BetterAuth/per-user credentials 后端（无链路）、依赖/CI/文档类。
-
-- 版本 `1.0.35003 → 1.0.39001`；changelog **合并为 `doc/upgrade/1.0.40003.md`**（单文件，含 1.0.40002 历史内容；该文件 2026-10-06 又并入 `doc/upgrade/1.1.1003.md` 后删除）。
-- **影响功能点**：Servers/Group 卡片复制与端点 chip、客户端预设对话框、SettingsPage OAuth TTL + Smart Routing 面板（隐藏）、logService 退避、Rust 三处安全/稳定性修复、locales +82 键。
-- **结果**：新增服务器复制/预设复制/OpenAPI 端点展示；修复禁用工具 REST 调用漏洞、on-demand 长调用误关、npx 重装波及、日志流退避、编辑竞态。**用户需重启生效**。
-
-#### 2026-09-08：`980ab4a` -> `6b1fdb7`（8 commit，v1.0.35）
-
-- `6043a1f` #1133 Smart Routing 字段 provider-neutral 更名（前端完整镜像 + 4 locales）；`6b1fdb7` #1141 `.btn-primary` 边框（index.css）；#1137/#1138/#1140 无需镜像（multipart/OpenAPI 序列化由 rmcp-openapi 库处理；skill 元数据）。
-- 版本 `1.0.34003 → 1.0.35001`；桌面运行行为不变。
-
-#### 2026-09-07：`a67165e` -> `980ab4a`（1 commit，MRL 维度透传）
-
-- #1131/#1132 前端完整镜像（`embeddingDimensionsApiPassthrough`）；后端无落点（Smart Routing 未实现）。版本 `1.0.34001 → 1.0.34002`。
-
-#### 2026-09-07：`8030868` -> `a67165e`（纯文档，无代码落点）；2026-09-06：`40e7c74` -> `8030868`（3 个 Node 后端修复均无需镜像：startOnDemand 持久化桌面已有专属列、OAuth 重连无链路、multipart 由库处理）。版本 `1.0.33102 → 1.0.34001`。
-
-#### 2026-09-01：`41d34be` -> `0f59780`（两轮合并发布 `1.0.33002`）
-
-- #1113 embedding provider presets + dimensions（前端完整镜像，10 locales 键/语言）；#1115 slogan 措辞（locales）。
-- 安全修复评估无需镜像：activity/log REST 加 admin（桌面无该 REST 面）、SSRF redirect 校验（无 CIMD/出站拉取链路；注：reqwest 默认跟 10 跳，未来引入「从不可信 URL 拉取」需评估 SSRF）。
-
-#### 历史记录
-
-> 2026-07-24 ~ 2026-08-25 共 11 轮同步已精简，逐 commit 评估见 `git log` 对应提交的 AGENTS.md 版本或 `AGENTS.md.bak`。
-
----
 
 ## 5. 已知问题与解决方案
 
@@ -1120,6 +688,12 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.1030.1**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.1102.1**。
 
 **规则（2026-10-27 起，详见 §4.4）**：`2位年.月日.迭代号`，不跟随 origin tag；同日多次发布迭代号递增，跨天重置为 1；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。
+- **第八轮独立复核（2026-11-02，5 代理并行切片 + 亲核修复 10 项 + 全量回归）**：扫描面 = mv override/多源下载全量 + bearer exclude 全链 + 前端新代码 + rag start/reindex 链 + 测试断言审计。**修复 10 项**：①[H] ModelScope token 硬编码测试源码（私有仓库凭证泄露）→ 环境变量化（**用户需吊销该 token**）；②[M] publish 先删旧 model.gguf 再 rename（失败/取消窗口销毁在用模型）→ publish_temp 原子覆盖优先；③[M] 单槽下载状态被第二个不同 size 下载孤儿化 → 进行中即拒绝；④[M] LFS batch 硬编码 refs/heads/main → branch 透传；⑤[M] 无 Content-Length 截断响应被当成功 → total/copied 双校验；⑥[M] reindex 部分失败仍清 NEEDS_REINDEX + 提交 → failed 计数 + partial 保持重试标记；⑦[M] reindex 中 select_model 混合嵌入固化 → REINDEX_ALL_RUNNING CAS + select_model 拒绝；⑧[M] smart-only 部署无 fallback → 下沉 load_locked；⑨[M] 测试池污染 + generation 测试未测守卫 + 前置断言级联 → restore_persisted/commit_allowed 提取/take 清场；⑩[L] docCountTotal 过滤残留 + SettingsPage 双弹框 → 无过滤同步+卸载重置 / startupReindexConfirm 守卫。另 repair_schema 探测失败静默 → warn。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；clippy 新代码 0；**75 套 E2E 全部 exit 0**。记录不修 3 项（commit 毫秒窗口/clone 超时清理竞争/测试池偶发锁）。详见 doc/sync_report_26.1031.1.md 第八轮。
+- **第九轮独立复核（2026-11-02，4 代理并行含第八轮回炉 + 亲核修复 6 项 + 全量回归）**：**修复 6 项**：①[H] update_system_config 缺 origin dashboardName 校验（非 string/超长透明存储→"保存成功"但静默丢失）→ string+trim≤100 对齐；②[H] fr.json 3 处字面 `******` 伪影入文件（字节级定谳非终端显示伪影，en 同键 stars=0）→ 按真实语义修复（en 真词 base64 定谳 "Bearer auth"）；③[M] costRevision 每渲染全量 stringify → useMemo；④[L] run_download panic 卡死 downloading phase（被 R8 并发守卫放大）→ catch_unwind 兜底；⑤[L] symlink 非文本跳过不计 failed；⑥[L] publish_temp 注释诚实化。**回炉结论**：R8 十项修复 7 项完全清洁。**locales 全量对账 PASS**（6 语言 0 缺 0 孤 / 1610 引用键全命中 / 占位符 0 漂移）。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1031.1.md 第九轮。
+- **第十轮独立复核（2026-11-02，4 代理并行含 R9 回炉 + config.rs/下载状态机/exclude UI 三个首扫切片 + 亲核修复 7 项 + 全量回归）**：**修复 7 项**：①[M] get_public_config 非严格读——配置损坏时前端免登录 UI + 后端全 401 死界面 → get_strict fail-closed（NULL 行保持默认 true）；②[M] smartRouting prev/new 差分并发丢 disable 钩子 → 幂等化（patch 触及且结果 false 即 release 检查）；③[M] 下载 panic 分支不发终态事件不清 temp → 补 emit+清理+注释明示 release panic=abort 下不生效；④[L] pump 不查 phase 可污染 cancel 后同 size 新下载；⑤[L] abort-poll 竞争 cancelled 被 error 覆盖 → 终态写入前查 cancel；⑥[L] 新建表单切走 exclude 不清已选；⑦[L] exclude 分组选择器缺 searchFn。**回炉结论**：R9 六项修复 4 项完全清洁。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1031.1.md 第十轮。
+- **第十一轮独立复核（2026-11-02，基线同步 a10c7df + 3 代理并行含 R10 回炉 + mv/mod.rs 首扫 + 亲核修复 8 项 + 全量回归）**：**修复 8 项**：①[H] ensure_started `.expect` TOCTOU panic（needs_reload 与 slot 锁之间并发 release 清空 slot）→ 有界重试循环重构；②[H] release 在 await 间隙后无条件 drop runtime——并发 ensure_started 注册消费者后零消费者泄漏运行中模型 → slot 锁内重查消费者（中毒 fail-closed 保留）；③[M] 并发加载中模型切换 waiter 直接 Err 放弃（runtime 停留旧模型）→ 重试成为加载者；④[M] embedder 数十秒同步加载阻塞 tokio worker → spawn_blocking；⑤[L] pump 守卫注释诚实化（同 size 重下载 200ms 窗口 cosmetic 残留）；⑥⑦⑧[L] AGENTS §6 四源行落后 3 版本 + §4.4 缺本轮条目 + changelog 日期表述。**回炉结论**：R10 七项修复 6 项完全清洁。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1031.1.md 第十一轮。
+- **第十二轮独立复核（2026-11-02，3 代理并行含 R11 回炉 + embedder/smart 生命周期首扫 + 亲核修复 7 项 + 全量回归）**：**修复 7 项**：①[H] needs_reload 无选择时 Err 使 load_locked fallback 对 smart-only 场景不可达（R8 修复死代码）→ Ok(true) 交给 fallback；②[M] fallback 把 resolve Err（瞬时 fs 错误）当模型不存在——静默切默认 + purge 删光用户索引行 → Err 传播；③[M] R11 重试循环 attempt 间隙（INITIALIZING 落地再 swap）→ wait_while_initializing 提前返回 + 并发 release → 零消费者泄漏（重构引入新竞态）→ 两阶段重构（Phase1 竞争 loader / Phase2 整个加载期持 INITIALIZING 含重试）；④[M] smart reindex_all 无 select_model 互斥（混合嵌入 + purge 静默删行）→ SMART_REINDEX_RUNNING + select_model 双标志；⑤[M] Windows FreePhysicalMemory 单位 KB 误乘 1MB（高估 1024 倍，2GiB 门控失效）→ ×1KB；⑥[M] 畸形 GGUF 元数据除零 panic（n_head/n_kv_head/pattern==0，5 文件 9 除点）→ 全变量 >0 校验；⑦[L] RAG_GGUF_DEVICE 大小写敏感 → lowercase。**回炉结论**：R11 重构核心（四转移/耗尽语义/InitGuard/release 全交错/锁序）逐行验证清洁。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1031.1.md 第十二轮。
+- **第十三轮独立复核（2026-11-02，3 代理并行含 R12 回炉 + gguf.rs 首扫 + 单测覆盖缺口审计 + 亲核修复 1H + 补 15 单测 + 全量回归）**：**修复 [H]**：R12 的 n_head==0 校验只落 gemma/qwen3——lfm2/nomic/modernbert 提取行带尾注释被脚本正则漏掉仍会除零 panic → 3 处补齐（5 arch 全覆盖）。**新增单测 15 个**（lib 338→353）：env_platform_override 大小写 9 断言、publish_temp 两场景、check_truncation（提取纯函数）、decide_model（提取纯函数，含 resolve Err 传播核心不变量）、validate_dashboard_name（提取纯函数，含 100 CJK 字符边界）。**回炉结论**：R12 七项 6 项完全清洁；gguf.rs 1242 行首扫零缺陷。**验证**：cargo check 0 错 0 警；lib **353 passed**；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1031.1.md 第十三轮。

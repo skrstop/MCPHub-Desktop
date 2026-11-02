@@ -127,6 +127,9 @@ impl NomicBertMoeArch {
         let hidden = get_u32(&format!("{}embedding_length", pfx), None)?; // 768
         let block_count = get_u32(&format!("{}block_count", pfx), None)?; // 12
         let n_head = get_u32(&format!("{}attention.head_count", pfx), None)?; // 12
+        if n_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_head must be > 0"));
+        }
         let head_dim = hidden / n_head; // 64
         let moe_every = get_u32(&format!("{}moe_every_n_layers", pfx), Some(0))?; // 2
         let n_experts = get_u32(&format!("{}expert_count", pfx), Some(0))?; // 8

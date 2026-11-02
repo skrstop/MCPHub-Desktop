@@ -165,9 +165,13 @@ async fn needs_reload() -> Result<bool> {
     match guard.as_ref() {
         None => Ok(true),
         Some(rt) => {
-            let selected = models::current_model()
-                .await
-                .ok_or_else(|| anyhow!("mv: no model selected"))?;
+            // No persisted selection: report "needs load" and let
+            // load_locked's bundled-default fallback decide the model —
+            // erroring here made the fallback unreachable for smart-only
+            // boots with a fresh config (review round 12).
+            let Some(selected) = models::current_model().await else {
+                return Ok(true);
+            };
             Ok(selected != rt.active_model)
         }
     }
@@ -189,34 +193,48 @@ pub async fn ensure_started(consumer: &str, app: &AppHandle) -> Result<MvInfo> {
     }
     mv_log("info", format!("[mv] ensure_started({}) — consumers={:?}", consumer, consumers_snapshot()));
 
-    if !needs_reload().await? {
-        let guard = runtime_slot().lock().await;
-        let rt = guard.as_ref().expect("checked running");
-        return Ok(MvInfo {
-            active_model: rt.active_model.clone(),
-            embed_dim: rt.embed_dim,
-        });
-    }
-
-    if INITIALIZING.swap(true, Ordering::SeqCst) {
-        // Another task is already loading. Wait for it to finish by polling
-        // the atomic (loading can take tens of seconds — model load).
-        while INITIALIZING.load(Ordering::SeqCst) {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+    // Bounded retry loop (review round 11): two interleavings made the old
+    // linear flow wrong — (a) a racing release() can empty the slot between
+    // needs_reload()==false and the slot lock (the old `.expect` panicked);
+    // (b) a model switch during someone else's load left the waiter with
+    // needs_reload still true and no path to become the loader (it gave up
+    // with a misleading "concurrent model load failed" while the runtime
+    // kept running the OLD model). Both are handled by re-evaluating and
+    // retrying up to a small bound.
+    // Phase 1: become the loader (or confirm someone else's load made the
+    // runtime ready). The INITIALIZING swap happens exactly once here.
+    loop {
         if !needs_reload().await? {
             let guard = runtime_slot().lock().await;
-            let rt = guard.as_ref().expect("checked");
-            return Ok(MvInfo {
-                active_model: rt.active_model.clone(),
-                embed_dim: rt.embed_dim,
-            });
+            if let Some(rt) = guard.as_ref() {
+                return Ok(MvInfo {
+                    active_model: rt.active_model.clone(),
+                    embed_dim: rt.embed_dim,
+                });
+            }
+            // Slot emptied by a racing release between the check and this
+            // lock — needs_reload will be true on the next iteration.
+            continue;
         }
-        return Err(anyhow!("mv: concurrent model load failed"));
+        if INITIALIZING.swap(true, Ordering::SeqCst) {
+            // Another task is already loading. Wait for it to finish by
+            // polling the atomic (loading can take tens of seconds), then
+            // re-evaluate: loaded fine / model changed again / loader
+            // failed — the loop handles all three.
+            while INITIALIZING.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            continue;
+        }
+        break;
     }
 
-    // Panic guard: if load_locked panics, INITIALIZING must be cleared or
-    // every waiter spins forever. (Normal failure paths return Err.)
+    // Phase 2: we hold INITIALIZING for the WHOLE load phase, including
+    // retries (review round 12): dropping it between attempts opened a
+    // window where wait_while_initializing returned early and a concurrent
+    // release() ran before the retrying load completed — leaking a running
+    // model with zero consumers. Panic guard: if load_locked panics,
+    // INITIALIZING must be cleared or every waiter spins forever.
     struct InitGuard;
     impl Drop for InitGuard {
         fn drop(&mut self) {
@@ -224,17 +242,53 @@ pub async fn ensure_started(consumer: &str, app: &AppHandle) -> Result<MvInfo> {
         }
     }
     let _guard = InitGuard;
-    let info = load_locked(app).await?;
-    mv_log(
-        "info",
-        format!(
-            "[mv] runtime ready: model={} dim={} consumers={:?}",
-            info.active_model,
-            info.embed_dim,
-            consumers_snapshot()
-        ),
-    );
-    Ok(info)
+    let mut last_err: Option<anyhow::Error> = None;
+    for _attempt in 0..3 {
+        match load_locked(app).await {
+            Ok(info) => {
+                mv_log(
+                    "info",
+                    format!(
+                        "[mv] runtime ready: model={} dim={} consumers={:?}",
+                        info.active_model,
+                        info.embed_dim,
+                        consumers_snapshot()
+                    ),
+                );
+                return Ok(info);
+            }
+            Err(e) => {
+                // Retry: the selection may have changed mid-load or the
+                // failure may be transient; load_locked re-reads the
+                // current selection each attempt.
+                mv_log("warn", format!("[mv] load attempt {} failed: {e:#}", _attempt + 1));
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("mv: load failed")))
+}
+
+/// Decide which model size `load_locked` should load (review round 13:
+/// extracted for unit testing). `resolved` is the `resolve_model_paths`
+/// outcome for the persisted selection:
+/// - `Err` = filesystem error (model_root/read_dir) — PROPAGATE. Treating it
+///   as "model gone" would let a transient I/O hiccup silently switch to the
+///   default AND purge the user's real model's index rows (round 12).
+/// - `Ok(None)` = the model genuinely has no ready `model.gguf` — fall back
+///   to the bundled default.
+/// - `Ok(Some(_))` = persisted selection is ready — use it.
+fn decide_model(
+    persisted: Option<String>,
+    resolved: Option<Result<Option<PathBuf>>>,
+    default: Option<String>,
+) -> Result<String> {
+    match resolved {
+        Some(Ok(Some(_))) => Ok(persisted.expect("resolved implies persisted")),
+        Some(Ok(None)) | None => default
+            .ok_or_else(|| anyhow!("no ready model - download one first")),
+        Some(Err(e)) => Err(e),
+    }
 }
 
 fn consumers_snapshot() -> Vec<String> {
@@ -247,9 +301,35 @@ fn consumers_snapshot() -> Vec<String> {
 /// Load (or reload) the model for the persisted selection + (re)open the
 /// lancedb connection. Caller must hold INITIALIZING.
 async fn load_locked(app: &AppHandle) -> Result<MvInfo> {
-    let size = models::current_model()
-        .await
-        .ok_or_else(|| anyhow!("mv: no model selected (mv.model / rag.model)"))?;
+    // Startup fallback (mirrors rag::service::start): when the persisted
+    // selection is missing or unresolvable, fall back to the bundled default
+    // for THIS session (session override; committed later by the RAG reindex
+    // flow). Without this, smart-only deployments (rag off, smart on) fail
+    // to boot even though a bundled default model is available (review
+    // round 8).
+    let size = {
+        let persisted = models::current_model().await;
+        let resolved = match persisted.as_ref() {
+            // Err propagates via decide_model (transient fs errors must not
+            // silently switch models — round 12).
+            Some(sel) => Some(models::resolve_model_paths(app, sel).map_err(anyhow::Error::from)),
+            None => None,
+        };
+        let default = models::default_size(app);
+        let size = decide_model(persisted.clone(), resolved, default)?;
+        if persisted.as_deref() != Some(&size) {
+            mv_log(
+                "info",
+                format!(
+                    "[mv] selected model '{}' not available - falling back to default '{}'",
+                    persisted.as_deref().unwrap_or("(none)"),
+                    size
+                ),
+            );
+            models::set_session_override(&size);
+        }
+        size
+    };
     let size_dir = models::resolve_model_paths(app, &size)?
         .ok_or_else(|| anyhow!("model '{}' not ready - download it first", size))?;
 
@@ -262,7 +342,15 @@ async fn load_locked(app: &AppHandle) -> Result<MvInfo> {
         "cpu" => Some(embedder::Platform::Cpu),
         _ => None,
     };
-    let model = embedder::load_embedder_with_user_platform(&size_dir, user_platform)?;
+    // Tens of seconds of synchronous CPU/IO — must not starve a tokio
+    // worker (review round 11). INITIALIZING is held by the caller-scoped
+    // guard, which stays alive across the spawn_blocking await.
+    let size_dir2 = size_dir.clone();
+    let model = tokio::task::spawn_blocking(move || {
+        embedder::load_embedder_with_user_platform(&size_dir2, user_platform)
+    })
+    .await
+    .map_err(|e| anyhow!("embedder load task panicked: {e}"))??;
     let dim = model.embed_dim();
 
     let dir = lancedb_dir(app)?;
@@ -340,8 +428,27 @@ pub async fn release(consumer: &str) {
     let rss_before = embedder::process_rss_mib().unwrap_or(0);
     let had = {
         let mut guard = runtime_slot().lock().await;
-        guard.take().is_some()
+        // Re-check consumers under the slot lock (review round 11): a
+        // concurrent ensure_started registers its consumer BEFORE loading,
+        // so a consumer appearing between the `remaining==0` decision and
+        // this lock means the runtime is wanted again — keep it instead of
+        // tearing down (the old code dropped it unconditionally; a load
+        // racing ahead of the teardown then leaked a running model with
+        // zero holders).
+        let still_wanted = match consumers().lock() {
+            Ok(c) => !c.is_empty(),
+            Err(_) => true, // poisoned: fail-closed, keep the runtime
+        };
+        if still_wanted {
+            mv_log("info", format!("[mv] release({}) — consumer re-registered during teardown, runtime kept", consumer));
+            false
+        } else {
+            guard.take().is_some()
+        }
     };
+    if !had {
+        return;
+    }
     EMBED_DIM.store(0, Ordering::SeqCst);
     if had {
         mv_log("info", format!("[mv] all consumers gone — runtime released (RSS {} -> pending mimalloc)", rss_before));
@@ -454,5 +561,52 @@ mod tests {
         // needs_reload with an empty slot returns true WITHOUT consulting the
         // config store (short-circuit on None) — safe in the test env.
         assert!(needs_reload().await.unwrap());
+    }
+}
+
+#[cfg(test)]
+mod decide_model_tests {
+    use super::*;
+
+    #[test]
+    fn ready_persisted_selection_wins() {
+        let d = decide_model(
+            Some("user-a".into()),
+            Some(Ok(Some(PathBuf::from("/x")))),
+            Some("default".into()),
+        )
+        .unwrap();
+        assert_eq!(d, "user-a");
+    }
+
+    #[test]
+    fn gone_model_falls_back_to_default() {
+        let d = decide_model(Some("gone".into()), Some(Ok(None)), Some("default".into())).unwrap();
+        assert_eq!(d, "default");
+    }
+
+    #[test]
+    fn no_selection_falls_back_to_default() {
+        let d = decide_model(None, None, Some("default".into())).unwrap();
+        assert_eq!(d, "default");
+    }
+
+    #[test]
+    fn resolve_io_error_propagates_never_falls_back() {
+        // Core round-12 invariant: a transient filesystem error must NOT
+        // silently switch to the default (which would purge the user's
+        // real model's index rows).
+        let err = decide_model(
+            Some("user-a".into()),
+            Some(Err(anyhow!("simulated read_dir failure"))),
+            Some("default".into()),
+        );
+        assert!(err.is_err(), "resolve Err must propagate");
+    }
+
+    #[test]
+    fn no_default_and_no_model_is_an_error() {
+        assert!(decide_model(None, None, None).is_err());
+        assert!(decide_model(Some("gone".into()), Some(Ok(None)), None).is_err());
     }
 }

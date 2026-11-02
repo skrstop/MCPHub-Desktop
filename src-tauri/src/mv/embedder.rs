@@ -322,7 +322,13 @@ pub fn resolve_platform(size_dir: &Path) -> Platform {
 /// model's deploy.json (debug/dev convenience - try both devices without
 /// editing the file). `cpu` / `metal|cuda|gpu` map to Cpu/Gpu.
 fn env_platform_override() -> Option<Platform> {
-    match std::env::var("RAG_GGUF_DEVICE").as_deref().ok() {
+    // Case-insensitive (parity with Platform::parse) — "GPU"/"CPU" must not
+    // be silently ignored (review round 12).
+    match std::env::var("RAG_GGUF_DEVICE")
+        .ok()
+        .map(|v| v.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("cpu") => Some(Platform::Cpu),
         Some("metal") | Some("cuda") | Some("gpu") => Some(Platform::Gpu),
         _ => None,
@@ -470,7 +476,7 @@ pub fn free_memory_bytes() -> Option<u64> {
     {
         use std::process::Command;
         let out = Command::new("powershell")
-            .args(["-NoProfile", "-Command", "(Get-Ciminstance Win32_OperatingSystem).FreePhysicalMemory*1MB"])
+            .args(["-NoProfile", "-Command", "(Get-Ciminstance Win32_OperatingSystem).FreePhysicalMemory*1KB"])
             .output()
             .ok()?;
         let s = String::from_utf8_lossy(&out.stdout);
@@ -515,7 +521,7 @@ pub fn process_rss_mib() -> Option<u64> {
 
 #[cfg(test)]
 mod template_tests {
-    use super::{render_doc_embed_text, render_query_embed_text};
+    use super::{env_platform_override, render_doc_embed_text, render_query_embed_text, Platform};
 
     #[test]
     fn granite_template_with_title_and_content() {
@@ -567,5 +573,39 @@ mod template_tests {
         assert_eq!(render_query_embed_text("Query: {query}", "待办"), "Query: 待办");
         // 无占位符 = 旧前缀拼接
         assert_eq!(render_query_embed_text("query: ", "待办"), "query: 待办");
+    }
+
+    #[test]
+    fn env_platform_override_is_case_insensitive() {
+        // Round-12 fix: "GPU"/"CPU" must not be silently ignored (parity
+        // with Platform::parse). Env is process-global — set/remove around
+        // each read; tests in this module that touch env must stay serial,
+        // which the single-threaded assertion body below guarantees by
+        // restoring the original value.
+        let original = std::env::var("RAG_GGUF_DEVICE").ok();
+        let mut set = |v: Option<&str>| match v {
+            Some(x) => std::env::set_var("RAG_GGUF_DEVICE", x),
+            None => std::env::remove_var("RAG_GGUF_DEVICE"),
+        };
+        set(Some("cpu"));
+        assert_eq!(env_platform_override(), Some(Platform::Cpu));
+        set(Some("CPU"));
+        assert_eq!(env_platform_override(), Some(Platform::Cpu));
+        set(Some("Cpu"));
+        assert_eq!(env_platform_override(), Some(Platform::Cpu));
+        set(Some("gpu"));
+        assert_eq!(env_platform_override(), Some(Platform::Gpu));
+        set(Some("GPU"));
+        assert_eq!(env_platform_override(), Some(Platform::Gpu));
+        set(Some("Metal"));
+        assert_eq!(env_platform_override(), Some(Platform::Gpu));
+        set(Some("CUDA"));
+        assert_eq!(env_platform_override(), Some(Platform::Gpu));
+        set(Some("bogus"));
+        assert_eq!(env_platform_override(), None);
+        set(None);
+        assert_eq!(env_platform_override(), None);
+        // Restore the caller's environment.
+        set(original.as_deref());
     }
 }

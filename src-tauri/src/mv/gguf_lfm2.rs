@@ -107,6 +107,9 @@ impl Lfm2Arch {
         let hidden = get_u32(&format!("{}embedding_length", pfx), None)?; // 1024
         let block_count = get_u32(&format!("{}block_count", pfx), None)?; // 16
         let n_head = get_u32(&format!("{}attention.head_count", pfx), None)?; // 16
+        if n_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_head must be > 0"));
+        }
         // head_count_kv is a per-block array in LFM2 (8 for attention blocks,
         // 0 for shortconv) - take the max (the attention blocks' KV head count).
         let n_kv = match md.get(&format!("{}attention.head_count_kv", pfx)) {

@@ -76,7 +76,13 @@ impl Qwen3EmbedArch {
         let hidden = get_u32(&format!("{}embedding_length", pfx), None)?;
         let block_count = get_u32(&format!("{}block_count", pfx), None)?;
         let n_head = get_u32(&format!("{}attention.head_count", pfx), None)?;
+        if n_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_head must be > 0"));
+        }
         let n_kv_head = get_u32(&format!("{}attention.head_count_kv", pfx), None)?;
+        if n_kv_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_kv_head must be > 0"));
+        }
         let head_dim = get_u32(&format!("{}attention.key_length", pfx), Some(hidden / n_head))?;
         let max_context = get_u32(&format!("{}context_length", pfx), Some(2048))? as u32;
         let rope_base = get_f32(&format!("{}rope.freq_base", pfx), 1_000_000.0);

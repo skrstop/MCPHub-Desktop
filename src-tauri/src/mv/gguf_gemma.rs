@@ -129,12 +129,21 @@ impl Gemma3EmbedArch {
         let hidden = get_u32(&format!("{}embedding_length", pfx), None)?;
         let block_count = get_u32(&format!("{}block_count", pfx), None)?;
         let n_head = get_u32(&format!("{}attention.head_count", pfx), None)?;
+        if n_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_head must be > 0"));
+        }
         let n_kv_head = get_u32(&format!("{}attention.head_count_kv", pfx), None)?;
+        if n_kv_head == 0 {
+            return Err(anyhow!("invalid GGUF metadata: n_kv_head must be > 0"));
+        }
         let head_dim = get_u32(&format!("{}attention.key_length", pfx), Some(hidden / n_head))?;
         let sliding_window = get_u32(&format!("{}attention.sliding_window", pfx), Some(512))?;
         // Gemma3: every `sliding_window_pattern`-th layer is full attention.
         // pattern default 6 (config.json layer_types: 5 sliding + 1 full).
         let pattern = get_u32(&format!("{}sliding_window_pattern", pfx), Some(6))?;
+        if pattern == 0 {
+            return Err(anyhow!("invalid GGUF metadata: pattern must be > 0"));
+        }
         let rope_theta = get_f32(&format!("{}rope.freq_base", pfx), 1_000_000.0);
         let rope_local = get_f32(&format!("{}rope.local_freq_base", pfx), 10_000.0);
         let max_context = get_u32(&format!("{}context_length", pfx), Some(2048))? as u32;
