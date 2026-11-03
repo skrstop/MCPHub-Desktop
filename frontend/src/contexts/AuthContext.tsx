@@ -73,17 +73,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const token = authService.getToken();
 
       if (!token) {
-        const betterAuthResponse = await authService.getBetterAuthUser();
-        if (betterAuthResponse.success && betterAuthResponse.user) {
-          setAuth({
-            isAuthenticated: true,
-            loading: false,
-            user: betterAuthResponse.user,
-            error: null,
-          });
-          return;
-        }
-
         setAuth({
           ...initialState,
           loading: false,
@@ -103,37 +92,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           });
         } else {
           authService.removeToken();
-          const betterAuthResponse = await authService.getBetterAuthUser();
-          if (betterAuthResponse.success && betterAuthResponse.user) {
-            setAuth({
-              isAuthenticated: true,
-              loading: false,
-              user: betterAuthResponse.user,
-              error: null,
-            });
-          } else {
-            setAuth({
-              ...initialState,
-              loading: false,
-            });
-          }
-        }
-      } catch (error) {
-        authService.removeToken();
-        const betterAuthResponse = await authService.getBetterAuthUser();
-        if (betterAuthResponse.success && betterAuthResponse.user) {
-          setAuth({
-            isAuthenticated: true,
-            loading: false,
-            user: betterAuthResponse.user,
-            error: null,
-          });
-        } else {
           setAuth({
             ...initialState,
             loading: false,
           });
         }
+      } catch (error) {
+        authService.removeToken();
+        setAuth({
+          ...initialState,
+          loading: false,
+        });
       }
     } catch (outerError) {
       // Safety net: ensure loading is always cleared even if unexpected error occurs
@@ -244,7 +213,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           console.debug('Failed to disable skipAuth on exit', { error });
         }
       }
-      await authService.logout({ skipBetterAuthSignOut: true });
+      await authService.logout();
       setAuth({
         ...initialState,
         loading: false,

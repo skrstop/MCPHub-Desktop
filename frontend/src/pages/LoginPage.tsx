@@ -6,14 +6,12 @@ import { useAuth } from '../contexts/AuthContext';
 import { useBranding } from '@/contexts/BrandingContext';
 import { getToken } from '../services/authService';
 import { getPublicConfig } from '../services/configService';
-import { createBetterAuthClient, startOidcLogin } from '../services/betterAuthClient';
 import { getBasePath } from '../utils/runtime';
 import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
 import DefaultPasswordWarningModal from '@/components/ui/DefaultPasswordWarningModal';
 
-type SocialProvider = 'google' | 'github' | 'oidc';
 
 const sanitizeReturnUrl = (value: string | null): string | null => {
   if (!value) return null;
@@ -36,17 +34,6 @@ const LoginPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [socialLoading, setSocialLoading] = useState<SocialProvider | null>(null);
-  const [socialError, setSocialError] = useState<string | null>(null);
-  const [betterAuthBasePath, setBetterAuthBasePath] = useState<string | undefined>(undefined);
-  // Set from the public config: only SSO sign-in is offered
-  const [passwordLoginDisabled, setPasswordLoginDisabled] = useState(false);
-  const [socialProviders, setSocialProviders] = useState({
-    google: false,
-    github: false,
-    oidc: false,
-  });
-  const [oidcProviderId, setOidcProviderId] = useState<string>('oidc');
   const [showDefaultPasswordWarning, setShowDefaultPasswordWarning] = useState(false);
   const { login, auth } = useAuth();
   const location = useLocation();
@@ -106,46 +93,11 @@ const LoginPage: React.FC = () => {
     }
   }, [auth.isAuthenticated, auth.loading, showDefaultPasswordWarning, redirectAfterLogin]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const errorCode = params.get('error');
-    if (errorCode) {
-      const i18nKey = `auth.error.${errorCode}`;
-      const translated = t(i18nKey);
-      setSocialError(translated !== i18nKey ? translated : t('auth.socialLoginFailed'));
-    }
-  }, [location.search, t]);
 
-  useEffect(() => {
-    const loadAuthProviders = async () => {
-      const publicConfig = await getPublicConfig();
-      const betterAuth = publicConfig.betterAuth;
-      if (!betterAuth?.enabled) {
-        setSocialProviders({ google: false, github: false, oidc: false });
-        return;
-      }
-      setBetterAuthBasePath(betterAuth.basePath);
-      setPasswordLoginDisabled(betterAuth.disablePasswordLogin === true);
-      setOidcProviderId(betterAuth.providers?.oidc?.providerId || 'oidc');
-      setSocialProviders({
-        google: betterAuth.providers?.google?.enabled === true,
-        github: betterAuth.providers?.github?.enabled === true,
-        oidc: betterAuth.providers?.oidc?.enabled === true,
-      });
-    };
-    loadAuthProviders().catch((err) => {
-      // Backend unreachable/500 — reset to defaults (no social buttons) and
-      // don't leave an unhandled rejection; the page's other async paths all
-      // have explicit handling.
-      console.error('Failed to load auth providers:', err);
-      setSocialProviders({ google: false, github: false, oidc: false });
-    });
-  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setSocialError(null);
     setLoading(true);
     try {
       if (!username || !password) {
@@ -169,32 +121,6 @@ const LoginPage: React.FC = () => {
     }
   };
 
-  const handleSocialLogin = async (provider: SocialProvider) => {
-    setSocialError(null);
-    setSocialLoading(provider);
-    try {
-      if (provider === 'oidc') {
-        await startOidcLogin({
-          providerId: oidcProviderId,
-          callbackURL: returnUrl || '/',
-          errorCallbackURL: `${getBasePath()}/login`,
-          basePathOverride: betterAuthBasePath,
-        });
-        return;
-      }
-
-      const client = createBetterAuthClient(betterAuthBasePath);
-      await client.signIn.social({
-        provider,
-        callbackURL: returnUrl || '/',
-        errorCallbackURL: `${getBasePath()}/login`,
-      });
-    } catch (err) {
-      console.error('Social login error:', err);
-      setSocialError(t('auth.socialLoginFailed'));
-      setSocialLoading(null);
-    }
-  };
 
   const handleCloseWarning = () => {
     setShowDefaultPasswordWarning(false);
@@ -280,7 +206,6 @@ const LoginPage: React.FC = () => {
               boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
             }}
           >
-            {!passwordLoginDisabled && (
             <form className="space-y-3" onSubmit={handleSubmit}>
               <div>
                 <label
@@ -350,105 +275,16 @@ const LoginPage: React.FC = () => {
                 {loading ? t('auth.loggingIn') : t('auth.login')}
               </button>
             </form>
-            )}
 
-            {passwordLoginDisabled && !(socialProviders.google || socialProviders.github || socialProviders.oidc) && (
-              <p
-                className="text-center"
-                style={{ fontSize: 13, color: 'var(--hub-ink-2)', padding: '12px 0' }}
-              >
-                {t('auth.passwordLoginDisabledNoSso', 'Password sign-in is disabled and no SSO provider is configured. Re-enable it in the system config to sign in.')}
-              </p>
-            )}
 
-            {!passwordLoginDisabled && (
-              <p
-                className="text-center mt-3"
+                <p
+              className="text-center mt-3"
                 style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}
               >
                 {t('auth.defaultPasswordHint', '默认密码: admin')}
               </p>
-            )}
 
-            {(socialProviders.google || socialProviders.github || socialProviders.oidc) && (
-              <div className="mt-5 space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="h-px flex-1" style={{ background: 'var(--hub-line)' }} />
-                  <span
-                    className="hub-sect"
-                    style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}
-                  >
-                    {t('auth.orContinue')}
-                  </span>
-                  <div className="h-px flex-1" style={{ background: 'var(--hub-line)' }} />
-                </div>
 
-                {socialError && (
-                  <div
-                    className="flex items-center gap-2"
-                    style={{
-                      padding: '8px 10px',
-                      borderRadius: 7,
-                      border: '1px solid oklch(0.85 0.1 25)',
-                      background: 'oklch(0.97 0.03 25)',
-                      color: 'oklch(0.4 0.18 25)',
-                      fontSize: 12.5,
-                    }}
-                  >
-                    <AlertCircle size={13} className="flex-shrink-0" />
-                    <span>{socialError}</span>
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  {socialProviders.google && (
-                    <button
-                      type="button"
-                      onClick={() => handleSocialLogin('google')}
-                      disabled={socialLoading !== null}
-                      className="hub-btn w-full justify-center"
-                      style={{ height: 34 }}
-                    >
-                      {socialLoading === 'google'
-                        ? t('auth.loggingIn')
-                        : t('auth.loginWithGoogle')}
-                    </button>
-                  )}
-                  {socialProviders.github && (
-                    <button
-                      type="button"
-                      onClick={() => handleSocialLogin('github')}
-                      disabled={socialLoading !== null}
-                      className="hub-btn w-full justify-center"
-                      style={{
-                        height: 34,
-                        background: 'var(--hub-ink)',
-                        color: 'var(--hub-bg)',
-                        borderColor: 'var(--hub-ink)',
-                      }}
-                    >
-                      <GitHubIcon className="h-3.5 w-3.5" />
-                      {socialLoading === 'github'
-                        ? t('auth.loggingIn')
-                        : t('auth.loginWithGithub')}
-                    </button>
-                  )}
-                  {socialProviders.oidc && (
-                    <button
-                      type="button"
-                      onClick={() => handleSocialLogin('oidc')}
-                      disabled={socialLoading !== null}
-                      className="hub-btn w-full justify-center"
-                      style={{ height: 34 }}
-                    >
-                      {socialLoading === 'oidc'
-                        ? t('auth.loggingIn')
-                        : t('auth.loginWithOIDC')}
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
 
           <p

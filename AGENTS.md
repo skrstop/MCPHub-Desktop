@@ -682,7 +682,6 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 - [ ] Tool Result Compression
 - [x] ~~MCPB/DXT 文件安装~~（已于 2026-10-19 完成，见 §3.11）
 - [ ] Templates（配置模板）
-- [ ] CI/CD 打包配置
 - [ ] proxy（Proxychains4）运行时接入
 - [ ] RAG 树形虚拟滚动（量大时）
 

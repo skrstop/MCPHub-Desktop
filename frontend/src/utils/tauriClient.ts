@@ -41,9 +41,6 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   // /auth/user and /auth/me both resolve current session
   if ((p === 'auth/user' || p === 'auth/me') && m === 'GET')
     return { command: 'get_current_user', args: {} };
-  // /better-auth/user delegates to the same session lookup in Tauri
-  if (p === 'better-auth/user' && m === 'GET')
-    return { command: 'get_current_user', args: {} };
   if (p === 'auth/change-password' && m === 'POST') {
     const b = body as Record<string, unknown>;
     return {

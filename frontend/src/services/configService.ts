@@ -41,55 +41,6 @@ export interface SystemConfig {
     strategy?: 'auto' | 'json' | 'log' | 'search' | 'diff' | 'text';
   };
   nameSeparator?: string;
-  auth?: {
-    betterAuth?: {
-      enabled?: boolean;
-      basePath?: string;
-      trustedOrigins?: string[];
-      // Effective value: only true while an SSO provider is enabled
-      disablePasswordLogin?: boolean;
-      providers?: {
-        google?: {
-          enabled?: boolean;
-        };
-        github?: {
-          enabled?: boolean;
-        };
-        oidc?: {
-          enabled?: boolean;
-          providerId?: string;
-          discoveryUrl?: string;
-          scopes?: string[];
-          pkce?: boolean;
-          prompt?: string;
-        };
-      };
-    };
-  };
-}
-
-interface BetterAuthConfig {
-  enabled?: boolean;
-  baseUrl?: string;
-  basePath?: string;
-  trustedOrigins?: string[];
-  disablePasswordLogin?: boolean;
-  providers?: {
-    google?: {
-      enabled?: boolean;
-    };
-    github?: {
-      enabled?: boolean;
-    };
-    oidc?: {
-      enabled?: boolean;
-      providerId?: string;
-      discoveryUrl?: string;
-      scopes?: string[];
-      pkce?: boolean;
-      prompt?: string;
-    };
-  };
 }
 
 export interface PublicConfigResponse {
@@ -97,7 +48,6 @@ export interface PublicConfigResponse {
   data?: {
     skipAuth?: boolean;
     permissions?: any;
-    betterAuth?: BetterAuthConfig;
     dashboardName?: string;
   };
   message?: string;
@@ -117,7 +67,6 @@ export interface SystemConfigResponse {
 export const getPublicConfig = async (): Promise<{
   skipAuth: boolean;
   permissions?: any;
-  betterAuth?: BetterAuthConfig;
   dashboardName?: string;
 }> => {
   try {
@@ -126,7 +75,6 @@ export const getPublicConfig = async (): Promise<{
       return {
         skipAuth: data.data?.skipAuth === true,
         permissions: data.data?.permissions || {},
-        betterAuth: data.data?.betterAuth,
         dashboardName: data.data?.dashboardName,
       };
     }
