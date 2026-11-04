@@ -939,6 +939,8 @@
       "reembedDoneHintReload": "Terminé — les données ont été rechargées.",
       "reloadButton": "Recharger",
       "reloadButtonHint": "Recalcule les vecteurs de tous les documents et l'index Smart Routing avec le modèle actuel",
+      "openModelDir": "Ouvrir le dossier du modèle",
+      "openModelDirHint": "Ouvre le dossier du modèle actuel dans le gestionnaire de fichiers",
       "rowElapsed": "Durée",
       "modelNotReadyHint": "Modèle non téléchargé - téléchargez-le d'abord",
       "modelSelectSource": "Choisir une source de téléchargement",

@@ -16,6 +16,7 @@ import {
   modelDownloadStatus,
   cancelModelDownload,
   reindexAllRag,
+  openModelDir,
 } from '@/services/ragService';
 import { apiGet, apiPut } from '@/utils/fetchInterceptor';
 import type { RagModelInfo, RagStatus } from '@/types';
@@ -284,6 +285,11 @@ const ModelVectorSettings: React.FC = () => {
             }}
             onCancel={(size) => {
               cancelModelDownload(size).catch((e) =>
+                showToast(e instanceof Error ? e.message : String(e), 'error'),
+              );
+            }}
+            onOpenFolder={(size) => {
+              openModelDir(size).catch((e) =>
                 showToast(e instanceof Error ? e.message : String(e), 'error'),
               );
             }}

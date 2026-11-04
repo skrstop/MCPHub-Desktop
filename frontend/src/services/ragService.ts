@@ -582,3 +582,11 @@ export const cancelModelDownload = async (size: string): Promise<boolean> => {
   if (!response.success) throw new Error(response.message || 'Failed to cancel download');
   return response.data ?? false;
 };
+
+/** Open a model size's directory (downloaded copy preferred, else bundled)
+ *  in the OS file manager; returns the opened path. */
+export const openModelDir = async (size: string): Promise<string> => {
+  const response: ApiResponse<string> = await apiPost('/rag/open-model-dir', { size });
+  if (!response.success) throw new Error(response.message || 'Failed to open model directory');
+  return response.data ?? '';
+};

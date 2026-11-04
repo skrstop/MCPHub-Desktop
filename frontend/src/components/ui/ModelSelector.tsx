@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, ChevronDown, Download, Loader2 } from 'lucide-react';
+import { Check, ChevronDown, Download, FolderOpen, Loader2 } from 'lucide-react';
 import type { RagModelInfo } from '@/types';
 
 /** Format a byte count as B/KB/MB (mirrors the RagPage helper). */
@@ -47,8 +47,9 @@ const ModelSelector: React.FC<{
   onSelect: (size: string) => void;
   onDownload: (size: string, source?: string) => void;
   onCancel: (size: string) => void;
+  onOpenFolder: (size: string) => void;
   onRefresh: () => void;
-}> = ({ models, currentModel, modelDownload, disabled, onSelect, onDownload, onCancel, onRefresh }) => {
+}> = ({ models, currentModel, modelDownload, disabled, onSelect, onDownload, onCancel, onOpenFolder, onRefresh }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   // 下载源下拉：记录触发按钮的视口矩形，用 portal 渲染到 body（fixed 定位），
@@ -273,6 +274,15 @@ const ModelSelector: React.FC<{
                               <ChevronDown size={10} style={{ opacity: 0.6 }} />
                             </button>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => onOpenFolder(m.size)}
+                            className="hub-btn sm"
+                            style={{ height: 24, paddingLeft: 4, paddingRight: 4 }}
+                            title={t('pages.rag.openModelDirHint')}
+                          >
+                            <FolderOpen size={11} style={{ opacity: 0.7 }} />
+                          </button>
                         </>
                       )}
                     </div>

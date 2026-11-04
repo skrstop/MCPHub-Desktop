@@ -942,6 +942,8 @@
       "reembedDoneHintReload": "全部完成，数据已重新载入。",
       "reloadButton": "重新载入",
       "reloadButtonHint": "用当前模型重新载入全部文档向量与智能路由索引",
+      "openModelDir": "打开模型目录",
+      "openModelDirHint": "在系统文件管理器中打开当前模型所在的文件夹",
       "rowElapsed": "耗时",
       "modelNotReadyHint": "模型未下载，请先下载",
       "modelSelectSource": "选择下载源",

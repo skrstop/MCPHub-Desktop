@@ -989,6 +989,8 @@
       "reembedDoneHintReload": "Todo listo; los datos han sido recargados.",
       "reloadButton": "Recargar",
       "reloadButtonHint": "Reincrustar todos los vectores de documentos y el índice de Smart Routing con el modelo actual",
+      "openModelDir": "Abrir carpeta del modelo",
+      "openModelDirHint": "Abre la carpeta del modelo actual en el gestor de archivos",
       "rowElapsed": "Transcurrido",
       "modelNotReadyHint": "Modelo no descargado: descárgalo primero",
       "modelSelectSource": "Elegir una fuente de descarga",

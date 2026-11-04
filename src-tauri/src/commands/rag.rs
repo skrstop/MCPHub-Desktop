@@ -784,6 +784,27 @@ pub async fn rag_model_download_cancel(
     Ok(service::cancel_model_download(&size))
 }
 
+/// Open a model size's directory in the OS file manager: the downloaded copy
+/// (`<app_data>/rag/models/<family>/<size>`) when it has a model file, else
+/// the bundled size dir. Per-row "open folder" button in the model selector.
+#[tauri::command]
+pub async fn rag_open_model_dir(
+    session: State<'_, SessionState>,
+    app: AppHandle,
+    size: String,
+) -> Result<String, String> {
+    // Reveals a directory on disk — admin-gated like the other model commands.
+    crate::commands::config::require_admin(&session).await?;
+    let dir = crate::mv::models::resolve_model_paths(&app, &size)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "model directory not found".to_string())?;
+    if !dir.is_dir() {
+        return Err(format!("model directory not found: {}", dir.display()));
+    }
+    crate::services::skill_service::spawn_file_manager(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.display().to_string())
+}
+
 // ─── 文档历史版本 ─────────────────────────────────────────────────────────
 
 /// List a doc's historical versions, newest first.

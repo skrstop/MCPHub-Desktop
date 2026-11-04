@@ -942,6 +942,8 @@
       "reembedDoneHintReload": "Hoàn tất tất cả — dữ liệu đã được nạp lại.",
       "reloadButton": "Nạp lại",
       "reloadButtonHint": "Embed lại toàn bộ vector tài liệu và chỉ mục Smart Routing với mô hình hiện tại",
+      "openModelDir": "Mở thư mục mô hình",
+      "openModelDirHint": "Mở thư mục của mô hình hiện tại trong trình quản lý tệp",
       "rowElapsed": "Đã trôi",
       "modelNotReadyHint": "Mô hình chưa tải — hãy tải xuống trước",
       "modelSelectSource": "Chọn nguồn tải xuống",

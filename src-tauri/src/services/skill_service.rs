@@ -1778,13 +1778,15 @@ pub async fn open_skill_library(app: &AppHandle, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Open a path (file or directory) in the OS file manager. Shared with the
+/// mv model-dir "locate" command (commands/rag.rs).
 #[cfg(target_os = "macos")]
-fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
+pub(crate) fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
     std::process::Command::new("open").arg(p).spawn()?.wait()?;
     Ok(())
 }
 #[cfg(target_os = "windows")]
-fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
+pub(crate) fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
     // explorer returns immediately; don't wait (odd exit codes otherwise).
     let mut c = std::process::Command::new("explorer");
     c.arg(p);
@@ -1794,7 +1796,7 @@ fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
     Ok(())
 }
 #[cfg(all(unix, not(target_os = "macos")))]
-fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
+pub(crate) fn spawn_file_manager(p: &Path) -> std::io::Result<()> {
     std::process::Command::new("xdg-open").arg(p).spawn()?;
     Ok(())
 }

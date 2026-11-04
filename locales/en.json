@@ -942,6 +942,8 @@
       "reembedDoneHintReload": "All done — data has been reloaded.",
       "reloadButton": "Reload",
       "reloadButtonHint": "Re-embed all document vectors and the Smart Routing index with the current model",
+      "openModelDir": "Open Model Folder",
+      "openModelDirHint": "Open the current model's folder in the OS file manager",
       "rowElapsed": "Elapsed",
       "modelNotReadyHint": "Model not downloaded - download it first",
       "modelSelectSource": "Choose a download source",

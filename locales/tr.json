@@ -939,6 +939,8 @@
       "reembedDoneHintReload": "Tamamlandı — veriler yeniden yüklendi.",
       "reloadButton": "Yeniden yükle",
       "reloadButtonHint": "Tüm belge vektörlerini ve Smart Routing indeksini geçerli modelle yeniden hesaplar",
+      "openModelDir": "Model Klasörünü Aç",
+      "openModelDirHint": "Geçerli modelin klasörünü işletim sistemi dosya yöneticisinde açar",
       "rowElapsed": "Süre",
       "modelNotReadyHint": "Model indirilmedi - önce indirin",
       "modelSelectSource": "İndirme kaynağı seçin",

@@ -3,7 +3,7 @@
   "description": "",
   "bundle": false,
   "default": false,
-  "sort": 1,
+  "sort": 6,
   "searchQueryPrefix": "Query: {query}",
   "importDocPrefix": "Title: {title} | {content}",
   "docTitleDelimiter": "|",
@@ -15,8 +15,8 @@
   "downloadUrls": {
     "modelscope": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=granite-97m-r2.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
     "github": "https://media.githubusercontent.com/media/skrstop/MCPHub-Desktop/refs/heads/main/src-tauri/runtimes/rag/model/granite/97m-r2/model.gguf?download=true",
-    "huggingface": "https://huggingface.co/mykor/granite-embedding-97m-multilingual-r2-GGUF/blob/main/granite-embedding-97M-multilingual-r2-Q8_0.gguf",
-    "hf-mirror": "https://hf-mirror.com/mykor/granite-embedding-97m-multilingual-r2-GGUF/blob/main/granite-embedding-97M-multilingual-r2-Q8_0.gguf",
+    "huggingface": "https://huggingface.co/mykor/granite-embedding-97m-multilingual-r2-GGUF/resolve/main/granite-embedding-97M-multilingual-r2-Q8_0.gguf",
+    "hf-mirror": "https://hf-mirror.com/mykor/granite-embedding-97m-multilingual-r2-GGUF/resolve/main/granite-embedding-97M-multilingual-r2-Q8_0.gguf",
     "atomgit": "https://atomgit.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=embedding-granite_97m_r2"
   }
 }

@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// remove dirs deleted from source, which made phantom `f16`/`q4` entries
 /// appear in the dropdown). In a packaged build the source path doesn't exist
 /// on the user's machine, so we fall back to the bundled resource dir.
-fn model_root(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn model_root(app: &AppHandle) -> Result<PathBuf> {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("runtimes")
         .join("rag")
@@ -39,7 +39,7 @@ fn model_root(app: &AppHandle) -> Result<PathBuf> {
 /// Writable store for DOWNLOADED models: `<app_data>/rag/models/<family>/<size>/`.
 /// The bundled resource dir is read-only in a signed app, so models fetched
 /// via deploy.json `downloadUrls` land here. Mirrors the bundled layout.
-fn download_root(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn download_root(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir(app)?.join("models"))
 }
 

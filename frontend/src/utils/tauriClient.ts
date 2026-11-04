@@ -972,6 +972,12 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
       const b = body as { size?: string } | null;
       return { command: 'rag_model_download_cancel', args: { size: b?.size ?? '' } };
     }
+    // POST /rag/open-model-dir - open a model size's directory in the OS
+    // file manager; returns the opened path.
+    if (segs[1] === 'open-model-dir' && m === 'POST') {
+      const b = body as { size?: string } | null;
+      return { command: 'rag_open_model_dir', args: { size: b?.size ?? '' } };
+    }
     // POST /rag/docs/pick — OS multi-file picker (plain-text), returns paths
     if (segs[1] === 'docs' && segs[2] === 'pick' && m === 'POST')
       return { command: 'pick_rag_files', args: {} };
