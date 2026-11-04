@@ -20,6 +20,7 @@ pub mod list_freshness;
 pub mod oauth_upstream;
 pub mod ssrf_guard;
 pub mod oauth_provider;
+pub mod openapi_schema;
 pub mod skill_service;
 pub mod fts_service;
 pub mod mcpb_service;

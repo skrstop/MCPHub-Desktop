@@ -780,9 +780,21 @@ const SettingsPage: React.FC = () => {
     { clientId: string; name: string; redirectUris: string[]; scopes: string[]; createdAt: number; revoked: boolean }[]
   >([]);
   const [revokeClientTarget, setRevokeClientTarget] = useState<string | null>(null);
+  const [revokingClientId, setRevokingClientId] = useState<string | null>(null);
   const [showOAuthClientsList, setShowOAuthClientsList] = useState(false);
 
-  
+  // Escape closes the clients-list dialog; the listener lives on document
+  // because the overlay div never receives keyboard focus. Skipped while the
+  // revoke confirmation is stacked on top so Escape only closes the top layer.
+  useEffect(() => {
+    if (!showOAuthClientsList) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !revokeClientTarget) setShowOAuthClientsList(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [showOAuthClientsList, revokeClientTarget]);
+
   const { dashboardName, setDashboardName } = useBranding();
   const [tempDashboardName, setTempDashboardName] = useState(dashboardName);
   const [savingDashboardName, setSavingDashboardName] = useState(false);
@@ -1055,7 +1067,6 @@ const SettingsPage: React.FC = () => {
     }
   }, [oauthServerConfig]);
 
-  
   // Update local tempNameSeparator when nameSeparator changes
   useEffect(() => {
     setTempNameSeparator(nameSeparator);
@@ -1148,6 +1159,8 @@ const SettingsPage: React.FC = () => {
   };
 
   const handleRevokeOAuthClient = async (clientId: string) => {
+    if (revokingClientId) return;
+    setRevokingClientId(clientId);
     try {
       const ok = await apiDelete<{ success: boolean; data?: boolean }>(`/oauth-clients/${encodeURIComponent(clientId)}`);
       if (ok?.data) {
@@ -1158,6 +1171,8 @@ const SettingsPage: React.FC = () => {
       loadOauthClients();
     } catch {
       showToast(t('settings.oauthClientRevokeFailed'));
+    } finally {
+      setRevokingClientId(null);
     }
   };
 
@@ -1508,7 +1523,7 @@ const SettingsPage: React.FC = () => {
     });
   };
 
-    const saveNameSeparator = async () => {
+  const saveNameSeparator = async () => {
     await updateNameSeparator(tempNameSeparator);
   };
 
@@ -2396,7 +2411,7 @@ const SettingsPage: React.FC = () => {
                   )}
                   {bearerKeys.length > 0 && bearerKeyScopeFilterOptions.length > 1 && (
                     <div className="flex items-center gap-2">
-                      <label htmlFor="bearer-key-scope-filter" className="text-sm text-gray-600 whitespace-nowrap">
+                      <label className="text-sm text-gray-600 whitespace-nowrap">
                         {t('settings.bearerKeyScopeFilter') || 'Filter by scope'}
                       </label>
                       <SimpleSelect
@@ -4282,6 +4297,9 @@ const SettingsPage: React.FC = () => {
                   onClick={() => setShowOAuthClientsList(false)}
                 >
                   <div
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={t('settings.oauthClients')}
                     className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] overflow-y-auto"
                     onClick={(e) => e.stopPropagation()}
                   >
@@ -4292,9 +4310,10 @@ const SettingsPage: React.FC = () => {
                       </h3>
                       <button
                         type="button"
+                        autoFocus
                         onClick={() => setShowOAuthClientsList(false)}
                         className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                        aria-label="close"
+                        aria-label={t('common.close', 'Close')}
                       >
                         <X size={18} />
                       </button>
@@ -4305,6 +4324,7 @@ const SettingsPage: React.FC = () => {
                         t={t}
                         onRevoke={(id) => setRevokeClientTarget(id)}
                         disabled={loading}
+                        revokingClientId={revokingClientId}
                       />
                     </div>
                   </div>
@@ -4904,9 +4924,26 @@ const OAuthClientsPager: React.FC<{
   t: ReturnType<typeof useTranslation>['t'];
   onRevoke: (clientId: string) => void;
   disabled: boolean;
-}> = ({ clients, t, onRevoke, disabled }) => {
+  revokingClientId: string | null;
+}> = ({ clients, t, onRevoke, disabled, revokingClientId }) => {
   const [page, setPage] = useState(0);
   const [viewTarget, setViewTarget] = useState<OAuthClientRow | null>(null);
+
+  // Escape closes the detail dialog (document-level: the overlay never has focus).
+  // stopImmediatePropagation keeps the clients-list dialog's own document-level
+  // Escape handler from also firing (child effects register first, so this
+  // listener runs first) — one Escape closes only the topmost dialog.
+  useEffect(() => {
+    if (!viewTarget) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        setViewTarget(null);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [viewTarget]);
   const totalPages = Math.max(1, Math.ceil(clients.length / OAUTH_CLIENTS_PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
   const start = safePage * OAUTH_CLIENTS_PAGE_SIZE;
@@ -4940,7 +4977,7 @@ const OAuthClientsPager: React.FC<{
               {!c.revoked && (
                 <button
                   className="hub-btn danger shrink-0"
-                  disabled={disabled}
+                  disabled={disabled || revokingClientId === c.clientId}
                   onClick={() => onRevoke(c.clientId)}
                 >
                   {tr('settings.oauthClientRevoke')}
@@ -4984,6 +5021,9 @@ const OAuthClientsPager: React.FC<{
           onClick={() => setViewTarget(null)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={tr('settings.oauthClientDetail')}
             className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[80vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
@@ -4993,9 +5033,10 @@ const OAuthClientsPager: React.FC<{
               </h3>
               <button
                 type="button"
+                autoFocus
                 onClick={() => setViewTarget(null)}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                aria-label="close"
+                aria-label={t('common.close', 'Close')}
               >
                 <X size={18} />
               </button>

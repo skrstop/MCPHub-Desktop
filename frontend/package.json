@@ -1,13 +1,14 @@
 {
   "name": "mcphub-desktop-frontend",
-  "version": "26.1103.1",
+  "version": "26.1104.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -5,8 +5,6 @@ import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useBranding } from '@/contexts/BrandingContext';
 import { getToken } from '../services/authService';
-import { getPublicConfig } from '../services/configService';
-import { getBasePath } from '../utils/runtime';
 import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import LanguageSwitch from '@/components/ui/LanguageSwitch';
 import GitHubIcon from '@/components/icons/GitHubIcon';
@@ -277,8 +275,8 @@ const LoginPage: React.FC = () => {
             </form>
 
 
-                <p
-              className="text-center mt-3"
+              <p
+                className="text-center mt-3"
                 style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}
               >
                 {t('auth.defaultPasswordHint', '默认密码: admin')}

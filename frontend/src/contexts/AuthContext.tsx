@@ -27,8 +27,7 @@ const AuthContext = createContext<{
    *  `skipServerUpdate`: skip the `PUT /system-config { routing:{skipAuth:false} }`
    *  call — use when the caller has already persisted that change (e.g. the
    *  Settings page toggle writes via `updateRoutingConfig` first). Either way
-   *  local auth state is cleared (without a Better Auth `signOut()` HTTP call,
-   *  which has no backing server in the desktop app). */
+   *  local auth state is cleared. */
   exitGuestMode: (opts?: { skipServerUpdate?: boolean }) => Promise<void>;
   reloadAuth: () => Promise<void>;
 }>({
@@ -198,10 +197,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   // Exit guest mode: disable `skipAuth` on the server so the dashboard
-  // requires a real login again, then clear local auth state. In guest mode
-  // there's no Better Auth HTTP session (and no backing server in the desktop
-  // app), so we skip the `signOut()` call that would otherwise hit
-  // `/api/auth/better/sign-out` and fail with ECONNREFUSED.
+  // requires a real login again, then clear local auth state.
   //
   // `skipServerUpdate`: skip the PUT /system-config call (caller already did it).
   const exitGuestMode = useCallback(

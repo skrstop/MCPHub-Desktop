@@ -145,17 +145,16 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
     const el = dropdownRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    // Flip above when there is no room below but there is above.
-    const up = window.innerHeight - r.bottom < 160 && r.top > window.innerHeight - r.bottom;
-    // When opening upward, anchor the menu's BOTTOM to the trigger's top
-    // using its measured height (a short menu must hug the trigger — using
-    // the max height left a large gap between menu and trigger).
     const h = menuRef.current?.offsetHeight ?? 0;
-    setMenuRect({
-      top: up ? Math.max(8, r.top - h - 4) : r.bottom + 4,
-      left: r.left,
-      width: r.width,
-    });
+    const below = window.innerHeight - r.bottom;
+    // Flip when the menu doesn't fit below but fits better above (same
+    // formula as SimpleSelect — a fixed threshold left tall menus clipped
+    // at the viewport bottom).
+    const up = below < Math.min(h + 4, 240) && r.top > below;
+    let top = up ? r.top - h - 4 : r.bottom + 4;
+    // Clamp inside the viewport so a tall menu never spills off-screen.
+    top = Math.max(8, Math.min(top, window.innerHeight - h - 8));
+    setMenuRect({ top, left: r.left, width: r.width });
   };
 
   const handleToggleDropdown = () => {
@@ -167,9 +166,9 @@ export const MultiSelect: React.FC<MultiSelectProps> = ({
     }
   };
 
-  // Keep the portaled menu anchored: reposition on scroll/resize. Scroll
-  // INSIDE the options list must not trigger this (it bubbles from listRef,
-  // not window) — window-level scroll only.
+  // Reposition on window scroll/resize. (The capture-phase listener also
+  // receives scroll events from the portaled menu's own list; repositioning
+  // on those is harmless — coordinates don't change — just redundant renders.)
   useEffect(() => {
     if (!isOpen) return;
     const onReposition = () => syncMenuRect();

@@ -56,17 +56,13 @@ const ModelSelector: React.FC<{
   const [sourceFor, setSourceFor] = useState<{ size: string; rect: DOMRect } | null>(null);
   const sourceMenuRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Per-model selected download source (size -> source name). Picking a source
+  // does NOT start the download; the 下载/重新下载 button uses this selection
+  // (falling back to the first/default source).
+  const [selectedSources, setSelectedSources] = useState<Record<string, string>>({});
 
   const openSourcePicker = (m: RagModelInfo, btn: HTMLElement) => {
     setSourceFor({ size: m.size, rect: btn.getBoundingClientRect() });
-  };
-  // 多源 → 弹出源选择；单源 → 直接下载。
-  const handleDownloadClick = (m: RagModelInfo, btn: HTMLElement) => {
-    if ((m.downloadSources?.length ?? 0) > 1) {
-      setSourceFor((v) => (v?.size === m.size ? null : { size: m.size, rect: btn.getBoundingClientRect() }));
-    } else {
-      onDownload(m.size);
-    }
   };
 
   // Close the panel on click-outside; the source dropdown follows the panel.
@@ -76,7 +72,16 @@ const ModelSelector: React.FC<{
       return;
     }
     const onDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      // The source-picker menu is portal'd to body (outside wrapRef); clicks
+      // inside it must not close the panel, or the menu unmounts on mousedown
+      // and the item's click event never fires.
+      if (
+        wrapRef.current &&
+        !wrapRef.current.contains(t) &&
+        !(sourceMenuRef.current && sourceMenuRef.current.contains(t))
+      )
+        setOpen(false);
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
@@ -231,20 +236,45 @@ const ModelSelector: React.FC<{
                       >
                         {isCurrent ? t('pages.rag.modelCurrent') : t('pages.rag.modelUse')}
                       </button>
-                      <button
-                        type="button"
-                        disabled={downloading}
-                        onClick={(e) => handleDownloadClick(m, e.currentTarget)}
-                        className="hub-btn sm"
-                        style={{ height: 24, fontSize: 11 }}
-                        title={t('settings.mvRedownloadHint')}
-                      >
-                        {downloading ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
-                        {t('settings.mvRedownload')}
-                        {(m.downloadSources?.length ?? 0) > 1 && (
-                          <ChevronDown size={10} style={{ opacity: 0.6, marginLeft: 2 }} />
-                        )}
-                      </button>
+                      {downloading ? (
+                        <button
+                          type="button"
+                          onClick={() => onCancel(m.size)}
+                          className="hub-btn sm"
+                          style={{ height: 24, fontSize: 11 }}
+                          title={t('settings.mvDownloadCancel')}
+                        >
+                          {t('settings.mvDownloadCancel')}
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onDownload(m.size, selectedSources[m.size])}
+                            className="hub-btn sm"
+                            style={{ height: 24, fontSize: 11 }}
+                            title={
+                              selectedSources[m.size]
+                                ? `${t('settings.mvRedownloadHint')} (${selectedSources[m.size]})`
+                                : t('settings.mvRedownloadHint')
+                            }
+                          >
+                            <Download size={11} />
+                            {t('settings.mvRedownload')}
+                          </button>
+                          {(m.downloadSources?.length ?? 0) > 1 && (
+                            <button
+                              type="button"
+                              onClick={(e) => openSourcePicker(m, e.currentTarget)}
+                              className="hub-btn sm"
+                              style={{ height: 24, paddingLeft: 4, paddingRight: 4 }}
+                              title={t('pages.rag.modelSelectSource')}
+                            >
+                              <ChevronDown size={10} style={{ opacity: 0.6 }} />
+                            </button>
+                          )}
+                        </>
+                      )}
                     </div>
                   ) : m.downloadable ? (
                     <div className="flex items-center gap-1.5 relative" style={{ flexShrink: 0 }}>
@@ -269,19 +299,33 @@ const ModelSelector: React.FC<{
                           {t('settings.mvDownloadCancel')}
                         </button>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={(e) => handleDownloadClick(m, e.currentTarget)}
-                          className="hub-btn sm"
-                          style={{ height: 24, fontSize: 11 }}
-                          title={t('pages.rag.modelDownloadHint', { name: m.label })}
-                        >
-                          <Download size={11} />
-                          {t('pages.rag.modelDownload')}
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onDownload(m.size, selectedSources[m.size])}
+                            className="hub-btn sm"
+                            style={{ height: 24, fontSize: 11 }}
+                            title={
+                              selectedSources[m.size]
+                                ? t('pages.rag.modelDownloadHint', { name: m.label }) + ` (${selectedSources[m.size]})`
+                                : t('pages.rag.modelDownloadHint', { name: m.label })
+                            }
+                          >
+                            <Download size={11} />
+                            {t('pages.rag.modelDownload')}
+                          </button>
                           {(m.downloadSources?.length ?? 0) > 1 && (
-                            <ChevronDown size={10} style={{ opacity: 0.6, marginLeft: 2 }} />
+                            <button
+                              type="button"
+                              onClick={(e) => openSourcePicker(m, e.currentTarget)}
+                              className="hub-btn sm"
+                              style={{ height: 24, paddingLeft: 4, paddingRight: 4 }}
+                              title={t('pages.rag.modelSelectSource')}
+                            >
+                              <ChevronDown size={10} style={{ opacity: 0.6 }} />
+                            </button>
                           )}
-                        </button>
+                        </>
                       )}
                     </div>
                   ) : null}
@@ -347,32 +391,40 @@ const ModelSelector: React.FC<{
             <div className="px-2.5 pt-1.5 pb-1" style={{ fontSize: 10, color: 'var(--hub-ink-3)' }}>
               {t('pages.rag.modelSelectSource')}
             </div>
-            {(models.find((m) => m.size === sourceFor.size)?.downloadSources ?? []).map((s, i) => (
-              <button
-                key={s}
-                type="button"
-                className="w-full text-left px-2.5 py-1.5 flex items-center gap-1.5 hover:opacity-80"
-                style={{
-                  fontSize: 11,
-                  color: 'var(--hub-ink)',
-                  borderTop: '1px solid var(--hub-line)',
-                }}
-                onClick={() => {
-                  setSourceFor(null);
-                  onDownload(sourceFor.size, s);
-                }}
-              >
-                <span className="truncate flex-1">{s}</span>
-                {i === 0 && (
-                  <span
-                    className="rounded px-1"
-                    style={{ fontSize: 9, background: 'var(--hub-line)', color: 'var(--hub-ink-3)', flexShrink: 0 }}
-                  >
-                    {t('pages.rag.modelDefaultSource')}
-                  </span>
-                )}
-              </button>
-            ))}
+            {(models.find((m) => m.size === sourceFor.size)?.downloadSources ?? []).map((s, i) => {
+              const selected = selectedSources[sourceFor.size] === s;
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  className="w-full text-left px-2.5 py-1.5 flex items-center gap-1.5 hover:opacity-80"
+                  style={{
+                    fontSize: 11,
+                    color: selected ? 'var(--hub-primary, #2563eb)' : 'var(--hub-ink)',
+                    fontWeight: selected ? 600 : 400,
+                    borderTop: '1px solid var(--hub-line)',
+                  }}
+                  title={t('pages.rag.modelSelectSource')}
+                  onClick={() => {
+                    // Selection only — the download starts from the
+                    // 下载/重新下载 button.
+                    setSelectedSources((prev) => ({ ...prev, [sourceFor.size]: s }));
+                    setSourceFor(null);
+                  }}
+                >
+                  {selected && <Check size={11} style={{ flexShrink: 0 }} />}
+                  <span className="truncate flex-1">{s}</span>
+                  {i === 0 && (
+                    <span
+                      className="rounded px-1"
+                      style={{ fontSize: 9, background: 'var(--hub-line)', color: 'var(--hub-ink-3)', flexShrink: 0 }}
+                    >
+                      {t('pages.rag.modelDefaultSource')}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>,
           document.body,
         )}

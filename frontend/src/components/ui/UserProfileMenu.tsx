@@ -43,9 +43,8 @@ const UserProfileMenu: React.FC<UserProfileMenuProps> = ({ collapsed }) => {
 
   const handleLogoutClick = () => {
     if (isGuest) {
-      // Guest mode exit: disable skipAuth server-side, skip the Better Auth
-      // sign-out HTTP call (no backing server in the desktop app → would
-      // fail with ECONNREFUSED). Navigate to /login after state clears.
+      // Guest mode exit: disable skipAuth server-side, then clear local
+      // auth state. Navigate to /login after state clears.
       exitGuestMode().finally(() => navigate('/login'));
       return;
     }

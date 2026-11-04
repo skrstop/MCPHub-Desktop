@@ -2104,7 +2104,10 @@ fn tool_schema_shape(tool: &Tool) -> (Option<Vec<serde_json::Value>>, Option<ser
         matches!(
             prop.get("type").and_then(|t| t.as_str()),
             Some("object") | Some("array") | Some("string")
-        )
+        ) || prop.get("type").map(|t| t.is_array()).unwrap_or(false)
+            || ["anyOf", "oneOf", "allOf", "$ref"]
+                .iter()
+                .any(|k| prop.get(k).is_some())
     });
     if !has_complex && props_obj.len() <= 10 {
         let mut parameters: Vec<serde_json::Value> = Vec::new();
@@ -2133,9 +2136,26 @@ fn tool_schema_shape(tool: &Tool) -> (Option<Vec<serde_json::Value>>, Option<ser
         }
         (Some(parameters), None)
     } else {
+        // OpenAPI 3.0 documents cannot carry JSON Schema unions (`type` lists,
+        // `anyOf`/`oneOf` with null members, `const`, local `$ref`s) — convert
+        // each property schema first (origin #1447).
+        let definitions = crate::services::openapi_schema::collect_definitions(schema);
+        let converted_props: serde_json::Map<String, serde_json::Value> = properties
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            crate::services::openapi_schema::to_openapi_schema(v, &definitions),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut body_schema = serde_json::Map::new();
         body_schema.insert("type".to_string(), json!("object"));
-        body_schema.insert("properties".to_string(), properties.clone());
+        body_schema.insert("properties".to_string(), serde_json::Value::Object(converted_props));
         if !required.is_empty() {
             body_schema.insert("required".to_string(), json!(required));
         }
@@ -2622,7 +2642,9 @@ fn convert_numeric_param(value: &str, prop_type: &str) -> serde_json::Value {
 }
 
 /// Coerce string query-parameter values to the types declared in the tool's
-/// inputSchema (origin convertParametersToTypes equivalent).
+/// inputSchema (origin convertParametersToTypes equivalent). Nullable unions
+/// (`type` lists / `anyOf` with a single non-null member) resolve to their
+/// effective type first (origin #1447 resolveEffectiveSchema).
 fn coerce_query_args(query: std::collections::HashMap<String, String>, tool: &Tool) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     let props = tool
@@ -2630,18 +2652,53 @@ fn coerce_query_args(query: std::collections::HashMap<String, String>, tool: &To
         .get("properties")
         .and_then(|p| p.as_object());
     for (k, v) in query {
-        let ty = props
+        let effective = props
             .and_then(|p| p.get(&k))
+            .map(crate::services::openapi_schema::resolve_effective_schema);
+        let ty = effective
+            .as_ref()
             .and_then(|p| p.get("type"))
-            .and_then(|t| t.as_str());
-        let value = match ty {
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        let value = match ty.as_deref() {
             Some("number") => convert_numeric_param(&v, "number"),
             Some("integer") => convert_numeric_param(&v, "integer"),
+            // Origin: `value.toLowerCase() === 'true' || value === '1'`, anything else is false.
             Some("boolean") => match v.to_lowercase().as_str() {
-                "true" => json!(true),
-                "false" => json!(false),
-                _ => json!(v),
+                "true" | "1" => json!(true),
+                _ => json!(false),
             },
+            Some("array") => {
+                // Comma-separated strings become arrays; a lone scalar is wrapped
+                // (origin array case). Empty strings stay as-is.
+                let items_def = effective
+                    .as_ref()
+                    .and_then(|p| p.get("items"))
+                    .map(crate::services::openapi_schema::resolve_effective_schema);
+                let items_ty = items_def
+                    .as_ref()
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string);
+                let convert_item = |s: &str| match items_ty.as_deref() {
+                    Some("number") => convert_numeric_param(s, "number"),
+                    Some("integer") => convert_numeric_param(s, "integer"),
+                    // Origin: `item.toLowerCase() === 'true' || item === '1'`, else false.
+                    Some("boolean") => match s.to_lowercase().as_str() {
+                        "true" | "1" => json!(true),
+                        _ => json!(false),
+                    },
+                    _ => json!(s),
+                };
+                if v.contains(',') {
+                    // Origin trims each comma-separated item (`'1, 2, 3'` → [1,2,3]).
+                    serde_json::Value::Array(v.split(',').map(|s| convert_item(s.trim())).collect())
+                } else if v.is_empty() {
+                    json!(v)
+                } else {
+                    serde_json::Value::Array(vec![convert_item(&v)])
+                }
+            }
             _ => json!(v),
         };
         obj.insert(k, value);

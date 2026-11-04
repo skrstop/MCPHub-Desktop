@@ -84,6 +84,7 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track last fetch time to implement smart refresh
   const lastFetchTimeRef = useRef<number>(0);
+  const packageRefreshUntilRef = useRef(0);
   // Minimum interval between manual refreshes (5 seconds in dev, 3 seconds in prod)
   const MIN_REFRESH_INTERVAL = import.meta.env.DEV ? 5000 : 3000;
 
@@ -136,7 +137,7 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     let active = true;
     const controller = new AbortController();
-    const policy = createServerPollingPolicy();
+    const policy = createServerPollingPolicy(Date.now, packageRefreshUntilRef.current);
     setFetchAttempts(0);
 
     const fetchServers = async () => {
@@ -331,7 +332,8 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           return false;
         }
 
-        // Refresh server list after successful reload
+        // Keep polling while the background connection and version checks finish.
+        packageRefreshUntilRef.current = Date.now() + 60000;
         triggerRefresh();
         return true;
       } catch (err) {
@@ -355,7 +357,8 @@ export const ServerProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           return false;
         }
 
-        // Refresh server list after successful reinstall
+        // Keep polling while the background connection and version checks finish.
+        packageRefreshUntilRef.current = Date.now() + 60000;
         triggerRefresh();
         return true;
       } catch (err) {

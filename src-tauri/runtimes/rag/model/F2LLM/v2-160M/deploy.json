@@ -15,6 +15,8 @@
   "downloadUrls": {
     "modelscope": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=F2LLM-v2-160M.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
     "github": "https://media.githubusercontent.com/media/skrstop/MCPHub-Desktop/refs/heads/main/src-tauri/runtimes/rag/model/F2LLM/v2-160M/model.gguf?download=true",
+    "huggingface": "https://huggingface.co/cstr/f2llm-v2-160m-GGUF/blob/main/f2llm-v2-160m-q8_0.gguf",
+    "hf-mirror": "https://hf-mirror.com/cstr/f2llm-v2-160m-GGUF/blob/main/f2llm-v2-160m-q8_0.gguf",
     "atomgit": "https://atomgit.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=embedding-F2LLM_v2_160M"
   }
 }

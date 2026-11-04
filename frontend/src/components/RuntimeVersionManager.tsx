@@ -255,7 +255,7 @@ const RuntimeVersionManager: React.FC<Props> = ({ runtime }) => {
             value={selectedVersion}
             onChange={handleSelectChange}
             disabled={actionLoading}
-            ariaLabel={t('settings.nodeVersion', 'Node.js Version')}
+            ariaLabel={t(runtime === 'node' ? 'settings.nodeVersion' : 'settings.pythonVersion', runtime === 'node' ? 'Node.js Version' : 'Python Version')}
             options={versions.map((v) => {
               let label: string;
               if (v.version === 'system') {

@@ -25,6 +25,7 @@ export const SimpleSelect: React.FC<SimpleSelectProps> = ({
   className = '',
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState(-1);
   const [menuRect, setMenuRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -59,6 +60,16 @@ export const SimpleSelect: React.FC<SimpleSelectProps> = ({
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [isOpen]);
 
+  // Keep the keyboard-highlighted option visible in the scrolling menu.
+  useEffect(() => {
+    if (!isOpen || highlighted < 0) return;
+    const menu = menuRef.current;
+    const el = menu?.querySelectorAll('[role="option"]')[highlighted] as
+      | HTMLElement
+      | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [isOpen, highlighted, options]);
+
   useLayoutEffect(() => {
     if (!isOpen) return;
     syncMenuRect();
@@ -92,7 +103,44 @@ export const SimpleSelect: React.FC<SimpleSelectProps> = ({
         onClick={() => {
           if (disabled) return;
           if (!isOpen) syncMenuRect();
+          // Reopening highlights the current value (combobox convention);
+          // a stale highlight from a previous session must not survive.
+          setHighlighted(options.findIndex((o) => o.value === value));
           setIsOpen(!isOpen);
+        }}
+        onKeyDown={(e) => {
+          if (disabled) return;
+          if (!isOpen) {
+            if (e.key === 'Enter' || e.key === 'ArrowDown') {
+              e.preventDefault();
+              syncMenuRect();
+              setHighlighted(options.findIndex((o) => o.value === value));
+              setIsOpen(true);
+            }
+            return;
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            setIsOpen(false);
+          } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setHighlighted((h) => Math.min(h + 1, options.length - 1));
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setHighlighted((h) => Math.max(h - 1, 0));
+          } else if (e.key === 'Enter') {
+            e.preventDefault();
+            // No highlight yet: keep the current value (just close) instead of
+            // silently selecting the first option.
+            const opt =
+              highlighted >= 0
+                ? options[highlighted]
+                : options.find((o) => o.value === value);
+            if (opt) {
+              onChange(opt.value);
+            }
+            setIsOpen(false);
+          }
         }}
         className={`hub-input flex items-center justify-between w-full text-left ${
           disabled ? 'opacity-50 cursor-not-allowed' : ''
@@ -112,7 +160,7 @@ export const SimpleSelect: React.FC<SimpleSelectProps> = ({
         </svg>
       </button>
 
-      {isOpen && menuRect && createPortal(
+      {isOpen && !disabled && menuRect && createPortal(
         <div
           ref={menuRef}
           style={{
@@ -123,14 +171,22 @@ export const SimpleSelect: React.FC<SimpleSelectProps> = ({
             zIndex: 1000,
           }}
           className="rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg overflow-hidden max-h-72 overflow-y-auto"
+          role="listbox"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              setIsOpen(false);
+            }
+          }}
         >
-          {options.map((option) => {
+          {options.map((option, idx) => {
             const isSelected = option.value === value;
             return (
               <div
                 key={option.value}
                 role="option"
                 aria-selected={isSelected}
+                onMouseEnter={() => setHighlighted(idx)}
                 onClick={() => {
                   if (disabled) return;
                   onChange(option.value);
@@ -139,7 +195,9 @@ export const SimpleSelect: React.FC<SimpleSelectProps> = ({
                 className={`px-3 py-1.5 text-sm cursor-pointer truncate ${
                   isSelected
                     ? 'bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-medium'
-                    : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100'
+                    : idx === highlighted
+                      ? 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100'
+                      : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-gray-100'
                 }`}
               >
                 {option.label}

@@ -216,18 +216,6 @@ const getDefaultOAuthServerConfig = (): OAuthServerConfig => ({
   },
 });
 
-const normalizeStringArray = (value: unknown, fallback: string[] = []): string[] => {
-  const normalized = Array.isArray(value)
-    ? value
-        .filter((item): item is string => typeof item === 'string')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0)
-    : [];
-
-  return normalized.length > 0 ? normalized : [...fallback];
-};
-
-
 const SettingsContext = createContext<SettingsContextValue | undefined>(undefined);
 
 export const useSettings = () => {
@@ -948,8 +936,6 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({ children }) 
     }
   };
 
-  // Batch update Better Auth configuration
-  
   // Update name separator
   const updateNameSeparator = async (value: string) => {
     setLoading(true);
