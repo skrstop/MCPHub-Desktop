@@ -3,7 +3,7 @@
   "description": "",
   "bundle": false,
   "default": false,
-  "sort": 6,
+  "sort": 7,
   "searchQueryPrefix": "Query: {query}",
   "importDocPrefix": "Title: {title} | {content}",
   "docTitleDelimiter": "|",

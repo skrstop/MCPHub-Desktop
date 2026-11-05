@@ -445,12 +445,17 @@ jobs:
           echo "   'dmg' alone does NOT generate .app.tar.gz / .app.tar.gz.sig"
           echo "   Windows 'nsis' target generates .nsis.zip / .nsis.zip.sig"
           echo ""
-          echo "[START] npm run tauri build..."
+          echo "[START] npm run build (gen-model-resources + tauri build)..."
           echo "========================================="
-          npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          # Single entry point: package.json "build" runs gen-model-resources.mjs
+          # (trims non-bundle RAG models to deploy.json only) then tauri build
+          # with --config src-tauri/tauri.models.json. Extra args after -- are
+          # appended to the tauri command. NEVER call `tauri build` directly —
+          # skipping the generator bundles the full runtimes/rag dir (all .gguf).
+          npm run build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
           EXIT_CODE=$?
           echo "========================================="
-          echo "[END] npm run tauri build"
+          echo "[END] npm run build"
           echo "Exit code: $EXIT_CODE"
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ Tauri build FAILED with exit code $EXIT_CODE"

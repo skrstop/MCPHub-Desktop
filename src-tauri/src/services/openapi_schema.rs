@@ -175,7 +175,7 @@ fn normalize_nullability(node: &Value) -> Value {
             result.remove("type");
             let mut members: Vec<Value> = types
                 .iter()
-                .map(|t| json!({ "type": t.clone() }))
+                .map(|t| json!({ "type": (**t).clone() }))
                 .collect();
             if accepts_null {
                 members[0] = mark_nullable(&members[0], false);

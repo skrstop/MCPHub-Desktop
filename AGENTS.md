@@ -115,7 +115,7 @@ npm run build                     # 生产构建
 ### 3.2 自动更新（Tauri updater）
 
 - **签名密钥直接明文存仓库**（开源项目，不用 GitHub Secrets）：`src-tauri/updater/mcphub.key`（base64 编码）+ `.key.pub`；公钥复制到 `tauri.conf.json` 的 `plugins.updater.pubkey`。CI（release.yml）用 Python 解码 base64 并 **`.strip()` 尾部空白**后设 `TAURI_SIGNING_PRIVATE_KEY`；Windows runner 需 `PYTHONIOENCODING: utf-8`。
-- **bundles 配置（MUST GET RIGHT）**：macOS 必须 `app,dmg`（仅 dmg 不生成 updater 产物）；Windows 必须含 `nsis`；Linux `deb,rpm` 不支持自动更新。
+- **bundles 配置（MUST GET RIGHT）**：macOS 必须 `app,dmg`（仅 dmg 不生成 updater 产物）；Windows 必须含 `nsis` + `msi`（msi 依赖版本号中间位 ≤255——版本号方案必须用月份作中间位，见 §4.4）；Linux `deb,rpm` 不支持自动更新。
 - **平台策略**：macOS/Windows 走 Tauri updater（`canAutoUpdate=true`）；Linux 回退 GitHub `latest.json` 版本号提示手动下载。
 - **启动更新检查**：根级 `UpdateCheckContext`（不依赖登录态），检测到新版本自动弹「关于」+ 红点；已移除「忽略此版本」；effect 故意不加 run-once 守卫（StrictMode 相关历史坑，StrictMode 现已禁用）。
 - **安装进度可视化**（AboutDialog）：`DownloadEvent` 流驱动 `installPhase`（downloading/installing/done/error）+ 下载百分比/速度（EMA）；安装阶段无百分比事件，用 indeterminate spinner。
@@ -169,7 +169,7 @@ npm run build                     # 生产构建
 - **downloadUrls**：deploy.json 对象 `{"源名":"地址"}`（serde_json Map = 字母序，首项为默认源，失败按序回退）；旧 `download.url` 机制已删除。
 - **后台下载**：`mv::download_model(app, size, source)` spawn 后台任务立即返回（`source` 可选指定下载源名，缺省/未知=首项）；写 `model.gguf.downloadtemp`，成功后 rename `model.gguf`（防中断损坏）；进度存进程内存 `DOWNLOAD_STATE`（`rag_model_download_status` 查询，done 快照 10s 后过期）+ `rag://model-download` 事件；**取消 = 协作标志 + JoinHandle::abort 双保险**（连接停滞无 chunk 时也能立即停），abort 后由 cancel 线程清理临时文件并发 cancelled 事件。命令均 require_admin；tauriClient 映射 `/rag/download-status|download-cancel`。
 - **下载源选择**：`RagModelInfo.downloadSources`（源名列表，默认源在前）暴露给前端；多源时点「下载」展开行内源选择弹层（默认源打标），单源直接下载。
-- **bundle 打包**：deploy.json `bundle: true`（legacy `default: true` 兼容回退）才随安装包分发——**无 staging 目录**：`scripts/gen-model-resources.mjs` 扫描 deploy.json 生成 `src-tauri/tauri.models.json`（Tauri `--config` 合并片段，替换 `bundle.resources` 为「基础资源 + 全量 `deploy.json` glob + bundle 尺寸 `**` glob」），`npm run build` = `gen-model-resources.mjs && tauri build --config src-tauri/tauri.models.json`；非 bundle 尺寸只带 deploy.json（下拉可见、可下载；GGUF 自带 tokenizer 元数据，下载目录无需 aux 文件）。生成物已 gitignore。
+- **bundle 打包**：deploy.json `bundle: true`（legacy `default: true` 兼容回退）才随安装包分发——**无 staging 目录**：`scripts/gen-model-resources.mjs` 扫描 deploy.json 生成 `src-tauri/tauri.models.json`（Tauri `--config` 合并片段，替换 `bundle.resources` 为「基础资源 + 全量 `deploy.json` glob + bundle 尺寸 `**` glob」），`npm run build` = `gen-model-resources.mjs && tauri build --config src-tauri/tauri.models.json`；非 bundle 尺寸只带 deploy.json（下拉可见、可下载；GGUF 自带 tokenizer 元数据，下载目录无需 aux 文件）。生成物已 gitignore。**CI 必须走 `npm run build` 唯一入口**（release.yml 用 `npm run build -- --target … --bundles …`，npm 把参数透传给脚本末尾的 tauri build；2026-11-05 修复：CI 曾直接 `npm run tauri build` 绕过裁剪，导致非 bundle 模型 gguf 全量打进安装包）。注意该步骤**不能**挪进 `beforeBuildCommand`——`--config` 在 tauri CLI 启动时读取，早于 before 钩子执行。
 - **模型默认参数**：deploy.json `defaultScore`/`defaultWeightVector`/`defaultWeightKeyword`（默认 0/0.5/0.5）；`select_model` 切换模型时丢弃用户调参、重置为新模型默认值（`mv::model_defaults`）。
 - **model_root 资源回退**：打包环境回退 `runtimes/rag/model` 资源目录（bundle 裁剪由 tauri.models.json 的 resources glob 控制，目录结构不变）。
 
@@ -204,6 +204,7 @@ npm run build                     # 生产构建
 | 可提取格式双文件语义（md-仅缓存/直连源文件） | `raw_content_path_for`/`open_source_path_for`（service.rs） | PDF/Office/图片**不再强制 copy**——method 跟随用户选择；copy 落盘原始拷贝 `{id}{raw_ext}` + 提取缓存 `{id}.md`（仅分片/展示）；symlink 只有缓存。更新/重提取读内容源（symlink→original_path；copy→外部 original 优先、丢失回退归档拷贝）；「查看源文件」copy 打开归档拷贝（自包含）；`content_path_for` 可提取文档 {id}.md 缓存优先（否则解析到二进制）；reindex_all/MCP update_doc 的 symlink 可提取分支读缓存（外部 original 是二进制会被 text sniff 跳过/清空向量）；delete_doc symlink 也删 {id}.md 缓存；`raw_ext` 记录归档扩展防改名孤儿化 |
 | 自动定时更新 + 文档/分片分页 | RagSettings{autoUpdateEnabled, interval(≥60s), docLoadChunkKb} | 自动 tick 与手动批量共用 `BATCH_UPDATE_RUNNING` CAS；空转放行条件含 added/removed；空转但有 lost 时发 `rag://docs-invalidated` 轻量刷新 |
 | PDF/Office 提取 + 图片 OCR | `rag/extract/{pdf,office,image,text,ocr}.rs` | pdf_oxide + office_oxide；OCR 自研三平台（macOS Vision / Windows WinRT / Linux tesseract chi_sim+eng）；提取文档强制 `method=copy`；扫描件无文字层报 `EXTRACT_FAILED` |
+| 树形虚拟滚动（2026-11-04） | `components/ui/RagDocTree.tsx`、`utils/ragTreeRows.ts`（+test） | 摊平纯函数层 `buildFlatRows`（可见行 = source/dir/doc/hint，稳定 key + 累计缩进 + 分类型估算行高）；组件内窗口虚拟化：绝对定位 + 前缀和偏移 + 二分找视口区间（overscan 6），行高按 key 实测缓存（layout effect 渲染后量一次，偏差>0.5px 才重算，收敛即停 + flatRows 变化时清理死 key）；滚动容器取最近可滚动祖先（Content 的 main.overflow-auto），document 捕获阶段监听 scroll（scroll 不冒泡）。行 JSX 与原实现逐字对齐（目录内直属文档在前/子目录在后、数据源分隔线由源块末行负责画）。**排序语义有单测钉死**（ragTreeRows.test.ts 10 用例） |
 | 数据源统一 + Git 数据源 + 树形视图 | `rag/git.rs`（gix 0.73）、`RagDocTree.tsx` | 支持 https/http/SSH（含密码 askpass wrapper、BatchMode、setsid、stderr 过滤 wrapper）；凭证存 `<app_data>/rag/git-credentials.json` 0600（弃用 keyring——会弹授权框打断无人值守流程）；`canonicalize_url`（`.no_proxy()`，处理 http→https 重定向剥凭证）；数据源级同步（新增导入/删除移除，双重条件防误删）；删除后引用归零自动清 clone+凭证 |
 | Git 失效提示 | `GitSourceError{url,branch,auth,message}` | auth=true → 引导重输账密；进度弹框仅在确有失败时显示 ⚠ |
 | 文件排除 | `config_json.rag.excludedPaths`（目录条目前缀匹配） | 排除 ⇄ 勾选互斥；不阻断手动上传更新 |
@@ -597,8 +598,9 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 4.4 最近同步基线
 
-> **版本号规则（2026-10-27 起，2026-10-30 勘误年份段）**：`2位年.月日.迭代号`（如 `26.1030.1`，**26 = 2026 年**——2026-10-29~30 曾误用 29 段，已全部归位 26），**不再跟随 origin tag**。
-> - **迭代号**：同一天内每次发布/同步递增（7 → 8 → …）；跨天则年.月日更新、迭代号重置为 1。
+> **版本号规则（2026-11-05 起）**：`2位年.月份.迭代号`（如 `26.11.1`，**26 = 2026 年**，中间位=月份 1-12），**不再跟随 origin tag**。
+> - **迭代号**：同月内每次发布/同步递增；跨月则年.月份更新、迭代号重置为 1。
+> - **WiX MSI 兼容**：中间位必须 ≤255——旧「月日」方案（如 26.1104.1，minor=1104）会导致 `app version minor number cannot be greater than 255` 打包失败，2026-11-05 起废弃。
 > - **semver 约束**：Cargo/Tauri 拒绝前导零——迭代号写 `7` 而非 `007`（实测 `invalid leading zero in patch version number`）。
 > - **同步时**：每次基线同步收口即递增迭代号并更新四源 + 双 lockfile + `Cargo.lock`；changelog 文件名用新版本号（`doc/upgrade/{版本}.md`，CI 取为 latest.json notes）。
 > - **历史规则（已废弃）**：~~跟随 origin 最新 tag `{{version}}`，桌面端 `{{version}}xxx`~~（1.1.5007 及之前）。
@@ -607,13 +609,13 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 | --- | --- |
 | **当前已同步到 origin commit** | `b1b5eb9`（origin/main，= b805474 后 10 commit；#1455 评估无需镜像） |
 | **对应 origin tag** | `v1.1.10`（后 46 commit，未发布新 tag） |
-| **桌面端版本号** | `26.1104.1`（**新规则 2026-10-27**：`2位年.月日.迭代号`（26=2026 年），跨天重置迭代号；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1） |
+| **桌面端版本号** | `26.11.1`（**新规则 2026-11-05**：`2位年.月份.迭代号`（26=2026 年，中间位=月份 1-12，≤255 兼容 WiX MSI）；同月内发布迭代号递增，跨月重置为 1；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1，26.1027.7~26.1104.1 旧方案（月日中间位）因 WiX minor≤255 限制废弃） |
 | **同步执行日期** | 2026-11-04（b1b5eb9，1 commit 评估轮） |
 
 > 下次同步以 `b1b5eb9` 为基线起点（`git log --oneline b1b5eb9..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405 已裁定不镜像，勿重复评估）。
 
 > **changelog 合并（2026-11-03）**：`doc/upgrade/26.1103.1~3.md` 已合并为 `doc/upgrade/26.1103.4.md`（新功能/修复/基线同步三分节），旧三个文件已删除；下文历史条目中的 26.1103.1/2/3.md 引用系当时动作记录。
-> **changelog 合并（2026-11-04）**：`doc/upgrade/26.1103.4.md` 已并入 `doc/upgrade/26.1104.1.md`（基线同步节追加 #1455 评估条目），26.1103.4.md 已删除。
+> **changelog 合并（2026-11-04）**：`doc/upgrade/26.1103.4.md` 已并入 `doc/upgrade/26.11.1.md`（基线同步节追加 #1455 评估条目；2026-11-05 随版本号方案改为年.月.迭代号由 26.1104.1.md 重命名），26.1103.4.md 已删除。
 > **记录精简（2026-11-03）**：同步记录只保留最近 3 次（第二十四/二十五/二十六轮）+ 桌面功能条目（2026-10-30 Git 下载源，非同步）；更早轮次（≤第二十三轮）已删除，逐 commit 评估见 git 历史。
 > **历史「已评估不镜像」台账**（防重复评估，按轮次序）：#1455 个人凭证跨服务器复制（2026-11-04 评估，无 per-user 凭证体系）、#1453 Authorization 透传 opt-in（2026-11-03 评估，桌面无调用方头转发路径）、#1446 Fake-IP 异常（2026-11-03 评估，无 Fake-IP 机制）、#1454 Docker 文档（docs 不同步）、#1447 OpenAPI 可空/联合参数（2026-11-03 已镜像）、#1451 重装后版本刷新（2026-11-03 已镜像）、#1449 配置变更保持连接（桌面架构已等价，2026-11-03 评估）、#1437 Better Auth OIDC、#1435 上游 OAuth 过期持久化/个人 token 续期、#1434/#1428 个人凭证预览/掩码、#1433 HA 文档、#1431 PG 副本、#1430 Node 22 要求、#1429 用户组共享、#1427 分组服务通知、#1416 事件总线、#1422/#1407 凭证 broker、#1412 CI 脚本、#1406 分组改名密钥 scope（桌面已有等价）、#1405 resolvedLanguage、#1404 i18n 检测顺序（已镜像）、#1401 密钥编辑器可访问性（已镜像）、#1400 导入 BOM（已镜像）、#1398 嵌入编码协商（无链路）、#1396 重置密钥、#1394/#1393 per-user 凭证绑定、#1387 bearer 哈希（用户裁定维持明文）。
 
@@ -695,13 +697,13 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 - [x] ~~MCPB/DXT 文件安装~~（已于 2026-10-19 完成，见 §3.11）
 - [ ] Templates（配置模板）
 - [ ] proxy（Proxychains4）运行时接入
-- [ ] RAG 树形虚拟滚动（量大时）
+- [x] ~~RAG 树形虚拟滚动~~（已于 2026-11-04 完成，见 §3.6 虚拟滚动行）
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.1104.1**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.11.1**。
 
-**规则（2026-10-27 起，详见 §4.4）**：`2位年.月日.迭代号`，不跟随 origin tag；同日多次发布迭代号递增，跨天重置为 1；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。
+**规则（2026-11-05 起，详见 §4.4）**：`2位年.月份.迭代号`，不跟随 origin tag；同月多次发布迭代号递增，跨月重置为 1；中间位=月份（1-12）保证 ≤255 兼容 WiX MSI（旧「月日」方案 26.1104.1 因 minor=1104>255 打包失败已废弃）；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。
 - **第八轮独立复核（2026-11-02，5 代理并行切片 + 亲核修复 10 项 + 全量回归）**：扫描面 = mv override/多源下载全量 + bearer exclude 全链 + 前端新代码 + rag start/reindex 链 + 测试断言审计。**修复 10 项**：①[H] ModelScope token 硬编码测试源码（私有仓库凭证泄露）→ 环境变量化（**用户需吊销该 token**）；②[M] publish 先删旧 model.gguf 再 rename（失败/取消窗口销毁在用模型）→ publish_temp 原子覆盖优先；③[M] 单槽下载状态被第二个不同 size 下载孤儿化 → 进行中即拒绝；④[M] LFS batch 硬编码 refs/heads/main → branch 透传；⑤[M] 无 Content-Length 截断响应被当成功 → total/copied 双校验；⑥[M] reindex 部分失败仍清 NEEDS_REINDEX + 提交 → failed 计数 + partial 保持重试标记；⑦[M] reindex 中 select_model 混合嵌入固化 → REINDEX_ALL_RUNNING CAS + select_model 拒绝；⑧[M] smart-only 部署无 fallback → 下沉 load_locked；⑨[M] 测试池污染 + generation 测试未测守卫 + 前置断言级联 → restore_persisted/commit_allowed 提取/take 清场；⑩[L] docCountTotal 过滤残留 + SettingsPage 双弹框 → 无过滤同步+卸载重置 / startupReindexConfirm 守卫。另 repair_schema 探测失败静默 → warn。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；clippy 新代码 0；**75 套 E2E 全部 exit 0**。记录不修 3 项（commit 毫秒窗口/clone 超时清理竞争/测试池偶发锁）。详见 doc/sync_report_26.1103.1.md 附录。
 - **第九轮独立复核（2026-11-02，4 代理并行含第八轮回炉 + 亲核修复 6 项 + 全量回归）**：**修复 6 项**：①[H] update_system_config 缺 origin dashboardName 校验（非 string/超长透明存储→"保存成功"但静默丢失）→ string+trim≤100 对齐；②[H] fr.json 3 处字面 `******` 伪影入文件（字节级定谳非终端显示伪影，en 同键 stars=0）→ 按真实语义修复（en 真词 base64 定谳 "Bearer auth"）；③[M] costRevision 每渲染全量 stringify → useMemo；④[L] run_download panic 卡死 downloading phase（被 R8 并发守卫放大）→ catch_unwind 兜底；⑤[L] symlink 非文本跳过不计 failed；⑥[L] publish_temp 注释诚实化。**回炉结论**：R8 十项修复 7 项完全清洁。**locales 全量对账 PASS**（6 语言 0 缺 0 孤 / 1610 引用键全命中 / 占位符 0 漂移）。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1103.1.md 附录。
 - **第十轮独立复核（2026-11-02，4 代理并行含 R9 回炉 + config.rs/下载状态机/exclude UI 三个首扫切片 + 亲核修复 7 项 + 全量回归）**：**修复 7 项**：①[M] get_public_config 非严格读——配置损坏时前端免登录 UI + 后端全 401 死界面 → get_strict fail-closed（NULL 行保持默认 true）；②[M] smartRouting prev/new 差分并发丢 disable 钩子 → 幂等化（patch 触及且结果 false 即 release 检查）；③[M] 下载 panic 分支不发终态事件不清 temp → 补 emit+清理+注释明示 release panic=abort 下不生效；④[L] pump 不查 phase 可污染 cancel 后同 size 新下载；⑤[L] abort-poll 竞争 cancelled 被 error 覆盖 → 终态写入前查 cancel；⑥[L] 新建表单切走 exclude 不清已选；⑦[L] exclude 分组选择器缺 searchFn。**回炉结论**：R9 六项修复 4 项完全清洁。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；**75 套 E2E 全部 exit 0**。详见 doc/sync_report_26.1103.1.md 附录。

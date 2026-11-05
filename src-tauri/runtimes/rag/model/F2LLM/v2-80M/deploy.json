@@ -3,7 +3,7 @@
   "bundle": true,
   "default": true,
   "description": "",
-  "sort": 3,
+  "sort": 1,
   "searchQueryPrefix": "Instruct: Given a question, retrieve passages that can help answer the question.\nQuery: {query}",
   "importDocPrefix": "",
   "docTitleDelimiter": "",

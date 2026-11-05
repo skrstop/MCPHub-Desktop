@@ -10,7 +10,12 @@
  * No staging directory is created: the override REPLACES `bundle.resources`
  * with the base list plus per-size globs —
  *   - every size:            runtimes/rag/model/<family>/<size>/deploy.json
- *   - bundle:true sizes:     runtimes/rag/model/<family>/<size>/**
+ *   - bundle:true sizes:     runtimes/rag/model/<family>/<size> + "/**" + "/*"
+ *
+ * NOTE: the glob must be `**` + `/*`, NOT a bare `**` — the Rust `glob` crate's
+ * trailing `**` matches only DIRECTORIES (files directly under the dir are
+ * skipped), so `dir/**` yields nothing for a flat dir and tauri fails with
+ * "path not found or didn't match any files".
  *
  * Output: src-tauri/tauri.models.json — consumed by
  * `tauri build --config src-tauri/tauri.models.json` (see package.json
@@ -53,7 +58,7 @@ const base = (conf.bundle?.resources ?? []).filter((r) => r !== 'runtimes/rag');
 const resources = [
   ...base,
   'runtimes/rag/model/*/*/deploy.json',
-  ...bundled.map((p) => `runtimes/rag/model/${p}/**`),
+  ...bundled.map((p) => `runtimes/rag/model/${p}/**/*`),
 ];
 
 writeFileSync(
