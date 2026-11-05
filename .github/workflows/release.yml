@@ -180,6 +180,26 @@ jobs:
         with:
           workspaces: src-tauri
           key: ${{ matrix.target }}
+          # Save the cache even when the job fails/is cancelled. Without this,
+          # a timed-out arm64 build (6h job limit) saves NOTHING and every
+          # retry starts a full cold build of ~1000 crates — the exact loop
+          # that made aarch64-unknown-linux-gnu never finish.
+          cache-on-failure: true
+
+      # ─── Linux swap（防 OOM/内存抖动）──────────────────────────────────────
+      # ubuntu-22.04-arm 仅 4 核 / 16GB 无 swap。candle/lancedb/datafusion 等
+      # 重依赖 + 最终 thin-LTO 链接的峰值内存可超 16GB：无 swap 时直接 OOM
+      # （runner "lost communication"），有 swap 时页面抖动会把 1-2h 拖成 6h+
+      # 超时。加 8GB swap 让链接阶段可完成（慢但能过），缓存命中后整体仍快。
+      - name: Add swap (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       # ─── protoc ───────────────────────────────────────────────────────────
       # lancedb → lance-encoding → prost-build 会在构建脚本中调用 `protoc` 二进制。
