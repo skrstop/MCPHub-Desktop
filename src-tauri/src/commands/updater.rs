@@ -60,15 +60,6 @@ static CURRENT_TASK: OnceLock<tokio::sync::Mutex<Option<tokio::task::JoinHandle<
 /// can tag the "cancelled" event without the frontend having to pass it back.
 static CURRENT_INSTALL_ID: OnceLock<std::sync::Mutex<u64>> = OnceLock::new();
 
-/// ResourceId of the most recent install's `Update` resource — the cancel
-/// path (which aborts a task that will never reach its own terminal-state
-/// cleanup) uses it to release the resource from the table.
-static CURRENT_RID: OnceLock<std::sync::Mutex<Option<ResourceId>>> = OnceLock::new();
-
-fn current_rid_slot() -> &'static std::sync::Mutex<Option<ResourceId>> {
-    CURRENT_RID.get_or_init(|| std::sync::Mutex::new(None))
-}
-
 fn task_slot() -> &'static tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> {
     CURRENT_TASK.get_or_init(|| tokio::sync::Mutex::new(None))
 }
@@ -108,9 +99,6 @@ pub async fn install_update_cancelable(
             // contradictory late event (review round 10). The aborted task
             // never reaches its own resource cleanup, so release here.
             let old_id = *install_id_slot().lock().unwrap();
-            if let Some(old_rid) = current_rid_slot().lock().unwrap().take() {
-                let _ = app.resources_table().close(old_rid);
-            }
             let _ = app.emit(
                 "updater://install-result",
                 InstallResult {
@@ -122,13 +110,29 @@ pub async fn install_update_cancelable(
         }
     }
     *install_id_slot().lock().unwrap() = install_id;
-    *current_rid_slot().lock().unwrap() = Some(rid);
 
     let handle = tokio::spawn(async move {
+        // Stall watchdog: a connection that stops delivering chunks without
+        // erroring leaves `download_and_install` pending forever (reqwest has
+        // no read timeout by default), so the UI would hang in "downloading"
+        // with no terminal event. Track the last progress timestamp and abort
+        // the wait when nothing arrives for 60s.
+        const STALL_TIMEOUT_MS: u64 = 60_000;
+        const WATCHDOG_TICK_MS: u64 = 15_000;
+        fn now_ms() -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+        }
+        let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(now_ms()));
+        let last_activity_for_cb = last_activity.clone();
+
         let mut first_chunk = true;
-        let result = update
-            .download_and_install(
+        let result = {
+            let dl = update.download_and_install(
                 |chunk_length, content_length| {
+                    last_activity_for_cb.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                     if first_chunk {
                         first_chunk = false;
                         let _ = on_event.send(UpdateDownloadEvent::Started { content_length });
@@ -138,9 +142,25 @@ pub async fn install_update_cancelable(
                 || {
                     let _ = on_event.send(UpdateDownloadEvent::Finished);
                 },
-            )
-            .await;
+            );
+            tokio::pin!(dl);
+            loop {
+                tokio::select! {
+                    r = &mut dl => break r,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(WATCHDOG_TICK_MS)) => {
+                        let idle = now_ms().saturating_sub(last_activity.load(std::sync::atomic::Ordering::Relaxed));
+                        if idle > STALL_TIMEOUT_MS {
+                            break Err(tauri_plugin_updater::Error::Network(format!(
+                                "download stalled: no data received for {}s",
+                                idle / 1000
+                            )));
+                        }
+                    }
+                }
+            }
+        };
 
+        let install_ok = result.is_ok();
         let payload = match result {
             Ok(()) => InstallResult {
                 install_id,
@@ -154,11 +174,15 @@ pub async fn install_update_cancelable(
             },
         };
         let _ = app.emit("updater://install-result", payload);
-        // Release the plugin resource now that this attempt reached a
-        // terminal state (ok / error) — parity with the plugin's own install
-        // command, which removes the Update from the resources table.
-        // Cancelled attempts release via the cancel path below.
-        let _ = app.resources_table().close(rid);
+        // Release the plugin resource only on success (the app relaunches
+        // anyway). On error/cancel the resource stays alive: the frontend's
+        // `cachedUpdate` still holds this rid, and `Update::download_and_install`
+        // takes `&self`, so keeping it lets "Install Update" retry work
+        // without a fresh check(). A failed attempt leaks one small resource
+        // until the next check() replaces the cached one — negligible.
+        if install_ok {
+            let _ = app.resources_table().close(rid);
+        }
     });
 
     *slot = Some(handle);
@@ -190,11 +214,8 @@ pub async fn cancel_update_install(
             return Ok(false);
         }
         handle.abort();
-        // The aborted task never reaches its terminal-state cleanup, so
-        // release the Update resource here.
-        if let Some(rid) = current_rid_slot().lock().unwrap().take() {
-            let _ = app.resources_table().close(rid);
-        }
+        // Keep the Update resource alive: the frontend's `cachedUpdate` still
+        // holds this rid and a retry must work without a fresh check().
         let _ = app.emit(
             "updater://install-result",
             InstallResult {

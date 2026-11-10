@@ -435,8 +435,8 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                         />
                       ) : (
                         <div
-                          className="h-full w-1/3 animate-pulse"
-                          style={{ background: 'var(--hub-accent, #3b82f6)' }}
+                          className="h-full w-full animate-pulse"
+                          style={{ background: 'var(--hub-accent, #3b82f6)', opacity: 0.35 }}
                         />
                       )}
                     </div>
@@ -444,7 +444,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({
                       <span style={{ color: 'var(--hub-ink-3)' }}>
                         {totalBytes > 0
                           ? `${Math.min(100, (downloaded / totalBytes) * 100).toFixed(0)}%`
-                          : ''}
+                          : t('about.connecting') || 'Connecting...'}
                       </span>
                       <span style={{ color: 'var(--hub-ink-3)' }}>
                         {speedBps > 0 ? formatSpeed(speedBps) : ''}
