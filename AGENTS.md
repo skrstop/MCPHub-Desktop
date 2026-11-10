@@ -607,17 +607,23 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `d8aeaaf`（origin/main，= d3254a6 后 5 commit；#1460/#1461/#1463/#1467/#1469 评估无需镜像） |
-| **对应 origin tag** | `v1.1.10`（后 52 commit，未发布新 tag） |
-| **桌面端版本号** | `26.11.3`（**新规则 2026-11-05**：`2位年.月份.迭代号`（26=2026 年，中间位=月份 1-12，≤255 兼容 WiX MSI）；同月内发布迭代号递增，跨月重置为 1；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1，26.1027.7~26.1104.1 旧方案（月日中间位）因 WiX minor≤255 限制废弃） |
-| **同步执行日期** | 2026-11-10（d8aeaaf，5 commit 评估轮） |
+| **当前已同步到 origin commit** | `14d599e`（origin/main，= d8aeaaf 后 1 commit；#1470 评估无需镜像） |
+| **对应 origin tag** | `v1.1.10`（后 53 commit，未发布新 tag） |
+| **桌面端版本号** | `26.11.4`（**新规则 2026-11-05**：`2位年.月份.迭代号`（26=2026 年，中间位=月份 1-12，≤255 兼容 WiX MSI）；同月内发布迭代号递增，跨月重置为 1；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1，26.1027.7~26.1104.1 旧方案（月日中间位）因 WiX minor≤255 限制废弃） |
+| **同步执行日期** | 2026-11-10（14d599e，1 commit 评估轮） |
 
-> 下次同步以 `d8aeaaf` 为基线起点（`git log --oneline d8aeaaf..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405/#1455/#1457/#1460/#1461/#1463/#1467/#1469 已裁定不镜像，勿重复评估）。
+> 下次同步以 `14d599e` 为基线起点（`git log --oneline 14d599e..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405/#1455/#1457/#1460/#1461/#1463/#1467/#1469/#1470 已裁定不镜像，勿重复评估）。
 
 > **changelog 合并（2026-11-03）**：`doc/upgrade/26.1103.1~3.md` 已合并为 `doc/upgrade/26.1103.4.md`（新功能/修复/基线同步三分节），旧三个文件已删除；下文历史条目中的 26.1103.1/2/3.md 引用系当时动作记录。
 > **changelog 合并（2026-11-04）**：`doc/upgrade/26.1103.4.md` 已并入 `doc/upgrade/26.11.1.md`（基线同步节追加 #1455 评估条目；2026-11-05 随版本号方案改为年.月.迭代号由 26.1104.1.md 重命名），26.1103.4.md 已删除。
 > **记录精简（2026-11-03）**：同步记录只保留最近 3 次（第二十四/二十五/二十六轮）+ 桌面功能条目（2026-10-30 Git 下载源，非同步）；更早轮次（≤第二十三轮）已删除，逐 commit 评估见 git 历史。
-> **历史「已评估不镜像」台账**（防重复评估，按轮次序）：#1460 陈旧向量写入防护（2026-11-10 评估，桌面 lancedb 版 skip-check+EMBED_WRITE_LOCK 已等价）、#1461 OAuth 记住授权/应用撤销（2026-11-10 评估，桌面单用户无 consent 记忆需求，revoke 已覆盖）、#1463 动态注册凭证持久化（2026-11-10 评估，rmcp Rust SDK 无同型缺陷）、#1467 个人运行时会话恢复（2026-11-10 评估，无 per-user 体系）、#1469 工具发现报告个人 OAuth（2026-11-10 评估，无 per-user 体系）、#1455 个人凭证跨服务器复制（2026-11-04 评估，无 per-user 凭证体系）、#1453 Authorization 透传 opt-in（2026-11-03 评估，桌面无调用方头转发路径）、#1446 Fake-IP 异常（2026-11-03 评估，无 Fake-IP 机制）、#1454 Docker 文档（docs 不同步）、#1447 OpenAPI 可空/联合参数（2026-11-03 已镜像）、#1451 重装后版本刷新（2026-11-03 已镜像）、#1449 配置变更保持连接（桌面架构已等价，2026-11-03 评估）、#1437 Better Auth OIDC、#1435 上游 OAuth 过期持久化/个人 token 续期、#1434/#1428 个人凭证预览/掩码、#1433 HA 文档、#1431 PG 副本、#1430 Node 22 要求、#1429 用户组共享、#1427 分组服务通知、#1416 事件总线、#1422/#1407 凭证 broker、#1412 CI 脚本、#1406 分组改名密钥 scope（桌面已有等价）、#1405 resolvedLanguage、#1404 i18n 检测顺序（已镜像）、#1401 密钥编辑器可访问性（已镜像）、#1400 导入 BOM（已镜像）、#1398 嵌入编码协商（无链路）、#1396 重置密钥、#1394/#1393 per-user 凭证绑定、#1387 bearer 哈希（用户裁定维持明文）。
+> **历史「已评估不镜像」台账**（防重复评估，按轮次序）：#1470 个人密钥限制分组（2026-11-10 评估，桌面无 user-kind 密钥体系）、#1460 陈旧向量写入防护（2026-11-10 评估，桌面 lancedb 版 skip-check+EMBED_WRITE_LOCK 已等价）、#1461 OAuth 记住授权/应用撤销（2026-11-10 评估，桌面单用户无 consent 记忆需求，revoke 已覆盖）、#1463 动态注册凭证持久化（2026-11-10 评估，rmcp Rust SDK 无同型缺陷）、#1467 个人运行时会话恢复（2026-11-10 评估，无 per-user 体系）、#1469 工具发现报告个人 OAuth（2026-11-10 评估，无 per-user 体系）、#1455 个人凭证跨服务器复制（2026-11-04 评估，无 per-user 凭证体系）、#1453 Authorization 透传 opt-in（2026-11-03 评估，桌面无调用方头转发路径）、#1446 Fake-IP 异常（2026-11-03 评估，无 Fake-IP 机制）、#1454 Docker 文档（docs 不同步）、#1447 OpenAPI 可空/联合参数（2026-11-03 已镜像）、#1451 重装后版本刷新（2026-11-03 已镜像）、#1449 配置变更保持连接（桌面架构已等价，2026-11-03 评估）、#1437 Better Auth OIDC、#1435 上游 OAuth 过期持久化/个人 token 续期、#1434/#1428 个人凭证预览/掩码、#1433 HA 文档、#1431 PG 副本、#1430 Node 22 要求、#1429 用户组共享、#1427 分组服务通知、#1416 事件总线、#1422/#1407 凭证 broker、#1412 CI 脚本、#1406 分组改名密钥 scope（桌面已有等价）、#1405 resolvedLanguage、#1404 i18n 检测顺序（已镜像）、#1401 密钥编辑器可访问性（已镜像）、#1400 导入 BOM（已镜像）、#1398 嵌入编码协商（无链路）、#1396 重置密钥、#1394/#1393 per-user 凭证绑定、#1387 bearer 哈希（用户裁定维持明文）。
+
+#### 2026-11-10（第二十九轮）：`d8aeaaf` -> `14d599e`（1 commit，版本 26.11.3 → 26.11.4，评估轮）
+
+- `14d599e` #1470 **个人 API 密钥限制到允许的分组（评估无需镜像）**——origin 收紧 user-kind（个人）bearer key 的 scope：创建/更新仅允许 `all`/`groups`（groups 强制非空且持久化分组 ID 防改名重定向）、SSE 鉴权对 user-kind key 不再无条件放行（groups scope 逐组校验、仅按 ID 匹配）、前端个人密钥 UI 收窄为分组选择器。桌面核查：桌面**没有 user-kind 密钥体系**——Rust `BearerKey`/`BearerKeyPayload` 无 `kind`/`owner` 字段（bearer_keys 表无该列），SettingsPage 注释明示「Desktop has no user/key-type system, every key is effectively system-level」；收紧对象在桌面不存在，无镜像落点。
+- **验证**：cargo check 0 错 0 警；cargo test --lib 388 passed；tsc 0 错；vitest 74 passed。
+- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
 
 #### 2026-11-10（第二十八轮）：`d3254a6` -> `d8aeaaf`（5 commit，版本 26.11.2 → 26.11.3，评估轮）
 
@@ -718,7 +724,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.11.3**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.11.4**。
 
 **规则（2026-11-05 起，详见 §4.4）**：`2位年.月份.迭代号`，不跟随 origin tag；同月多次发布迭代号递增，跨月重置为 1；中间位=月份（1-12）保证 ≤255 兼容 WiX MSI（旧「月日」方案 26.1104.1 因 minor=1104>255 打包失败已废弃）；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。
 - **第八轮独立复核（2026-11-02，5 代理并行切片 + 亲核修复 10 项 + 全量回归）**：扫描面 = mv override/多源下载全量 + bearer exclude 全链 + 前端新代码 + rag start/reindex 链 + 测试断言审计。**修复 10 项**：①[H] ModelScope token 硬编码测试源码（私有仓库凭证泄露）→ 环境变量化（**用户需吊销该 token**）；②[M] publish 先删旧 model.gguf 再 rename（失败/取消窗口销毁在用模型）→ publish_temp 原子覆盖优先；③[M] 单槽下载状态被第二个不同 size 下载孤儿化 → 进行中即拒绝；④[M] LFS batch 硬编码 refs/heads/main → branch 透传；⑤[M] 无 Content-Length 截断响应被当成功 → total/copied 双校验；⑥[M] reindex 部分失败仍清 NEEDS_REINDEX + 提交 → failed 计数 + partial 保持重试标记；⑦[M] reindex 中 select_model 混合嵌入固化 → REINDEX_ALL_RUNNING CAS + select_model 拒绝；⑧[M] smart-only 部署无 fallback → 下沉 load_locked；⑨[M] 测试池污染 + generation 测试未测守卫 + 前置断言级联 → restore_persisted/commit_allowed 提取/take 清场；⑩[L] docCountTotal 过滤残留 + SettingsPage 双弹框 → 无过滤同步+卸载重置 / startupReindexConfirm 守卫。另 repair_schema 探测失败静默 → warn。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；clippy 新代码 0；**75 套 E2E 全部 exit 0**。记录不修 3 项（commit 毫秒窗口/clone 超时清理竞争/测试池偶发锁）。详见 doc/sync_report_26.1103.1.md 附录。
