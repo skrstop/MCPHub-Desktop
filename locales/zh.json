@@ -71,7 +71,8 @@
     "cancelUpdate": "取消更新",
     "installed": "更新已安装，即将重启...",
     "installFailed": "安装失败，请重试。",
-    "downloadManual": "下载更新"
+    "downloadManual": "下载更新",
+    "connecting": "连接中..."
   },
   "profile": {
     "viewProfile": "查看个人中心",
@@ -364,7 +365,20 @@
     "protocolNegotiation": "协议协商",
     "protocolNegotiationAuto": "自动（先探测现代协议）",
     "protocolNegotiationLegacy": "仅旧版（initialize 握手）",
-    "protocolNegotiationDescription": "自动模式先探测 2026 现代协议（server/discover），失败时回退旧版 initialize 握手；仅旧版模式完全跳过现代协议探测。"
+    "protocolNegotiationDescription": "自动模式先探测 2026 现代协议（server/discover），失败时回退旧版 initialize 握手；仅旧版模式完全跳过现代协议探测。",
+    "smartSearch": {
+      "title": "相关度搜索",
+      "hint": "基于智能路由工具索引的混合检索（向量 + 关键词）。选择范围、输入查询，结果按相关度评分排序。",
+      "scope": "范围",
+      "scopeAll": "全部服务器与分组",
+      "scopeGroup": "分组",
+      "scopeServer": "服务器",
+      "queryPlaceholder": "描述你想做的事情…",
+      "searchBtn": "搜索",
+      "results": "搜索结果",
+      "noResults": "没有匹配的工具。",
+      "score": "相关度"
+    }
   },
   "status": {
     "sleeping": "休眠",

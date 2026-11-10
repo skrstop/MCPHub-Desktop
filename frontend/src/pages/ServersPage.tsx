@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X, Loader2 } from 'lucide-react';
+import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X, Loader2, Sparkles } from 'lucide-react';
 import { Server } from '@/types';
 import ServerCard from '@/components/ServerCard';
 import AddServerForm from '@/components/AddServerForm';
@@ -13,6 +13,9 @@ import { useToast } from '@/contexts/ToastContext';
 import { apiPost } from '@/utils/fetchInterceptor';
 import { ApiResponse, ServerPage } from '@/types';
 import { useServerData } from '@/hooks/useServerData';
+import { useGroupData } from '@/hooks/useGroupData';
+import { useSettings } from '@/contexts/SettingsContext';
+import SmartSearchDialog, { type SmartSearchScopeOption } from '@/components/SmartSearchDialog';
 import { useCostData } from '@/hooks/useCostData';
 import { serverCostRevision } from '@/utils/costRevision';
 import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/utils/serverFilters';
@@ -47,6 +50,22 @@ const ServersPage: React.FC = () => {
   // recomputing per render (every keystroke/poll) is O(full catalog).
   const costRevision = useMemo(() => serverCostRevision(allServers), [allServers]);
   const { serverCosts } = useCostData(costRevision);
+  const { smartRoutingConfig } = useSettings();
+  const { groups } = useGroupData();
+
+  // Relevance-search scope options: all / groups / servers (smart routing on).
+  const smartSearchScopes: SmartSearchScopeOption[] = useMemo(() => {
+    const opts: SmartSearchScopeOption[] = [
+      { value: 'all', label: t('server.smartSearch.scopeAll'), kind: 'all' },
+    ];
+    for (const g of groups) {
+      opts.push({ value: `group:${g.id}`, label: `${t('server.smartSearch.scopeGroup')}: ${g.name}`, kind: 'group' });
+    }
+    for (const s of allServers) {
+      opts.push({ value: `server:${s.name}`, label: `${t('server.smartSearch.scopeServer')}: ${s.name}`, kind: 'server' });
+    }
+    return opts;
+  }, [groups, allServers, t]);
 
   const [editingServer, setEditingServer] = useState<Server | null>(null);
   const [duplicateServer, setDuplicateServer] = useState<Server | null>(null);
@@ -55,6 +74,7 @@ const ServersPage: React.FC = () => {
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [showMcpbUpload, setShowMcpbUpload] = useState(false);
   const [showJsonImport, setShowJsonImport] = useState(false);
+  const [showSmartSearch, setShowSmartSearch] = useState(false);
   const [filter, setFilter] = useState<ServerFilter>('all');
   const [search, setSearch] = useState('');
   // Server-type filter: 'custom' (default) hides builtin servers, 'builtin'
@@ -240,6 +260,15 @@ const ServersPage: React.FC = () => {
           </p>
         </div>
         <div className="flex gap-2">
+          {smartRoutingConfig.enabled && (
+            <button
+              className="hub-btn"
+              onClick={() => setShowSmartSearch(true)}
+              aria-label={t('server.smartSearch.title')}
+            >
+              <Sparkles size={13} /> {t('server.smartSearch.title')}
+            </button>
+          )}
           {hasStdioServer && (
             <button
               className="hub-btn"
@@ -486,6 +515,12 @@ const ServersPage: React.FC = () => {
             triggerRefresh();
           }}
           onCancel={() => setShowJsonImport(false)}
+        />
+      )}
+      {showSmartSearch && (
+        <SmartSearchDialog
+          scopeOptions={smartSearchScopes}
+          onClose={() => setShowSmartSearch(false)}
         />
       )}
     </div>

@@ -71,7 +71,8 @@
     "cancelUpdate": "Annuler la mise à jour",
     "installed": "Mise à jour installée. Redémarrage...",
     "installFailed": "Échec de l'installation. Veuillez réessayer.",
-    "downloadManual": "Télécharger la mise à jour"
+    "downloadManual": "Télécharger la mise à jour",
+    "connecting": "Connexion..."
   },
   "profile": {
     "viewProfile": "Voir le profil",
@@ -364,7 +365,20 @@
     "protocolNegotiation": "Négociation de protocole",
     "protocolNegotiationAuto": "Auto (sonde moderne d'abord)",
     "protocolNegotiationLegacy": "Hérité (initialize uniquement)",
-    "protocolNegotiationDescription": "Auto sonde d'abord le protocole moderne 2026 (server/discover) avant de revenir à la poignée de main héritée. Hérité ignore complètement la sonde moderne."
+    "protocolNegotiationDescription": "Auto sonde d'abord le protocole moderne 2026 (server/discover) avant de revenir à la poignée de main héritée. Hérité ignore complètement la sonde moderne.",
+    "smartSearch": {
+      "title": "Recherche par pertinence",
+      "hint": "Recherche hybride (vecteur + mot-clé) sur l'index d'outils du routage intelligent. Choisissez une portée, saisissez une requête ; les résultats sont classés par score de pertinence.",
+      "scope": "Portée",
+      "scopeAll": "Tous les serveurs et groupes",
+      "scopeGroup": "Groupe",
+      "scopeServer": "Serveur",
+      "queryPlaceholder": "Décrivez ce que vous voulez faire…",
+      "searchBtn": "Rechercher",
+      "results": "Résultats",
+      "noResults": "Aucun outil correspondant.",
+      "score": "Score"
+    }
   },
   "status": {
     "sleeping": "En veille",

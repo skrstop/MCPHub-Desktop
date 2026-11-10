@@ -496,6 +496,7 @@ pub fn run() {
             commands::smart_routing::smart_routing_reindex,
             commands::smart_routing::smart_routing_reindex_participants,
             commands::smart_routing::smart_routing_performance,
+            commands::smart_routing::smart_routing_search,
             commands::config::import_settings,
             commands::config::export_settings,
             commands::config::save_settings_json,

@@ -792,6 +792,15 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
   // meta ("N 个服务器"); read-only count mirroring reindex_all's denominator.
   if (p === 'smart-routing/reindex-participants' && m === 'GET')
     return { command: 'smart_routing_reindex_participants', args: {} };
+  // POST /smart-routing/search — relevance search over the smart tool index
+  // (ServersPage dialog; same hybrid engine as the $smart meta tool).
+  if (p === 'smart-routing/search' && m === 'POST') {
+    const b = body as { query?: string; scope?: string; limit?: number } | null;
+    return {
+      command: 'smart_routing_search',
+      args: { payload: { query: b?.query ?? '', scope: b?.scope ?? 'all', limit: b?.limit } },
+    };
+  }
 
   if (segs[0] === 'rag') {
     // GET /rag/status — runtime status (switch state)
@@ -1221,6 +1230,11 @@ export function transformTauriResponse(command: string, result: unknown): unknow
   }
   if (command === 'smart_routing_status') {
     return { success: true, data: result };
+  }
+  // smart_routing_search returns Vec<SmartSearchResult> (camelCase serde).
+  if (command === 'smart_routing_search') {
+    const arr = Array.isArray(result) ? result : [];
+    return { success: true, data: arr };
   }
   // get_server_oauth_status returns a plain status string.
   if (command === 'get_server_oauth_status') {

@@ -103,3 +103,33 @@ export const getSmartReindexParticipants = async (): Promise<SmartReindexPartici
   const o = (d ?? {}) as { servers?: number; tools?: number };
   return { servers: o.servers ?? 0, tools: o.tools ?? 0 };
 };
+
+/** One merged, scored result from the Smart Routing hybrid search
+ *  (vector + keyword, same engine the $smart meta tool uses). */
+export interface SmartSearchResult {
+  serverName: string;
+  toolName: string;
+  contentId: string;
+  contentType: string;
+  textContent: string;
+  metadata?: { description?: string; inputSchema?: unknown } | null;
+  /** Final weighted score in [0,1]. */
+  score: number;
+}
+
+/** Relevance search over the Smart Routing tool index. `scope` is "all",
+ *  a group name/id, or a server name. */
+export const searchSmartRouting = async (
+  query: string,
+  scope: string,
+  limit = 20,
+): Promise<SmartSearchResult[]> => {
+  const response = await apiPost<SmartRoutingApiResponse<SmartSearchResult[]>>(
+    '/smart-routing/search',
+    { query, scope, limit },
+  );
+  if (!response.success) {
+    throw new Error(response.error || response.message || 'Smart routing search failed');
+  }
+  return Array.isArray(response.data) ? response.data : [];
+};

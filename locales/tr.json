@@ -71,7 +71,8 @@
     "cancelUpdate": "Güncellemeyi İptal Et",
     "installed": "Güncelleme yüklendi. Yeniden başlatılıyor...",
     "installFailed": "Yükleme başarısız. Lütfen tekrar deneyin.",
-    "downloadManual": "Güncellemeyi İndir"
+    "downloadManual": "Güncellemeyi İndir",
+    "connecting": "Bağlanılıyor..."
   },
   "profile": {
     "viewProfile": "Profili görüntüle",
@@ -364,7 +365,20 @@
     "protocolNegotiation": "Protokol Müzakeresi",
     "protocolNegotiationAuto": "Otomatik (önce modern keşif)",
     "protocolNegotiationLegacy": "Eski (yalnızca initialize)",
-    "protocolNegotiationDescription": "Otomatik, eski el sıkışmaya geri dönmeden önce 2026 modern protokolünü (server/discover) sınar. Eski mod modern keşfi tamamen atlar."
+    "protocolNegotiationDescription": "Otomatik, eski el sıkışmaya geri dönmeden önce 2026 modern protokolünü (server/discover) sınar. Eski mod modern keşfi tamamen atlar.",
+    "smartSearch": {
+      "title": "İlgililik Araması",
+      "hint": "Akıllı yönlendirme araç dizini üzerinde hibrit (vektör + anahtar kelime) arama. Bir kapsam seçin, sorgu girin; sonuçlar ilgililik puanına göre sıralanır.",
+      "scope": "Kapsam",
+      "scopeAll": "Tüm sunucular ve gruplar",
+      "scopeGroup": "Grup",
+      "scopeServer": "Sunucu",
+      "queryPlaceholder": "Ne yapmak istediğinizi tanımlayın…",
+      "searchBtn": "Ara",
+      "results": "Sonuçlar",
+      "noResults": "Eşleşen araç bulunamadı.",
+      "score": "Puan"
+    }
   },
   "status": {
     "sleeping": "Uykuda",

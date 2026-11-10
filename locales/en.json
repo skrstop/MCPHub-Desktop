@@ -71,7 +71,8 @@
     "cancelUpdate": "Cancel Update",
     "installed": "Update installed. Relaunching...",
     "installFailed": "Update failed. Please try again.",
-    "downloadManual": "Download Update"
+    "downloadManual": "Download Update",
+    "connecting": "Connecting..."
   },
   "profile": {
     "viewProfile": "View profile",
@@ -364,7 +365,20 @@
     "protocolNegotiation": "Protocol Negotiation",
     "protocolNegotiationAuto": "Auto (probe modern first)",
     "protocolNegotiationLegacy": "Legacy (initialize only)",
-    "protocolNegotiationDescription": "Auto probes the 2026 modern protocol (server/discover) before falling back to the legacy handshake. Legacy skips the modern probe entirely."
+    "protocolNegotiationDescription": "Auto probes the 2026 modern protocol (server/discover) before falling back to the legacy handshake. Legacy skips the modern probe entirely.",
+    "smartSearch": {
+      "title": "Relevance Search",
+      "hint": "Hybrid (vector + keyword) search over the Smart Routing tool index. Pick a scope, type a query, and results are ranked by relevance score.",
+      "scope": "Scope",
+      "scopeAll": "All servers & groups",
+      "scopeGroup": "Group",
+      "scopeServer": "Server",
+      "queryPlaceholder": "Describe what you want to do…",
+      "searchBtn": "Search",
+      "results": "Results",
+      "noResults": "No matching tools found.",
+      "score": "Score"
+    }
   },
   "status": {
     "sleeping": "Sleeping",

@@ -1,6 +1,6 @@
-//! Smart Routing Tauri commands (Phase 4): status / reindex / performance.
+//! Smart Routing Tauri commands (Phase 4): status / reindex / performance / search.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,4 +90,61 @@ pub async fn smart_routing_performance() -> Result<SmartRoutingPerformance, Stri
         tool_rows,
         total_rows,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartSearchPayload {
+    pub query: String,
+    /// "all" (default) | group name/id | server name.
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Relevance search over the Smart Routing tool index (ServersPage dialog).
+/// Same hybrid search the $smart meta tool uses; the scope selector narrows
+/// the candidate set to one group's members or a single server.
+#[tauri::command]
+pub async fn smart_routing_search(
+    session: tauri::State<'_, crate::commands::auth::SessionState>,
+    payload: SmartSearchPayload,
+) -> Result<Vec<crate::smart_routing::search::SmartSearchResult>, String> {
+    crate::commands::config::require_admin(&session).await?;
+    let query = payload.query.trim().to_string();
+    if query.is_empty() {
+        return Err("Query is required".to_string());
+    }
+    let scope = payload
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "all");
+    let allowed_servers = match scope {
+        None => None,
+        Some(s) => {
+            // Group first (by name or id), expanding to its member server
+            // names; anything else is a single-server scope. An unknown
+            // scope yields an empty candidate set — search returns no hits
+            // rather than silently degrading to a global search.
+            let groups = crate::services::group_service::list_all()
+                .await
+                .map_err(|e| e.to_string())?;
+            match groups.iter().find(|g| g.name == s || g.id == s) {
+                Some(grp) => Some(
+                    grp.servers
+                        .iter()
+                        .filter_map(|sv| {
+                            sv.get("name").and_then(|n| n.as_str()).map(|x| x.to_string())
+                        })
+                        .collect::<Vec<String>>(),
+                ),
+                None => Some(vec![s.to_string()]),
+            }
+        }
+    };
+    crate::smart_routing::search::search(&query, payload.limit, allowed_servers, None)
+        .await
+        .map_err(|e| e.to_string())
 }
