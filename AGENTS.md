@@ -607,17 +607,34 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 | 项 | 值 |
 | --- | --- |
-| **当前已同步到 origin commit** | `b1b5eb9`（origin/main，= b805474 后 10 commit；#1455 评估无需镜像） |
-| **对应 origin tag** | `v1.1.10`（后 46 commit，未发布新 tag） |
-| **桌面端版本号** | `26.11.1`（**新规则 2026-11-05**：`2位年.月份.迭代号`（26=2026 年，中间位=月份 1-12，≤255 兼容 WiX MSI）；同月内发布迭代号递增，跨月重置为 1；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1，26.1027.7~26.1104.1 旧方案（月日中间位）因 WiX minor≤255 限制废弃） |
-| **同步执行日期** | 2026-11-04（b1b5eb9，1 commit 评估轮） |
+| **当前已同步到 origin commit** | `d8aeaaf`（origin/main，= d3254a6 后 5 commit；#1460/#1461/#1463/#1467/#1469 评估无需镜像） |
+| **对应 origin tag** | `v1.1.10`（后 52 commit，未发布新 tag） |
+| **桌面端版本号** | `26.11.3`（**新规则 2026-11-05**：`2位年.月份.迭代号`（26=2026 年，中间位=月份 1-12，≤255 兼容 WiX MSI）；同月内发布迭代号递增，跨月重置为 1；Cargo semver 拒绝前导零；历史 changelog 已合并：1.1.5001~5007 → 26.1027.7，26.1027.7~29.1030.1 → 26.1030.1，26.1027.7~26.1104.1 旧方案（月日中间位）因 WiX minor≤255 限制废弃） |
+| **同步执行日期** | 2026-11-10（d8aeaaf，5 commit 评估轮） |
 
-> 下次同步以 `b1b5eb9` 为基线起点（`git log --oneline b1b5eb9..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405 已裁定不镜像，勿重复评估）。
+> 下次同步以 `d8aeaaf` 为基线起点（`git log --oneline d8aeaaf..HEAD`；#1387/#1396/#1393/#1394/#1398/#1405/#1455/#1457/#1460/#1461/#1463/#1467/#1469 已裁定不镜像，勿重复评估）。
 
 > **changelog 合并（2026-11-03）**：`doc/upgrade/26.1103.1~3.md` 已合并为 `doc/upgrade/26.1103.4.md`（新功能/修复/基线同步三分节），旧三个文件已删除；下文历史条目中的 26.1103.1/2/3.md 引用系当时动作记录。
 > **changelog 合并（2026-11-04）**：`doc/upgrade/26.1103.4.md` 已并入 `doc/upgrade/26.11.1.md`（基线同步节追加 #1455 评估条目；2026-11-05 随版本号方案改为年.月.迭代号由 26.1104.1.md 重命名），26.1103.4.md 已删除。
 > **记录精简（2026-11-03）**：同步记录只保留最近 3 次（第二十四/二十五/二十六轮）+ 桌面功能条目（2026-10-30 Git 下载源，非同步）；更早轮次（≤第二十三轮）已删除，逐 commit 评估见 git 历史。
-> **历史「已评估不镜像」台账**（防重复评估，按轮次序）：#1455 个人凭证跨服务器复制（2026-11-04 评估，无 per-user 凭证体系）、#1453 Authorization 透传 opt-in（2026-11-03 评估，桌面无调用方头转发路径）、#1446 Fake-IP 异常（2026-11-03 评估，无 Fake-IP 机制）、#1454 Docker 文档（docs 不同步）、#1447 OpenAPI 可空/联合参数（2026-11-03 已镜像）、#1451 重装后版本刷新（2026-11-03 已镜像）、#1449 配置变更保持连接（桌面架构已等价，2026-11-03 评估）、#1437 Better Auth OIDC、#1435 上游 OAuth 过期持久化/个人 token 续期、#1434/#1428 个人凭证预览/掩码、#1433 HA 文档、#1431 PG 副本、#1430 Node 22 要求、#1429 用户组共享、#1427 分组服务通知、#1416 事件总线、#1422/#1407 凭证 broker、#1412 CI 脚本、#1406 分组改名密钥 scope（桌面已有等价）、#1405 resolvedLanguage、#1404 i18n 检测顺序（已镜像）、#1401 密钥编辑器可访问性（已镜像）、#1400 导入 BOM（已镜像）、#1398 嵌入编码协商（无链路）、#1396 重置密钥、#1394/#1393 per-user 凭证绑定、#1387 bearer 哈希（用户裁定维持明文）。
+> **历史「已评估不镜像」台账**（防重复评估，按轮次序）：#1460 陈旧向量写入防护（2026-11-10 评估，桌面 lancedb 版 skip-check+EMBED_WRITE_LOCK 已等价）、#1461 OAuth 记住授权/应用撤销（2026-11-10 评估，桌面单用户无 consent 记忆需求，revoke 已覆盖）、#1463 动态注册凭证持久化（2026-11-10 评估，rmcp Rust SDK 无同型缺陷）、#1467 个人运行时会话恢复（2026-11-10 评估，无 per-user 体系）、#1469 工具发现报告个人 OAuth（2026-11-10 评估，无 per-user 体系）、#1455 个人凭证跨服务器复制（2026-11-04 评估，无 per-user 凭证体系）、#1453 Authorization 透传 opt-in（2026-11-03 评估，桌面无调用方头转发路径）、#1446 Fake-IP 异常（2026-11-03 评估，无 Fake-IP 机制）、#1454 Docker 文档（docs 不同步）、#1447 OpenAPI 可空/联合参数（2026-11-03 已镜像）、#1451 重装后版本刷新（2026-11-03 已镜像）、#1449 配置变更保持连接（桌面架构已等价，2026-11-03 评估）、#1437 Better Auth OIDC、#1435 上游 OAuth 过期持久化/个人 token 续期、#1434/#1428 个人凭证预览/掩码、#1433 HA 文档、#1431 PG 副本、#1430 Node 22 要求、#1429 用户组共享、#1427 分组服务通知、#1416 事件总线、#1422/#1407 凭证 broker、#1412 CI 脚本、#1406 分组改名密钥 scope（桌面已有等价）、#1405 resolvedLanguage、#1404 i18n 检测顺序（已镜像）、#1401 密钥编辑器可访问性（已镜像）、#1400 导入 BOM（已镜像）、#1398 嵌入编码协商（无链路）、#1396 重置密钥、#1394/#1393 per-user 凭证绑定、#1387 bearer 哈希（用户裁定维持明文）。
+
+#### 2026-11-10（第二十八轮）：`d3254a6` -> `d8aeaaf`（5 commit，版本 26.11.2 → 26.11.3，评估轮）
+
+- `753fec8` #1460 **清理/配置变更后陈旧向量写入防护（评估无需镜像）**——origin pgvector 版 Smart Routing 修复：清理服务器向量与配置变更（provider/model/dbUrl 等）竞态时，在飞嵌入批次把陈旧向量写回（mutation barrier + 批次失效 + 配置身份快照）。桌面核查：Smart Routing 为本地 lancedb 实现（`smart_routing/index.rs`），写入由 `EMBED_WRITE_LOCK` 全局串行化，写入前 skip-check（count+ids+hash+server row+model）与 `needs_full_reindex`（维度变更重建表）双重校验——清理/换模型后陈旧写入被拦截或随表重建清除，无同型竞态。
+- `1bdaf02` #1461 **OAuth 记住授权 + 应用撤销（评估无需镜像）**——origin OAuth Provider 新增 `oauth_client_approvals` 表（记住 consent，`alwaysShowApprovalScreen=false` 时静默重发授权码）+ 用户级「我的应用」撤销页。桌面核查：桌面 OAuth Provider 为本地单用户设计（无 username/sessionVersion 体系），consent 每次显式确认；`revoke_oauth_client` 已实现应用级撤销（revoked 标记 + tokens/codes 级联删除），功能面已覆盖。
+- `de0b22a` #1463 **动态注册凭证持久化修复（评估无需镜像）**——origin 修复 rmcp TS SDK 动态注册后从 `config.clientMetadata()` 提取 client_id/secret（原 `(config as any).client_id` 访问器失效致凭证丢失）。桌面核查：上游 OAuth 走 rmcp 3.4.1 Rust SDK，`register_client` → `configure_client` 后 token 交换时 `StoredCredentials`（含 client_id）经 `DbCredentialStore` 全量持久化，重启后 `initialize_from_store` 回填——无同型缺陷。
+- `e2585e1` #1467 **上游会话丢失后个人运行时恢复（评估无需镜像）**——origin per-user 凭证体系修复：上游 404 "session not found" 时标记个人运行时断连以便下次重建。桌面核查：无 per-user 凭证/个人运行时体系（#1455/#1393/#1394 同族裁定维持），连接级失效恢复由 `mark_conn_loss` + session_rebuild 覆盖。
+- `d8aeaaf` #1469 **工具发现时报告缺失的个人 OAuth（评估无需镜像）**——origin per-user OAuth 修复：聚合 tools/list 全空且存在授权失败时抛 `PERSONAL_AUTHORIZATION_REQUIRED` 协议错误而非静默空列表。桌面核查：无 per-user OAuth 体系；桌面聚合 tools/list 对未连接服务器跳过（不产生空列表误导），OAuth 未授权由 `oauth_required` 状态机 + ServerCard 状态点引导。
+- **验证**：cargo check 0 错 0 警；cargo test --lib 388 passed；tsc 0 错；vitest 74 passed。
+- **影响功能点与结果**：无（纯版本号推进）。**用户需重启生效**。
+
+#### 2026-11-05（第二十七轮）：`b1b5eb9` -> `d3254a6`（1 commit，版本 26.11.1 → 26.11.2，评估轮 + 更新器修复）
+
+- `d3254a6` #1457 **转发认证 JWT 可配置请求头（评估无需镜像）**——origin forward-auth（Better Auth/JWKS 网关认证）新增 `jwks.tokenHeader`（如 Cloudflare Access 的 `Cf-Access-Jwt-Assertion`），SSE 用户上下文优先级与 passthrough 转发语义同步调整。桌面核查：无 forward-auth/Better Auth 子系统（全仓 grep 零命中，与 #1437/#1435 同族裁定），无镜像落点。
+- **修复 3 项（用户实测报告：首次下载失败后重试永久卡「正在下载」）**：①[M] 下载停滞无看门狗——reqwest 默认无读超时，连接停止吐 chunk 不报错时 `download_and_install` future 永久 pending、无终态事件（app_log 实锤：19:59:05 第二次 install 后零日志）→ `install_update_cancelable` 加 select! 看门狗（15s tick，60s 无进度 → `Error::Network("download stalled...")` 终态）；②[M] 失败/取消路径关闭 Update 资源（rid）而前端 `cachedUpdate` 仍持旧 rid → 重试撞失效资源 → 仅成功时 close（`download_and_install(&self)` 可复用），CURRENT_RID 槽删除；③[L] 下载初始进度条误导——GitHub 302 重定向期间首 chunk 未到，不确定态渲染 1/3 宽实心脉冲条像「进度 33% 卡住」→ 全宽低透明度脉冲 + `about.connecting` 文案（4 语言）。
+- **验证**：cargo check 0 错 0 警；cargo test --lib 388 passed；tsc 0 错；vitest 74 passed。
+- **影响功能点与结果**：更新下载停滞 60s 后明确报错可重试；失败/取消后「安装更新」直接重试不再需要重新检查。**用户需重启生效**。
 
 #### 2026-11-04（第二十六轮·复核波）：4 代理并行切片 + 亲核修复 8 项 + 测试补强
 
@@ -701,7 +718,7 @@ patch -p1 --dry-run --batch --forward --no-backup-if-mismatch -F 5 < /tmp/origin
 
 ### 版本号四源（发布时必须一致）
 
-`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.11.1**。
+`src-tauri/tauri.conf.json`（也是 `import.meta.env.PACKAGE_VERSION` 来源）、`src-tauri/Cargo.toml`、根 `package.json`、`frontend/package.json`（+ `Cargo.lock`）。当前 **26.11.3**。
 
 **规则（2026-11-05 起，详见 §4.4）**：`2位年.月份.迭代号`，不跟随 origin tag；同月多次发布迭代号递增，跨月重置为 1；中间位=月份（1-12）保证 ≤255 兼容 WiX MSI（旧「月日」方案 26.1104.1 因 minor=1104>255 打包失败已废弃）；semver 禁前导零（迭代号 `7` 非 `007`）；每次同步/发布收口时四源 + 双 lockfile + `Cargo.lock` 一起更新，changelog 建同名 `doc/upgrade/{版本}.md`。
 - **第八轮独立复核（2026-11-02，5 代理并行切片 + 亲核修复 10 项 + 全量回归）**：扫描面 = mv override/多源下载全量 + bearer exclude 全链 + 前端新代码 + rag start/reindex 链 + 测试断言审计。**修复 10 项**：①[H] ModelScope token 硬编码测试源码（私有仓库凭证泄露）→ 环境变量化（**用户需吊销该 token**）；②[M] publish 先删旧 model.gguf 再 rename（失败/取消窗口销毁在用模型）→ publish_temp 原子覆盖优先；③[M] 单槽下载状态被第二个不同 size 下载孤儿化 → 进行中即拒绝；④[M] LFS batch 硬编码 refs/heads/main → branch 透传；⑤[M] 无 Content-Length 截断响应被当成功 → total/copied 双校验；⑥[M] reindex 部分失败仍清 NEEDS_REINDEX + 提交 → failed 计数 + partial 保持重试标记；⑦[M] reindex 中 select_model 混合嵌入固化 → REINDEX_ALL_RUNNING CAS + select_model 拒绝；⑧[M] smart-only 部署无 fallback → 下沉 load_locked；⑨[M] 测试池污染 + generation 测试未测守卫 + 前置断言级联 → restore_persisted/commit_allowed 提取/take 清场；⑩[L] docCountTotal 过滤残留 + SettingsPage 双弹框 → 无过滤同步+卸载重置 / startupReindexConfirm 守卫。另 repair_schema 探测失败静默 → warn。**验证**：cargo check 0 错 0 警；lib 338 passed；vitest 58；tsc 0 错；build ✓；clippy 新代码 0；**75 套 E2E 全部 exit 0**。记录不修 3 项（commit 毫秒窗口/clone 超时清理竞争/测试池偶发锁）。详见 doc/sync_report_26.1103.1.md 附录。
