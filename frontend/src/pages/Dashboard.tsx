@@ -79,9 +79,17 @@ const DashboardPage: React.FC = () => {
       return;
     }
     let cancelled = false;
-    apiGet<{ metaToolsContextTokens?: number | null }>('/smart-routing/status')
+    apiGet<{ success?: boolean; data?: { metaToolsContextTokens?: number | null } }>(
+      '/smart-routing/status',
+    )
       .then((res) => {
-        if (!cancelled) setSmartMetaTokens(res?.metaToolsContextTokens ?? null);
+        // Tauri invoke path wraps the payload as { success, data }.
+        const envelope = res as {
+          data?: { metaToolsContextTokens?: number | null };
+          metaToolsContextTokens?: number | null;
+        };
+        const payload = envelope?.data ?? envelope;
+        if (!cancelled) setSmartMetaTokens(payload?.metaToolsContextTokens ?? null);
       })
       .catch(() => {
         if (!cancelled) setSmartMetaTokens(null);
