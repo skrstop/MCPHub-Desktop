@@ -252,7 +252,6 @@ const DashboardPage: React.FC = () => {
             <Stat
               label={t('pages.dashboard.smartRoutingFootprint')}
               value={`${(smartMetaTokens / 1000).toFixed(1)}k`}
-              tone="muted"
             />
           )}
         </div>
