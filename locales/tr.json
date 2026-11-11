@@ -368,7 +368,7 @@
     "protocolNegotiationDescription": "Otomatik, eski el sıkışmaya geri dönmeden önce 2026 modern protokolünü (server/discover) sınar. Eski mod modern keşfi tamamen atlar.",
     "smartSearch": {
       "title": "İlgililik Araması",
-      "hint": "Akıllı yönlendirme araç dizini üzerinde hibrit (vektör + anahtar kelime) arama. Bir kapsam seçin, sorgu girin; sonuçlar ilgililik puanına göre sıralanır.",
+      "hint": "Akıllı yönlendirme araç dizini üzerinde hibrit (vektör + anahtar kelime) arama. Bir kapsam seçin, sorgu girin; sonuçlar ilgililik puanına göre sıralanır. Çapraz dil aramayı destekler: Çince bir sorgu İngilizce araç açıklamalarını da bulur, tersi de geçerlidir.",
       "scope": "Kapsam",
       "scopeAll": "Tüm sunucular ve gruplar",
       "scopeGroup": "Grup",
@@ -383,6 +383,11 @@
       "resultsTruncated": "Yalnızca ilk {{count}} eşleşme gösteriliyor — listeyi daraltmak için sorguyu hassaslaştırın.",
       "indexEmpty": "Akıllı yönlendirme indeksi boş. Ayarlar → Akıllı Yönlendirme bölümünden yeniden oluşturun ve tekrar arayın.",
       "scoreHint": "Ağırlıklı hibrit puan (vektör + anahtar kelime). Kanal başına puan 0-1 arasıdır; ağırlık ayarlarınıza göre birleşik puan 2’ye ulaşabilir."
+    },
+    "smartRoutingSettings": {
+      "title": "Akıllı Yönlendirme Ayarları",
+      "hint": "Akıllı yönlendirme için hibrit getirme ayarları (RAG ayarlarından bağımsız). Kaydettikten sonra sonraki aramada geçerli olur.",
+      "thresholdHint": "Puan eşiği $smart uç noktasının sonuçlarını filtreler; ilgili arama penceresi eşiğin altındaki eşleşmeleri de (puanlarıyla) gösterir."
     }
   },
   "status": {
@@ -669,7 +674,7 @@
       "modelLeft": "kaldı",
       "modelFiles": "dosya",
       "refresh": "Yenile",
-      "searchDialogTitle": "Arama Ayarları",
+      "searchDialogTitle": "RAG Ayarları",
       "vectorWeight": "Vektör arama ağırlığı",
       "keywordWeight": "Anahtar kelime arama ağırlığı",
       "searchHint": "Ağırlıklar gerçek hibrit arama skorlamasına uygulanır. Aralık [0, 1]. Varsayılan 0.5 / 0.5.",

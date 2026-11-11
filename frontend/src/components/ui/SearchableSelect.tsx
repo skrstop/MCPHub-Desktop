@@ -17,6 +17,11 @@ export interface SearchableSelectProps {
   className?: string;
   /** 是否显示搜索输入框（默认 true；false 时为纯下拉，打开即加载全部候选） */
   searchable?: boolean;
+  /** 可选：从展示文案映射回提交值（默认恒等——option 字符串即值）。
+   *  传入后 options 仍为展示文案数组，选中/回显比较均基于映射值。 */
+  getOptionValue?: (opt: string) => string;
+  /** 可选：关闭态回显文案（传入 getOptionValue 时值本身可能不可读，如 uuid） */
+  selectedLabel?: string;
 }
 
 /**
@@ -36,7 +41,13 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
   emptyText,
   className = '',
   searchable = true,
+  getOptionValue,
+  selectedLabel,
 }) => {
+  const valueOf = useCallback(
+    (opt: string) => (getOptionValue ? getOptionValue(opt) : opt),
+    [getOptionValue],
+  );
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [options, setOptions] = useState<string[]>([]);
@@ -137,7 +148,7 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (highlighted >= 0 && highlighted < options.length) {
-        onChange(options[highlighted]);
+        onChange(valueOf(options[highlighted]));
         setOpen(false);
       }
     }
@@ -155,7 +166,7 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
         className="hub-input flex items-center justify-between w-full text-left"
       >
         <span className={`truncate ${value ? '' : 'text-gray-400 dark:text-gray-500'}`}>
-          {value || placeholder}
+          {(value && (selectedLabel ?? value)) || placeholder}
         </span>
         <span className="flex items-center gap-1 shrink-0 ml-2">
           {value && (
@@ -226,14 +237,14 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
               <div
                 key={opt}
                 role="option"
-                aria-selected={opt === value}
+                aria-selected={valueOf(opt) === value}
                 onMouseEnter={() => setHighlighted(idx)}
                 onClick={() => {
-                  onChange(opt);
+                  onChange(valueOf(opt));
                   setOpen(false);
                 }}
                 className={`px-3 py-1.5 text-sm cursor-pointer truncate ${
-                  opt === value
+                  valueOf(opt) === value
                     ? 'bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-medium'
                     : idx === highlighted
                       ? 'bg-gray-100 dark:bg-gray-700'

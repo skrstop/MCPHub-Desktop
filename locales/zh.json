@@ -368,7 +368,7 @@
     "protocolNegotiationDescription": "自动模式先探测 2026 现代协议（server/discover），失败时回退旧版 initialize 握手；仅旧版模式完全跳过现代协议探测。",
     "smartSearch": {
       "title": "相关度搜索",
-      "hint": "基于智能路由工具索引的混合检索（向量 + 关键词）。选择范围、输入查询，结果按相关度评分排序。",
+      "hint": "基于智能路由工具索引的混合检索（向量 + 关键词）。选择范围、输入查询，结果按相关度评分排序。 支持中英文混合检索：中文查询也能匹配英文工具描述，反之亦然。",
       "scope": "范围",
       "scopeAll": "全部服务器与分组",
       "scopeGroup": "分组",
@@ -383,6 +383,11 @@
       "resultsTruncated": "仅显示前 {{count}} 条匹配，请细化查询以缩小范围。",
       "indexEmpty": "智能路由索引为空，请先在「设置 → 智能路由」中重建索引后再搜索。",
       "scoreHint": "加权混合评分（向量 + 关键词）。单通道分数为 0-1；按当前权重设置，合并分数最高可达 2。"
+    },
+    "smartRoutingSettings": {
+      "title": "智能路由设置",
+      "hint": "智能路由的混合检索设置（独立于 RAG 设置），保存后下次搜索即生效。",
+      "thresholdHint": "评分阈值会过滤 $smart 端点的结果；相关度搜索对话框也会显示低于阈值的匹配（附评分）。"
     }
   },
   "status": {
@@ -637,7 +642,7 @@
       "scanSkippedFiles": "已过滤 {{count}} 个不支持或二进制文件",
       "scanTruncated": "文件数超出单次导入上限 {{cap}}，已按路径顺序保留前 {{kept}} 个。如需全部导入，请分批选择子文件夹。",
       "uploadConfirm": "导入",
-      "searchDialogTitle": "搜索设置",
+      "searchDialogTitle": "RAG设置",
       "vectorWeight": "向量搜索权重",
       "keywordWeight": "关键词搜索权重",
       "searchHint": "权重将代入实际混合检索打分。范围 [0, 1],默认 0.5 / 0.5。",

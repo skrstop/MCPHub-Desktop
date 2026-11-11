@@ -34,7 +34,7 @@ interface InstallConfig {
   baseUrl: string;
 }
 
-interface SmartRoutingConfig {
+export interface SmartRoutingConfig {
   enabled: boolean;
   dbUrl: string;
   basePacingDelayMs?: number;

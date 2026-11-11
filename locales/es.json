@@ -350,7 +350,7 @@
     "protocolNegotiationDescription": "Automático prueba primero el protocolo moderno 2026 (server/discover) antes de recurrir al saludo heredado. Heredado omite por completo la prueba moderna.",
     "smartSearch": {
       "title": "Búsqueda por relevancia",
-      "hint": "Búsqueda híbrida (vector + palabra clave) sobre el índice de herramientas del enrutamiento inteligente. Elija un ámbito, escriba una consulta; los resultados se ordenan por puntuación de relevancia.",
+      "hint": "Búsqueda híbrida (vector + palabra clave) sobre el índice de herramientas del enrutamiento inteligente. Elija un ámbito, escriba una consulta; los resultados se ordenan por puntuación de relevancia. Admite búsqueda entre idiomas: una consulta en chino también encuentra descripciones en inglés, y viceversa.",
       "scope": "Ámbito",
       "scopeAll": "Todos los servidores y grupos",
       "scopeGroup": "Grupo",
@@ -365,6 +365,11 @@
       "resultsTruncated": "Solo se muestran las primeras {{count}} coincidencias; refine la consulta para acotar los resultados.",
       "indexEmpty": "El índice de enrutamiento inteligente está vacío. Reconstrúyalo en Ajustes → Enrutamiento inteligente y vuelva a buscar.",
       "scoreHint": "Puntuación híbrida ponderada (vector + palabras clave). Las puntuaciones por canal son 0-1; con sus pesos configurados, la puntuación combinada puede llegar a 2."
+    },
+    "smartRoutingSettings": {
+      "title": "Ajustes de enrutamiento inteligente",
+      "hint": "Ajustes de recuperación híbrida del enrutamiento inteligente (independientes de los ajustes de RAG). Surten efecto en la próxima búsqueda.",
+      "thresholdHint": "El umbral de puntuación filtra los resultados del endpoint $smart; el diálogo de búsqueda por relevancia también muestra coincidencias por debajo del umbral (con su puntuación)."
     }
   },
   "status": {
@@ -684,7 +689,7 @@
       "scanSkippedFiles": "Se filtraron {{count}} archivos no compatibles/binarios",
       "scanTruncated": "El número de archivos supera el límite por importación de {{cap}}; se conservaron los primeros {{kept}} por orden de ruta. Para importar todo, selecciona subcarpetas por lotes.",
       "uploadConfirm": "Importar",
-      "searchDialogTitle": "Ajustes de búsqueda",
+      "searchDialogTitle": "Ajustes de RAG",
       "vectorWeight": "Peso de búsqueda vectorial",
       "keywordWeight": "Peso de búsqueda por palabras clave",
       "searchHint": "Los pesos se aplican a la puntuación real de la búsqueda híbrida. Rango [0, 1]. Predeterminado 0.5 / 0.5.",

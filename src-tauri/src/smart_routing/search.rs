@@ -177,8 +177,20 @@ pub async fn search(
         Vec::new()
     };
     let kw_hits = if settings.keyword_weight > 0.0 {
+        // Cross-lingual expansion (zh ↔ en): the query language is unknown
+        // up front and tool descriptions are mostly single-language, so the
+        // keyword channel also tries the matched concepts' other-language
+        // terms (and standalone CJK concept words). The vector channel keeps
+        // the original query (multilingual models handle it; mixing
+        // translations would dilute the embedding).
+        let expanded = super::i18n_terms::expand_query_terms(query);
+        let kw_query = if expanded.is_empty() {
+            query.to_string()
+        } else {
+            format!("{} {}", query, expanded.join(" "))
+        };
         store
-            .keyword_search(query, fetch, allowed)
+            .keyword_search(&kw_query, fetch, allowed)
             .await
             .unwrap_or_else(|e| {
                 log::warn!("[smart] keyword search failed: {}", e);

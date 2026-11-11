@@ -6,10 +6,60 @@
 # =============================================================================
 set -euo pipefail
 
-# Versions — override via env vars if needed
-NODE_VERSION="${NODE_VERSION:-24.18.0}"
+# Versions — resolved dynamically at run time: the bundled default is the
+# LTS release BEFORE the newest one (最新 LTS 的前一个版本线，生态兼容更稳)，
+# fetched from nodejs.org / endoflife.date. Override via env vars; the
+# hardcoded values below are only used when the version feeds are unreachable
+# (2026-11 校准).
+NODE_FALLBACK_VERSION="24.22.2"
+PYTHON_FALLBACK_VERSION="3.14"
 UV_VERSION="${UV_VERSION:-0.11.24}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
+NODE_VERSION="${NODE_VERSION:-}"
+PYTHON_VERSION="${PYTHON_VERSION:-}"
+
+resolve_node_version() {
+  if [[ -n "$NODE_VERSION" ]]; then echo "$NODE_VERSION"; return; fi
+  local resolved=""
+  if command -v python3 >/dev/null 2>&1; then
+    resolved=$(curl -fsSL --max-time 20 https://nodejs.org/dist/index.json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+lts = {}
+for e in entries:
+    if e.get("lts"):
+        major = int(e["version"].split(".")[0][1:])
+        if major not in lts:
+            lts[major] = e["version"][1:]
+majors = sorted(lts, reverse=True)
+print(lts[majors[1]] if len(majors) >= 2 else "")
+' 2>/dev/null || true)
+  fi
+  if [[ -n "$resolved" ]]; then echo "$resolved"; else echo "$NODE_FALLBACK_VERSION"; fi
+}
+
+resolve_python_version() {
+  if [[ -n "$PYTHON_VERSION" ]]; then echo "$PYTHON_VERSION"; return; fi
+  local resolved=""
+  if command -v python3 >/dev/null 2>&1; then
+    resolved=$(curl -fsSL --max-time 20 https://endoflife.date/api/python.json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+entries.sort(key=lambda e: [int(x) for x in e["cycle"].split(".")], reverse=True)
+print(entries[1]["cycle"] if len(entries) >= 2 else "")
+' 2>/dev/null || true)
+  fi
+  if [[ -n "$resolved" ]]; then echo "$resolved"; else echo "$PYTHON_FALLBACK_VERSION"; fi
+}
+
+NODE_VERSION=$(resolve_node_version)
+PYTHON_VERSION=$(resolve_python_version)
+echo "==> Bundled runtimes: Node.js v${NODE_VERSION} / Python ${PYTHON_VERSION} (latest-1; override with NODE_VERSION/PYTHON_VERSION)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR/../src-tauri/runtimes"

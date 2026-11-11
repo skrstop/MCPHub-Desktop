@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, Loader2, Sparkles, Wrench, AlertCircle } from 'lucide-react';
 import { searchSmartRouting, fetchSmartRoutingPerformance, type SmartSearchResult } from '@/services/smartRoutingService';
+import SearchableSelect from '@/components/ui/SearchableSelect';
 import {
   localizeSmartSearchError,
   scopeForRequest,
@@ -70,6 +71,26 @@ const SmartSearchDialog: React.FC<{
   // Effective result cap: the backend clamps the request limit to the user's
   // max_results setting, so the truncation hint must use the same value.
   const effectiveLimit = Math.max(1, Math.min(SEARCH_LIMIT, maxResults ?? SEARCH_LIMIT));
+
+  // Searchable + paginated scope selector: options are filtered/paged
+  // client-side (the full list is already in memory — groups + servers).
+  const scopeByLabel = new Map(scopeOptions.map((o) => [o.label, o]));
+  const loadScopeOptions = useCallback(
+    (search: string, page: number, pageSize: number): Promise<{ options: string[]; total: number }> => {
+      const q = search.trim().toLowerCase();
+      const filtered = q
+        ? scopeOptions.filter((o) => o.label.toLowerCase().includes(q))
+        : scopeOptions;
+      const start = (page - 1) * pageSize;
+      return Promise.resolve({
+        options: filtered.slice(start, start + pageSize).map((o) => o.label),
+        total: filtered.length,
+      });
+    },
+    [scopeOptions],
+  );
+  const selectedScopeLabel =
+    scopeOptions.find((o) => o.value === scope)?.label ?? '';
 
   const handleSearch = async () => {
     const q = query.trim();
@@ -157,19 +178,18 @@ const SmartSearchDialog: React.FC<{
             {t('server.smartSearch.hint')}
           </p>
           <div className="flex gap-2">
-            <select
-              className="hub-input"
-              style={{ width: 220, flexShrink: 0 }}
+            <SearchableSelect
+              className="flex-shrink-0 w-[220px]"
+              loadOptions={loadScopeOptions}
               value={scope}
-              onChange={(e) => handleScopeChange(e.target.value)}
-              aria-label={t('server.smartSearch.scope')}
-            >
-              {scopeOptions.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+              onChange={handleScopeChange}
+              getOptionValue={(label) => scopeByLabel.get(label)?.value ?? ''}
+              selectedLabel={selectedScopeLabel}
+              placeholder={t('server.smartSearch.scope')}
+              ariaLabel={t('server.smartSearch.scope')}
+              pageSize={50}
+              emptyText={t('server.smartSearch.noResults')}
+            />
             <input
               className="hub-input flex-1"
               ref={inputRef}

@@ -3,15 +3,58 @@
 # Run from the repository root before building the Tauri app.
 
 param(
-    [string]$NodeVersion = "24.18.0",
+    [string]$NodeVersion = "",
     [string]$UvVersion = "0.11.24",
-    [string]$PythonVersion = "3.14",
+    [string]$PythonVersion = "",
     # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
     # 注意: TargetArch 控制 Node.js 和 Python 的目标架构，但 uv 始终使用宿主架构以便能执行
     [string]$TargetArch = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Versions — resolved dynamically at run time: the bundled default is the
+# LTS release BEFORE the newest one (最新 LTS 的前一个版本线，生态兼容更稳)，
+# fetched from nodejs.org / endoflife.date. Override via -NodeVersion /
+# -PythonVersion; the hardcoded values below are only used when the version
+# feeds are unreachable (2026-11 校准).
+$NodeFallbackVersion = "24.22.2"
+$PythonFallbackVersion = "3.14"
+
+function Resolve-NodeVersion {
+    if ($NodeVersion) { return $NodeVersion }
+    try {
+        $entries = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -TimeoutSec 20
+        $lts = @{}
+        foreach ($e in $entries) {
+            if ($e.lts) {
+                $major = [int]($e.version.TrimStart('v').Split('.')[0])
+                if (-not $lts.ContainsKey($major)) { $lts[$major] = $e.version.TrimStart('v') }
+            }
+        }
+        $majors = @($lts.Keys | Sort-Object -Descending)
+        if ($majors.Count -ge 2) { return $lts[$majors[1]] }
+    } catch {
+        Write-Warning "nodejs.org version feed unreachable, using fallback $($NodeFallbackVersion): $_"
+    }
+    return $NodeFallbackVersion
+}
+
+function Resolve-PythonVersion {
+    if ($PythonVersion) { return $PythonVersion }
+    try {
+        $entries = Invoke-RestMethod -Uri "https://endoflife.date/api/python.json" -TimeoutSec 20
+        $sorted = @($entries | Sort-Object { [version]$_.cycle } -Descending)
+        if ($sorted.Count -ge 2) { return $sorted[1].cycle }
+    } catch {
+        Write-Warning "endoflife.date version feed unreachable, using fallback $($PythonFallbackVersion): $_"
+    }
+    return $PythonFallbackVersion
+}
+
+$NodeVersion = Resolve-NodeVersion
+$PythonVersion = Resolve-PythonVersion
+Write-Host "==> Bundled runtimes: Node.js v$NodeVersion / Python $PythonVersion (latest-1; override with -NodeVersion/-PythonVersion)"
 
 # Helper: run an external executable and capture its stdout without triggering
 # the PowerShell "StandardOutputEncoding" error that occurs in some CI environments.

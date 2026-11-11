@@ -56,6 +56,22 @@ describe('SmartSearchDialog', () => {
     expect((btn as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('filters scope options by search text in the selector', async () => {
+    const user = userEvent.setup();
+    render(<SmartSearchDialog onClose={() => {}} scopeOptions={scopes} />);
+    await user.click(screen.getByRole('combobox'));
+    // Debounced search (300ms) triggers the filtered loader branch.
+    const searchInput = screen.getAllByPlaceholderText(/searchScope|search/i)[0];
+    await user.type(searchInput, 'web');
+    await waitFor(
+      () => {
+        expect(screen.queryByText('Server: pw')).toBeNull();
+      },
+      { timeout: 3000 },
+    );
+    expect(screen.getByText('Group: web')).toBeTruthy();
+  });
+
   it('sends the scope verbatim and renders scored results', async () => {
     const user = userEvent.setup();
     searchMock.mockResolvedValue([
@@ -70,7 +86,8 @@ describe('SmartSearchDialog', () => {
       },
     ]);
     render(<SmartSearchDialog onClose={() => {}} scopeOptions={scopes} />);
-    await user.selectOptions(screen.getByRole('combobox'), 'group:g1');
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByText('Group: web'));
     await user.type(screen.getByRole('textbox'), 'deploy');
     await user.click(screen.getByRole('button', { name: /searchBtn/ }));
     await waitFor(() => expect(screen.getByText(/click/)).toBeTruthy());
@@ -86,7 +103,8 @@ describe('SmartSearchDialog', () => {
     await user.type(screen.getByRole('textbox'), 'deploy');
     await user.click(screen.getByRole('button', { name: /searchBtn/ }));
     // Change scope while the request is in flight, then resolve the old response.
-    await user.selectOptions(screen.getByRole('combobox'), 'server:pw');
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByText('Server: pw'));
     await act(async () => {
       d.resolve([
         {
@@ -105,12 +123,34 @@ describe('SmartSearchDialog', () => {
     expect(screen.queryByText(/server\.smartSearch\.results/)).toBeNull();
   });
 
+  it('falls back to the all scope when a stale option label is clicked', async () => {
+    // Scope options refreshed while the dropdown stayed open: the rendered
+    // option list still holds the old label, so clicking it must not select
+    // a value that no longer exists (getOptionValue fallback -> '').
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <SmartSearchDialog onClose={() => {}} scopeOptions={scopes} />,
+    );
+    await user.click(screen.getByRole('combobox'));
+    rerender(
+      <SmartSearchDialog
+        onClose={() => {}}
+        scopeOptions={scopes.filter((o) => o.kind !== 'group')}
+      />,
+    );
+    await user.click(screen.getByText('Group: web'));
+    await waitFor(() => {
+      expect(screen.getByRole('combobox').textContent).toContain('All');
+    });
+  });
+
   it('resets a dangling scope back to all when its option disappears', async () => {
     const user = userEvent.setup();
     const { rerender } = render(
       <SmartSearchDialog onClose={() => {}} scopeOptions={scopes} />,
     );
-    await user.selectOptions(screen.getByRole('combobox'), 'group:g1');
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByText('Group: web'));
     // The group is deleted while the dialog is open.
     rerender(
       <SmartSearchDialog
@@ -118,8 +158,10 @@ describe('SmartSearchDialog', () => {
         scopeOptions={[scopes[0], scopes[2]]}
       />,
     );
+    // The closed combobox displays the selected option's label; after the
+    // dangling-scope fallback it must show the global scope's label.
     await waitFor(() =>
-      expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('all'),
+      expect(screen.getByRole('combobox').textContent).toContain('All'),
     );
   });
 
@@ -285,7 +327,8 @@ describe('SmartSearchDialog', () => {
     render(<SmartSearchDialog onClose={() => {}} scopeOptions={scopes} />);
     await user.type(screen.getByRole('textbox'), 'deploy');
     await user.click(screen.getByRole('button', { name: /searchBtn/ }));
-    await user.selectOptions(screen.getByRole('combobox'), 'server:pw');
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByText('Server: pw'));
     await act(async () => {
       d.reject(new Error('late failure'));
     });

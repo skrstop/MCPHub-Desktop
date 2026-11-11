@@ -368,7 +368,7 @@
     "protocolNegotiationDescription": "Auto probes the 2026 modern protocol (server/discover) before falling back to the legacy handshake. Legacy skips the modern probe entirely.",
     "smartSearch": {
       "title": "Relevance Search",
-      "hint": "Hybrid (vector + keyword) search over the Smart Routing tool index. Pick a scope, type a query, and results are ranked by relevance score.",
+      "hint": "Hybrid (vector + keyword) search over the Smart Routing tool index. Pick a scope, type a query, and results are ranked by relevance score. Supports cross-lingual search: a Chinese query also matches English tool descriptions, and vice versa.",
       "scope": "Scope",
       "scopeAll": "All servers & groups",
       "scopeGroup": "Group",
@@ -383,6 +383,11 @@
       "resultsTruncated": "Only the top {{count}} matches are shown — refine the query to narrow the results.",
       "indexEmpty": "The smart routing index is empty. Rebuild it in Settings → Smart Routing, then search again.",
       "scoreHint": "Weighted hybrid score (vector + keyword). Per-channel scores are 0-1; with your weight settings the combined score can reach up to 2."
+    },
+    "smartRoutingSettings": {
+      "title": "Smart Routing Settings",
+      "hint": "Hybrid retrieval settings for Smart Routing (independent of RAG settings). Changes take effect on the next search.",
+      "thresholdHint": "The score threshold filters results in the $smart endpoint; the relevance-search dialog shows below-threshold matches too (with scores)."
     }
   },
   "status": {
@@ -637,7 +642,7 @@
       "scanSkippedFiles": "Filtered {{count}} unsupported/binary files",
       "scanTruncated": "File count exceeds the per-import cap of {{cap}}; kept the first {{kept}} by path order. To import everything, pick sub-folders in batches.",
       "uploadConfirm": "Import",
-      "searchDialogTitle": "Search Settings",
+      "searchDialogTitle": "RAG Settings",
       "vectorWeight": "Vector search weight",
       "keywordWeight": "Keyword search weight",
       "searchHint": "Weights are applied to the actual hybrid search scoring. Range [0, 1]. Default 0.5 / 0.5.",

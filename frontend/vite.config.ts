@@ -6,7 +6,7 @@ import tailwindcss from '@tailwindcss/vite';
 import { readFileSync } from 'fs';
 
 // Get version from tauri.conf.json (single source of truth)
-const tauriConf = JSON.parse(readFileSync(path.resolve(__dirname, '../src-tauri/tauri.conf.json'), 'utf-8'));
+const tauriConf = JSON.parse(readFileSync(path.resolve(import.meta.dirname, '../src-tauri/tauri.conf.json'), 'utf-8'));
 
 // For runtime configuration, we'll always use relative paths
 // BASE_PATH will be determined at runtime
@@ -18,7 +18,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   define: {

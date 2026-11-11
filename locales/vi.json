@@ -368,7 +368,7 @@
     "protocolNegotiationDescription": "Tự động thăm dò giao thức hiện đại 2026 (server/discover) trước khi quay lại bắt tay cũ. Chế độ cũ bỏ qua hoàn toàn bước thăm dò hiện đại.",
     "smartSearch": {
       "title": "Tìm kiếm theo độ liên quan",
-      "hint": "Tìm kiếm lai (vector + từ khóa) trên chỉ mục công cụ của định tuyến thông minh. Chọn phạm vi, nhập truy vấn; kết quả được xếp hạng theo điểm liên quan.",
+      "hint": "Tìm kiếm lai (vector + từ khóa) trên chỉ mục công cụ của định tuyến thông minh. Chọn phạm vi, nhập truy vấn; kết quả được xếp hạng theo điểm liên quan. Hỗ trợ tìm kiếm đa ngôn ngữ: truy vấn tiếng Trung cũng khớp mô tả công cụ tiếng Anh và ngược lại.",
       "scope": "Phạm vi",
       "scopeAll": "Tất cả máy chủ và nhóm",
       "scopeGroup": "Nhóm",
@@ -383,6 +383,11 @@
       "resultsTruncated": "Chỉ hiển thị {{count}} kết quả khớp hàng đầu — hãy tinh chỉnh truy vấn để thu hẹp phạm vi.",
       "indexEmpty": "Chỉ mục định tuyến thông minh đang trống. Hãy dựng lại trong Cài đặt → Định tuyến thông minh rồi tìm lại.",
       "scoreHint": "Điểm lai có trọng số (vector + từ khóa). Điểm từng kênh là 0-1; theo cài đặt trọng số, điểm kết hợp có thể lên tới 2."
+    },
+    "smartRoutingSettings": {
+      "title": "Cài đặt định tuyến thông minh",
+      "hint": "Cài đặt truy xuất lai cho định tuyến thông minh (độc lập với cài đặt RAG). Có hiệu lực từ lần tìm kiếm tiếp theo.",
+      "thresholdHint": "Ngưỡng điểm lọc kết quả của endpoint $smart; hộp thoại tìm kiếm độ liên quan cũng hiển thị các kết quả dưới ngưỡng (kèm điểm)."
     }
   },
   "status": {
@@ -637,7 +642,7 @@
       "scanSkippedFiles": "Đã lọc {{count}} tệp không hỗ trợ hoặc nhị phân",
       "scanTruncated": "Số tệp vượt giới hạn {{cap}} mỗi lần nhập; đã giữ {{kept}} tệp đầu theo thứ tự đường dẫn. Để nhập tất cả, hãy chọn từng thư mục con theo đợt.",
       "uploadConfirm": "Nhập",
-      "searchDialogTitle": "Cài đặt tìm kiếm",
+      "searchDialogTitle": "Cài đặt RAG",
       "vectorWeight": "Trọng số tìm kiếm vector",
       "keywordWeight": "Trọng số tìm kiếm từ khóa",
       "searchHint": "Trọng số sẽ được áp dụng vào điểm số tìm kiếm lai thực tế. Phạm vi [0, 1]. Mặc định 0.5 / 0.5.",

@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X, Loader2, Sparkles } from 'lucide-react';
+import { Plus, RefreshCw, Search, Upload, FileCode, AlertCircle, X, Loader2, Sparkles, SlidersHorizontal } from 'lucide-react';
 import { Server } from '@/types';
 import ServerCard from '@/components/ServerCard';
 import AddServerForm from '@/components/AddServerForm';
@@ -16,6 +16,7 @@ import { useServerData } from '@/hooks/useServerData';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useSettings } from '@/contexts/SettingsContext';
 import SmartSearchDialog from '@/components/SmartSearchDialog';
+import SmartRoutingSettingsDialog from '@/components/SmartRoutingSettingsDialog';
 import { buildSmartSearchScopes } from '@/utils/smartSearchScope';
 import { isTauri } from '@/utils/tauriClient';
 import { useCostData } from '@/hooks/useCostData';
@@ -52,7 +53,7 @@ const ServersPage: React.FC = () => {
   // recomputing per render (every keystroke/poll) is O(full catalog).
   const costRevision = useMemo(() => serverCostRevision(allServers), [allServers]);
   const { serverCosts } = useCostData(costRevision);
-  const { smartRoutingConfig } = useSettings();
+  const { smartRoutingConfig, updateSmartRoutingConfigBatch } = useSettings();
   const { groups } = useGroupData();
 
   // Relevance-search scope options: all / groups / servers (smart routing on).
@@ -80,6 +81,7 @@ const ServersPage: React.FC = () => {
   const [showMcpbUpload, setShowMcpbUpload] = useState(false);
   const [showJsonImport, setShowJsonImport] = useState(false);
   const [showSmartSearch, setShowSmartSearch] = useState(false);
+  const [showSmartRoutingSettings, setShowSmartRoutingSettings] = useState(false);
   const [filter, setFilter] = useState<ServerFilter>('all');
   const [search, setSearch] = useState('');
   // Server-type filter: 'custom' (default) hides builtin servers, 'builtin'
@@ -266,13 +268,22 @@ const ServersPage: React.FC = () => {
         </div>
         <div className="flex flex-wrap gap-2">
           {isTauri() && smartRoutingConfig.enabled && (
-            <button
-              className="hub-btn"
-              onClick={() => setShowSmartSearch(true)}
-              aria-label={t('server.smartSearch.title')}
-            >
-              <Sparkles size={13} /> {t('server.smartSearch.title')}
-            </button>
+            <>
+              <button
+                className="hub-btn primary"
+                onClick={() => setShowSmartSearch(true)}
+                aria-label={t('server.smartSearch.title')}
+              >
+                <Sparkles size={13} /> {t('server.smartSearch.title')}
+              </button>
+              <button
+                className="hub-btn"
+                onClick={() => setShowSmartRoutingSettings(true)}
+                aria-label={t('server.smartRoutingSettings.title')}
+              >
+                <SlidersHorizontal size={13} /> {t('server.smartRoutingSettings.title')}
+              </button>
+            </>
           )}
           {hasStdioServer && (
             <button
@@ -520,6 +531,13 @@ const ServersPage: React.FC = () => {
             triggerRefresh();
           }}
           onCancel={() => setShowJsonImport(false)}
+        />
+      )}
+      {showSmartRoutingSettings && (
+        <SmartRoutingSettingsDialog
+          config={smartRoutingConfig}
+          onClose={() => setShowSmartRoutingSettings(false)}
+          onSave={updateSmartRoutingConfigBatch}
         />
       )}
       {showSmartSearch && (

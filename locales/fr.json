@@ -368,7 +368,7 @@
     "protocolNegotiationDescription": "Auto sonde d'abord le protocole moderne 2026 (server/discover) avant de revenir à la poignée de main héritée. Hérité ignore complètement la sonde moderne.",
     "smartSearch": {
       "title": "Recherche par pertinence",
-      "hint": "Recherche hybride (vecteur + mot-clé) sur l'index d'outils du routage intelligent. Choisissez une portée, saisissez une requête ; les résultats sont classés par score de pertinence.",
+      "hint": "Recherche hybride (vecteur + mot-clé) sur l'index d'outils du routage intelligent. Choisissez une portée, saisissez une requête ; les résultats sont classés par score de pertinence. Prend en charge la recherche interlingue : une requête en chinois trouve aussi les descriptions en anglais, et inversement.",
       "scope": "Portée",
       "scopeAll": "Tous les serveurs et groupes",
       "scopeGroup": "Groupe",
@@ -383,6 +383,11 @@
       "resultsTruncated": "Seuls les {{count}} premiers résultats sont affichés — affinez la requête pour réduire la liste.",
       "indexEmpty": "L'index du routage intelligent est vide. Reconstruisez-le dans Paramètres → Routage intelligent, puis relancez la recherche.",
       "scoreHint": "Score hybride pondéré (vecteur + mots-clés). Les scores par canal sont de 0 à 1 ; selon vos pondérations, le score combiné peut atteindre 2."
+    },
+    "smartRoutingSettings": {
+      "title": "Paramètres du routage intelligent",
+      "hint": "Paramètres de récupération hybride du routage intelligent (indépendants des paramètres RAG). Effectifs dès la prochaine recherche.",
+      "thresholdHint": "Le seuil de score filtre les résultats de l'endpoint $smart ; la boîte de dialogue de recherche par pertinence affiche aussi les correspondances sous le seuil (avec leur score)."
     }
   },
   "status": {
@@ -669,7 +674,7 @@
       "modelLeft": "restant",
       "modelFiles": "fichiers",
       "refresh": "Actualiser",
-      "searchDialogTitle": "Paramètres de recherche",
+      "searchDialogTitle": "Paramètres RAG",
       "vectorWeight": "Poids recherche vectorielle",
       "keywordWeight": "Poids recherche par mots-clés",
       "searchHint": "Les poids sont appliqués au score de recherche hybride. Plage [0, 1]. Défaut 0.5 / 0.5.",

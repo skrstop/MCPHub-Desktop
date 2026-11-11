@@ -248,30 +248,29 @@ async fn fetch_python_versions() -> Option<Vec<String>> {
     Some(result)
 }
 
-/// 网络异常时使用的内置 Node.js LTS 版本列表（保底）
+/// 网络异常时使用的内置 Node.js LTS 版本列表（保底；按 LTS 主版本降序，
+/// 与 nodejs.org/dist/index.json 的当前 LTS 线对齐——2026-11 校准）。
 fn fallback_node_versions() -> Vec<String> {
     vec![
-        "24.17.0".to_string(),
-        "22.14.0".to_string(),
-        "20.18.3".to_string(),
-        "18.20.7".to_string(),
+        "26.13.0".to_string(),
+        "24.22.2".to_string(),
+        "22.23.4".to_string(),
+        "20.20.2".to_string(),
+        "18.20.8".to_string(),
         "16.20.2".to_string(),
-        "14.21.3".to_string(),
-        "12.22.12".to_string(),
-        "10.24.1".to_string(),
     ]
 }
 
-/// 网络异常时使用的内置 Python 版本列表（保底）
+/// 网络异常时使用的内置 Python 版本列表（保底；稳定 minor 降序——2026-11 校准）。
 fn fallback_python_versions() -> Vec<String> {
     vec![
-        "3.14.0".to_string(),
-        "3.13.1".to_string(),
-        "3.12.8".to_string(),
-        "3.11.11".to_string(),
-        "3.10.16".to_string(),
-        "3.9.21".to_string(),
-        "3.8.20".to_string(),
+        "3.15.2".to_string(),
+        "3.14.10".to_string(),
+        "3.13.18".to_string(),
+        "3.12.16".to_string(),
+        "3.11.18".to_string(),
+        "3.10.22".to_string(),
+        "3.9.25".to_string(),
     ]
 }
 

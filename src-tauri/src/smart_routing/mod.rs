@@ -18,6 +18,7 @@
 //! - config update → `index::on_server_updated` (re-runs save; hash skip-check
 //!   makes it a no-op when nothing changed)
 
+pub mod i18n_terms;
 pub mod index;
 pub mod meta;
 pub mod models;
