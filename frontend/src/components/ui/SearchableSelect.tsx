@@ -49,6 +49,9 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
     [getOptionValue],
   );
   const [open, setOpen] = useState(false);
+  // Fixed positioning: the dropdown must escape ancestor overflow clipping
+  // (e.g. dialog bodies with overflow-y-auto would otherwise cut it off).
+  const [dropPos, setDropPos] = useState<{ top: number; left: number; width: number; openUp: boolean } | null>(null);
   const [search, setSearch] = useState('');
   const [options, setOptions] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
@@ -80,6 +83,34 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
     },
     [loadOptions, pageSize],
   );
+
+  const updateDropPos = useCallback(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - r.bottom;
+    setDropPos({
+      top: spaceBelow < 280 ? r.top : r.bottom + 4,
+      left: r.left,
+      width: r.width,
+      openUp: spaceBelow < 280,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      setDropPos(null);
+      return;
+    }
+    updateDropPos();
+    // Keep the fixed dropdown aligned while ancestors scroll/resize.
+    document.addEventListener('scroll', updateDropPos, true);
+    window.addEventListener('resize', updateDropPos);
+    return () => {
+      document.removeEventListener('scroll', updateDropPos, true);
+      window.removeEventListener('resize', updateDropPos);
+    };
+  }, [open, updateDropPos]);
 
   // 打开时拉第一页；输入防抖 300ms 后重拉第一页
   useEffect(() => {
@@ -210,7 +241,19 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
       </button>
 
       {open && (
-        <div className="absolute z-30 mt-1 w-full rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg">
+        <div
+          className="fixed z-[60] rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg"
+          style={
+            dropPos
+              ? {
+                  top: dropPos.top,
+                  left: dropPos.left,
+                  width: dropPos.width,
+                  ...(dropPos.openUp ? { transform: 'translateY(calc(-100% - 4px))' } : {}),
+                }
+              : { display: 'none' }
+          }
+        >
           {searchable && (
             <div className="p-2 border-b border-gray-100 dark:border-gray-700">
               <input

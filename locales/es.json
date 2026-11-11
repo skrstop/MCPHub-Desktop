@@ -608,7 +608,8 @@
       "openapiHint": "Importa la especificación en OpenWebUI, Swagger UI o cualquier cliente compatible con OpenAPI para llamar a las herramientas MCP",
       "openapiNamePlaceholder": "<servidor-o-grupo>",
       "openapiTitle": "Endpoints OpenAPI",
-      "openapiUsage": "Reemplaza el marcador por un nombre de servidor o grupo. Las herramientas de parámetros simples se convierten en llamadas GET; el resto acepta un cuerpo JSON POST. Las solicitudes requieren una clave de acceso cuando la autenticación está habilitada."
+      "openapiUsage": "Reemplaza el marcador por un nombre de servidor o grupo. Las herramientas de parámetros simples se convierten en llamadas GET; el resto acepta un cuerpo JSON POST. Las solicitudes requieren una clave de acceso cuando la autenticación está habilitada.",
+      "smartRoutingFootprint": "Huella de enrutamiento inteligente"
     },
     "servers": {
       "title": "Gestión de servidores"

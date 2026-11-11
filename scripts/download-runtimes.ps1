@@ -4,7 +4,8 @@
 
 param(
     [string]$NodeVersion = "",
-    [string]$UvVersion = "0.11.24",
+    # uv：总是下载最新版本（releases/latest 重定向解析 tag），兜底 0.13.7
+    [string]$UvVersion = "",
     [string]$PythonVersion = "",
     # TargetArch 用于 CI 交叉编译，取值: x64 | arm64 | "" (自动检测)
     # 注意: TargetArch 控制 Node.js 和 Python 的目标架构，但 uv 始终使用宿主架构以便能执行
@@ -20,6 +21,24 @@ $ErrorActionPreference = "Stop"
 # feeds are unreachable (2026-11 校准).
 $NodeFallbackVersion = "24.22.2"
 $PythonFallbackVersion = "3.14"
+$UvFallbackVersion = "0.13.7"
+
+function Resolve-UvVersion {
+    if ($UvVersion) { return $UvVersion }
+    try {
+        # releases/latest 302 重定向到 /releases/tag/<tag>，取末段即为版本号
+        $resp = Invoke-WebRequest -Uri "https://github.com/astral-sh/uv/releases/latest" `
+            -MaximumRedirection 0 -ErrorAction SilentlyContinue -UseBasicParsing
+        $loc = $resp.Headers.Location
+        if ($loc) {
+            $tag = ($loc -split '/tag/')[-1]
+            if ($tag -match '^\d+\.\d+\.\d+$') { return $tag }
+        }
+    } catch {
+        Write-Warning "uv latest release lookup failed, using fallback $($UvFallbackVersion): $_"
+    }
+    return $UvFallbackVersion
+}
 
 function Resolve-NodeVersion {
     if ($NodeVersion) { return $NodeVersion }
@@ -54,7 +73,8 @@ function Resolve-PythonVersion {
 
 $NodeVersion = Resolve-NodeVersion
 $PythonVersion = Resolve-PythonVersion
-Write-Host "==> Bundled runtimes: Node.js v$NodeVersion / Python $PythonVersion (latest-1; override with -NodeVersion/-PythonVersion)"
+$UvVersion = Resolve-UvVersion
+Write-Host "==> Bundled runtimes: Node.js v$NodeVersion / Python $PythonVersion / uv v$UvVersion (node/python latest-1, uv latest; override with -NodeVersion/-PythonVersion/-UvVersion)"
 
 # Helper: run an external executable and capture its stdout without triggering
 # the PowerShell "StandardOutputEncoding" error that occurs in some CI environments.

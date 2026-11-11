@@ -111,7 +111,7 @@ const SmartRoutingSettingsDialog: React.FC<{
           <p className="text-[12px]" style={{ color: 'var(--hub-ink-3)' }}>
             {t('server.smartRoutingSettings.hint')}
           </p>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+          <div className="space-y-4">
             <Slider
               label={t('settings.srVectorWeight')}
               value={vectorWeight}

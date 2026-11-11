@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { RefreshCw, Plus, ChevronRight, AlertCircle, AlertTriangle } from 'lucide-react';
@@ -6,6 +6,7 @@ import { useServerData } from '@/hooks/useServerData';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useCostData } from '@/hooks/useCostData';
 import { formatTokens } from '@/utils/contextCost';
+import { apiGet } from '@/utils/fetchInterceptor';
 import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { isTauri } from '@/utils/tauriClient';
 import { getSmartRoutingPath } from '@/utils/runtime';
@@ -67,7 +68,28 @@ const DashboardPage: React.FC = () => {
   const { allServers, error, setError, isLoading, triggerRefresh } = useServerData({
     refreshOnMount: true,
   });
-  const { installConfig, routingConfig, bearerKeys } = useSettingsData();
+  const { installConfig, routingConfig, bearerKeys, smartRoutingConfig } = useSettingsData();
+
+  // Smart Routing context footprint: token estimate of the $smart meta tools
+  // as a client would receive them (backend computes from the real definitions).
+  const [smartMetaTokens, setSmartMetaTokens] = useState<number | null>(null);
+  useEffect(() => {
+    if (!smartRoutingConfig?.enabled) {
+      setSmartMetaTokens(null);
+      return;
+    }
+    let cancelled = false;
+    apiGet<{ metaToolsContextTokens?: number | null }>('/smart-routing/status')
+      .then((res) => {
+        if (!cancelled) setSmartMetaTokens(res?.metaToolsContextTokens ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setSmartMetaTokens(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [smartRoutingConfig?.enabled]);
   const { serverCosts } = useCostData();
   const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
 
@@ -218,6 +240,13 @@ const DashboardPage: React.FC = () => {
           <Stat label={t('pages.dashboard.offlineServers')} value={stats.offline} tone="err" />
           <Stat label={t('pages.dashboard.disabledServers')} value={stats.disabled} tone="muted" />
           <Stat label={t('cost.totalFootprint')} value={formatTokens(footprint)} />
+          {smartRoutingConfig?.enabled && smartMetaTokens !== null && (
+            <Stat
+              label={t('pages.dashboard.smartRoutingFootprint')}
+              value={formatTokens(smartMetaTokens)}
+              tone="muted"
+            />
+          )}
         </div>
       )}
 

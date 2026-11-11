@@ -258,6 +258,10 @@ fn fallback_node_versions() -> Vec<String> {
         "20.20.2".to_string(),
         "18.20.8".to_string(),
         "16.20.2".to_string(),
+        "14.21.3".to_string(),
+        "12.22.12".to_string(),
+        "10.24.1".to_string(),
+        "8.17.0".to_string(),
     ]
 }
 
@@ -271,6 +275,9 @@ fn fallback_python_versions() -> Vec<String> {
         "3.11.18".to_string(),
         "3.10.22".to_string(),
         "3.9.25".to_string(),
+        "3.8.20".to_string(),
+        "3.7.17".to_string(),
+        "3.6.15".to_string(),
     ]
 }
 

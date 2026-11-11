@@ -558,7 +558,8 @@
       "httpFailReasonLoopback": "{{port}} portunun geri döngü adresinde başka bir uygulama dinliyor, localhost erişimi yönlendiriliyor.",
       "httpFailSuggestionLoopback": "Otomatik işlem için \"Sonlandır ve yeniden başlat\" seçeneğini kullanın; veya diğer uygulamayı durdurun / Ayarlar → Yönlendirme bölümünden portu değiştirin.",
       "httpFailCauseloopbackOccupied": "Geri döngü adresi 127.0.0.1:{{port}} zaten başka bir süreçte (genel bağlama başarılı oldu, ancak yerel adres işgal edildi — yerel istemciler yönlendirilecek).",
-      "httpFailActionloopbackOccupied": "Algılanan işgal eden süreci sonlandırın (seçeneği işaretleyip \"Sonlandır ve yeniden başlat\" öğesine tıklayın) veya Ayarlar → Yönlendirme bölümünden portu değiştirip yeniden deneyin."
+      "httpFailActionloopbackOccupied": "Algılanan işgal eden süreci sonlandırın (seçeneği işaretleyip \"Sonlandır ve yeniden başlat\" öğesine tıklayın) veya Ayarlar → Yönlendirme bölümünden portu değiştirip yeniden deneyin.",
+      "smartRoutingFootprint": "Akıllı Yönlendirme Ayak İzi"
     },
     "servers": {
       "title": "Sunucu Yönetimi"

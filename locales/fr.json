@@ -558,7 +558,8 @@
       "httpFailReasonLoopback": "Une autre application écoute sur l'adresse de bouclage du port {{port}}, détournant l'accès localhost.",
       "httpFailSuggestionLoopback": "Activez « Terminer et redémarrer » pour traiter automatiquement, ou arrêtez l’autre application / changez le port dans Paramètres → Routage.",
       "httpFailCauseloopbackOccupied": "L'adresse de bouclage 127.0.0.1:{{port}} est déjà détenue par un autre processus (le bind générique a réussi, mais l'adresse locale est squattée — les clients locaux seraient détournés).",
-      "httpFailActionloopbackOccupied": "Terminez le processus occupant détecté ci-dessous (cochez l'option puis « Terminer et redémarrer »), ou changez le port dans Paramètres → Routage et réessayez."
+      "httpFailActionloopbackOccupied": "Terminez le processus occupant détecté ci-dessous (cochez l'option puis « Terminer et redémarrer »), ou changez le port dans Paramètres → Routage et réessayez.",
+      "smartRoutingFootprint": "Empreinte Smart Routing"
     },
     "servers": {
       "title": "Gestion des serveurs"

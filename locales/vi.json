@@ -558,7 +558,8 @@
       "httpFailReasonLoopback": "Một ứng dụng khác đang lắng nghe địa chỉ loopback của cổng {{port}}, chiếm đoạt truy cập localhost.",
       "httpFailSuggestionLoopback": "Bật \"Kết thúc & khởi động lại\" để xử lý tự động, hoặc dừng ứng dụng kia / đổi cổng trong Cài đặt → Định tuyến.",
       "httpFailCauseloopbackOccupied": "Địa chỉ loopback 127.0.0.1:{{port}} đã bị tiến trình khác chiếm (bind wildcard thành công nhưng địa chỉ cục bộ bị chiếm — client cục bộ sẽ bị chiếm đoạt).",
-      "httpFailActionloopbackOccupied": "Kết thúc tiến trình chiếm cổng được phát hiện bên dưới (tick tùy chọn rồi bấm \"Kết thúc & khởi động lại\"), hoặc đổi cổng trong Cài đặt → Định tuyến rồi thử lại."
+      "httpFailActionloopbackOccupied": "Kết thúc tiến trình chiếm cổng được phát hiện bên dưới (tick tùy chọn rồi bấm \"Kết thúc & khởi động lại\"), hoặc đổi cổng trong Cài đặt → Định tuyến rồi thử lại.",
+      "smartRoutingFootprint": "Dấu chân định tuyến thông minh"
     },
     "servers": {
       "title": "Quản lý Máy chủ"

@@ -15,6 +15,10 @@ pub struct SmartRoutingStatus {
     pub embed_dim: Option<u32>,
     /// Per-server row counts in the smart_tool index.
     pub indexed_servers: Vec<ServerIndexInfo>,
+    /// Estimated context footprint (tokens, ~4 chars = 1 token) of the $smart
+    /// meta tools as a client would see them on the root scope. None when the
+    /// config cannot be read.
+    pub meta_tools_context_tokens: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -35,11 +39,31 @@ pub async fn smart_routing_status() -> Result<SmartRoutingStatus, String> {
     } else {
         Vec::new()
     };
+    // Context footprint of the meta tools on the root scope: mirror what a
+    // client connecting to /mcp/$smart receives in tools/list.
+    let meta_tools_context_tokens = if settings.enabled {
+        let (scope_description, servers_list, _) =
+            crate::smart_routing::meta::compute_scope("").await;
+        let tools = crate::smart_routing::meta::build_meta_tools(
+            &scope_description,
+            &servers_list,
+            settings.progressive_disclosure,
+            None,
+        );
+        let chars: usize = tools
+            .iter()
+            .map(|t| serde_json::to_string(t).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        Some((chars / 4) as u64)
+    } else {
+        None
+    };
     Ok(SmartRoutingStatus {
         enabled: settings.enabled,
         progressive_disclosure: settings.progressive_disclosure,
         mv_running,
         embed_dim: crate::mv::embed_dim().map(|d| d as u32),
+        meta_tools_context_tokens,
         indexed_servers: indexed
             .into_iter()
             .map(|(server, tools)| ServerIndexInfo { server, tools })

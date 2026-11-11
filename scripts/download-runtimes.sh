@@ -13,7 +13,19 @@ set -euo pipefail
 # (2026-11 校准).
 NODE_FALLBACK_VERSION="24.22.2"
 PYTHON_FALLBACK_VERSION="3.14"
-UV_VERSION="${UV_VERSION:-0.11.24}"
+# uv：总是下载最新版本（releases/latest 重定向解析 tag）；网络不可达时
+# 回退到兜底版本。UV_VERSION 环境变量仍可强制指定。
+UV_FALLBACK_VERSION="0.13.7"
+UV_VERSION="${UV_VERSION:-}"
+
+resolve_uv_version() {
+  if [[ -n "$UV_VERSION" ]]; then echo "$UV_VERSION"; return; fi
+  local tag=""
+  # releases/latest 302 重定向到 /releases/tag/<tag>，取末段即为版本号
+  tag=$(curl -fsSL --max-time 20 -o /dev/null -w '%{url_effective}' \
+    https://github.com/astral-sh/uv/releases/latest 2>/dev/null | sed 's#.*/tag/##' || true)
+  if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "$tag"; else echo "$UV_FALLBACK_VERSION"; fi
+}
 NODE_VERSION="${NODE_VERSION:-}"
 PYTHON_VERSION="${PYTHON_VERSION:-}"
 
@@ -59,7 +71,8 @@ print(entries[1]["cycle"] if len(entries) >= 2 else "")
 
 NODE_VERSION=$(resolve_node_version)
 PYTHON_VERSION=$(resolve_python_version)
-echo "==> Bundled runtimes: Node.js v${NODE_VERSION} / Python ${PYTHON_VERSION} (latest-1; override with NODE_VERSION/PYTHON_VERSION)"
+UV_VERSION=$(resolve_uv_version)
+echo "==> Bundled runtimes: Node.js v${NODE_VERSION} / Python ${PYTHON_VERSION} / uv v${UV_VERSION} (node/python latest-1, uv latest; override with NODE_VERSION/PYTHON_VERSION/UV_VERSION)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR/../src-tauri/runtimes"

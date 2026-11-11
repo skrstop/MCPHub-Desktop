@@ -163,7 +163,7 @@ const SmartSearchDialog: React.FC<{
         role="dialog"
         aria-modal="true"
         aria-label={t('server.smartSearch.title')}
-        className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col"
+        className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 min-h-[480px] max-h-[90vh] flex flex-col"
       >
         <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
           <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
