@@ -377,7 +377,12 @@
       "searchBtn": "Rechercher",
       "results": "Résultats",
       "noResults": "Aucun outil correspondant.",
-      "score": "Score"
+      "score": "Score",
+      "errMvNotRunning": "Le modèle d'embedding n'est pas encore démarré. Chargez-le dans Paramètres → Modèle et vecteurs, puis réessayez.",
+      "errDisabled": "Le routage intelligent n'est pas activé. Activez-le d'abord dans les paramètres.",
+      "resultsTruncated": "Seuls les {{count}} premiers résultats sont affichés — affinez la requête pour réduire la liste.",
+      "indexEmpty": "L'index du routage intelligent est vide. Reconstruisez-le dans Paramètres → Routage intelligent, puis relancez la recherche.",
+      "scoreHint": "Score hybride pondéré (vecteur + mots-clés). Les scores par canal sont de 0 à 1 ; selon vos pondérations, le score combiné peut atteindre 2."
     }
   },
   "status": {

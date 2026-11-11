@@ -71,7 +71,8 @@
     "cancelUpdate": "Hủy cập nhật",
     "installed": "Đã cài đặt bản cập nhật. Đang khởi động lại...",
     "installFailed": "Cập nhật thất bại. Vui lòng thử lại.",
-    "downloadManual": "Tải bản cập nhật"
+    "downloadManual": "Tải bản cập nhật",
+    "connecting": "Đang kết nối..."
   },
   "profile": {
     "viewProfile": "Xem hồ sơ",
@@ -364,7 +365,25 @@
     "protocolNegotiation": "Đàm phán giao thức",
     "protocolNegotiationAuto": "Tự động (thăm dò hiện đại trước)",
     "protocolNegotiationLegacy": "Cũ (chỉ initialize)",
-    "protocolNegotiationDescription": "Tự động thăm dò giao thức hiện đại 2026 (server/discover) trước khi quay lại bắt tay cũ. Chế độ cũ bỏ qua hoàn toàn bước thăm dò hiện đại."
+    "protocolNegotiationDescription": "Tự động thăm dò giao thức hiện đại 2026 (server/discover) trước khi quay lại bắt tay cũ. Chế độ cũ bỏ qua hoàn toàn bước thăm dò hiện đại.",
+    "smartSearch": {
+      "title": "Tìm kiếm theo độ liên quan",
+      "hint": "Tìm kiếm lai (vector + từ khóa) trên chỉ mục công cụ của định tuyến thông minh. Chọn phạm vi, nhập truy vấn; kết quả được xếp hạng theo điểm liên quan.",
+      "scope": "Phạm vi",
+      "scopeAll": "Tất cả máy chủ và nhóm",
+      "scopeGroup": "Nhóm",
+      "scopeServer": "Máy chủ",
+      "queryPlaceholder": "Mô tả những gì bạn muốn làm…",
+      "searchBtn": "Tìm kiếm",
+      "results": "Kết quả",
+      "noResults": "Không tìm thấy công cụ phù hợp.",
+      "score": "Điểm",
+      "errMvNotRunning": "Mô hình embedding chưa chạy. Hãy tải nó trong Cài đặt → Mô hình & Vector rồi thử lại.",
+      "errDisabled": "Định tuyến thông minh chưa được bật. Hãy bật trong Cài đặt trước.",
+      "resultsTruncated": "Chỉ hiển thị {{count}} kết quả khớp hàng đầu — hãy tinh chỉnh truy vấn để thu hẹp phạm vi.",
+      "indexEmpty": "Chỉ mục định tuyến thông minh đang trống. Hãy dựng lại trong Cài đặt → Định tuyến thông minh rồi tìm lại.",
+      "scoreHint": "Điểm lai có trọng số (vector + từ khóa). Điểm từng kênh là 0-1; theo cài đặt trọng số, điểm kết hợp có thể lên tới 2."
+    }
   },
   "status": {
     "sleeping": "Đang ngủ",

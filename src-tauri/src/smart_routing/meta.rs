@@ -396,6 +396,7 @@ pub async fn handle_search_tools(
         } else {
             None
         },
+        None,
     )
     .await
     .map_err(|e| e.to_string())?;

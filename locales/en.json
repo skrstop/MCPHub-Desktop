@@ -377,7 +377,12 @@
       "searchBtn": "Search",
       "results": "Results",
       "noResults": "No matching tools found.",
-      "score": "Score"
+      "score": "Score",
+      "errMvNotRunning": "The embedding model is not running yet. Load it in Settings → Model & Vector, then try again.",
+      "errDisabled": "Smart Routing is not enabled. Enable it in Settings first.",
+      "resultsTruncated": "Only the top {{count}} matches are shown — refine the query to narrow the results.",
+      "indexEmpty": "The smart routing index is empty. Rebuild it in Settings → Smart Routing, then search again.",
+      "scoreHint": "Weighted hybrid score (vector + keyword). Per-channel scores are 0-1; with your weight settings the combined score can reach up to 2."
     }
   },
   "status": {

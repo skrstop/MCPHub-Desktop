@@ -311,6 +311,17 @@ jobs:
           echo "✅ Frontend deps installed"
           echo "========================================="
 
+      # ─── 前端测试（vitest：单元 + 组件，含 jsdom 环境）────────────────────
+      - name: Run frontend tests
+        shell: bash
+        run: |
+          echo "========================================="
+          echo "  Frontend Tests (vitest)"
+          echo "========================================="
+          cd frontend && npm test
+          echo "✅ Frontend tests passed"
+          echo "========================================="
+
       # ─── 下载运行时（Node.js + uv + Python）────────────────────────────────
       - name: Download runtimes
         shell: bash

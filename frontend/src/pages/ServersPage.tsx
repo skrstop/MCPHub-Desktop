@@ -15,7 +15,9 @@ import { ApiResponse, ServerPage } from '@/types';
 import { useServerData } from '@/hooks/useServerData';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useSettings } from '@/contexts/SettingsContext';
-import SmartSearchDialog, { type SmartSearchScopeOption } from '@/components/SmartSearchDialog';
+import SmartSearchDialog from '@/components/SmartSearchDialog';
+import { buildSmartSearchScopes } from '@/utils/smartSearchScope';
+import { isTauri } from '@/utils/tauriClient';
 import { useCostData } from '@/hooks/useCostData';
 import { serverCostRevision } from '@/utils/costRevision';
 import { selectServerPage, getServerFilterCounts, type ServerFilter } from '@/utils/serverFilters';
@@ -54,18 +56,21 @@ const ServersPage: React.FC = () => {
   const { groups } = useGroupData();
 
   // Relevance-search scope options: all / groups / servers (smart routing on).
-  const smartSearchScopes: SmartSearchScopeOption[] = useMemo(() => {
-    const opts: SmartSearchScopeOption[] = [
-      { value: 'all', label: t('server.smartSearch.scopeAll'), kind: 'all' },
-    ];
-    for (const g of groups) {
-      opts.push({ value: `group:${g.id}`, label: `${t('server.smartSearch.scopeGroup')}: ${g.name}`, kind: 'group' });
-    }
-    for (const s of allServers) {
-      opts.push({ value: `server:${s.name}`, label: `${t('server.smartSearch.scopeServer')}: ${s.name}`, kind: 'server' });
-    }
-    return opts;
-  }, [groups, allServers, t]);
+  // Disabled servers are excluded — the smart index skips them, so they would
+  // be dead options that always yield empty results.
+  const smartSearchScopes = useMemo(
+    () =>
+      buildSmartSearchScopes(
+        groups,
+        allServers.filter((s) => s.enabled !== false),
+        {
+          all: t('server.smartSearch.scopeAll'),
+          group: t('server.smartSearch.scopeGroup'),
+          server: t('server.smartSearch.scopeServer'),
+        },
+      ),
+    [groups, allServers, t],
+  );
 
   const [editingServer, setEditingServer] = useState<Server | null>(null);
   const [duplicateServer, setDuplicateServer] = useState<Server | null>(null);
@@ -259,8 +264,8 @@ const ServersPage: React.FC = () => {
             {t('common.inactive') || 'issues'}
           </p>
         </div>
-        <div className="flex gap-2">
-          {smartRoutingConfig.enabled && (
+        <div className="flex flex-wrap gap-2">
+          {isTauri() && smartRoutingConfig.enabled && (
             <button
               className="hub-btn"
               onClick={() => setShowSmartSearch(true)}
@@ -520,6 +525,7 @@ const ServersPage: React.FC = () => {
       {showSmartSearch && (
         <SmartSearchDialog
           scopeOptions={smartSearchScopes}
+          maxResults={smartRoutingConfig.maxResults}
           onClose={() => setShowSmartSearch(false)}
         />
       )}

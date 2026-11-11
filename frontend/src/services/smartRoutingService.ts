@@ -113,7 +113,9 @@ export interface SmartSearchResult {
   contentType: string;
   textContent: string;
   metadata?: { description?: string; inputSchema?: unknown } | null;
-  /** Final weighted score in [0,1]. */
+  /** Final weighted score: per-channel scores are in [0,1] but the
+   *  user-configured weights are not normalized, so the combined score
+   *  can reach up to 2.0 when vectorWeight + keywordWeight > 1. */
   score: number;
 }
 

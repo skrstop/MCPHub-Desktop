@@ -377,7 +377,12 @@
       "searchBtn": "Ara",
       "results": "Sonuçlar",
       "noResults": "Eşleşen araç bulunamadı.",
-      "score": "Puan"
+      "score": "Puan",
+      "errMvNotRunning": "Gömme modeli henüz çalışmıyor. Ayarlar → Model ve Vektör bölümünden yükleyip tekrar deneyin.",
+      "errDisabled": "Akıllı yönlendirme etkin değil. Önce ayarlardan etkinleştirin.",
+      "resultsTruncated": "Yalnızca ilk {{count}} eşleşme gösteriliyor — listeyi daraltmak için sorguyu hassaslaştırın.",
+      "indexEmpty": "Akıllı yönlendirme indeksi boş. Ayarlar → Akıllı Yönlendirme bölümünden yeniden oluşturun ve tekrar arayın.",
+      "scoreHint": "Ağırlıklı hibrit puan (vektör + anahtar kelime). Kanal başına puan 0-1 arasıdır; ağırlık ayarlarınıza göre birleşik puan 2’ye ulaşabilir."
     }
   },
   "status": {

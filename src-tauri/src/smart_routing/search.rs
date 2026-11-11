@@ -22,14 +22,16 @@ pub struct SmartSearchResult {
     pub content_type: String,
     pub text_content: String,
     pub metadata: Option<serde_json::Value>,
-    /// Final weighted score in [0,1].
+    /// Final weighted score: per-channel scores are in [0,1] but the user
+    ///-configured weights are NOT normalized to sum to 1, so the combined
+    /// score can reach up to 2.0 (e.g. both weights at 1.0).
     pub score: f32,
 }
 
 /// Weighted merge of the two channels (PURE — unit tested):
 /// - key = (server_name, tool_name) (server rows have an empty tool_name);
 /// - vec score = 1 - cosine distance, clamped [0,1];
-/// - kw score  = matched query terms / total query terms;
+/// - kw score  = matched DISTINCT query terms / total distinct terms;
 /// - final = vw * vec + kw * kwScore, dropped below `threshold`, sorted desc,
 ///   truncated to `limit`.
 pub fn merge_hits(
@@ -130,6 +132,7 @@ pub async fn search(
     limit_override: Option<u32>,
     allowed_servers: Option<Vec<String>>,
     merge_limit: Option<usize>,
+    threshold_override: Option<f32>,
 ) -> Result<Vec<SmartSearchResult>> {
     let settings = models::get_settings().await;
     if !settings.enabled {
@@ -138,6 +141,11 @@ pub async fn search(
     if !crate::mv::is_running() {
         return Err(anyhow!("mv runtime not running"));
     }
+    // The exploratory search dialog passes Some(0.0): a human browsing wants
+    // to see below-threshold matches too (scored, so they can judge); the
+    // $smart meta tool keeps the configured threshold (routing decisions
+    // should stay conservative).
+    let score_threshold = threshold_override.unwrap_or(settings.score_threshold);
     let limit = match limit_override {
         Some(n) => n.clamp(1, settings.max_results) as usize,
         None => settings.max_results as usize,
@@ -201,7 +209,7 @@ pub async fn search(
         query,
         settings.vector_weight,
         settings.keyword_weight,
-        settings.score_threshold,
+        score_threshold,
         merge_limit.unwrap_or(limit),
     ))
 }

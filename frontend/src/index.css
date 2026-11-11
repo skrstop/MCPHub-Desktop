@@ -699,6 +699,10 @@
 .dark .error-box {
   background: oklch(0.3 0.08 25) !important;
   border-color: oklch(0.45 0.15 25) !important;
+  /* Base rule pins a dark-red text color that is illegible on this dark
+     background — restore a solid light red for dark mode (solid, no alpha,
+     to keep contrast above WCAG AA at 13px). */
+  color: oklch(0.78 0.1 20) !important;
 }
 .error-box h3 { color: oklch(0.4 0.18 25) !important; }
 

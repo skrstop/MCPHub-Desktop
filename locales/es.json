@@ -41,7 +41,8 @@
     "installUpdate": "Instalar actualización",
     "installed": "Actualización instalada. Reiniciando...",
     "installing": "Instalando actualización...",
-    "officialWebsite": "Sitio web oficial"
+    "officialWebsite": "Sitio web oficial",
+    "connecting": "Conectando..."
   },
   "profile": {
     "viewProfile": "Ver perfil",
@@ -346,7 +347,25 @@
     "protocolNegotiation": "Negociación de protocolo",
     "protocolNegotiationAuto": "Automático (probar moderno primero)",
     "protocolNegotiationLegacy": "Heredado (solo initialize)",
-    "protocolNegotiationDescription": "Automático prueba primero el protocolo moderno 2026 (server/discover) antes de recurrir al saludo heredado. Heredado omite por completo la prueba moderna."
+    "protocolNegotiationDescription": "Automático prueba primero el protocolo moderno 2026 (server/discover) antes de recurrir al saludo heredado. Heredado omite por completo la prueba moderna.",
+    "smartSearch": {
+      "title": "Búsqueda por relevancia",
+      "hint": "Búsqueda híbrida (vector + palabra clave) sobre el índice de herramientas del enrutamiento inteligente. Elija un ámbito, escriba una consulta; los resultados se ordenan por puntuación de relevancia.",
+      "scope": "Ámbito",
+      "scopeAll": "Todos los servidores y grupos",
+      "scopeGroup": "Grupo",
+      "scopeServer": "Servidor",
+      "queryPlaceholder": "Describa lo que quiere hacer…",
+      "searchBtn": "Buscar",
+      "results": "Resultados",
+      "noResults": "No se encontraron herramientas coincidentes.",
+      "score": "Puntuación",
+      "errMvNotRunning": "El modelo de embeddings aún no se está ejecutando. Cárguelo en Ajustes → Modelo y vectores e inténtelo de nuevo.",
+      "errDisabled": "El enrutamiento inteligente no está habilitado. Actívelo primero en Ajustes.",
+      "resultsTruncated": "Solo se muestran las primeras {{count}} coincidencias; refine la consulta para acotar los resultados.",
+      "indexEmpty": "El índice de enrutamiento inteligente está vacío. Reconstrúyalo en Ajustes → Enrutamiento inteligente y vuelva a buscar.",
+      "scoreHint": "Puntuación híbrida ponderada (vector + palabras clave). Las puntuaciones por canal son 0-1; con sus pesos configurados, la puntuación combinada puede llegar a 2."
+    }
   },
   "status": {
     "sleeping": "En suspensión",
