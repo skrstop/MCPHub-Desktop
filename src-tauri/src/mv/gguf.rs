@@ -150,6 +150,14 @@ impl GgufEmbedder {
             "qwen2" | "qwen3" => {
                 Box::new(Qwen3EmbedArch::from_content(&mut file, &content, &device)?)
             }
+            // F2LLM-v2-330M third-party GGUF (cstr/f2llm-v2-330m-GGUF): same
+            // Qwen3 architecture but the converter wrote arch =
+            // "decoder_embed" with `decoder.*` metadata keys and `dec.{i}.*`
+            // tensor names (attn.o / ffn.gate|up|down). Qwen3EmbedArch
+            // remaps both when the arch name is decoder_embed.
+            "decoder_embed" => {
+                Box::new(Qwen3EmbedArch::from_content(&mut file, &content, &device)?)
+            }
             // nomic-embed-text-v2-moe (BERT-MoE encoder, mean-pool). "nomic-bert"
             // (v1, dense) shares the arch - moe_every_n_layers=0 -> all dense.
             "nomic-bert-moe" | "nomic-bert" => {

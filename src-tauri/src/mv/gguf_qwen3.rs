@@ -60,7 +60,13 @@ impl Qwen3EmbedArch {
             .get("general.architecture")
             .and_then(|v| v.to_string().ok())
             .ok_or_else(|| anyhow!("missing gguf key general.architecture"))?;
-        let pfx = format!("{}.", arch);
+        // decoder_embed (F2LLM-v2-330M third-party conversion) writes its
+        // metadata under `decoder.*` instead of `{arch}.*`.
+        let pfx = if arch == "decoder_embed" {
+            "decoder.".to_string()
+        } else {
+            format!("{}.", arch)
+        };
 
         let get_u32 = |key: &str, default: Option<usize>| -> Result<usize> {
             match md.get(key).map(|v| v.to_u32()) {
@@ -73,22 +79,66 @@ impl Qwen3EmbedArch {
             md.get(key).and_then(|v| v.to_f32().ok()).unwrap_or(default)
         };
 
-        let hidden = get_u32(&format!("{}embedding_length", pfx), None)?;
-        let block_count = get_u32(&format!("{}block_count", pfx), None)?;
-        let n_head = get_u32(&format!("{}attention.head_count", pfx), None)?;
+        // decoder_embed (HF-style names) fallbacks: hidden_size /
+        // num_hidden_layers / num_attention_heads / num_key_value_heads /
+        // head_dim / max_position_embeddings.
+        let alt = |k: &str| format!("{}{}", pfx, k);
+        let hidden = get_u32(&format!("{}embedding_length", pfx), None)
+            .or_else(|_| get_u32(&alt("hidden_size"), None))?;
+        let block_count = get_u32(&format!("{}block_count", pfx), None)
+            .or_else(|_| get_u32(&alt("num_hidden_layers"), None))?;
+        let n_head = get_u32(&format!("{}attention.head_count", pfx), None)
+            .or_else(|_| get_u32(&alt("num_attention_heads"), None))?;
         if n_head == 0 {
             return Err(anyhow!("invalid GGUF metadata: n_head must be > 0"));
         }
-        let n_kv_head = get_u32(&format!("{}attention.head_count_kv", pfx), None)?;
+        let n_kv_head = get_u32(&format!("{}attention.head_count_kv", pfx), None)
+            .or_else(|_| get_u32(&alt("num_key_value_heads"), None))?;
         if n_kv_head == 0 {
             return Err(anyhow!("invalid GGUF metadata: n_kv_head must be > 0"));
         }
-        let head_dim = get_u32(&format!("{}attention.key_length", pfx), Some(hidden / n_head))?;
-        let max_context = get_u32(&format!("{}context_length", pfx), Some(2048))? as u32;
-        let rope_base = get_f32(&format!("{}rope.freq_base", pfx), 1_000_000.0);
-        let rms_eps = get_f32(&format!("{}attention.layer_norm_rms_epsilon", pfx), 1e-6) as f64;
+        let head_dim = get_u32(&format!("{}attention.key_length", pfx), None)
+            .or_else(|_| get_u32(&alt("head_dim"), None))
+            .unwrap_or(hidden / n_head);
+        let max_context = get_u32(&format!("{}context_length", pfx), None)
+            .or_else(|_| get_u32(&alt("max_position_embeddings"), None))
+            .unwrap_or(2048) as u32;
+        let rope_base = get_f32(&format!("{}rope.freq_base", pfx), {
+            // decoder_embed conversion names it rope_theta.
+            md.get(&format!("{}rope_theta", pfx))
+                .and_then(|v| v.to_f32().ok())
+                .unwrap_or(1_000_000.0)
+        });
+        let rms_eps = get_f32(&format!("{}attention.layer_norm_rms_epsilon", pfx), {
+            // decoder_embed HF-style name: rms_norm_eps.
+            md.get(&alt("rms_norm_eps"))
+                .and_then(|v| v.to_f32().ok())
+                .unwrap_or(1e-6)
+        }) as f64;
         // pooling_type: 0=none, 1=mean, 2=cls, 3=last. Default mean for embedders.
-        let pooling_type = get_u32(&format!("{}pooling_type", pfx), Some(1))? as u32;
+        // decoder_embed conversion names it pooling_method.
+        let pooling_type = get_u32(&format!("{}pooling_type", pfx), None)
+            .or_else(|_| get_u32(&format!("{}pooling_method", pfx), None))
+            .unwrap_or(1) as u32;
+
+        // decoder_embed tensor naming: dec.{i}.attn.o (not attn_output),
+        // dec.{i}.ffn.gate|up|down (not ffn_gate|ffn_up|ffn_down), layer
+        // prefix dec. (not blk.).
+        let tname = |name: &str| -> String {
+            if arch != "decoder_embed" {
+                return name.to_string();
+            }
+            name.replacen("blk.", "dec.", 1)
+                .replace("attn_output", "attn.o")
+                .replace("attn_q_norm", "attn.q_norm")
+                .replace("attn_k_norm", "attn.k_norm")
+                .replace("attn_q", "attn.q")
+                .replace("attn_k", "attn.k")
+                .replace("attn_v", "attn.v")
+                .replace("ffn_gate", "ffn.gate")
+                .replace("ffn_up", "ffn.up")
+                .replace("ffn_down", "ffn.down")
+        };
 
         let token_embd = content.tensor(file, "token_embd.weight", device)?.dequantize(device)?;
         let final_norm = rms_norm(file, content, "output_norm.weight", device, rms_eps)?;
@@ -96,17 +146,17 @@ impl Qwen3EmbedArch {
         let mut layers = Vec::with_capacity(block_count);
         for i in 0..block_count {
             layers.push(Qwen3Layer {
-                ln1: rms_norm(file, content, &format!("blk.{i}.attn_norm.weight"), device, rms_eps)?,
-                ln2: rms_norm(file, content, &format!("blk.{i}.ffn_norm.weight"), device, rms_eps)?,
-                wq: qmatmul(file, content, &format!("blk.{i}.attn_q.weight"), device)?,
-                wk: qmatmul(file, content, &format!("blk.{i}.attn_k.weight"), device)?,
-                wv: qmatmul(file, content, &format!("blk.{i}.attn_v.weight"), device)?,
-                wo: qmatmul(file, content, &format!("blk.{i}.attn_output.weight"), device)?,
-                q_norm: rms_norm(file, content, &format!("blk.{i}.attn_q_norm.weight"), device, rms_eps)?,
-                k_norm: rms_norm(file, content, &format!("blk.{i}.attn_k_norm.weight"), device, rms_eps)?,
-                gate: qmatmul(file, content, &format!("blk.{i}.ffn_gate.weight"), device)?,
-                up: qmatmul(file, content, &format!("blk.{i}.ffn_up.weight"), device)?,
-                down: qmatmul(file, content, &format!("blk.{i}.ffn_down.weight"), device)?,
+                ln1: rms_norm(file, content, &tname(&format!("blk.{i}.attn_norm.weight")), device, rms_eps)?,
+                ln2: rms_norm(file, content, &tname(&format!("blk.{i}.ffn_norm.weight")), device, rms_eps)?,
+                wq: qmatmul(file, content, &tname(&format!("blk.{i}.attn_q.weight")), device)?,
+                wk: qmatmul(file, content, &tname(&format!("blk.{i}.attn_k.weight")), device)?,
+                wv: qmatmul(file, content, &tname(&format!("blk.{i}.attn_v.weight")), device)?,
+                wo: qmatmul(file, content, &tname(&format!("blk.{i}.attn_output.weight")), device)?,
+                q_norm: rms_norm(file, content, &tname(&format!("blk.{i}.attn_q_norm.weight")), device, rms_eps)?,
+                k_norm: rms_norm(file, content, &tname(&format!("blk.{i}.attn_k_norm.weight")), device, rms_eps)?,
+                gate: qmatmul(file, content, &tname(&format!("blk.{i}.ffn_gate.weight")), device)?,
+                up: qmatmul(file, content, &tname(&format!("blk.{i}.ffn_up.weight")), device)?,
+                down: qmatmul(file, content, &tname(&format!("blk.{i}.ffn_down.weight")), device)?,
             });
         }
 

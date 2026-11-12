@@ -14,7 +14,7 @@
 | granite 311m-r2 | 0.920 | 0.965 | 0.970 | +0.14 | 0.78 ⚠️ |
 | granite 97m-r2 | 0.819 | 0.929 | 0.957 | +0.15~0.19 | 0.63~0.67 ⚠️ |
 | harrier oss-v1-270m | 0.448 | 0.450 | 0.565 | −0.10 | 0.55 |
-| F2LLM v2-330M | 加载失败——GGUF 由第三方转换（cstr/f2llm-v2-330m-GGUF），arch 名写成非标准的 `decoder_embed`（键前缀 `decoder.` 而非 `qwen3.`），且丢失 `tokenizer.ggml.model`/`.pre`/`.token_type` 三个元数据键；官方 HF 仓库有 tokenizer.json，放进 size 目录可解决 tokenizer 问题，但 arch 仍需新增 `decoder_embed` 实现（16 头 / 40960 ctx / CLS pooling，Qwen3 变体）才能加载 | | | | |
+| F2LLM v2-330M | **已修复加载**（`decoder_embed` arch 别名 + 键/张量名重映射 + 官方 tokenizer.json），但检索质量差：zh↔enTool 仅 0.254（带前缀）/0.169（裸），en↔enTool 0.393/0.171——连英文查询都过不了 0.5 阈值；zh↔zh 0.72 说明中文内部尚可、跨语言与英文对齐都弱。**不可用** | 0.254 | 0.393 | ❌ | |
 
 ## 结论
 
@@ -41,6 +41,12 @@
 | granite 311m-r2 | 0.920 | 0.965 | 0.786 | 全通过 | 全通过 | **无**（负向 0.78，任何阈值都误召回） | ❌ 不存在 |
 | granite 97m-r2 | 0.819 | 0.929 | 0.683 | 全通过 | 全通过 | **无**（负向 0.68） | ❌ 不存在 |
 | harrier 270m | 0.448 | 0.450 | 0.502 | ≤0.40 | ≤0.40 | ≥0.51 | ❌ 空窗（zh/en 上限 < 负向下限） |
+
+### v2-330M 修复记录（2026-11-12）
+
+- **加载失败根因**：GGUF 来自第三方转换（cstr/f2llm-v2-330m-GGUF）——arch 名写成 `decoder_embed`（非 `qwen3`），元数据键用 HF 风格（`decoder.hidden_size`/`num_hidden_layers`/`num_attention_heads`/`num_key_value_heads`/`head_dim`/`max_position_embeddings`/`rms_norm_eps`/`pooling_method`/`rope_theta`），张量名用 `dec.{i}.attn.q|k|v|o`、`ffn.gate|up|down`（非 `blk.{i}.attn_q`、`ffn_gate`），且丢失 `tokenizer.ggml.model/.pre/.token_type`。
+- **修复**：①`gguf.rs` dispatch 增加 `decoder_embed` 别名；②`gguf_qwen3.rs` 键名双轨回退（qwen3 风格优先、HF 风格兜底）+ 张量名重映射闭包 + `pooling_method`/`rope_theta`/`rms_norm_eps` 兜底读取；③size 目录放入官方 `tokenizer.json`（codefuse-ai/F2LLM-v2-330M，BPE 151643 词）。
+- **修复后实测**：模型正常加载（dim=896），但检索质量差——zh↔enTool 0.254、en↔enTool 0.393（带前缀），裸文本更低（0.169/0.171）；zh↔zh 0.72。**结论：330M 这个转换版的嵌入质量不达标，不推荐使用**（可能系转换量化损失或该蒸馏尺寸本身能力不足）。
 
 ### 阈值结论
 
