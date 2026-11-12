@@ -67,6 +67,27 @@
 3. 330M 第三方转换版即使 pooling 修正后仍差（0.336/0.445，负向 0.397），维持不可用判定。
 4. **重要**：修复后**必须重建智能路由索引**（旧向量是 mean-pooling 产物，与新 last-pooling 向量不可比）。
 
+### 全模型 pooling 交叉审计（2026-11-12 第三轮）
+
+逐一对照 GGUF 元数据、官方 sentence-transformers pooling 配置与我们的实现：
+
+| 模型 | GGUF 标记 | 官方 pooling | 我们的实现 | 判定 |
+|---|---|---|---|---|
+| F2LLM v2-160M | qwen3.pooling_type=3 | lasttoken | last ✅ | 正确 |
+| F2LLM v2-80M | （无键）| lasttoken | 修复后默认 last ✅ | 已修 |
+| F2LLM v2-330M | decoder.pooling_method=2 | lasttoken | decoder_embed 强制 last ✅ | 已修 |
+| bekko v1-a25m | modern-bert.pooling_type=1 | mean | mean ✅ | 正确 |
+| bekko v1-a8m | modern-bert.pooling_type=1 | mean | mean ✅ | 正确 |
+| granite 311m-r2 | modern-bert.pooling_type=2 | cls | cls ✅ | 正确 |
+| granite 97m-r2 | modern-bert.pooling_type=2 | cls | cls ✅ | 正确 |
+| **harrier oss-v1-270m** | gemma3.pooling_type=3 | **lasttoken**（microsoft 官方 README: "decoder-only architectures with last-token pooling"）| **修复前 mean+bidirectional ❌ → 修复后 causal+last ✅** | **已修** |
+
+**harrier 修复**（gemma arch 第二处 pooling bug）：gemma arch 原来硬编码 mean-pool + 双向注意力；现按 GGUF `pooling_type` 分派——1=mean（gemma-embedding 家族，双向）保持原行为，3=last（harrier）走 causal mask + last-token pooling（复用 qwen3 的 causal_mask/pool）。
+
+**修复后 harrier 复测**：zh↔enTool 0.386 / en↔enTool 0.387 / 负向最高 0.496——仍不达标（负向高于相关分），该模型本身检索能力弱，维持不可用判定（但至少向量语义现在是正确的）。
+
+**测试注记**：并行 `cargo test --lib` 出现 3-4 个 `database is locked` 失败（group_service/bearer_exclude 测试共享文件池的锁竞争，与本次改动无关），`--test-threads=1` 串行 411/411 全绿。
+
 ### v2-330M 修复记录（2026-11-12）
 
 - **加载失败根因**：GGUF 来自第三方转换（cstr/f2llm-v2-330m-GGUF）——arch 名写成 `decoder_embed`（非 `qwen3`），元数据键用 HF 风格（`decoder.hidden_size`/`num_hidden_layers`/`num_attention_heads`/`num_key_value_heads`/`head_dim`/`max_position_embeddings`/`rms_norm_eps`/`pooling_method`/`rope_theta`），张量名用 `dec.{i}.attn.q|k|v|o`、`ffn.gate|up|down`（非 `blk.{i}.attn_q`、`ffn_gate`），且丢失 `tokenizer.ggml.model/.pre/.token_type`。

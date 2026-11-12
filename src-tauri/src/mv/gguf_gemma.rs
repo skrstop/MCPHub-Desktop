@@ -92,6 +92,9 @@ pub struct Gemma3EmbedArch {
     n_kv_head: usize,
     head_dim: usize,
     max_context: u32,
+    /// GGUF `{arch}.pooling_type`: 1=mean (gemma-embedding family,
+    /// bidirectional), 3=last (harrier — decoder-only, causal, last token).
+    pooling_type: u32,
     device: Device,
 }
 
@@ -147,6 +150,11 @@ impl Gemma3EmbedArch {
         let rope_theta = get_f32(&format!("{}rope.freq_base", pfx), 1_000_000.0);
         let rope_local = get_f32(&format!("{}rope.local_freq_base", pfx), 10_000.0);
         let max_context = get_u32(&format!("{}context_length", pfx), Some(2048))? as u32;
+        // Pooling: gemma-embedding family = mean (1, bidirectional); harrier
+        // (microsoft, decoder-only) = last token (3) per its official
+        // sentence-transformers config (pooling_mode_lasttoken=true). The
+        // GGUF carries the value — honor it, default mean.
+        let pooling_type = get_u32(&format!("{}pooling_type", pfx), Some(1))? as u32;
         let rms_eps = get_f32(&format!("{}attention.layer_norm_rms_epsilon", pfx), 1e-6) as f64;
 
         let token_embd = content.tensor(file, "token_embd.weight", device)?;
@@ -188,6 +196,7 @@ impl Gemma3EmbedArch {
             n_kv_head,
             head_dim,
             max_context,
+            pooling_type,
             device: device.clone(),
         })
     }
@@ -209,18 +218,31 @@ impl GgufArch for Gemma3EmbedArch {
         let mut x = self.token_embd.embedding(&ids_flat)?;
         x = x.reshape((b, seq, self.hidden))?;
 
-        // Padding bias [b,1,1,seq]: 0 real / -1e9 pad. Bidirectional (no causal).
+        // Padding bias [b,1,1,seq]: 0 real / -1e9 pad. Bidirectional (no
+        // causal) for mean-pooled gemma-embedding; causal for last-token
+        // pooled models (harrier) — matching the qwen3 arch's split.
         let mask_bias = attn_bias(attention_mask)?;
+        let causal_bias = if self.pooling_type == 3 {
+            Some(crate::mv::gguf_qwen3::causal_mask(seq, &self.device)?)
+        } else {
+            None
+        };
         let positions = Tensor::arange(0u32, seq as u32, &self.device)?;
 
         for layer in self.layers.iter() {
             x = forward_layer(
-                layer, &x, &positions, &mask_bias,
+                layer, &x, &positions, &mask_bias, causal_bias.as_ref(),
                 self.head_dim, self.n_head, self.n_kv_head, &self.device,
             )?;
         }
         let x = self.final_norm.forward(&x)?;
-        pool_and_normalize(&x, attention_mask)
+        // Mean for gemma-embedding (1); last-token for harrier (3). Both L2
+        // normalized (pool() already normalizes; pool_and_normalize does too).
+        if self.pooling_type == 3 {
+            crate::mv::gguf_qwen3::pool(&x, attention_mask, 3)
+        } else {
+            pool_and_normalize(&x, attention_mask)
+        }
     }
 }
 
@@ -246,6 +268,7 @@ fn forward_layer(
     x: &Tensor,
     positions: &Tensor,
     mask_bias: &Tensor,
+    causal_bias: Option<&Tensor>,
     head_dim: usize,
     n_head: usize,
     n_kv_head: usize,
@@ -282,6 +305,11 @@ fn forward_layer(
         qk
     };
     let qk = qk.broadcast_add(mask_bias)?;
+    let qk = if let Some(cb) = causal_bias {
+        qk.broadcast_add(cb)?
+    } else {
+        qk
+    };
     let probs = ops::softmax_last_dim(&qk)?;
     let attn = probs.matmul(&v.contiguous()?)?;
     let attn = attn.transpose(1, 2)?.reshape((b, seq, n_head * head_dim))?;

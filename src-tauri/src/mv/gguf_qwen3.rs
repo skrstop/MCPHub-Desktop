@@ -298,7 +298,7 @@ fn attn_bias(mask: &Tensor) -> Result<Tensor> {
 
 /// Causal bias [1,1,seq,seq]: 0 where j<=i (can see), -1e9 where j>i (future).
 /// Built on CPU as a Vec (index math in Rust) - avoids Metal op gaps.
-fn causal_mask(seq: usize, device: &Device) -> Result<Tensor> {
+pub(crate) fn causal_mask(seq: usize, device: &Device) -> Result<Tensor> {
     let mut m = vec![0f32; seq * seq];
     for i in 0..seq {
         for j in 0..seq {
@@ -342,7 +342,7 @@ fn apply_rope(
 ///   2 (cls):  first token (position 0).
 ///   3 (last): last real token (per row, via gather).
 ///   _:       default to last real token.
-fn pool(x: &Tensor, mask: &Tensor, pooling_type: u32) -> Result<Tensor> {
+pub(crate) fn pool(x: &Tensor, mask: &Tensor, pooling_type: u32) -> Result<Tensor> {
     let (b, _seq, _hidden) = x.dims3()?;
     let pooled = match pooling_type {
         1 => {
