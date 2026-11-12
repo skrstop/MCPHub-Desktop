@@ -143,6 +143,15 @@ impl GgufEmbedder {
         // Dispatch to the architecture impl by general.architecture.
         let arch_name = meta_string(md, "general.architecture")
             .ok_or_else(|| anyhow!("missing gguf key general.architecture"))?;
+
+        // decoder_embed (F2LLM-v2-330M third-party conversion) writes
+        // add_eos_token=false, contradicting the official sentence-transformers
+        // recipe for the whole Qwen3-embedding family (append EOS, pool the
+        // EOS position). Verified against the official safetensors via
+        // transformers: with EOS zh 0.536 / negs 0.03-0.09; without EOS the
+        // vectors go anisotropic (negs 0.30-0.40). The 80M/160M GGUFs carry
+        // add_eos_token=true explicitly; force EOS for decoder_embed only.
+        let add_eos = if arch_name == "decoder_embed" { true } else { add_eos };
         let arch: Box<dyn GgufArch> = match arch_name.as_str() {
             "gemma" | "gemma2" | "gemma3" | "gemma-embedding" => {
                 Box::new(Gemma3EmbedArch::from_content(&mut file, &content, &device)?)
