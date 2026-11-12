@@ -1987,6 +1987,35 @@ pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
             s.keyword_weight = defaults.2;
             save_settings(s).await?;
         }
+        // Smart Routing shares the embedding model but keeps its own global
+        // threshold (config_json.smartRouting.scoreThreshold, default 0.5).
+        // Models tuned to a different cosine band (granite 0.75/0.87,
+        // harrier 0.4) are unusable at 0.5, so a switch to a model that
+        // ships an explicit per-model defaultScore (> 0) resets the smart
+        // threshold too. Models without one (defaultScore 0/absent) leave
+        // the user's smart threshold untouched.
+        if defaults.0 > 0.0 {
+            let smart = crate::smart_routing::models::get_settings().await;
+            if (smart.score_threshold - defaults.0).abs() > f32::EPSILON {
+                let patch = json!({ "smartRouting": { "scoreThreshold": defaults.0 } });
+                match crate::services::config_service::update(&patch).await {
+                    Ok(_) => rag_log(
+                        "info",
+                        format!(
+                            "model switch {} -> {}: smartRouting.scoreThreshold {} → {} (model-specific)",
+                            prev_indexed.as_deref().unwrap_or("(none)"),
+                            size,
+                            smart.score_threshold,
+                            defaults.0
+                        ),
+                    ),
+                    Err(e) => rag_log(
+                        "warn",
+                        format!("failed to reset smartRouting.scoreThreshold on model switch: {e}"),
+                    ),
+                }
+            }
+        }
     }
     mv::persist_selection(size).await;
     if is_enabled() {
