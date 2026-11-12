@@ -462,4 +462,104 @@ mod tests {
         let self_cos: f32 = embedded[0].1.iter().zip(&embedded[4].1).map(|(a, b)| a * b).sum();
         assert!((self_cos - 1.0).abs() < 1e-2, "identical texts should be ~1.0, got {self_cos}");
     }
+
+    /// Cross-lingual probe for the Smart Routing model (F2LLM-v2-80M): does a
+    /// Chinese query embed near its English paraphrase and near an English
+    /// tool description? Mirrors the live failure "如何查询公网ip" vs the
+    /// getPublicIp tool text. Run:
+    /// `cargo test --lib mv::gguf_modernbert::tests::f2llm_zh_crosslingual_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn f2llm_zh_crosslingual_probe() {
+        use crate::mv::embedder::Embedder;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes/rag/model");
+        // Every bundled size dir that ships a model.gguf.
+        let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
+            .expect("read model root")
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .flat_map(|fam| std::fs::read_dir(fam.path()).expect("read fam").flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .filter(|d| d.join("model.gguf").is_file())
+            .collect();
+        dirs.sort();
+        for size_dir in dirs {
+            let label = format!(
+                "{}/{}",
+                size_dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("?"),
+                size_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+            );
+            eprintln!("\n########## MODEL: {label} ##########");
+            let mut embedder =
+                match crate::mv::gguf::GgufEmbedder::load(&size_dir.join("model.gguf")) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("  LOAD FAILED: {e}");
+                        continue;
+                    }
+                };
+            let cfg = crate::mv::embedder::read_deploy_config(&size_dir);
+            eprintln!("deploy: query_prefix={:?}", cfg.search_query_prefix);
+
+        // (query-side, doc-side) pairs: zh query vs en description, en vs en
+        // (control), zh vs zh-server-name row (the indexed server row).
+        let pairs: &[(&str, &str)] = &[
+            (
+                "如何查询公网ip",
+                "getPublicIp Get Public IP Address\n\nReturns the public IP address of the client making the request.",
+            ),
+            ("get public ip address", "getPublicIp Get Public IP Address\n\nReturns the public IP address of the client making the request."),
+            ("如何查询公网ip", "本机公网ip查询"),
+            ("get public ip address", "本机公网ip查询"),
+            ("如何查询公网ip", "如何查询公网ip"), // near-self sanity (prefix asymmetry applies)
+        ];
+        let q_pfx = &cfg.search_query_prefix;
+            // Negative controls: unrelated zh↔en pairs. A model whose
+            // unrelated pairs score nearly as high as related ones is
+            // anisotropic (uniform-high cosine) — its high "related" scores
+            // carry no discriminative signal.
+            eprintln!("--- negative controls (unrelated) ---");
+            let negs: &[(&str, &str)] = &[
+                ("如何查询公网ip", "今天天气真好适合出去玩"),
+                ("如何查询公网ip", "The quick brown fox jumps over the lazy dog"),
+                ("get public ip address", "帮我写一首关于春天的诗"),
+            ];
+            for use_prefix in [false] {
+                for (i, (q, d)) in negs.iter().enumerate() {
+                    let qtext = if use_prefix {
+                        crate::mv::embedder::render_query_embed_text(q_pfx, q)
+                    } else {
+                        q.to_string()
+                    };
+                    let qv = embedder.embed(&qtext).expect("embed q");
+                    let dv = embedder.embed(d).expect("embed d");
+                    let cos: f32 = qv.iter().zip(&dv).map(|(a, b)| a * b).sum();
+                    let qshow: String = q.chars().take(12).collect();
+                    let dshow: String = d.chars().take(24).collect();
+                    eprintln!("neg {i}: cos = {cos:.4}   {qshow:?} vs {dshow:?}");
+                }
+            }
+            // Two passes: with the model's asymmetric query prefix, and
+            // without (both sides raw). If the prefix pass scores WORSE
+            // across the board (especially identical-text pair 4 << 1.0),
+            // the template is misapplied for this model and raw symmetric
+            // embedding is better.
+            for use_prefix in [true, false] {
+                eprintln!("=== use_query_prefix = {use_prefix} ===");
+                for (i, (q, d)) in pairs.iter().enumerate() {
+                    let qtext = if use_prefix {
+                        crate::mv::embedder::render_query_embed_text(q_pfx, q)
+                    } else {
+                        q.to_string()
+                    };
+                    let qv = embedder.embed(&qtext).expect("embed q");
+                    let dv = embedder.embed(d).expect("embed d");
+                    let cos: f32 = qv.iter().zip(&dv).map(|(a, b)| a * b).sum();
+                    let qshow: String = q.chars().take(12).collect();
+                    let dshow: String = d.chars().take(30).collect();
+                    eprintln!("pair {i}: cos = {cos:.4}   {qshow:?} vs {dshow:?}");
+                }
+            }
+            let _ = q_pfx;
+        }
+    }
 }
