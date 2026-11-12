@@ -632,6 +632,7 @@ pub fn run() {
             commands::rag::rag_reindex_all,
             commands::rag::rag_list_models,
             commands::rag::rag_current_model,
+            commands::decision::decision_decide,
             commands::rag::rag_select_model,
             commands::rag::rag_download_model,
             commands::rag::rag_model_download_status,

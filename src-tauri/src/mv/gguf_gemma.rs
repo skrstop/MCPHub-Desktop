@@ -296,8 +296,8 @@ fn forward_layer(
     // Per-head q/k RMSNorm (weights stored effective, see GemmaRmsNorm).
     let q = l.q_norm.forward(&q)?;
     let k = l.k_norm.forward(&k)?;
-    let q = apply_rope(&q, positions, head_dim, l.rope_base, device)?;
-    let k = apply_rope(&k, positions, head_dim, l.rope_base, device)?;
+    let q = apply_rope_interleaved(&q, positions, head_dim, l.rope_base, device)?;
+    let k = apply_rope_interleaved(&k, positions, head_dim, l.rope_base, device)?;
     // GQA: repeat k, v from n_kv_head to n_head.
     let rep = n_head / n_kv_head;
     let k = repeat_kv(&k, rep)?;
@@ -373,9 +373,39 @@ pub(crate) fn apply_rope(
     rope_base: f32,
     device: &Device,
 ) -> Result<Tensor> {
-    // llama.cpp-converted gemma GGUFs permute q/k weights for INTERLEAVED
-    // (NORM-style) rope — pairs (2i, 2i+1) — unlike qwen3 GGUFs which keep the
-    // HF half-split layout. Verified layer-by-layer against HF transformers.
+    // HALF-SPLIT (NeoX rotate_half) — the convention of qwen3, modernbert,
+    // nomic, lfm2 and their GGUF conversions: pairs (i, i+half). Gemma3
+    // llama.cpp conversions permute q/k weights for INTERLEAVED rope instead
+    // and must call `apply_rope_interleaved` (verified layer-by-layer against
+    // HF transformers — see the gemma3 module docs).
+    let half = head_dim / 2;
+    let inv_freq: Vec<f32> = (0..half)
+        .map(|i| 1.0 / rope_base.powf((2 * i) as f32 / head_dim as f32))
+        .collect();
+    let inv_freq = Tensor::from_vec(inv_freq, half, device)?;
+    let positions = positions.to_dtype(DType::F32)?.reshape((positions.dim(0)?, 1))?;
+    let freqs = positions.matmul(&inv_freq.reshape((1, half))?)?;
+    let cos = freqs.cos()?;
+    let sin = freqs.sin()?;
+    let (b, seq_d, n_head, _) = q.dims4()?;
+    let cos = cos.reshape((1, seq_d, 1, half))?.broadcast_as((b, seq_d, n_head, half))?;
+    let sin = sin.reshape((1, seq_d, 1, half))?.broadcast_as((b, seq_d, n_head, half))?;
+    let q1 = q.narrow(3, 0, half)?; // first half
+    let q2 = q.narrow(3, half, half)?; // second half
+    let o1 = (q1.broadcast_mul(&cos)? - q2.broadcast_mul(&sin)?)?;
+    let o2 = (q1.broadcast_mul(&sin)? + q2.broadcast_mul(&cos)?)?;
+    Ok(Tensor::cat(&[o1, o2], 3)?)
+}
+
+/// INTERLEAVED (NORM-style) rope — pairs (2i, 2i+1). ONLY for gemma-family
+/// GGUFs whose converter permuted the q/k weights accordingly.
+pub(crate) fn apply_rope_interleaved(
+    q: &Tensor,
+    positions: &Tensor,
+    head_dim: usize,
+    rope_base: f32,
+    device: &Device,
+) -> Result<Tensor> {
     let half = head_dim / 2;
     let inv_freq: Vec<f32> = (0..half)
         .map(|i| 1.0 / rope_base.powf((2 * i) as f32 / head_dim as f32))

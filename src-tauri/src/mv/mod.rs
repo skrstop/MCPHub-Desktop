@@ -24,6 +24,7 @@
 //! another consumer kept the runtime alive.
 
 pub mod embedder;
+pub mod decision;
 pub mod gguf;
 pub mod gguf_gemma;
 pub mod gguf_lfm2;

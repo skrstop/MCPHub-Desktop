@@ -458,9 +458,11 @@ mod tests {
             let cos: f32 = q.iter().zip(v).map(|(a, b)| a * b).sum();
             eprintln!("  query x [{i}] = {cos:.4}   {t}");
         }
-        // Self-check: identical texts (probe 0 and 4) must be ~1.0.
+        // Probes 0 and 4 are the same content but 0 carries the QUERY prefix
+        // while 4 carries the DOC prefix (asymmetric prefixes) — the cosine
+        // must stay high (same content) without being exactly 1.0.
         let self_cos: f32 = embedded[0].1.iter().zip(&embedded[4].1).map(|(a, b)| a * b).sum();
-        assert!((self_cos - 1.0).abs() < 1e-2, "identical texts should be ~1.0, got {self_cos}");
+        assert!(self_cos > 0.8, "same content across prefixes should be > 0.8, got {self_cos}");
     }
 
     /// Cross-lingual probe for the Smart Routing model (F2LLM-v2-80M): does a

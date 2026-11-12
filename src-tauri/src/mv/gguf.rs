@@ -387,7 +387,7 @@ impl Embedder for GgufEmbedder {
 /// self-contained). Supports:
 ///   - BPE (`gpt2`/`qwen2`/`llama3`/`bert`): vocab + merges + ByteLevel.
 ///   - SentencePiece (`llama`): tokens + scores + Metaspace + byte-fallback.
-fn build_gguf_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
+pub(crate) fn build_gguf_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
     let model = meta_string(md, "tokenizer.ggml.model").unwrap_or_default();
     match model.as_str() {
         "gpt2" | "qwen2" | "llama3" | "bert" => build_bpe_tokenizer(md),
@@ -568,28 +568,28 @@ fn build_t5_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<T
 
 // ── GGUF metadata helpers (Value extraction) ────────────────────────────────
 
-fn meta_string(md: &std::collections::HashMap<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn meta_string(md: &std::collections::HashMap<String, Value>, key: &str) -> Option<String> {
     match md.get(key)? {
         Value::String(s) => Some(s.clone()),
         _ => None,
     }
 }
 
-fn meta_u32(md: &std::collections::HashMap<String, Value>, key: &str) -> Option<u32> {
+pub(crate) fn meta_u32(md: &std::collections::HashMap<String, Value>, key: &str) -> Option<u32> {
     match md.get(key)? {
         Value::U32(v) => Some(*v),
         _ => None,
     }
 }
 
-fn meta_bool(md: &std::collections::HashMap<String, Value>, key: &str) -> Option<bool> {
+pub(crate) fn meta_bool(md: &std::collections::HashMap<String, Value>, key: &str) -> Option<bool> {
     match md.get(key)? {
         Value::Bool(b) => Some(*b),
         _ => None,
     }
 }
 
-fn meta_string_array(
+pub(crate) fn meta_string_array(
     md: &std::collections::HashMap<String, Value>,
     key: &str,
 ) -> Result<Vec<String>> {
