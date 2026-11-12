@@ -623,3 +623,39 @@ mod tests {
         }
     }
 }
+
+    /// Probe: can our embedder path load the Julia-1 decision GGUF
+    /// (`decision/julia_1`)? It is a modern-bert classifier, not an embedder —
+    /// this documents what our current code does with it.
+    /// `cargo test --lib mv::gguf_modernbert::tests::julia_decision_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn julia_decision_probe() {
+        use crate::mv::embedder::Embedder;
+        let gguf = std::path::PathBuf::from(
+            "runtimes/rag/model/embedding/decision/julia_1/model.gguf",
+        );
+        let gguf = if gguf.is_file() {
+            gguf
+        } else {
+            std::path::PathBuf::from(
+                "runtimes/rag/model/decision/julia_1/model.gguf",
+            )
+        };
+        if !gguf.is_file() {
+            eprintln!("SKIP: julia_1 model.gguf not present");
+            return;
+        }
+        match crate::mv::gguf::GgufEmbedder::load(&gguf) {
+            Ok(mut e) => {
+                eprintln!("julia: loaded OK, dim = {}", e.embed("test").unwrap().len());
+                for t in ["如何查询公网ip", "get public ip address"] {
+                    let v = e.embed(t).unwrap();
+                    let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    eprintln!("julia embed {:?}: dim {} norm {:.4} first3 {:?}",
+                        t, v.len(), n, &v[..3.min(v.len())]);
+                }
+            }
+            Err(e) => eprintln!("julia: LOAD FAILED: {e}"),
+        }
+    }
