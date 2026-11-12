@@ -143,8 +143,14 @@ impl Gemma3EmbedArch {
         let head_dim = get_u32(&format!("{}attention.key_length", pfx), Some(hidden / n_head))?;
         let sliding_window = get_u32(&format!("{}attention.sliding_window", pfx), Some(512))?;
         // Gemma3: every `sliding_window_pattern`-th layer is full attention.
-        // pattern default 6 (config.json layer_types: 5 sliding + 1 full).
-        let pattern = get_u32(&format!("{}sliding_window_pattern", pfx), Some(6))?;
+        // When the GGUF does NOT carry the pattern key, treat ALL layers as
+        // full attention: the bundled harrier GGUF (microsoft/harrier-oss-
+        // v1-270m, official config `_sliding_window_pattern: 1` = every layer
+        // full) omits the key, and defaulting to 6 mis-assigned rope_local
+        // (10k) to most layers — verified as the root cause of layer-3+
+        // divergence against HF. Standard 5+1-pattern GGUFs converted by
+        // llama.cpp carry the key explicitly.
+        let pattern = get_u32(&format!("{}sliding_window_pattern", pfx), Some(1))?;
         if pattern == 0 {
             return Err(anyhow!("invalid GGUF metadata: pattern must be > 0"));
         }

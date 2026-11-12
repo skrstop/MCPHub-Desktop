@@ -467,6 +467,37 @@ mod tests {
     /// Chinese query embed near its English paraphrase and near an English
     /// tool description? Mirrors the live failure "如何查询公网ip" vs the
     /// getPublicIp tool text. Run:
+    /// Live probe: harrier BF16 GGUF (mykor) vs the bundled Q8_0 — does the
+    /// higher-precision quantization restore official-level discrimination?
+    /// `cargo test --lib mv::gguf_modernbert::tests::harrier_bf16_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn harrier_bf16_probe() {
+        use crate::mv::embedder::Embedder;
+        let gguf = std::path::PathBuf::from(std::env::var("HARRIER_GGUF").unwrap_or_else(|_| "/tmp/harrier_bf16.gguf".into()));
+        if !gguf.is_file() {
+            eprintln!("SKIP: /tmp/harrier_bf16.gguf not present");
+            return;
+        }
+        let mut embedder = crate::mv::gguf::GgufEmbedder::load(&gguf).expect("load");
+        let pfx = "Instruct: Given a web search query, retrieve relevant passages that answer the query.\nQuery: {query}";
+        let qt = |q: &str| crate::mv::embedder::render_query_embed_text(pfx, q);
+        let tool = "getPublicIp Get Public IP Address\n\nReturns the public IP address of the client making the request.";
+        let et = embedder.embed(tool).expect("tool");
+        let pairs: &[(&str, &str)] = &[
+            ("zh", "如何查询公网ip"),
+            ("en", "get public ip address"),
+            ("neg1", "今天天气怎么样"),
+            ("neg2", "the fox jumps over the lazy dog"),
+            ("neg3", "帮我写一首诗"),
+        ];
+        for (k, a) in pairs {
+            let qv = embedder.embed(&qt(a)).expect("q");
+            let c: f32 = qv.iter().zip(&et).map(|(a, b)| a * b).sum();
+            eprintln!("harrier-bf16 {k}: cos = {c:.4}");
+        }
+    }
+
     /// `cargo test --lib mv::gguf_modernbert::tests::f2llm_zh_crosslingual_probe -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -524,7 +555,7 @@ mod tests {
             // out (no false hit)? Printed as a compact matrix per model.
             eprintln!("--- threshold sweep (pair0=zh↔enTool, pair1=en↔enTool, neg0/1/2) ---");
             eprintln!("  thr |  zh-enTool  en-enTool | neg0  neg1  neg2 | zh pass? en pass? clean?");
-            for thr in [0.30f32, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60] {
+            for thr in [0.30f32, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90] {
                 let qtext0 = crate::mv::embedder::render_query_embed_text(q_pfx, pairs[0].0);
                 let qtext1 = crate::mv::embedder::render_query_embed_text(q_pfx, pairs[1].0);
                 let d0 = embedder.embed(pairs[0].1).expect("d0");

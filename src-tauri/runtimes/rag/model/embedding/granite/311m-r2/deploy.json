@@ -9,7 +9,7 @@
   "docTitleDelimiter": "|",
   "chunkSize": 512,
   "chunkOverlap": 100,
-  "defaultScore": 0,
+  "defaultScore": 0.87,
   "defaultWeightVector": 0.5,
   "defaultWeightKeyword": 0.5,
   "downloadUrls": {
