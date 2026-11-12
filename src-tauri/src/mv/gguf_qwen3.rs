@@ -115,11 +115,20 @@ impl Qwen3EmbedArch {
                 .and_then(|v| v.to_f32().ok())
                 .unwrap_or(1e-6)
         }) as f64;
-        // pooling_type: 0=none, 1=mean, 2=cls, 3=last. Default mean for embedders.
-        // decoder_embed conversion names it pooling_method.
-        let pooling_type = get_u32(&format!("{}pooling_type", pfx), None)
-            .or_else(|_| get_u32(&format!("{}pooling_method", pfx), None))
-            .unwrap_or(1) as u32;
+        // pooling_type: 0=none, 1=mean, 2=cls, 3=last. Qwen3-Embedding models
+        // (incl. the F2LLM-v2 family) are causal LMs pooled at the LAST token
+        // per their official sentence-transformers config
+        // (pooling_mode_lasttoken=true) — default LAST when the GGUF omits
+        // the key (the v2-80M conversion does). The decoder_embed conversion
+        // writes pooling_method=2 (CLS), which contradicts the official
+        // config — force LAST for it.
+        let pooling_type = if arch == "decoder_embed" {
+            3
+        } else {
+            get_u32(&format!("{}pooling_type", pfx), None)
+                .or_else(|_| get_u32(&format!("{}pooling_method", pfx), None))
+                .unwrap_or(3) as u32
+        };
 
         // decoder_embed tensor naming: dec.{i}.attn.o (not attn_output),
         // dec.{i}.ffn.gate|up|down (not ffn_gate|ffn_up|ffn_down), layer

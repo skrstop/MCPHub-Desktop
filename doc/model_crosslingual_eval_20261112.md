@@ -42,6 +42,31 @@
 | granite 97m-r2 | 0.819 | 0.929 | 0.683 | 全通过 | 全通过 | **无**（负向 0.68） | ❌ 不存在 |
 | harrier 270m | 0.448 | 0.450 | 0.502 | ≤0.40 | ≤0.40 | ≥0.51 | ❌ 空窗（zh/en 上限 < 负向下限） |
 
+### 🔴 重大修正：pooling 错误（2026-11-12 第二轮）
+
+**用户质疑「330M 不应该这么差」是对的——根因是我们代码的 pooling 用错了，不是模型差。**
+
+- **官方事实**（各 size 的 `1_Pooling/config.json`）：F2LLM-v2 全系（80M/160M/330M）都是 **last-token pooling**（`pooling_mode_lasttoken=true`，causal LM 取末 token）。
+- **我们的错误**：
+  - v2-80M GGUF **没有** pooling 元数据键 → 代码默认 mean → **向量全错**（此前 80M 的 0.488 低分是 bug 产物！）
+  - v2-160M GGUF 写 `qwen3.pooling_type=3`（last）→ 碰巧正确
+  - v2-330M 第三方 GGUF 写 `pooling_method=2`（CLS）→ 与官方矛盾 → 向量全错
+- **修复**：qwen3 架构 pooling 缺省改为 last（3）；`decoder_embed` 强制 last（忽略错误的 CLS 标记）。
+
+**修复后复测**：
+
+| 模型 | zh↔enTool | en↔enTool | 负向最高 | 判定 |
+|---|---|---|---|---|
+| **F2LLM v2-80M** | **0.620**（原 0.488）| **0.814**（原 0.588）| 0.036（原 0.288）| **✅ 完全可用！窗口 0.04~0.60** |
+| F2LLM v2-160M | 0.617（不变，原本就对）| 0.810 | 0.033 | ✅ |
+| F2LLM v2-330M | 0.336（原 0.254）| 0.445（原 0.393）| 0.397 | ⚠️ 仍不达标（负向 0.397 与相关分重叠），该转换版质量确实差 |
+
+**结论翻转**：
+1. **当前默认 v2-80M 修复 pooling 后即可用**——zh 0.620 / en 0.814 / 负向 0.036，与 160M 同级，**无需换模型**！用户实测「如何查询公网ip」0 命中的根因就是这个 pooling bug（真机 0.446 是 mean-pooling 的错误向量）。
+2. 160M 与 80M 修复后同级（0.617 vs 0.620），默认模型保持 80M 即可。
+3. 330M 第三方转换版即使 pooling 修正后仍差（0.336/0.445，负向 0.397），维持不可用判定。
+4. **重要**：修复后**必须重建智能路由索引**（旧向量是 mean-pooling 产物，与新 last-pooling 向量不可比）。
+
 ### v2-330M 修复记录（2026-11-12）
 
 - **加载失败根因**：GGUF 来自第三方转换（cstr/f2llm-v2-330m-GGUF）——arch 名写成 `decoder_embed`（非 `qwen3`），元数据键用 HF 风格（`decoder.hidden_size`/`num_hidden_layers`/`num_attention_heads`/`num_key_value_heads`/`head_dim`/`max_position_embeddings`/`rms_norm_eps`/`pooling_method`/`rope_theta`），张量名用 `dec.{i}.attn.q|k|v|o`、`ffn.gate|up|down`（非 `blk.{i}.attn_q`、`ffn_gate`），且丢失 `tokenizer.ggml.model/.pre/.token_type`。
