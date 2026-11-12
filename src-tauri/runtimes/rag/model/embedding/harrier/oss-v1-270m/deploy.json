@@ -4,7 +4,7 @@
   "bundle": false,
   "default": false,
   "sort": 6,
-  "searchQueryPrefix": "Query: {query}",
+  "searchQueryPrefix": "Instruct: Given a web search query, retrieve relevant passages that answer the query.\nQuery: {query}",
   "importDocPrefix": "Title: {title} | {content}",
   "docTitleDelimiter": "|",
   "chunkSize": 512,

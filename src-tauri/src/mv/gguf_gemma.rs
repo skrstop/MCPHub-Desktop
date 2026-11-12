@@ -33,8 +33,11 @@ pub trait GgufArch: Send + Sync {
     fn max_context(&self) -> u32;
 }
 
-/// Gemma RMSNorm: `x / sqrt(mean(x²) + eps) * (weight + 1.0)`. The +1 weight
-/// shift is Gemma-specific (candle_nn::RmsNorm does `* weight` - wrong here).
+/// Gemma RMSNorm: `x / sqrt(mean(x²) + eps) * weight`. The GGUF stores the
+/// EFFECTIVE weight (HF `1 + w` already baked in by the converter — verified
+/// elementwise against microsoft/harrier-oss-v1-270m safetensors: gg == hf+1
+/// for every norm), so NO runtime +1 here. (candle_nn::RmsNorm does
+/// `* weight` too — the old "+1 shift" comment referred to raw-HF weights.)
 struct GemmaRmsNorm {
     weight: Tensor,
     eps: f64,
@@ -56,9 +59,7 @@ impl Module for GemmaRmsNorm {
         let x_in = x.to_dtype(internal_dtype)?;
         let mean_sq = (x_in.sqr()?.sum_keepdim(D::Minus1)? / hidden)?;
         let x_normed = x_in.broadcast_div(&(mean_sq + self.eps)?.sqrt()?)?;
-        x_normed
-            .to_dtype(x.dtype())?
-            .broadcast_mul(&(&self.weight + 1.0)?)
+        x_normed.to_dtype(x.dtype())?.broadcast_mul(&self.weight)
     }
 }
 
@@ -214,8 +215,11 @@ impl GgufArch for Gemma3EmbedArch {
     fn forward_embed(&self, input_ids: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
         let (b, seq) = input_ids.dims2()?;
         let ids_flat = input_ids.flatten_all()?;
-        // Gemma2/3 do NOT scale token embeddings (Gemma1 did).
+        // Gemma3 scales token embeddings by sqrt(hidden_size) (HF
+        // Gemma3TextScaledWordEmbedding: embed_scale = hidden_size**0.5;
+        // llama.cpp does the same for gemma* archs).
         let mut x = self.token_embd.embedding(&ids_flat)?;
+        x = x.affine((self.hidden as f64).sqrt(), 0.0)?;
         x = x.reshape((b, seq, self.hidden))?;
 
         // Padding bias [b,1,1,seq]: 0 real / -1e9 pad. Bidirectional (no
@@ -283,7 +287,7 @@ fn forward_layer(
     let q = q.reshape((b, seq, n_head, head_dim))?;
     let k = k.reshape((b, seq, n_kv_head, head_dim))?;
     let v = v.reshape((b, seq, n_kv_head, head_dim))?;
-    // Per-head q/k RMSNorm (Gemma norm, weight+1 shift).
+    // Per-head q/k RMSNorm (weights stored effective, see GemmaRmsNorm).
     let q = l.q_norm.forward(&q)?;
     let k = l.k_norm.forward(&k)?;
     let q = apply_rope(&q, positions, head_dim, l.rope_base, device)?;
@@ -363,6 +367,9 @@ pub(crate) fn apply_rope(
     rope_base: f32,
     device: &Device,
 ) -> Result<Tensor> {
+    // llama.cpp-converted gemma GGUFs permute q/k weights for INTERLEAVED
+    // (NORM-style) rope — pairs (2i, 2i+1) — unlike qwen3 GGUFs which keep the
+    // HF half-split layout. Verified layer-by-layer against HF transformers.
     let half = head_dim / 2;
     let inv_freq: Vec<f32> = (0..half)
         .map(|i| 1.0 / rope_base.powf((2 * i) as f32 / head_dim as f32))
@@ -375,11 +382,14 @@ pub(crate) fn apply_rope(
     let (b, seq_d, n_head, _) = q.dims4()?;
     let cos = cos.reshape((1, seq_d, 1, half))?.broadcast_as((b, seq_d, n_head, half))?;
     let sin = sin.reshape((1, seq_d, 1, half))?.broadcast_as((b, seq_d, n_head, half))?;
-    let q1 = q.narrow(3, 0, half)?;
-    let q2 = q.narrow(3, half, half)?;
+    // Interleave: view [.., half, 2] so x[...,i,0]=x[2i], x[...,i,1]=x[2i+1].
+    let q_p = q.reshape((b, seq_d, n_head, half, 2))?;
+    let q1 = q_p.narrow(4, 0, 1)?.squeeze(4)?; // even indices
+    let q2 = q_p.narrow(4, 1, 1)?.squeeze(4)?; // odd indices
     let o1 = (q1.broadcast_mul(&cos)? - q2.broadcast_mul(&sin)?)?;
     let o2 = (q1.broadcast_mul(&sin)? + q2.broadcast_mul(&cos)?)?;
-    Ok(Tensor::cat(&[o1, o2], 3)?)
+    let out = Tensor::stack(&[o1, o2], 4)?.reshape((b, seq_d, n_head, head_dim))?;
+    Ok(out)
 }
 
 /// Matmul a hidden tensor `h` (`[..., in]`) by a 2D weight `w` (`[in, out]`),
