@@ -12,23 +12,30 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Bundled model root. In **dev** (`tauri dev`) the source dir
-/// (`CARGO_MANIFEST_DIR/runtimes/rag/model`) is preferred so edits to the
+/// (`CARGO_MANIFEST_DIR/runtimes/rag/model/embedding`) is preferred so edits to the
 /// model files take effect live WITHOUT tauri recopying them to the target
 /// dir - and so deleted size dirs don't linger as stale copies under
 /// `target/debug/runtimes/` (tauri copies resources to target but does NOT
 /// remove dirs deleted from source, which made phantom `f16`/`q4` entries
 /// appear in the dropdown). In a packaged build the source path doesn't exist
 /// on the user's machine, so we fall back to the bundled resource dir.
+/// Layout: `model/embedding/<family>/<size>/` — the `embedding` level groups
+/// model kinds (embedding today; room for e.g. reranker later).
 pub(crate) fn model_root(app: &AppHandle) -> Result<PathBuf> {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("runtimes")
         .join("rag")
-        .join("model");
+        .join("model")
+        .join("embedding");
     if src.exists() {
         return Ok(src);
     }
     if let Ok(resource) = app.path().resource_dir() {
-        let p = resource.join("runtimes").join("rag").join("model");
+        let p = resource
+            .join("runtimes")
+            .join("rag")
+            .join("model")
+            .join("embedding");
         if p.exists() {
             return Ok(p);
         }
@@ -36,11 +43,40 @@ pub(crate) fn model_root(app: &AppHandle) -> Result<PathBuf> {
     Ok(src)
 }
 
-/// Writable store for DOWNLOADED models: `<app_data>/rag/models/<family>/<size>/`.
+/// Writable store for DOWNLOADED models: `<app_data>/rag/models/embedding/<family>/<size>/`.
 /// The bundled resource dir is read-only in a signed app, so models fetched
-/// via deploy.json `downloadUrls` land here. Mirrors the bundled layout.
+/// via deploy.json `downloadUrls` land here. Mirrors the bundled layout
+/// (including the `embedding` kind level). Performs a one-time best-effort
+/// migration of pre-`embedding` downloads (`models/<family>` →
+/// `models/embedding/<family>`).
 pub(crate) fn download_root(app: &AppHandle) -> Result<PathBuf> {
-    Ok(data_dir(app)?.join("models"))
+    let base = data_dir(app)?.join("models");
+    let root = base.join("embedding");
+    if base.exists() {
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            log::warn!("create download model dir {}: {}", root.display(), e);
+        }
+        // Migrate legacy flat family dirs (best-effort; rename is atomic).
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name == "embedding" || !entry.path().is_dir() {
+                    continue;
+                }
+                let dst = root.join(&*name);
+                if dst.exists() {
+                    continue;
+                }
+                if let Err(e) = std::fs::rename(entry.path(), &dst) {
+                    log::warn!("migrate downloaded model dir {}: {}", name, e);
+                } else {
+                    log::info!("migrated downloaded models to {}", dst.display());
+                }
+            }
+        }
+    }
+    Ok(root)
 }
 
 /// The out-of-box default ready size: the size whose `deploy.json` has
@@ -230,7 +266,7 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
 }
 
 /// Resolve the size dir for the given size: the downloaded copy (under
-/// `<app_data>/rag/models/<family>/<size>/`) if it has a model file, else the
+/// `<app_data>/rag/models/embedding/<family>/<size>/`) if it has a model file, else the
 /// bundled size dir if it has a model file. Returns `None` if the size isn't
 /// found or not ready (download.url only). Each size dir is self-contained
 /// (holds a *.gguf file + tokenizer.json + config.json).
@@ -1029,7 +1065,7 @@ fn find_download_source(
 /// Start a BACKGROUND download of `size`'s model file from the FIRST source
 /// in its deploy.json `downloadUrls` (remaining entries are fallbacks tried
 /// in order on network failure). Streams into
-/// `<app_data>/rag/models/<family>/<size>/model.gguf.downloadtemp` and
+/// `<app_data>/rag/models/embedding/<family>/<size>/model.gguf.downloadtemp` and
 /// renames to `model.gguf` only on success. Returns immediately; progress is
 /// emitted on `rag://model-download` and queryable via `download_status`.
 /// Re-downloading an already-ready size is allowed (修复损坏文件的重试路径).

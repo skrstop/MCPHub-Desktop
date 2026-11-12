@@ -361,7 +361,7 @@ mod tests {
     #[ignore]
     fn granite_loads_and_embeds() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+            .join("runtimes/rag/model/embedding/granite/97m-r2/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: {} not present", gguf.display());
             return;
@@ -409,7 +409,7 @@ mod tests {
     fn granite_cosine_probe() {
         use crate::mv::embedder::Embedder;
         let size_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m-r2");
+            .join("runtimes/rag/model/embedding/granite/97m-r2");
         if !size_dir.exists() {
             eprintln!("skipping: {} not present", size_dir.display());
             return;
@@ -472,7 +472,7 @@ mod tests {
     #[ignore]
     fn f2llm_zh_crosslingual_probe() {
         use crate::mv::embedder::Embedder;
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes/rag/model");
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes/rag/model/embedding");
         // Every bundled size dir that ships a model.gguf.
         let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
             .expect("read model root")

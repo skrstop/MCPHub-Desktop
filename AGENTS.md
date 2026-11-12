@@ -171,7 +171,7 @@ npm run build                     # 生产构建
 - **下载源选择**：`RagModelInfo.downloadSources`（源名列表，默认源在前）暴露给前端；多源时点「下载」展开行内源选择弹层（默认源打标），单源直接下载。
 - **bundle 打包**：deploy.json `bundle: true`（legacy `default: true` 兼容回退）才随安装包分发——**无 staging 目录**：`scripts/gen-model-resources.mjs` 扫描 deploy.json 生成 `src-tauri/tauri.models.json`（Tauri `--config` 合并片段，替换 `bundle.resources` 为「基础资源 + 全量 `deploy.json` glob + bundle 尺寸 `**` glob」），`npm run build` = `gen-model-resources.mjs && tauri build --config src-tauri/tauri.models.json`；非 bundle 尺寸只带 deploy.json（下拉可见、可下载；GGUF 自带 tokenizer 元数据，下载目录无需 aux 文件）。生成物已 gitignore。**CI 必须走 `npm run build` 唯一入口**（release.yml 用 `npm run build -- --target … --bundles …`，npm 把参数透传给脚本末尾的 tauri build；2026-11-05 修复：CI 曾直接 `npm run tauri build` 绕过裁剪，导致非 bundle 模型 gguf 全量打进安装包）。注意该步骤**不能**挪进 `beforeBuildCommand`——`--config` 在 tauri CLI 启动时读取，早于 before 钩子执行。
 - **模型默认参数**：deploy.json `defaultScore`/`defaultWeightVector`/`defaultWeightKeyword`（默认 0/0.5/0.5）；`select_model` 切换模型时丢弃用户调参、重置为新模型默认值（`mv::model_defaults`）。
-- **model_root 资源回退**：打包环境回退 `runtimes/rag/model` 资源目录（bundle 裁剪由 tauri.models.json 的 resources glob 控制，目录结构不变）。
+- **model_root 资源回退**：打包环境回退 `runtimes/rag/model/embedding` 资源目录（2026-11-12 起模型根下新增 `embedding` 分类层，下载目录同步为 `<app_data>/rag/models/embedding`，旧平铺下载目录自动迁移）（bundle 裁剪由 tauri.models.json 的 resources glob 控制，目录结构不变）。
 
 ### 3.5 MCP 连接机制（桌面端独有/镜像）
 

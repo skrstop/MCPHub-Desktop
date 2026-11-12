@@ -545,7 +545,7 @@ export interface RagStatus {
   mvRunning?: boolean;
 }
 
-/** One selectable model size (scanned from runtimes/rag/model/<family>/<size>/).
+/** One selectable model size (scanned from runtimes/rag/model/embedding/<family>/<size>/).
  *  `status`: "ready" (selectable) | "downloadable" (has download.url, fetch
  *  first) | "unavailable". `format`: "gguf" | "" (drives the backend
  *  strategy + a dropdown badge). `fileSize`: model payload bytes (ready) or 0. */

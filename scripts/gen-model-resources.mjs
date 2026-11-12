@@ -9,8 +9,8 @@
  *
  * No staging directory is created: the override REPLACES `bundle.resources`
  * with the base list plus per-size globs —
- *   - every size:            runtimes/rag/model/<family>/<size>/deploy.json
- *   - bundle:true sizes:     runtimes/rag/model/<family>/<size> + "/**" + "/*"
+ *   - every size:            runtimes/rag/model/embedding/<family>/<size>/deploy.json
+ *   - bundle:true sizes:     runtimes/rag/model/embedding/<family>/<size> + "/**" + "/*"
  *
  * NOTE: the glob must be `**` + `/*`, NOT a bare `**` — the Rust `glob` crate's
  * trailing `**` matches only DIRECTORIES (files directly under the dir are
@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const conf = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf-8'));
-const src = join(root, 'src-tauri', 'runtimes', 'rag', 'model');
+const src = join(root, 'src-tauri', 'runtimes', 'rag', 'model', 'embedding');
 
 const bundled = [];
 const stubbed = [];
@@ -57,8 +57,8 @@ try {
 const base = (conf.bundle?.resources ?? []).filter((r) => r !== 'runtimes/rag');
 const resources = [
   ...base,
-  'runtimes/rag/model/*/*/deploy.json',
-  ...bundled.map((p) => `runtimes/rag/model/${p}/**/*`),
+  'runtimes/rag/model/embedding/*/*/deploy.json',
+  ...bundled.map((p) => `runtimes/rag/model/embedding/${p}/**/*`),
 ];
 
 writeFileSync(

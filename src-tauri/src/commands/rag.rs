@@ -714,7 +714,7 @@ app: AppHandle) -> Result<usize, String> {
     service::reindex_all(&app).await.map_err(|e| e.to_string())
 }
 
-/// List available model sizes (scanned from `runtimes/rag/model/<family>/<size>/`).
+/// List available model sizes (scanned from `runtimes/rag/model/embedding/<family>/<size>/`).
 /// Each entry's status is "ready" (selectable) or "downloadable" (has a
 /// download.url, fetch via `rag_download_model` first).
 #[tauri::command]
@@ -785,7 +785,7 @@ pub async fn rag_model_download_cancel(
 }
 
 /// Open a model size's directory in the OS file manager: the downloaded copy
-/// (`<app_data>/rag/models/<family>/<size>`) when it has a model file, else
+/// (`<app_data>/rag/models/embedding/<family>/<size>`) when it has a model file, else
 /// the bundled size dir. Per-row "open folder" button in the model selector.
 #[tauri::command]
 pub async fn rag_open_model_dir(

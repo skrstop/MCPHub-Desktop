@@ -731,7 +731,7 @@ mod semantic_probe_tests {
     #[ignore]
     fn granite_97m_semantic_similarity_probe() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+            .join("runtimes/rag/model/embedding/granite/97m-r2/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: {} not present", gguf.display());
             return;
@@ -800,7 +800,7 @@ mod semantic_probe_tests {
         use lancedb::query::{ExecutableQuery, QueryBase};
 
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+            .join("runtimes/rag/model/embedding/granite/97m-r2/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: model not present");
             return;
@@ -993,7 +993,7 @@ mod semantic_probe_tests {
         use lancedb::connect;
         use lancedb::query::{ExecutableQuery, QueryBase};
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+            .join("runtimes/rag/model/embedding/granite/97m-r2/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: model not present");
             return;
@@ -1111,7 +1111,7 @@ mod semantic_probe_tests {
         use lancedb::query::{ExecutableQuery, QueryBase};
 
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/97m-r2/model.gguf");
+            .join("runtimes/rag/model/embedding/granite/97m-r2/model.gguf");
         if !gguf.exists() {
             eprintln!("skipping: model not present");
             return;
@@ -1204,7 +1204,7 @@ mod tests {
     #[ignore]
     fn granite_311m_gemma4_tokenizer() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/granite/311m/granite-embedding-311M-multilingual-r2-Q8_0.gguf");
+            .join("runtimes/rag/model/embedding/granite/311m/granite-embedding-311M-multilingual-r2-Q8_0.gguf");
         if !gguf.exists() {
             eprintln!("skipping: {} not present", gguf.display());
             return;
