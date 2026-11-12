@@ -513,16 +513,45 @@ mod tests {
             ("如何查询公网ip", "如何查询公网ip"), // near-self sanity (prefix asymmetry applies)
         ];
         let q_pfx = &cfg.search_query_prefix;
-            // Negative controls: unrelated zh↔en pairs. A model whose
-            // unrelated pairs score nearly as high as related ones is
-            // anisotropic (uniform-high cosine) — its high "related" scores
-            // carry no discriminative signal.
-            eprintln!("--- negative controls (unrelated) ---");
             let negs: &[(&str, &str)] = &[
                 ("如何查询公网ip", "今天天气真好适合出去玩"),
                 ("如何查询公网ip", "The quick brown fox jumps over the lazy dog"),
                 ("get public ip address", "帮我写一首关于春天的诗"),
             ];
+
+            // Threshold sweep: for each candidate threshold, does the zh
+            // query hit the en tool description (pass) while negatives stay
+            // out (no false hit)? Printed as a compact matrix per model.
+            eprintln!("--- threshold sweep (pair0=zh↔enTool, pair1=en↔enTool, neg0/1/2) ---");
+            eprintln!("  thr |  zh-enTool  en-enTool | neg0  neg1  neg2 | zh pass? en pass? clean?");
+            for thr in [0.30f32, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60] {
+                let qtext0 = crate::mv::embedder::render_query_embed_text(q_pfx, pairs[0].0);
+                let qtext1 = crate::mv::embedder::render_query_embed_text(q_pfx, pairs[1].0);
+                let d0 = embedder.embed(pairs[0].1).expect("d0");
+                let qv0 = embedder.embed(&qtext0).expect("q0");
+                let qv1 = embedder.embed(&qtext1).expect("q1");
+                let c0: f32 = qv0.iter().zip(&d0).map(|(a, b)| a * b).sum();
+                let c1: f32 = qv1.iter().zip(&d0).map(|(a, b)| a * b).sum();
+                let mut negs_cos = Vec::new();
+                for (q, d) in negs {
+                    let qt = crate::mv::embedder::render_query_embed_text(q_pfx, q);
+                    let qv = embedder.embed(&qt).expect("nq");
+                    let dv = embedder.embed(d).expect("nd");
+                    negs_cos.push(qv.iter().zip(&dv).map(|(a, b)| a * b).sum::<f32>());
+                }
+                let zh_pass = c0 >= thr;
+                let en_pass = c1 >= thr;
+                let clean = !negs_cos.iter().any(|&c| c >= thr);
+                eprintln!(
+                    "  {:.2} |    {:.4}     {:.4}   | {:.3} {:.3} {:.3} |   {:?}      {:?}     {:?}",
+                    thr, c0, c1, negs_cos[0], negs_cos[1], negs_cos[2], zh_pass, en_pass, clean
+                );
+            }
+            // Negative controls: unrelated zh↔en pairs. A model whose
+            // unrelated pairs score nearly as high as related ones is
+            // anisotropic (uniform-high cosine) — its high "related" scores
+            // carry no discriminative signal.
+            eprintln!("--- negative controls (unrelated) ---");
             for use_prefix in [false] {
                 for (i, (q, d)) in negs.iter().enumerate() {
                     let qtext = if use_prefix {
