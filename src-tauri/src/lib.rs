@@ -281,6 +281,16 @@ pub fn run() {
             services::app_logger::init(app.path().app_data_dir().ok());
             services::app_logger::log_to_db("info", "Application started, database initialized");
 
+            // Decision-support enable flag: sync from persisted config once the
+            // DB is up (the builtin tool listing reads the in-memory flag).
+            {
+                let app_handle_decision = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    services::decision_service::sync_enabled_flag().await;
+                    let _ = &app_handle_decision;
+                });
+            }
+
             // Reconcile FTS5 full-text tables (§4.2: rebuild 5 entity tables;
             // drift self-healing). Fire-and-forget — a slow first build must not
             // block startup, and failures fall back to LIKE search (§4.4).
@@ -412,6 +422,9 @@ pub fn run() {
                         let _ = services::log_service::run_cleanup_with_summary().await;
                         // OAuth provider: drop expired codes/tokens opportunistically.
                         services::oauth_provider::cleanup_expired().await;
+                        // Decision-support request history: same 15-day
+                        // retention as the activity log.
+                        let _ = services::decision_service::cleanup_history(15).await;
                         tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
                     }
                 });
@@ -632,7 +645,17 @@ pub fn run() {
             commands::rag::rag_reindex_all,
             commands::rag::rag_list_models,
             commands::rag::rag_current_model,
+            commands::decision::decision_status,
+            commands::decision::decision_set_enabled,
+            commands::decision::decision_list_models,
+            commands::decision::decision_select_model,
+            commands::decision::decision_download_model,
+            commands::decision::decision_download_status,
+            commands::decision::decision_download_cancel,
             commands::decision::decision_decide,
+            commands::decision::decision_history_list,
+            commands::decision::decision_history_get,
+            commands::decision::decision_history_clear,
             commands::rag::rag_select_model,
             commands::rag::rag_download_model,
             commands::rag::rag_model_download_status,

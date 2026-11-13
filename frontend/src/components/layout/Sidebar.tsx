@@ -14,6 +14,7 @@ import {
   ScrollText,
   Wrench,
   Library,
+  BrainCircuit,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useBranding } from '@/contexts/BrandingContext';
@@ -22,6 +23,7 @@ import { useBuiltinData } from '@/contexts/BuiltinDataContext';
 import { useGroupData } from '@/hooks/useGroupData';
 import { useSkillData } from '@/hooks/useSkillData';
 import { useRagData } from '@/hooks/useRagData';
+import { isTauri } from '@/utils/tauriClient';
 import { canViewSystemLogs } from '@/utils/navigationPermissions';
 import { usePermissionCheck } from '../PermissionChecker';
 import UserProfileMenu from '@/components/ui/UserProfileMenu';
@@ -84,6 +86,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     { path: '/resources', label: t('nav.resources'), icon: <FileText className="h-4 w-4" />, badge: resources.length || undefined },
     { path: '/skills', label: t('nav.skills'), icon: <Wrench className="h-4 w-4" />, badge: skills.length || undefined },
     { path: '/rag', label: t('nav.rag'), icon: <Library className="h-4 w-4" />, badge: ragDocs.length || undefined, beta: true },
+    ...(isTauri()
+      ? [{ path: '/decision', label: t('nav.decision'), icon: <BrainCircuit className="h-4 w-4" /> }]
+      : []),
     { path: '/market', label: t('nav.market'), icon: <Store className="h-4 w-4" /> },
   ];
 

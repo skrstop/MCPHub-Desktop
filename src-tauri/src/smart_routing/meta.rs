@@ -85,7 +85,7 @@ pub async fn compute_scope_with(
     // scope retains against a list that doesn't contain the name → empty
     // allowed → zero search results, and global searches would never surface
     // its rag_* tools to resolve_tool either.
-    if crate::rag::service::is_enabled() {
+    if crate::rag::service::builtin_server_active() {
         allowed.push(crate::rag::service::BUILTIN_SERVER_NAME.to_string());
     }
     if let Some(g) = &target {
@@ -629,7 +629,7 @@ async fn no_match_message(
         .filter(|s| s.connected || s.start_on_demand)
         .map(|s| s.name)
         .collect();
-    if crate::rag::service::is_enabled() {
+    if crate::rag::service::builtin_server_active() {
         names.push(crate::rag::service::BUILTIN_SERVER_NAME.to_string());
     }
     if let Some(list) = allowed {
@@ -708,7 +708,7 @@ async fn resolve_tool(
             // resolve_tool only looks at tools of servers in this list; the
             // builtin server lives outside the pool, so add it when live —
             // otherwise smart_route_describe/call can't resolve rag_* tools.
-            if crate::rag::service::is_enabled() {
+            if crate::rag::service::builtin_server_active() {
                 names.push(crate::rag::service::BUILTIN_SERVER_NAME.to_string());
             }
             names

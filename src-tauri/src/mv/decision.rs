@@ -36,7 +36,7 @@ impl DecisionType {
             DecisionType::Noul => 2,
         }
     }
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             DecisionType::Choice => "choice",
             DecisionType::Score => "score",
@@ -130,7 +130,6 @@ pub struct DecisionModel {
     head_dim: usize,
     sliding_window: usize,
     rope_base: f32,
-    eps: f64,
     /// Encoder FFN activation from `modern-bert.hidden_activation`
     /// ("gelu" for Julia-1, "silu" for granite-style conversions).
     hidden_activation: String,
@@ -201,10 +200,6 @@ impl DecisionModel {
             .and_then(|v| v.to_string().ok())
             .cloned()
             .unwrap_or_else(|| "silu".to_string());
-        let eps = md
-            .get(&format!("{pfx}attention.layer_norm_rms_epsilon"))
-            .and_then(|v| v.to_f32().ok())
-            .unwrap_or(1e-5) as f64;
         let head_length = get_u32(&format!("{pfx}decision.max_head_tokens"), Some(256))?;
         let max_context = get_u32(&format!("{pfx}context_length"), Some(8192))?;
 
@@ -364,7 +359,6 @@ impl DecisionModel {
             head_dim,
             sliding_window,
             rope_base,
-            eps,
             hidden_activation,
             head_length,
             max_context,
@@ -375,31 +369,20 @@ impl DecisionModel {
         })
     }
 
-    /// Resolve the bundled decision model GGUF (`decision/<name>/model.gguf`).
-    /// Decision models sit NEXT TO the `embedding` kind dir (not inside it).
+    /// Resolve the selected decision model GGUF via the shared kind-aware
+    /// resolver (`decision/<family>/<size>/model.gguf`, downloaded copy
+    /// preferred over bundled).
     pub fn resolve_model_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf> {
         if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
             return Err(anyhow!("invalid decision model name"));
         }
-        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/decision")
-            .join(name)
-            .join("model.gguf");
-        if src.is_file() {
-            return Ok(src);
-        }
-        if let Ok(resource) = tauri::Manager::path(app).resource_dir() {
-            let p = resource
-                .join("runtimes/rag/model/decision")
-                .join(name)
-                .join("model.gguf");
-            if p.is_file() {
-                return Ok(p);
-            }
-        }
-        Err(anyhow!(
-            "decision model '{name}' not found (no model.gguf under runtimes/rag/model/decision)"
-        ))
+        let dir = super::models::resolve_model_paths_kind(
+            app,
+            super::models::ModelKind::Decision,
+            name,
+        )?
+        .ok_or_else(|| anyhow!("decision model '{name}' is not ready - download it first"))?;
+        Ok(dir.join("model.gguf"))
     }
 
     /// Tokenize + serialize one request into `(ids, marker_positions)`

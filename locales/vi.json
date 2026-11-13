@@ -507,7 +507,8 @@
     "system": "Hệ thống",
     "skills": "Kỹ năng",
     "rag": "Cơ sở tri thức",
-    "beta": "Beta"
+    "beta": "Beta",
+    "decision": "Hỗ trợ quyết định"
   },
   "pages": {
     "dashboard": {
@@ -1011,6 +1012,36 @@
       "scanPhaseScan": "Đang quét thư mục nguồn (phát hiện thêm/xóa)…",
       "scanPhaseChecking": "Đang so sánh thay đổi tệp ({{current}}/{{total}}): {{name}}",
       "scanPhaseCheckingCount": "Đang so sánh thay đổi tệp ({{current}}/{{total}})"
+    },
+    "decision": {
+      "title": "Hỗ trợ quyết định",
+      "subtitle": "Mô hình quyết định cục bộ: quyết định có cấu trúc cho máy khách MCP",
+      "enabledTag": "Đang bật",
+      "disabledTag": "Đang tắt",
+      "enableToast": "Đã bật hỗ trợ quyết định",
+      "disableToast": "Đã tắt hỗ trợ quyết định",
+      "historyTitle": "Lịch sử yêu cầu",
+      "clearAll": "Xóa tất cả",
+      "empty": "Chưa có yêu cầu quyết định nào",
+      "view": "Xem",
+      "selected": "Đã chọn",
+      "detailTitle": "Chi tiết quyết định",
+      "fieldType": "Loại",
+      "fieldTime": "Thời điểm yêu cầu",
+      "fieldState": "Ngữ cảnh (State)",
+      "fieldQuestion": "Câu hỏi",
+      "fieldOptions": "Các lựa chọn",
+      "score": "Điểm",
+      "probability": "Xác suất",
+      "selectedTag": "Đã chọn",
+      "fieldDuration": "Thời gian",
+      "fieldSource": "Nguồn",
+      "clearedToast": "Đã xóa {{count}} mục",
+      "clearConfirmTitle": "Xóa toàn bộ lịch sử",
+      "clearConfirmMessage": "Thao tác này xóa {{count}} mục lịch sử quyết định và không thể hoàn tác. Tiếp tục?",
+      "type_choice": "Lựa chọn",
+      "type_score": "Chấm điểm",
+      "type_noul": "Có/Không"
     }
   },
   "logs": {
@@ -1504,12 +1535,12 @@
     "embeddingPrefixesDescription": "Văn bản được nối vào phía trước trước khi embedding, dành cho các mô hình tìm kiếm bất đối xứng được huấn luyện với các tiền tố tác vụ (vd: EmbeddingGemma, E5, Nomic). Để trống cả hai cho các mô hình mong đợi văn bản thô. Hãy bao gồm khoảng trắng ở cuối. Việc thay đổi tiền tố tài liệu sẽ thực hiện re-embed lại tất cả các công cụ.",
     "embeddingQueryPrefix": "Tiền tố truy vấn (Query prefix)",
     "embeddingDocumentPrefix": "Tiền tố tài liệu (Document prefix)",
-    "mvTitle": "Mô hình & Vector",
+    "mvTitle": "Mô hình cục bộ",
     "mvStatusRunning": "Đang chạy: {{model}} · {{dim}} chiều · {{device}}",
     "mvStatusStopped": "Chưa chạy: tự khởi động khi bật RAG hoặc Smart Routing",
     "mvSourceSmartRouting": "Smart Routing",
     "mvHint": "Mô hình và kho vector chạy như một thể hiện dùng chung: bật bất kỳ tính năng phụ thuộc nào sẽ tự khởi động, và dừng sau khi tắt tính năng cuối cùng.",
-    "mvModelSwitch": "Chuyển mô hình",
+    "mvModelSwitch": "Mô hình embedding",
     "mvDownloadFailed": "Tải xuống thất bại",
     "mvDownloadDone": "Tải xuống hoàn tất",
     "mvDevice": "Thiết bị",
@@ -1734,7 +1765,15 @@
     "fieldName": "Tên mã của công cụ (có tiền tố máy chủ khi expose nhiều máy chủ).",
     "fieldDescription": "Mô tả công cụ, mô hình dựa vào đó đánh giá mức liên quan.",
     "fieldServerName": "Tên máy chủ MCP cung cấp công cụ.",
-    "mvSourceRag": "Cơ sở tri thức"
+    "mvSourceRag": "Cơ sở tri thức",
+    "decisionTitle": "Mô hình quyết định",
+    "decisionEnable": "Bật hỗ trợ quyết định",
+    "decisionEnableDescription": "Công cụ MCP decision_decide trên máy chủ tích hợp mcphub-desktop và ghi lại lịch sử yêu cầu.",
+    "decisionHint": "Mô hình quyết định độc lập với mô hình embedding: chuyển đổi có hiệu lực ngay, không cần tạo lại chỉ mục.",
+    "decisionModelSwitch": "Mô hình quyết định",
+    "decisionEnabledToast": "Đã bật hỗ trợ quyết định",
+    "decisionDisabledToast": "Đã tắt hỗ trợ quyết định",
+    "decisionModelSwitched": "Đã chuyển mô hình quyết định"
   },
   "mcpb": {
     "upload": "Tải lên",

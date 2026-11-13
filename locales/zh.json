@@ -507,7 +507,8 @@
     "system": "系统",
     "skills": "技能",
     "rag": "知识库",
-    "beta": "Beta"
+    "beta": "Beta",
+    "decision": "决策支持"
   },
   "pages": {
     "dashboard": {
@@ -1011,6 +1012,36 @@
       "scanPhaseScan": "扫描数据源目录（检测新增/删除）…",
       "scanPhaseChecking": "比对文件变更 ({{current}}/{{total}})：{{name}}",
       "scanPhaseCheckingCount": "比对文件变更 ({{current}}/{{total}})"
+    },
+    "decision": {
+      "title": "决策支持",
+      "subtitle": "本地决策模型：为 MCP 客户端提供结构化决策能力",
+      "enabledTag": "已开启",
+      "disabledTag": "未开启",
+      "enableToast": "决策支持已开启",
+      "disableToast": "决策支持已关闭",
+      "historyTitle": "请求历史",
+      "clearAll": "清空历史",
+      "empty": "暂无决策请求记录",
+      "view": "查看",
+      "selected": "选中",
+      "detailTitle": "决策详情",
+      "fieldType": "决策类型",
+      "fieldTime": "请求时间",
+      "fieldState": "上下文（State）",
+      "fieldQuestion": "问题",
+      "fieldOptions": "候选选项",
+      "score": "分数",
+      "probability": "概率",
+      "selectedTag": "选中",
+      "fieldDuration": "耗时",
+      "fieldSource": "来源",
+      "clearedToast": "已清空 {{count}} 条历史",
+      "clearConfirmTitle": "清空全部历史",
+      "clearConfirmMessage": "将删除全部 {{count}} 条决策请求历史，且不可恢复。确定继续吗？",
+      "type_choice": "单选",
+      "type_score": "评分",
+      "type_noul": "可否"
     }
   },
   "logs": {
@@ -1505,12 +1536,12 @@
     "embeddingPrefixesDescription": "在生成嵌入前添加到文本开头，适用于使用任务前缀训练的非对称检索模型（如 EmbeddingGemma、E5、Nomic）。对于期望原始文本的模型，请将两者留空。请包含末尾的空格。修改文档前缀会重新生成所有工具的嵌入。",
     "embeddingQueryPrefix": "查询前缀",
     "embeddingDocumentPrefix": "文档前缀",
-    "mvTitle": "模型和向量",
+    "mvTitle": "本地模型",
     "mvStatusRunning": "运行中：{{model}} · {{dim}} 维 · {{device}}",
     "mvStatusStopped": "未运行：开启 RAG 或智能路由后自动启动",
     "mvSourceSmartRouting": "智能路由",
     "mvHint": "模型与向量库为单实例共享运行时：任意依赖功能开启即自动启动，关闭最后一个功能后停止。",
-    "mvModelSwitch": "模型切换",
+    "mvModelSwitch": "向量模型",
     "mvDownloadFailed": "下载失败",
     "mvDownloadDone": "下载完成",
     "mvDevice": "运行设备",
@@ -1734,7 +1765,15 @@
     "fieldName": "工具代码名（多服务器时带服务器前缀）。",
     "fieldDescription": "工具描述，模型据此判断相关性。",
     "fieldServerName": "提供该工具的 MCP 服务器名。",
-    "mvSourceRag": "知识库"
+    "mvSourceRag": "知识库",
+    "decisionTitle": "决策模型",
+    "decisionEnable": "启用决策支持",
+    "decisionEnableDescription": "开启后在内置 mcphub-desktop 服务器上暴露 decision_decide MCP 工具，并记录请求历史。",
+    "decisionHint": "决策模型与向量模型相互独立：切换即时生效，无需重建索引。",
+    "decisionModelSwitch": "决策模型切换",
+    "decisionEnabledToast": "决策支持已开启",
+    "decisionDisabledToast": "决策支持已关闭",
+    "decisionModelSwitched": "决策模型已切换"
   },
   "mcpb": {
     "upload": "上传",

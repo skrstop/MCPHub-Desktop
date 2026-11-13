@@ -21,12 +21,32 @@ use tauri::{AppHandle, Emitter, Manager};
 /// on the user's machine, so we fall back to the bundled resource dir.
 /// Layout: `model/embedding/<family>/<size>/` — the `embedding` level groups
 /// model kinds (embedding today; room for e.g. reranker later).
-pub(crate) fn model_root(app: &AppHandle) -> Result<PathBuf> {
+/// Which model family tree a path/listing/download operation targets. Both
+/// kinds share the exact `<kind>/<family>/<size>/` layout and deploy.json
+/// contract; only the roots differ.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    Embedding,
+    Decision,
+}
+
+impl ModelKind {
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            ModelKind::Embedding => "embedding",
+            ModelKind::Decision => "decision",
+        }
+    }
+}
+
+pub(crate) fn model_root_kind(app: &AppHandle, kind: ModelKind) -> Result<PathBuf> {
+    let name = kind.dir_name();
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("runtimes")
         .join("rag")
         .join("model")
-        .join("embedding");
+        .join(name);
     if src.exists() {
         return Ok(src);
     }
@@ -35,7 +55,7 @@ pub(crate) fn model_root(app: &AppHandle) -> Result<PathBuf> {
             .join("runtimes")
             .join("rag")
             .join("model")
-            .join("embedding");
+            .join(name);
         if p.exists() {
             return Ok(p);
         }
@@ -49,9 +69,9 @@ pub(crate) fn model_root(app: &AppHandle) -> Result<PathBuf> {
 /// (including the `embedding` kind level). Performs a one-time best-effort
 /// migration of pre-`embedding` downloads (`models/<family>` →
 /// `models/embedding/<family>`).
-pub(crate) fn download_root(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn download_root_kind(app: &AppHandle, kind: ModelKind) -> Result<PathBuf> {
     let base = data_dir(app)?.join("models");
-    let root = base.join("embedding");
+    let root = base.join(kind.dir_name());
     if base.exists() {
         if let Err(e) = std::fs::create_dir_all(&root) {
             log::warn!("create download model dir {}: {}", root.display(), e);
@@ -61,7 +81,12 @@ pub(crate) fn download_root(app: &AppHandle) -> Result<PathBuf> {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name == "embedding" || !entry.path().is_dir() {
+                // Skip every known kind dir — with ModelKind::Decision the
+                // base dir legitimately holds `decision/` too; renaming it
+                // into the embedding tree would orphan all decision models.
+                if matches!(name.as_ref(), "embedding" | "decision")
+                    || !entry.path().is_dir()
+                {
                     continue;
                 }
                 let dst = root.join(&*name);
@@ -189,8 +214,12 @@ pub struct RagModelInfo {
 /// when the size's `deploy.json` has a non-empty `downloadUrls` object but no
 /// `model.gguf` yet.
 pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
-    let root = model_root(app)?;
-    let dl_root = download_root(app)?;
+    list_models_kind(app, ModelKind::Embedding)
+}
+
+pub fn list_models_kind(app: &AppHandle, kind: ModelKind) -> Result<Vec<RagModelInfo>> {
+    let root = model_root_kind(app, kind)?;
+    let dl_root = download_root_kind(app, kind)?;
     let mut out: Vec<RagModelInfo> = Vec::new();
     if !root.exists() {
         return Ok(out);
@@ -271,8 +300,16 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<RagModelInfo>> {
 /// found or not ready (download.url only). Each size dir is self-contained
 /// (holds a *.gguf file + tokenizer.json + config.json).
 pub(crate) fn resolve_model_paths(app: &AppHandle, size: &str) -> Result<Option<PathBuf>> {
-    let root = model_root(app)?;
-    let dl_root = download_root(app)?;
+    resolve_model_paths_kind(app, ModelKind::Embedding, size)
+}
+
+pub(crate) fn resolve_model_paths_kind(
+    app: &AppHandle,
+    kind: ModelKind,
+    size: &str,
+) -> Result<Option<PathBuf>> {
+    let root = model_root_kind(app, kind)?;
+    let dl_root = download_root_kind(app, kind)?;
     for fam in std::fs::read_dir(&root)? {
         let fam_path = fam?.path();
         if !fam_path.is_dir() {
@@ -380,9 +417,50 @@ pub(crate) async fn set_current_model(size: &str) {
     }
 }
 
+/// The persisted selected DECISION model size (`decision.model`). Separate
+/// namespace from the embedding selection (`mv.model`) — the two kinds run
+/// on independent lifecycles.
+pub async fn current_decision_model() -> Option<String> {
+    let c = crate::services::config_service::get().await.ok()?;
+    c.get("decision")
+        .and_then(|d| d.get("model"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// The out-of-box default decision size (deploy.json `"default": true` and
+/// ready, else first ready). Falls back to the persisted selection's
+/// absence gracefully.
+pub fn default_decision_size(app: &AppHandle) -> Option<String> {
+    let models = list_models_kind(app, ModelKind::Decision).ok()?;
+    pick_default_size(&models)
+}
+
+/// Pure default-size selection: the `default: true` AND ready entry wins
+/// (regardless of list order), else the first ready entry, else None.
+pub(crate) fn pick_default_size(models: &[RagModelInfo]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| m.is_default && m.ready)
+        .or_else(|| models.iter().find(|m| m.ready))
+        .map(|m| m.size.clone())
+}
+
+/// Persist `decision.model = <size>` (deep-merge).
+pub async fn set_decision_model(size: &str) {
+    let patch = json!({ "decision": { "model": size } });
+    if let Err(e) = crate::services::config_service::update(&patch).await {
+        rag_log("warn", format!("failed to persist decision.model: {}", e));
+    }
+}
+
 /// Validate that `size` resolves to a ready model dir.
 pub fn ensure_model_ready(app: &AppHandle, size: &str) -> Result<()> {
-    if resolve_model_paths(app, size)?.is_none() {
+    ensure_model_ready_kind(app, ModelKind::Embedding, size)
+}
+
+pub fn ensure_model_ready_kind(app: &AppHandle, kind: ModelKind, size: &str) -> Result<()> {
+    if resolve_model_paths_kind(app, kind, size)?.is_none() {
         return Err(anyhow!(
             "model '{}' is not ready - download it first",
             size
@@ -423,6 +501,11 @@ pub fn model_defaults(app: &AppHandle, size: &str) -> (f32, f32, f32) {
 #[serde(rename_all = "camelCase")]
 pub struct RagModelDownloadProgress {
     pub size: String,
+    /// Which model kind tree this download targets (embedding | decision).
+    /// The single-slot download state is shared across kinds; the field lets
+    /// status/cancel queries disambiguate same-name sizes. Serialized for the
+    /// frontend event payload (informational there).
+    pub kind: ModelKind,
     phase: String,
     /// Bytes downloaded so far.
     downloaded: u64,
@@ -1033,9 +1116,10 @@ pub(crate) async fn download_from_git(
 /// Returns `(family, size_dir, ordered sources)`.
 fn find_download_source(
     app: &AppHandle,
+    kind: ModelKind,
     size: &str,
 ) -> Result<(String, PathBuf, Vec<(String, String)>)> {
-    let root = model_root(app)?;
+    let root = model_root_kind(app, kind)?;
     for fam in std::fs::read_dir(&root)? {
         let fam_path = fam?.path();
         if !fam_path.is_dir() {
@@ -1070,7 +1154,16 @@ fn find_download_source(
 /// emitted on `rag://model-download` and queryable via `download_status`.
 /// Re-downloading an already-ready size is allowed (修复损坏文件的重试路径).
 pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Result<()> {
-    let (family, _size_dir, mut sources) = find_download_source(app, size)?;
+    download_model_kind(app, ModelKind::Embedding, size, source)
+}
+
+pub fn download_model_kind(
+    app: &AppHandle,
+    kind: ModelKind,
+    size: &str,
+    source: Option<&str>,
+) -> Result<()> {
+    let (family, _size_dir, mut sources) = find_download_source(app, kind, size)?;
     // Optional explicit source selection (frontend source picker); unknown
     // names fall back to the default (first) source.
     if let Some(want) = source {
@@ -1098,7 +1191,7 @@ pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Resu
             }
         }
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let temp_path = download_root(app)?
+        let temp_path = download_root_kind(app, kind)?
             .join(&family)
             .join(size)
             .join(format!("{MODEL_FILE}{MODEL_TEMP_SUFFIX}"));
@@ -1110,6 +1203,7 @@ pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Resu
             cancel: Some(cancel.clone()),
             progress: Some(RagModelDownloadProgress {
                 size: size.to_string(),
+                kind,
                 phase: "downloading".into(),
                 downloaded: 0,
                 total: 0,
@@ -1129,6 +1223,7 @@ pub fn download_model(app: &AppHandle, size: &str, source: Option<&str>) -> Resu
             let result = futures_util::FutureExt::catch_unwind(
                 std::panic::AssertUnwindSafe(run_download(
                     app2.clone(),
+                    kind,
                     size2.clone(),
                     family,
                     sources,
@@ -1226,6 +1321,7 @@ fn check_truncation(total: u64, downloaded: u64) -> Result<(), String> {
 /// ("done" | "error" | "cancelled") in the in-memory state.
 async fn run_download(
     app: AppHandle,
+    kind: ModelKind,
     size: String,
     family: String,
     sources: Vec<(String, String)>,
@@ -1235,7 +1331,7 @@ async fn run_download(
     use std::sync::atomic::Ordering;
     use tokio::io::AsyncWriteExt;
 
-    let target_dir = download_root(&app)?.join(&family).join(&size);
+    let target_dir = download_root_kind(&app, kind)?.join(&family).join(&size);
     tokio::fs::create_dir_all(&target_dir)
         .await
         .map_err(|e| anyhow!("create {}: {}", target_dir.display(), e))?;
@@ -1565,14 +1661,24 @@ async fn run_download(
 /// queryable for 10s (covering slow remounts), then reports None so a page
 /// revisited much later doesn't show a phantom finished bar.
 pub fn download_status(size: &str) -> Option<RagModelDownloadProgress> {
+    download_status_kind(ModelKind::Embedding, size)
+}
+
+/// Kind-aware status lookup: the single-slot download state is shared across
+/// model kinds, so a decision-model query must not match an embedding
+/// download of the same size name (and vice versa). Snapshots written before
+/// the kind field existed default to the embedding kind.
+pub fn download_status_kind(kind: ModelKind, size: &str) -> Option<RagModelDownloadProgress> {
     let st = state_lock();
     match st.as_ref() {
         Some(DownloadState {
-            progress,
+            progress: Some(p),
             done_at,
             ..
         }) => {
-            let p = progress.clone().filter(|p| p.size == size)?;
+            if p.size != size || p.kind != kind {
+                return None;
+            }
             if p.phase == "done"
                 && done_at
                     .map(|t| t.elapsed() > std::time::Duration::from_secs(10))
@@ -1580,7 +1686,7 @@ pub fn download_status(size: &str) -> Option<RagModelDownloadProgress> {
             {
                 return None;
             }
-            Some(p)
+            Some(p.clone())
         }
         _ => None,
     }
@@ -1593,6 +1699,13 @@ pub fn download_status(size: &str) -> Option<RagModelDownloadProgress> {
 /// since an aborted task cannot run its own cleanup, and the final
 /// "cancelled" event is emitted from this thread.
 pub fn cancel_download(size: &str) -> bool {
+    cancel_download_kind(ModelKind::Embedding, size)
+}
+
+/// Kind-aware cancel: the single-slot state is shared across model kinds, so
+/// a decision-model cancel must not abort an embedding download of the same
+/// size name (and vice versa).
+pub fn cancel_download_kind(kind: ModelKind, size: &str) -> bool {
     let mut st = state_lock();
     if let Some(DownloadState {
         progress: Some(p),
@@ -1603,7 +1716,7 @@ pub fn cancel_download(size: &str) -> bool {
         ..
     }) = st.as_mut()
     {
-        if p.size == size && p.phase == "downloading" {
+        if p.size == size && p.kind == kind && p.phase == "downloading" {
             if let Some(flag) = cancel {
                 use std::sync::atomic::Ordering;
                 flag.store(true, Ordering::Relaxed);
@@ -2063,4 +2176,40 @@ mod publish_and_truncation_tests {
         assert!(check_truncation(0, 0).is_ok());
         assert!(check_truncation(0, 12345).is_ok());
     }
+    fn mk_model(size: &str, ready: bool, is_default: bool) -> RagModelInfo {
+        RagModelInfo {
+            size: size.into(),
+            label: size.into(),
+            status: if ready { "ready".into() } else { "unavailable".into() },
+            ready,
+            downloadable: false,
+            format: if ready { "gguf".into() } else { String::new() },
+            file_size: 0,
+            description: String::new(),
+            is_default,
+            sort: 0,
+            download_sources: vec![],
+        }
+    }
+
+    #[test]
+    fn pick_default_size_prefers_default_ready_then_any_ready() {
+        // default+ready wins even when listed last
+        let models = vec![
+            mk_model("a", true, false),
+            mk_model("b", false, true),
+            mk_model("c", true, true),
+        ];
+        assert_eq!(pick_default_size(&models).as_deref(), Some("c"));
+        // no default → first ready
+        let models = vec![mk_model("a", false, true), mk_model("b", true, false)];
+        assert_eq!(pick_default_size(&models).as_deref(), Some("b"));
+        // default exists but NOT ready → falls through to first ready
+        let models = vec![mk_model("a", false, true), mk_model("b", true, false)];
+        assert_eq!(pick_default_size(&models).as_deref(), Some("b"));
+        // nothing ready → None
+        assert_eq!(pick_default_size(&[mk_model("a", false, true)]), None);
+        assert_eq!(pick_default_size(&[]), None);
+    }
+
 }

@@ -802,6 +802,63 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     };
   }
 
+  if (segs[0] === 'decision') {
+    // GET /decision/status — enable flag + selected model
+    if (segs[1] === 'status' && m === 'GET')
+      return { command: 'decision_status', args: {} };
+    // PUT /decision/enabled — toggle decision support
+    if (segs[1] === 'enabled' && m === 'PUT') {
+      const b = body as { enabled?: boolean } | null;
+      return { command: 'decision_set_enabled', args: { enabled: b?.enabled ?? false } };
+    }
+    // GET /decision/models — decision model dropdown entries
+    if (segs[1] === 'models' && m === 'GET')
+      return { command: 'decision_list_models', args: {} };
+    // POST /decision/select-model — persist the selection
+    if (segs[1] === 'select-model' && m === 'POST') {
+      const b = body as { model?: string } | null;
+      return { command: 'decision_select_model', args: { model: b?.model ?? '' } };
+    }
+    // POST /decision/download-model — background download (same machinery as
+    // embedding models; progress on rag://model-download).
+    if (segs[1] === 'download-model' && m === 'POST') {
+      const b = body as { model?: string; source?: string } | null;
+      return {
+        command: 'decision_download_model',
+        args: { model: b?.model ?? '', source: b?.source ?? null },
+      };
+    }
+    // GET /decision/download-status?model= — progress snapshot
+    if (segs[1] === 'download-status' && m === 'GET') {
+      const qsi = endpoint.indexOf('?');
+      const qs = qsi >= 0 ? new URLSearchParams(endpoint.slice(qsi + 1)) : new URLSearchParams();
+      return { command: 'decision_download_status', args: { model: qs.get('model') ?? '' } };
+    }
+    // POST /decision/download-cancel — cancel a running download
+    if (segs[1] === 'download-cancel' && m === 'POST') {
+      const b = body as { model?: string } | null;
+      return { command: 'decision_download_cancel', args: { model: b?.model ?? '' } };
+    }
+    // GET /decision/history?limit&offset — request history, newest first
+    if (segs[1] === 'history' && segs.length === 2 && m === 'GET') {
+      const qsi = endpoint.indexOf('?');
+      const qs = qsi >= 0 ? new URLSearchParams(endpoint.slice(qsi + 1)) : new URLSearchParams();
+      return {
+        command: 'decision_history_list',
+        args: {
+          limit: qs.get('limit') != null ? Number(qs.get('limit')) : null,
+          offset: qs.get('offset') != null ? Number(qs.get('offset')) : null,
+        },
+      };
+    }
+    // GET /decision/history/:id — one entry
+    if (segs[1] === 'history' && segs.length === 3 && m === 'GET')
+      return { command: 'decision_history_get', args: { id: decodeURIComponent(segs[2]) } };
+    // DELETE /decision/history — clear all
+    if (segs[1] === 'history' && m === 'DELETE')
+      return { command: 'decision_history_clear', args: {} };
+  }
+
   if (segs[0] === 'rag') {
     // GET /rag/status — runtime status (switch state)
     if (segs[1] === 'status' && m === 'GET')

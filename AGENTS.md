@@ -530,6 +530,19 @@ npm run build                     # 生产构建
 - **测试**：lib 115 passed（+provider 单测：PKCE RFC7636 附录 B 向量、注册/撤销/token 生命周期、配置默认值；flow E2E：mock AS + mock 上游 + 浏览器重定向链模拟跑通 discovery→注册→PKCE→token 全链）；新套件 `oauth_provider_e2e.py` 35/35（负路径：disabled 404×3、坏 redirect scheme、deny、未注册 redirect、缺 nonce、PKCE 重放、refresh 轮换 + 重放吊销、revoke 401）。**54 套 E2E 全绿零回归**；cargo check 0 错 0 警；tsc 0 错；build ✓。
 - **OAuth 复核轮（2026-10-08 晚，独立 code-review 代理 + 亲核）**：修复 3 项——①[H] redirect_uri 白名单**前缀匹配**（`http://localhost.evil.com` 可注册）→ `url::Url` 精确 host 校验（loopback= localhost/127.0.0.1/::1 允许 http，其余强制 https）+ CRLF/反斜杠拒收；②[M] consent 表单无 CSRF（任意网页可跨站 POST approve 直取授权码）→ 一次性 nonce（内存 Map，5min TTL，GET 渲染 POST 必验）；③[M] refresh 重放无检测（旧 token 轮换后可静默重放，BCP 违规）→ 轮换改 `refresh_used` 标记制（1h 保留 + cleanup_expired 清理），重放检测 → **整族吊销**（含 successor access，E2E N7b 钉死）+ 轮换时同步删同族旧 access；④[M] `oauth_authorize_submit` 误用 `validate_client(None)` → secret 客户端永远无法同意授权 → 改 find_client + revoked 检查（authorize 端点不做 client 认证，OAuth 语义）；⑤ cleanup_expired 接入 6h 日志清理循环（原为死代码）。**游客模式确认**：`require_admin` 在 skipAuth 下放行系全仓统一设计——游客模式可操作全部 OAuth 命令（本地单用户工具语义）。
 
+### 3.12 决策支持 / 决策模型（2026-11-12）
+
+> 测试报告：`doc/decision_support_report_20261112.md`。决策运行时（Julia-1 结构化决策输出）见 §3.10 前置工作（commit 8b84c9c）。
+
+- **DB v39**：`decision_history` 表（12 列 + created_at DESC 索引）；TARGET_VERSION 38→39。
+- **`services/decision_service.rs`（新）**：`DECISION_ACTIVE` AtomicBool（启动 `sync_enabled_flag` 回填 `decision.enabled`）；模型缓存（按 size 键，选择变更失效）；`decide_and_record`（决策+历史落库，历史写失败不拖垮决策）；历史 list/get/clear/cleanup（15 天保留，挂 lib.rs 6h 清理循环）；`builtin_decision_tools()` + `parse_decision_tool_args`（2-20/非空校验）。
+- **命令**：`commands/decision.rs` 11 条全部 require_admin（status/set_enabled/list_models/select_model/download_model/download_status/download_cancel/decide/history_list/history_get/history_clear）。
+- **模型管理 kind 化**：`mv/models.rs` `ModelKind {Embedding, Decision}`——`*_kind` 变体（root/download_root/list/resolve/download/ensure_ready），旧签名保留为 embedding 包装；决策布局 `decision/<family>/<size>/`（julia/julia_1 + deploy.json bundle:true）；下载进度结构加 `kind` 字段，`download_status_kind`/`cancel_download_kind` 跨 kind 消歧（单槽状态共享）；决策选择 `decision.model` 独立于 `mv.model`；`pick_default_size` 纯函数。`gen-model-resources.mjs` 扫描双 kind 目录。
+- **MCP 工具**：`decision_decide` 挂 builtin `mcphub-desktop`（`builtin_tools()` 追加 + `call_builtin_tool` 顶部 decision 分支）；**可见性门控统一 `builtin_server_active()`**（= RAG 开 || 决策开）——替换 pool/rmcp_bridge/http_server×4/smart meta×3 共 9 处 RAG-only 门控（决策开+RAG 关时 $smart/HTTP/REST 全面可达）。
+- **前端**：`DecisionPage.tsx`（开关+历史倒序+详情弹框+清空，isTauri 门控）；`DecisionModelSettings.tsx`（设置【决策模型】卡片，ModelSelector 复用，切换即时生效无需重建索引）；设置改名【模型和向量】→【本地模型】、【模型配置】→【向量模型】；tauriClient `/decision/*` 10 映射（limit/offset 必须 Number()——serde Option<i64> 拒字符串）；`rag://model-download` 事件三处监听按 `kind` 过滤防跨 kind 串扰；locales ×6。
+- **复核战役（2 波）**：第一波 4 代理修复 6 项（2H 迁移孤儿化+serde 字符串、2H $smart/builtin_server_tools 门控漏、1M 下载跨 kind 串扰、1H 参数校验缺口）；第二波回炉修复 2 项（前端 kind 消费缺口、测试并行抖动 TEST_LOCK 串行化）。
+- **验证**：lib **422 passed**（+8 新单测：服务 10/迁移 v39/pick_default_size）；vitest **151 passed**（+7 decisionFormat）；tsc 0 错；cargo check 0 错 0 警；build ✓。
+
 ### 3.11 MCPB（.mcpb 文件安装，2026-10-19）
 
 > 计划：`doc/mcpb_implementation_plan_20261018.md`（含 origin 逐处扫描结论）。DXT 无独立逻辑（origin dxtController 仅 1 行 shim）。

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 38;
+pub const TARGET_VERSION: i64 = 39;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -281,6 +281,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         36 => migrate_v36(pool).await,
         37 => migrate_v37(pool).await,
         38 => migrate_v38(pool).await,
+        39 => migrate_v39(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -535,6 +536,24 @@ async fn migrate_v38(pool: &SqlitePool) -> Result<()> {
         "TEXT NOT NULL DEFAULT '[]'",
     )
     .await?;
+    Ok(())
+}
+
+/// v38 → v39: decision-support request history (决策支持 page). One row per
+/// structured decision request; JSON columns keep the exact request/response
+/// payloads so the detail dialog can render them verbatim.
+async fn migrate_v39(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS decision_history (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, decision_type TEXT NOT NULL, state TEXT, question TEXT NOT NULL, options_json TEXT NOT NULL, scores_json TEXT NOT NULL, probabilities_json TEXT NOT NULL, selected_index INTEGER NOT NULL, selected_option TEXT NOT NULL, duration_ms INTEGER, source TEXT)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_decision_history_created ON decision_history(created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+    log::info!("[db] migration v39: created decision_history table");
     Ok(())
 }
 
@@ -1781,6 +1800,60 @@ async fn create_index_if_column_exists(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v39: decision_history 表 + created_at 索引存在，且 run_pending 幂等。
+    #[tokio::test]
+    async fn migrate_v39_creates_decision_history_table_and_index() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations");
+        assert_eq!(get_current_version(&pool).await.unwrap(), TARGET_VERSION);
+
+        let cols: Vec<String> =
+            sqlx::query("SELECT name FROM pragma_table_info('decision_history')")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.get::<String, _>("name"))
+                .collect();
+        for c in [
+            "id",
+            "created_at",
+            "decision_type",
+            "state",
+            "question",
+            "options_json",
+            "scores_json",
+            "probabilities_json",
+            "selected_index",
+            "selected_option",
+            "duration_ms",
+            "source",
+        ] {
+            assert!(cols.iter().any(|x| x == c), "column {c} missing in {:?}", cols);
+        }
+        let idx: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_decision_history_created'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(idx, 1, "created_at index missing");
+        sqlx::query("INSERT INTO decision_history (id, created_at, decision_type, question, options_json, scores_json, probabilities_json, selected_index, selected_option) VALUES ('x','2026-01-01 00:00:00','choice','q','[]','[]','[]',0,'a')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let _: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM decision_history ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET 0",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        run_pending(&pool).await.expect("re-run migrations idempotent");
+    }
 
     /// v29（全新安装修复）：fresh DB 直升 TARGET_VERSION 后 bearer_keys 必须是
     /// token 形态，且 bearer CRUD 端到端可用（round 11 发现的盲区——存量开发机

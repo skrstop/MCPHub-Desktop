@@ -1874,6 +1874,15 @@ pub fn is_enabled() -> bool {
     RAG_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Whether the builtin "mcphub-desktop" server should be VISIBLE at all:
+/// true when ANY bundled capability is active (RAG tools or the decision
+/// tool). Visibility gates must use this — gating on `is_enabled()` alone
+/// would hide the builtin server (and its decision tool) whenever RAG is
+/// off but decision support is on.
+pub fn builtin_server_active() -> bool {
+    is_enabled() || crate::services::decision_service::is_enabled()
+}
+
 /// The model the current vector index was built with (`rag.indexedModel`),
 /// persisted at start (no reindex needed) and after `reindex_all`. Used to
 /// detect a same-dim model swap, which the table's dim check cannot see.
@@ -2179,7 +2188,7 @@ pub const BUILTIN_SERVER_NAME: &str = "mcphub-desktop";
 /// uniformly - select it in groups, view its tools, etc.).
 pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
     use crate::models::server::Tool;
-    tool_definitions()
+    let mut tools: Vec<Tool> = tool_definitions()
         .into_iter()
         .map(|v| Tool {
                     hidden_params: None,
@@ -2196,7 +2205,11 @@ pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
             meta: None,
             description_overridden: false,
         })
-        .collect()
+        .collect();
+    // Decision-support tool rides the same builtin server (empty while the
+    // decision runtime is disabled).
+    tools.extend(crate::services::decision_service::builtin_decision_tools());
+    tools
 }
 
 /// Dispatch a builtin RAG tool call (`rag_search` / `rag_get` / `rag_tag_search`
@@ -2214,6 +2227,11 @@ pub async fn call_builtin_tool(
     args: &serde_json::Value,
 ) -> Result<crate::models::server::ToolCallResult> {
     use crate::models::server::ToolCallResult;
+    // Decision tools dispatch to their own service (own enable gate).
+    if tool_name.starts_with("decision_") {
+        return crate::services::decision_service::call_builtin_decision_tool(app, tool_name, args)
+            .await;
+    }
     if !is_enabled() {
         return Err(anyhow!("RAG is not enabled"));
     }
@@ -2374,7 +2392,11 @@ pub async fn call_builtin_tool(
 /// capabilities append here once and propagate everywhere; nothing downstream
 /// hardcodes tool names.
 pub async fn builtin_server_tools() -> Vec<crate::models::server::Tool> {
-    let mut tools = if is_enabled() { builtin_tools() } else { Vec::new() };
+    let mut tools = if builtin_server_active() {
+        builtin_tools()
+    } else {
+        Vec::new()
+    };
     // Smart Routing meta tools on the builtin server (UI + test invocation).
     tools.extend(crate::smart_routing::meta::builtin_meta_tools().await);
     tools

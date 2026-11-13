@@ -451,6 +451,7 @@ const useRagDataState = () => {
     // from downloadable to ready.
     listen<{
       size: string;
+      kind?: string;
       phase: string;
       downloaded: number;
       total: number;
@@ -463,6 +464,9 @@ const useRagDataState = () => {
     }>('rag://model-download', (event) => {
       const p = event.payload;
       if (!p || !mounted.current) return;
+      // Shared event bus: ignore decision-kind downloads (absent kind =
+      // legacy payload → embedding).
+      if (p.kind === 'decision') return;
       setModelDownload({ ...p });
       if (p.phase === 'done' || p.phase === 'error') {
         // Refresh the model list so the downloaded size becomes "ready" /

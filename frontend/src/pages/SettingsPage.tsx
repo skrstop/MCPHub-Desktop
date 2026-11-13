@@ -28,6 +28,7 @@ import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import ToolPolicyPanel from '@/components/ToolPolicyPanel';
 import SmartRoutingIndexPanel from '@/components/SmartRoutingIndexPanel';
 import ModelVectorSettings from '@/components/ModelVectorSettings';
+import DecisionModelSettings from '@/components/DecisionModelSettings';
 import { reindexSmartRouting } from '@/services/smartRoutingService';
 import ReindexDialog from '@/components/ReindexDialog';
 import { apiDelete, apiGet, apiPost, apiPut } from '@/utils/fetchInterceptor';
@@ -4517,6 +4518,9 @@ const SettingsPage: React.FC = () => {
           管理入口（单实例，RAG / Smart Routing 共享）。Web 模式无本地运行时，
           不渲染。见 doc/smart_routing_port_plan_20260925.md §3.4。 */}
       {isTauri() && <ModelVectorSettings />}
+
+      {/* 决策模型（桌面端专属）：决策支持开关 + 决策模型管理，与向量模型同构 */}
+      {isTauri() && <DecisionModelSettings />}
 
       {/* Route Configuration Settings */}
       <PermissionChecker permissions={PERMISSIONS.SETTINGS_ROUTE_CONFIG}>

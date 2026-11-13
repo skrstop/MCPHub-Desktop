@@ -507,7 +507,8 @@
     "system": "System",
     "skills": "Skills",
     "rag": "Knowledge Base",
-    "beta": "Beta"
+    "beta": "Beta",
+    "decision": "Decision Support"
   },
   "pages": {
     "dashboard": {
@@ -1011,6 +1012,36 @@
       "scanPhaseScan": "Scanning source directories (detecting additions/removals)…",
       "scanPhaseChecking": "Comparing file changes ({{current}}/{{total}}): {{name}}",
       "scanPhaseCheckingCount": "Comparing file changes ({{current}}/{{total}})"
+    },
+    "decision": {
+      "title": "Decision Support",
+      "subtitle": "Local decision model: structured decisions for MCP clients",
+      "enabledTag": "On",
+      "disabledTag": "Off",
+      "enableToast": "Decision support enabled",
+      "disableToast": "Decision support disabled",
+      "historyTitle": "Request History",
+      "clearAll": "Clear All",
+      "empty": "No decision requests yet",
+      "view": "View",
+      "selected": "Selected",
+      "detailTitle": "Decision Detail",
+      "fieldType": "Type",
+      "fieldTime": "Requested At",
+      "fieldState": "State",
+      "fieldQuestion": "Question",
+      "fieldOptions": "Options",
+      "score": "Score",
+      "probability": "Probability",
+      "selectedTag": "Selected",
+      "fieldDuration": "Duration",
+      "fieldSource": "Source",
+      "clearedToast": "Cleared {{count}} entries",
+      "clearConfirmTitle": "Clear All History",
+      "clearConfirmMessage": "This deletes all {{count}} decision history entries and cannot be undone. Continue?",
+      "type_choice": "Choice",
+      "type_score": "Score",
+      "type_noul": "Yes/No"
     }
   },
   "logs": {
@@ -1504,12 +1535,12 @@
     "embeddingPrefixesDescription": "Text prepended before embedding, for asymmetric retrieval models trained with task prefixes (e.g. EmbeddingGemma, E5, Nomic). Leave both empty for models that expect raw text. Include the trailing space. Changing the document prefix re-embeds all tools.",
     "embeddingQueryPrefix": "Query prefix",
     "embeddingDocumentPrefix": "Document prefix",
-    "mvTitle": "Model & Vector",
+    "mvTitle": "Local Models",
     "mvStatusRunning": "Running: {{model}} · {{dim}} dims · {{device}}",
     "mvStatusStopped": "Not running: starts automatically when RAG or Smart Routing is enabled",
     "mvSourceSmartRouting": "Smart Routing",
     "mvHint": "The model and vector store run as a shared single instance: enabling any dependent feature starts it automatically, and it stops after the last feature is disabled.",
-    "mvModelSwitch": "Model Switch",
+    "mvModelSwitch": "Embedding Model",
     "mvDownloadFailed": "Download failed",
     "mvDownloadDone": "Download complete",
     "mvDevice": "Device",
@@ -1734,7 +1765,15 @@
     "fieldName": "Tool code name (with server prefix when multiple servers are exposed).",
     "fieldDescription": "Tool description used by the model to decide relevance.",
     "fieldServerName": "Name of the MCP server providing the tool.",
-    "mvSourceRag": "Knowledge Base"
+    "mvSourceRag": "Knowledge Base",
+    "decisionTitle": "Decision Model",
+    "decisionEnable": "Enable Decision Support",
+    "decisionEnableDescription": "Exposes the decision_decide MCP tool on the builtin mcphub-desktop server and records request history.",
+    "decisionHint": "Decision models are independent of the embedding model: switching takes effect immediately, no reindex needed.",
+    "decisionModelSwitch": "Decision Model",
+    "decisionEnabledToast": "Decision support enabled",
+    "decisionDisabledToast": "Decision support disabled",
+    "decisionModelSwitched": "Decision model switched"
   },
   "mcpb": {
     "upload": "Upload",

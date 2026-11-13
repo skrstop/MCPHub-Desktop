@@ -22,6 +22,9 @@ const formatEta = (secs: number): string => {
 
 export interface ModelDownloadProgress {
   size: string;
+  /** Which model kind tree this download targets ("embedding" | "decision").
+   *  Absent on payloads from before the field existed (treat as embedding). */
+  kind?: string;
   phase: string;
   downloaded: number;
   total: number;
@@ -47,7 +50,7 @@ const ModelSelector: React.FC<{
   onSelect: (size: string) => void;
   onDownload: (size: string, source?: string) => void;
   onCancel: (size: string) => void;
-  onOpenFolder: (size: string) => void;
+  onOpenFolder?: (size: string) => void;
   onRefresh: () => void;
 }> = ({ models, currentModel, modelDownload, disabled, onSelect, onDownload, onCancel, onOpenFolder, onRefresh }) => {
   const { t } = useTranslation();
@@ -274,15 +277,17 @@ const ModelSelector: React.FC<{
                               <ChevronDown size={10} style={{ opacity: 0.6 }} />
                             </button>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => onOpenFolder(m.size)}
-                            className="hub-btn sm"
-                            style={{ height: 24, paddingLeft: 4, paddingRight: 4 }}
-                            title={t('pages.rag.openModelDirHint')}
-                          >
-                            <FolderOpen size={11} style={{ opacity: 0.7 }} />
-                          </button>
+                          {onOpenFolder && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenFolder(m.size)}
+                              className="hub-btn sm"
+                              style={{ height: 24, paddingLeft: 4, paddingRight: 4 }}
+                              title={t('pages.rag.openModelDirHint')}
+                            >
+                              <FolderOpen size={11} style={{ opacity: 0.7 }} />
+                            </button>
+                          )}
                         </>
                       )}
                     </div>

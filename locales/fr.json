@@ -507,7 +507,8 @@
     "system": "Système",
     "rag": "Base de connaissances",
     "beta": "Beta",
-    "skills": "Skills"
+    "skills": "Skills",
+    "decision": "Aide à la décision"
   },
   "pages": {
     "dashboard": {
@@ -1011,6 +1012,36 @@
     },
     "skills": {
       "title": "Skills"
+    },
+    "decision": {
+      "title": "Aide à la décision",
+      "subtitle": "Modèle de décision local : décisions structurées pour les clients MCP",
+      "enabledTag": "Activé",
+      "disabledTag": "Désactivé",
+      "enableToast": "Aide à la décision activée",
+      "disableToast": "Aide à la décision désactivée",
+      "historyTitle": "Historique des requêtes",
+      "clearAll": "Tout effacer",
+      "empty": "Aucune requête de décision",
+      "view": "Voir",
+      "selected": "Sélection",
+      "detailTitle": "Détail de la décision",
+      "fieldType": "Type",
+      "fieldTime": "Date de la requête",
+      "fieldState": "Contexte (State)",
+      "fieldQuestion": "Question",
+      "fieldOptions": "Options",
+      "score": "Score",
+      "probability": "Probabilité",
+      "selectedTag": "Sélectionné",
+      "fieldDuration": "Durée",
+      "fieldSource": "Source",
+      "clearedToast": "{{count}} entrées supprimées",
+      "clearConfirmTitle": "Effacer tout l'historique",
+      "clearConfirmMessage": "Ceci supprime les {{count}} entrées d'historique, sans possibilité d'annulation. Continuer ?",
+      "type_choice": "Choix",
+      "type_score": "Score",
+      "type_noul": "Oui/Non"
     }
   },
   "logs": {
@@ -1480,12 +1511,12 @@
     "embeddingPrefixesDescription": "Texte ajouté avant l'embedding, pour les modèles de recherche asymétriques entraînés avec des préfixes de tâche (par ex. EmbeddingGemma, E5, Nomic). Laissez les deux vides pour les modèles qui attendent du texte brut. Incluez l'espace final. Modifier le préfixe de document recalcule les embeddings de tous les outils.",
     "embeddingQueryPrefix": "Préfixe de requête",
     "embeddingDocumentPrefix": "Préfixe de document",
-    "mvTitle": "Modèle & Vecteurs",
+    "mvTitle": "Modèles locaux",
     "mvStatusRunning": "En cours : {{model}} · {{dim}} dim. · {{device}}",
     "mvStatusStopped": "Non démarré : démarre automatiquement quand RAG ou le routage intelligent est activé",
     "mvSourceSmartRouting": "Routage intelligent",
     "mvHint": "Le modèle et le magasin de vecteurs s'exécutent en instance unique partagée : l'activation de toute fonction dépendante le démarre automatiquement, il s'arrête après la désactivation de la dernière fonction.",
-    "mvModelSwitch": "Changement de modèle",
+    "mvModelSwitch": "Modèle d'embedding",
     "mvDownloadFailed": "Échec du téléchargement",
     "mvDownloadDone": "Téléchargement terminé",
     "mvDevice": "Appareil",
@@ -1734,7 +1765,15 @@
     "fieldName": "Nom de code de l'outil (préfixé du serveur quand plusieurs serveurs sont exposés).",
     "fieldDescription": "Description de l'outil utilisée par le modèle pour juger la pertinence.",
     "fieldServerName": "Nom du serveur MCP fournissant l'outil.",
-    "mvSourceRag": "Base de connaissances"
+    "mvSourceRag": "Base de connaissances",
+    "decisionTitle": "Modèle de décision",
+    "decisionEnable": "Activer l'aide à la décision",
+    "decisionEnableDescription": "Expose l'outil MCP decision_decide sur le serveur intégré mcphub-desktop et enregistre l'historique des requêtes.",
+    "decisionHint": "Les modèles de décision sont indépendants du modèle d'embedding : le changement est immédiat, sans réindexation.",
+    "decisionModelSwitch": "Modèle de décision",
+    "decisionEnabledToast": "Aide à la décision activée",
+    "decisionDisabledToast": "Aide à la décision désactivée",
+    "decisionModelSwitched": "Modèle de décision changé"
   },
   "mcpb": {
     "upload": "Télécharger",

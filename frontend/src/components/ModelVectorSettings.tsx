@@ -105,6 +105,9 @@ const ModelVectorSettings: React.FC = () => {
     const unlistenP = listen<ModelDownloadProgress>('rag://model-download', (event) => {
       const p = event.payload;
       if (!p || !mounted.current) return;
+      // Shared event bus: ignore decision-kind downloads (absent kind =
+      // legacy payload from before the field existed → embedding).
+      if (p.kind === 'decision') return;
       setModelDownload({ ...p });
       if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
         void fetchAll();

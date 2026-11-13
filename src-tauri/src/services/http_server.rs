@@ -1283,7 +1283,7 @@ async fn tools_for_server(nm: &str) -> Option<Vec<crate::models::server::Tool>> 
         // are exclusive to the $smart access points — their tools/list builds
         // them dynamically via build_meta_tools, and letting them leak into
         // /mcp|/api listings would duplicate (and mis-scope) them.
-        if crate::rag::service::is_enabled() {
+        if crate::rag::service::builtin_server_active() {
             Some(crate::rag::service::builtin_tools())
         } else {
             None
@@ -1299,10 +1299,11 @@ pub(crate) async fn mcp_scope_server_filters(scope: &str) -> Vec<ServerFilter> {
     // its own single-server scope) when RAG is enabled. Treated like any server
     // by the tools/list aggregation.
     let rag_filter = move || -> Option<ServerFilter> {
-        // Builtin server surfaces on non-$smart HTTP paths only when RAG is
-        // on (its rag_* tools). The smart meta tools never leak here — they
-        // are exclusive to the $smart access points.
-        if crate::rag::service::is_enabled() {
+        // Builtin server surfaces on non-$smart HTTP paths only when a
+        // bundled capability is active (rag_* tools / decision tool). The
+        // smart meta tools never leak here — they are exclusive to the
+        // $smart access points.
+        if crate::rag::service::builtin_server_active() {
             Some(ServerFilter {
                 name: crate::rag::service::BUILTIN_SERVER_NAME.to_string(),
                 tools: None,
@@ -2506,7 +2507,7 @@ async fn openapi_servers_list(headers: HeaderMap) -> Response {
     }
     // The spec endpoints include the RAG builtin server's tools — the
     // discovery lists must match or clients can't see what they can call.
-    if crate::rag::service::is_enabled() {
+    if crate::rag::service::builtin_server_active() {
         let builtin_ok = get_allowed_servers(bearer_key.as_ref())
             .await
             .map(|a| a.contains(crate::rag::service::BUILTIN_SERVER_NAME))
@@ -2544,7 +2545,7 @@ async fn openapi_stats(headers: HeaderMap) -> Response {
         })
         .collect();
     // Spec endpoints expose the RAG builtin server — keep stats in sync.
-    if crate::rag::service::is_enabled() {
+    if crate::rag::service::builtin_server_active() {
         let builtin_ok = get_allowed_servers(bearer_key.as_ref())
             .await
             .map(|a| a.contains(crate::rag::service::BUILTIN_SERVER_NAME))

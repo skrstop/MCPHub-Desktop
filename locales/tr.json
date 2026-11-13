@@ -507,7 +507,8 @@
     "system": "Sistem",
     "rag": "Bilgi Tabanı",
     "beta": "Beta",
-    "skills": "Beceriler"
+    "skills": "Beceriler",
+    "decision": "Karar Desteği"
   },
   "pages": {
     "dashboard": {
@@ -1011,6 +1012,36 @@
     },
     "skills": {
       "title": "Beceriler"
+    },
+    "decision": {
+      "title": "Karar Desteği",
+      "subtitle": "Yerel karar modeli: MCP istemcileri için yapılandırılmış kararlar",
+      "enabledTag": "Açık",
+      "disabledTag": "Kapalı",
+      "enableToast": "Karar desteği etkinleştirildi",
+      "disableToast": "Karar desteği devre dışı bırakıldı",
+      "historyTitle": "İstek Geçmişi",
+      "clearAll": "Tümünü Temizle",
+      "empty": "Henüz karar isteği yok",
+      "view": "Görüntüle",
+      "selected": "Seçilen",
+      "detailTitle": "Karar Detayı",
+      "fieldType": "Tür",
+      "fieldTime": "İstek Zamanı",
+      "fieldState": "Bağlam (State)",
+      "fieldQuestion": "Soru",
+      "fieldOptions": "Seçenekler",
+      "score": "Puan",
+      "probability": "Olasılık",
+      "selectedTag": "Seçildi",
+      "fieldDuration": "Süre",
+      "fieldSource": "Kaynak",
+      "clearedToast": "{{count}} kayıt temizlendi",
+      "clearConfirmTitle": "Tüm Geçmişi Temizle",
+      "clearConfirmMessage": "Bu işlem {{count}} karar geçmişi kaydını siler ve geri alınamaz. Devam edilsin mi?",
+      "type_choice": "Seçim",
+      "type_score": "Puan",
+      "type_noul": "Evet/Hayır"
     }
   },
   "logs": {
@@ -1479,12 +1510,12 @@
     "embeddingPrefixesDescription": "Görev önekleriyle eğitilmiş asimetrik arama modelleri (ör. EmbeddingGemma, E5, Nomic) için embedding öncesinde metnin başına eklenir. Ham metin bekleyen modeller için ikisini de boş bırakın. Sondaki boşluğu da ekleyin. Belge önekini değiştirmek tüm araçların embedding'lerini yeniden oluşturur.",
     "embeddingQueryPrefix": "Sorgu öneki",
     "embeddingDocumentPrefix": "Belge öneki",
-    "mvTitle": "Model & Vektör",
+    "mvTitle": "Yerel Modeller",
     "mvStatusRunning": "Çalışıyor: {{model}} · {{dim}} boyut · {{device}}",
     "mvStatusStopped": "Çalışmıyor: RAG veya akıllı yönlendirme etkinleştirildiğinde otomatik başlar",
     "mvSourceSmartRouting": "Akıllı yönlendirme",
     "mvHint": "Model ve vektör deposu paylaşılan tek örnek olarak çalışır: bağımlı herhangi bir özelliğin etkinleştirilmesi onu otomatik başlatır, son özellik kapatıldığında durur.",
-    "mvModelSwitch": "Model Değiştirme",
+    "mvModelSwitch": "Gömme Modeli",
     "mvDownloadFailed": "İndirme başarısız",
     "mvDownloadDone": "İndirme tamamlandı",
     "mvDevice": "Cihaz",
@@ -1734,7 +1765,15 @@
     "fieldName": "Aracın kod adı (birden çok sunucu açıkken sunucu önekiyle).",
     "fieldDescription": "Modelin ilgiyi değerlendirmesi için kullandığı araç açıklaması.",
     "fieldServerName": "Aracı sağlayan MCP sunucusunun adı.",
-    "mvSourceRag": "Bilgi Tabanı"
+    "mvSourceRag": "Bilgi Tabanı",
+    "decisionTitle": "Karar Modeli",
+    "decisionEnable": "Karar Desteğini Etkinleştir",
+    "decisionEnableDescription": "Yerleşik mcphub-desktop sunucusunda decision_decide MCP aracını kullanıma sunar ve istek geçmişini kaydeder.",
+    "decisionHint": "Karar modelleri gömme modelinden bağımsızdır: geçiş anında etkili olur, yeniden indeksleme gerekmez.",
+    "decisionModelSwitch": "Karar Modeli",
+    "decisionEnabledToast": "Karar desteği etkinleştirildi",
+    "decisionDisabledToast": "Karar desteği devre dışı bırakıldı",
+    "decisionModelSwitched": "Karar modeli değiştirildi"
   },
   "mcpb": {
     "upload": "Yükle",

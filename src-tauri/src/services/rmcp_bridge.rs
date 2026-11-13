@@ -757,7 +757,7 @@ impl HubBridge {
         for sf in &server_filters {
             let is_builtin = sf.name == crate::rag::service::BUILTIN_SERVER_NAME;
             let ts: Vec<Tool> = if is_builtin {
-                if !crate::rag::service::is_enabled() {
+                if !crate::rag::service::builtin_server_active() {
                     continue;
                 }
                 crate::rag::service::builtin_tools()

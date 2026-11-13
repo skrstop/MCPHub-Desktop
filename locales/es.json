@@ -557,7 +557,8 @@
     "system": "Sistema",
     "beta": "Beta",
     "rag": "Base de conocimiento",
-    "skills": "Skills"
+    "skills": "Skills",
+    "decision": "Soporte de decisión"
   },
   "pages": {
     "dashboard": {
@@ -1061,6 +1062,36 @@
     },
     "skills": {
       "title": "Skills"
+    },
+    "decision": {
+      "title": "Soporte de decisión",
+      "subtitle": "Modelo de decisión local: decisiones estructuradas para clientes MCP",
+      "enabledTag": "Activado",
+      "disabledTag": "Desactivado",
+      "enableToast": "Soporte de decisión activado",
+      "disableToast": "Soporte de decisión desactivado",
+      "historyTitle": "Historial de solicitudes",
+      "clearAll": "Borrar todo",
+      "empty": "Aún no hay solicitudes de decisión",
+      "view": "Ver",
+      "selected": "Seleccionada",
+      "detailTitle": "Detalle de la decisión",
+      "fieldType": "Tipo",
+      "fieldTime": "Fecha de solicitud",
+      "fieldState": "Contexto (State)",
+      "fieldQuestion": "Pregunta",
+      "fieldOptions": "Opciones",
+      "score": "Puntuación",
+      "probability": "Probabilidad",
+      "selectedTag": "Seleccionada",
+      "fieldDuration": "Duración",
+      "fieldSource": "Origen",
+      "clearedToast": "Se borraron {{count}} entradas",
+      "clearConfirmTitle": "Borrar todo el historial",
+      "clearConfirmMessage": "Esto elimina las {{count}} entradas del historial y no se puede deshacer. ¿Continuar?",
+      "type_choice": "Elección",
+      "type_score": "Puntuación",
+      "type_noul": "Sí/No"
     }
   },
   "logs": {
@@ -1691,13 +1722,13 @@
     "mvDownloadDone": "Descarga completada",
     "mvDownloadFailed": "La descarga falló",
     "mvHint": "El modelo y el almacén vectorial se ejecutan como una única instancia compartida: activar cualquier función dependiente la inicia automáticamente, y se detiene tras desactivar la última función.",
-    "mvModelSwitch": "Cambio de modelo",
+    "mvModelSwitch": "Modelo de embedding",
     "mvModelSwitched": "Modelo cambiado",
     "mvReindexDone": "Índice vectorial reconstruido",
     "mvSourceSmartRouting": "Enrutamiento inteligente",
     "mvStatusRunning": "En ejecución: {{model}} · {{dim}} dims · {{device}}",
     "mvStatusStopped": "No en ejecución: se inicia automáticamente al activar RAG o el enrutamiento inteligente",
-    "mvTitle": "Modelo y vectores",
+    "mvTitle": "Modelos locales",
     "nodeVersion": "Versión de Node.js",
     "nodeVersionDescription": "Selecciona o instale una versión específica de Node.js para ejecutar servidores MCP",
     "oauthClientRevoke": "Revocar",
@@ -1793,7 +1824,15 @@
     "fieldName": "Nombre de código de la herramienta (con prefijo del servidor cuando se exponen varios).",
     "fieldDescription": "Descripción de la herramienta que el modelo usa para decidir la relevancia.",
     "fieldServerName": "Nombre del servidor MCP que proporciona la herramienta.",
-    "mvSourceRag": "Base de conocimiento"
+    "mvSourceRag": "Base de conocimiento",
+    "decisionTitle": "Modelo de decisión",
+    "decisionEnable": "Activar soporte de decisión",
+    "decisionEnableDescription": "Expone la herramienta MCP decision_decide en el servidor integrado mcphub-desktop y registra el historial de solicitudes.",
+    "decisionHint": "Los modelos de decisión son independientes del modelo de embedding: el cambio es inmediato, sin reindexación.",
+    "decisionModelSwitch": "Modelo de decisión",
+    "decisionEnabledToast": "Soporte de decisión activado",
+    "decisionDisabledToast": "Soporte de decisión desactivado",
+    "decisionModelSwitched": "Modelo de decisión cambiado"
   },
   "mcpb": {
     "upload": "Subir",

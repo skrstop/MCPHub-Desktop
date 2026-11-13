@@ -28,12 +28,19 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const conf = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf-8'));
-const src = join(root, 'src-tauri', 'runtimes', 'rag', 'model', 'embedding');
+const kinds = ['embedding', 'decision'];
 
 const bundled = [];
 const stubbed = [];
-try {
-  for (const fam of readdirSync(src)) {
+for (const kind of kinds) {
+  const src = join(root, 'src-tauri', 'runtimes', 'rag', 'model', kind);
+  let fams = [];
+  try {
+    fams = readdirSync(src);
+  } catch {
+    continue; // kind dir absent (e.g. no decision models yet)
+  }
+  for (const fam of fams) {
     const famPath = join(src, fam);
     if (!statSync(famPath).isDirectory()) continue;
     for (const size of readdirSync(famPath)) {
@@ -46,19 +53,17 @@ try {
         console.warn(`[gen-model-resources] skip ${fam}/${size}: unreadable deploy.json`);
         continue;
       }
-      ((cfg.bundle ?? cfg.default) === true ? bundled : stubbed).push(`${fam}/${size}`);
+      ((cfg.bundle ?? cfg.default) === true ? bundled : stubbed).push(`${kind}/${fam}/${size}`);
     }
   }
-} catch {
-  console.warn('[gen-model-resources] no model dir; shipping deploy.json glob only');
 }
 
 // Base resources minus the whole rag model dir, then re-add per-size globs.
 const base = (conf.bundle?.resources ?? []).filter((r) => r !== 'runtimes/rag');
 const resources = [
   ...base,
-  'runtimes/rag/model/embedding/*/*/deploy.json',
-  ...bundled.map((p) => `runtimes/rag/model/embedding/${p}/**/*`),
+  ...kinds.map((k) => `runtimes/rag/model/${k}/*/*/deploy.json`),
+  ...bundled.map((p) => `runtimes/rag/model/${p}/**/*`),
 ];
 
 writeFileSync(
