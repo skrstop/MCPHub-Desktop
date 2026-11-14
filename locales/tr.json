@@ -1045,7 +1045,10 @@
       "loadMore": "Daha Fazla Yükle",
       "loadFailed": "Karar verileri yüklenemedi",
       "retry": "Yeniden dene",
-      "clearConfirmAll": "Bu işlem TÜM karar geçmişi kayıtlarını (yüklenmemiş sayfalar dahil) siler ve geri alınamaz. Devam edilsin mi?"
+      "clearConfirmAll": "Bu işlem TÜM karar geçmişi kayıtlarını (yüklenmemiş sayfalar dahil) siler ve geri alınamaz. Devam edilsin mi?",
+      "viewTools": "Araçları Gör",
+      "viewToolsHint": "Karar desteğinin sağladığı MCP araçlarını gör",
+      "toolsEmpty": "Karar desteği kapalı — kullanılabilir araç yok."
     }
   },
   "logs": {

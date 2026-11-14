@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Boxes, Check, ChevronDown, Database, Loader2, RefreshCw } from 'lucide-react';
+import { Boxes, BrainCircuit, Check, ChevronDown, Database, Loader2, RefreshCw } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
+import { Switch } from '@/components/ui/ToggleGroup';
 import ModelSelector, { type ModelDownloadProgress } from '@/components/ui/ModelSelector';
 import ReindexDialog from '@/components/ReindexDialog';
 import { reindexSmartRouting } from '@/services/smartRoutingService';
@@ -18,6 +19,16 @@ import {
   reindexAllRag,
   openModelDir,
 } from '@/services/ragService';
+import {
+  cancelDecisionModelDownload,
+  decisionModelDownloadStatus,
+  decisionSetEnabled,
+  decisionStatus,
+  downloadDecisionModel,
+  listDecisionModels,
+  selectDecisionModel,
+  type DecisionStatus,
+} from '@/services/decisionService';
 import { apiGet, apiPut } from '@/utils/fetchInterceptor';
 import type { RagModelInfo, RagStatus } from '@/types';
 
@@ -48,6 +59,12 @@ const ModelVectorSettings: React.FC = () => {
   // the current model) — same shared ReindexDialog, different lead/done text.
   const [reindexMode, setReindexMode] = useState<'switch' | 'reload'>('switch');
   const [sectionOpen, setSectionOpen] = useState(false);
+  // ── 决策支持（合并自原独立【决策模型】卡片）──
+  const [decision, setDecision] = useState<DecisionStatus | null>(null);
+  const [decisionModels, setDecisionModels] = useState<RagModelInfo[]>([]);
+  const [decisionDownload, setDecisionDownload] = useState<ModelDownloadProgress | null>(null);
+  const [decisionToggling, setDecisionToggling] = useState(false);
+  const [decisionSelecting, setDecisionSelecting] = useState(false);
   const deviceWrapRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
 
@@ -55,6 +72,66 @@ const ModelVectorSettings: React.FC = () => {
   // runtime running state; the RAG tag reflects the switch, not the model.
   const mvRunning = status?.mvRunning ?? !!status?.enabled;
   const ragEnabled = status?.enabled ?? mvRunning;
+  const decisionEnabled = decision?.enabled ?? false;
+
+  // ── 决策支持：状态/模型列表加载（与向量模型同构，独立命名空间）──
+  const fetchDecision = async () => {
+    try {
+      const [st, m] = await Promise.all([decisionStatus(), listDecisionModels()]);
+      if (!mounted.current) return;
+      setDecision(st);
+      setDecisionModels(m);
+      if (st.model) {
+        const p = await decisionModelDownloadStatus(st.model);
+        if (!mounted.current) return;
+        // Restore-on-mount guard: never overwrite a terminal snapshot with a
+        // stale "downloading" read (the bar would stick forever).
+        if (p && p.phase === 'downloading') {
+          setDecisionDownload((c) => (c && c.phase !== 'downloading' ? c : p));
+        }
+      }
+    } catch (e) {
+      console.warn('[mv] failed to load decision status', e);
+      // A silent failure would render the switch as OFF while decision
+      // support may actually be ON — flipping it would then really disable
+      // it. Surface the failure loudly instead.
+      if (mounted.current) showToast(t('common.operationFailed'), 'error');
+    }
+  };
+
+  const handleDecisionToggle = async (enabled: boolean) => {
+    setDecisionToggling(true);
+    try {
+      await decisionSetEnabled(enabled);
+      if (mounted.current) {
+        setDecision((s) => (s ? { ...s, enabled } : s));
+        showToast(
+          enabled ? t('settings.decisionEnabledToast') : t('settings.decisionDisabledToast'),
+          'success',
+        );
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      if (mounted.current) setDecisionToggling(false);
+    }
+  };
+
+  const handleDecisionSelect = async (model: string) => {
+    if (decisionSelecting) return;
+    setDecisionSelecting(true);
+    try {
+      await selectDecisionModel(model);
+      if (mounted.current) {
+        setDecision((s) => (s ? { ...s, model, modelReady: true } : s));
+        showToast(t('settings.decisionModelSwitched'), 'success');
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      if (mounted.current) setDecisionSelecting(false);
+    }
+  };
 
   // 设备自定义下拉的点击外部关闭。
   useEffect(() => {
@@ -98,6 +175,7 @@ const ModelVectorSettings: React.FC = () => {
   useEffect(() => {
     mounted.current = true;
     void fetchAll();
+    void fetchDecision();
     // 运行设备：读共享配置 mv.device（deep-merge 持久化）。
     apiGet<Record<string, any>>('config')
       .then((res) => {
@@ -106,13 +184,30 @@ const ModelVectorSettings: React.FC = () => {
         if (d === 'gpu' || d === 'cpu' || d === 'auto') setDevice(d);
       })
       .catch(() => undefined);
-    // 模型下载进度（与 RagPage 同一事件源；两处监听互不影响）。
+    // 模型下载进度（与 RagPage 同一事件源；两处监听互不影响）。事件按
+    // kind 分流：embedding 进度进向量模型状态，decision 进度进决策模型
+    // 状态（absent kind = legacy embedding-era payload）。
     const unlistenP = listen<ModelDownloadProgress>('rag://model-download', (event) => {
       const p = event.payload;
       if (!p || !mounted.current) return;
-      // Shared event bus: ignore decision-kind downloads (absent kind =
-      // legacy payload from before the field existed → embedding).
-      if (p.kind === 'decision') return;
+      if (p.kind === 'decision') {
+        setDecisionDownload({ ...p });
+        if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
+          void fetchDecision();
+          if (p.phase === 'done') {
+            // Identity-guarded clear: a new download within the window keeps
+            // its own progress bar. The sentinel must be the SAME object put
+            // into state (a copy of p, not p itself).
+            const snapshot = { ...p };
+            setDecisionDownload(snapshot);
+            setTimeout(() => {
+              if (!mounted.current) return;
+              setDecisionDownload((c) => (c === snapshot ? null : c));
+            }, 1500);
+          }
+        }
+        return;
+      }
       if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
         // Terminal phases MUST reach state (the render shows the error/
         // cancelled message and ModelSelector's bar keys off phase) — set
@@ -246,6 +341,15 @@ const ModelVectorSettings: React.FC = () => {
               : { opacity: 0.45 }}
           >
             {t('settings.mvSourceRag')}
+          </span>
+          <span
+            className="hub-tag"
+            title={t('settings.decisionTitle')}
+            style={decisionEnabled
+              ? { background: 'oklch(0.66 0.15 145 / 0.15)', color: 'var(--hub-ok)', borderColor: 'transparent' }
+              : { opacity: 0.45 }}
+          >
+            {t('settings.decisionTitle')}
           </span>
         </div>
         <span className="text-[var(--hub-ink-3)]">{sectionOpen ? '−' : '+'}</span>
@@ -394,6 +498,72 @@ const ModelVectorSettings: React.FC = () => {
           {deviceDirty && (
             <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
               {t('settings.mvDeviceRestartHint')}
+            </p>
+          )}
+        </div>
+
+        {/* ── 决策支持（合并自原独立【决策模型】卡片）：开关 + 决策模型管理。
+            与向量模型完全同构（同一套 deploy.json 契约与下载机制），仅模型
+            根目录（decision/）与选择键（decision.model）不同；切换模型无需
+            重建索引（决策模型无向量库），即时生效。 */}
+        <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-[var(--hub-item)] rounded-md">
+          <div className="flex items-center gap-2">
+            <BrainCircuit size={14} className="text-[var(--hub-ink-2)]" />
+            <div>
+              <h3 className="font-medium text-gray-700">{t('settings.decisionEnable')}</h3>
+              <p className="text-sm text-gray-500">{t('settings.decisionEnableDescription')}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {decisionToggling && <Loader2 size={13} className="animate-spin text-[var(--hub-ink-3)]" />}
+            <Switch
+              disabled={decisionToggling}
+              checked={decisionEnabled}
+              onCheckedChange={handleDecisionToggle}
+              aria-label={t('settings.decisionEnable')}
+            />
+          </div>
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>{t('settings.decisionHint')}</p>
+
+        {decision?.model && !decision.modelReady && (
+          <p className="text-[12px] font-medium" style={{ color: 'var(--hub-warn, #d97706)' }}>
+            {t('settings.decisionModelMissing')}
+          </p>
+        )}
+
+        <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${decisionEnabled ? '' : 'mv-disabled'}`}>
+          <div className="flex items-center gap-2 mb-2">
+            <BrainCircuit size={13} className="text-[var(--hub-ink-3)]" />
+            <h3 className="text-[13px] font-medium flex-1" style={{ color: 'var(--hub-ink)' }}>
+              {t('settings.decisionModelSwitch')}
+            </h3>
+          </div>
+          <ModelSelector
+            models={decisionModels}
+            currentModel={decision?.model ?? null}
+            modelDownload={decisionDownload}
+            disabled={!decisionEnabled || decisionToggling || decisionSelecting}
+            onSelect={handleDecisionSelect}
+            onDownload={(model, source) => {
+              downloadDecisionModel(model, source).catch((e) =>
+                showToast(e instanceof Error ? e.message : String(e), 'error'),
+              );
+            }}
+            onCancel={(model) => {
+              cancelDecisionModelDownload(model).catch((e) =>
+                showToast(e instanceof Error ? e.message : String(e), 'error'),
+              );
+            }}
+            onRefresh={fetchDecision}
+          />
+          {decisionDownload && decisionDownload.phase !== 'downloading' && (
+            <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
+              {decisionDownload.phase === 'error'
+                ? decisionDownload.message || t('settings.mvDownloadFailed')
+                : decisionDownload.phase === 'cancelled'
+                ? t('settings.mvDownloadCancelled')
+                : t('settings.mvDownloadDone')}
             </p>
           )}
         </div>

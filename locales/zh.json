@@ -1045,7 +1045,10 @@
       "loadMore": "加载更多",
       "loadFailed": "加载数据失败",
       "retry": "重试",
-      "clearConfirmAll": "将删除全部决策请求历史（包括未加载的分页），且不可恢复。确定继续吗？"
+      "clearConfirmAll": "将删除全部决策请求历史（包括未加载的分页），且不可恢复。确定继续吗？",
+      "viewTools": "查看工具",
+      "viewToolsHint": "查看决策支持提供的 MCP 工具",
+      "toolsEmpty": "决策支持未开启，暂无可用工具。"
     }
   },
   "logs": {

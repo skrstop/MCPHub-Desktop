@@ -45,6 +45,15 @@ export const decideDecision = async (
   return response.data;
 };
 
+/** The app-level decision MCP tool (decision_decide) — name/description/
+ *  inputSchema. Empty if decision support is off. Powers the "view tools"
+ *  dialog in the decision page. */
+export const getDecisionTools = async (): Promise<Record<string, unknown>[]> => {
+  const response: ApiResponse<Record<string, unknown>[]> = await apiGet('/decision/tools');
+  if (!response.success) throw new Error(response.message || 'Failed to get decision tools');
+  return response.data ?? [];
+};
+
 export const listDecisionModels = async (): Promise<RagModelInfo[]> => {
   const response: ApiResponse<RagModelInfo[]> = await apiGet('/decision/models');
   if (!response.success) throw new Error(response.message || 'Failed to list decision models');

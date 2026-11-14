@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BrainCircuit, Eye, Loader2, Trash2 } from 'lucide-react';
+import { BrainCircuit, Eye, Loader2, Sparkles, Trash2, X } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import {
   clearDecisionHistory,
   decisionSetEnabled,
   decisionStatus,
+  getDecisionTools,
   listDecisionHistory,
   type DecisionHistoryEntry,
 } from '@/services/decisionService';
@@ -43,6 +44,9 @@ const DecisionPage: React.FC = () => {
   const [viewing, setViewing] = useState<DecisionHistoryEntry | null>(null);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearing, setClearing] = useState(false);
+  // "View tools" dialog — shows the MCP tools decision support exposes
+  // (decision_decide), same pattern as the RAG page's tools dialog.
+  const [showTools, setShowTools] = useState(false);
   const mounted = useRef(true);
   // True while a toggle is in flight — fetchAll consults it so a stale
   // pre-toggle status can't revert an accepted toggle.
@@ -173,16 +177,27 @@ const DecisionPage: React.FC = () => {
 
   return (
     <div className="p-6 max-w-6xl mx-auto" data-testid="decision-page">
-      {/* Header: title + enable switch */}
+      {/* Header: title + beta tag + tools button + enable switch */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold text-[var(--hub-ink)] flex items-center gap-2">
             <BrainCircuit size={20} className="text-[var(--hub-ink-2)]" />
             {t('pages.decision.title')}
+            <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
+              {t('nav.beta')}
+            </span>
           </h1>
           <p className="text-sm text-[var(--hub-ink-3)] mt-1">{t('pages.decision.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="hub-btn sm"
+            onClick={() => setShowTools(true)}
+            title={t('pages.decision.viewToolsHint')}
+          >
+            <Sparkles size={12} /> {t('pages.decision.viewTools')}
+          </button>
           {toggling && <Loader2 size={14} className="animate-spin text-[var(--hub-ink-3)]" />}
           <Switch
             disabled={toggling}
@@ -393,6 +408,107 @@ const DecisionPage: React.FC = () => {
           onClose={() => setClearConfirm(false)}
         />
       )}
+
+      {/* View decision tools dialog — shows the MCP tools decision support
+          exposes (decision_decide): name, description, input schema. */}
+      {showTools && <ToolsDialog onClose={() => setShowTools(false)} />}
+    </div>
+  );
+};
+
+/** Dialog showing the MCP tools decision support exposes (decision_decide) —
+ *  name, description, and input schema. Read-only; mirrors the RAG page's
+ *  tools dialog. */
+/** Exported for tests (DecisionToolsDialog.test.tsx). */
+export const ToolsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const { t } = useTranslation();
+  const [tools, setTools] = useState<Record<string, unknown>[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    getDecisionTools()
+      .then((ts) => {
+        if (alive) setTools(ts);
+      })
+      .catch((e) => {
+        if (alive) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-2xl w-full mx-4 border border-gray-100 dark:border-gray-700 max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between p-5 border-b border-[var(--hub-line-2)]">
+          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">{t('pages.decision.viewTools')}</h2>
+          <button onClick={onClose} className="hub-icon-btn sm">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          {loading ? (
+            <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
+              <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
+            </div>
+          ) : error ? (
+            <div className="text-[13px]" style={{ color: 'var(--hub-err)' }}>
+              {error}
+            </div>
+          ) : tools.length === 0 ? (
+            <div className="text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
+              {t('pages.decision.toolsEmpty')}
+            </div>
+          ) : (
+            tools.map((tool, idx) => {
+              const name = String(tool.name ?? '');
+              const desc = String(tool.description ?? '');
+              const schema = tool.inputSchema as Record<string, unknown> | undefined;
+              const props = (schema?.properties ?? {}) as Record<string, Record<string, unknown>>;
+              const required = (schema?.required ?? []) as string[];
+              return (
+                <div key={`${name}-${idx}`} className="hub-card" style={{ padding: '12px 14px', background: 'var(--hub-surface)' }}>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <Sparkles size={14} style={{ color: 'var(--hub-accent)' }} />
+                    <span className="hub-mono text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+                      {name}
+                    </span>
+                  </div>
+                  <p className="text-[12.5px] mb-2" style={{ color: 'var(--hub-ink-2)' }}>
+                    {desc}
+                  </p>
+                  {Object.keys(props).length > 0 && (
+                    <div className="space-y-1">
+                      {Object.entries(props).map(([k, v]) => (
+                        <div key={k} className="flex items-center gap-2 text-[11.5px]">
+                          <span className="hub-mono" style={{ color: 'var(--hub-ink)' }}>
+                            {k}
+                            {required.includes(k) && <span style={{ color: 'var(--hub-err)' }}>*</span>}
+                          </span>
+                          <span style={{ color: 'var(--hub-ink-3)' }}>
+                            ({String(v.type ?? 'any')}) {String(v.description ?? '')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 p-5 border-t border-[var(--hub-line-2)]">
+          <button onClick={onClose} className="hub-btn">
+            {t('common.close')}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };

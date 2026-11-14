@@ -653,6 +653,7 @@ pub fn run() {
             commands::rag::rag_list_models,
             commands::rag::rag_current_model,
             commands::decision::decision_status,
+            commands::decision::decision_tools,
             commands::decision::decision_set_enabled,
             commands::decision::decision_list_models,
             commands::decision::decision_select_model,

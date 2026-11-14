@@ -40,6 +40,16 @@ pub async fn decision_status(
     })
 }
 
+/// The app-level decision tool (decision_decide) as MCP tool definitions
+/// (name / description / inputSchema). Empty when decision support is
+/// disabled. Powers the "view tools" dialog in the decision page — the same
+/// source the HTTP MCP layer advertises in tools/list. Read-only, no admin
+/// gate (mirrors `rag_tools`).
+#[tauri::command]
+pub async fn decision_tools() -> Result<Vec<serde_json::Value>, String> {
+    Ok(crate::services::decision_service::decision_tool_definitions())
+}
+
 /// Toggle decision support (persisted; the builtin tool exposure follows).
 #[tauri::command]
 pub async fn decision_set_enabled(

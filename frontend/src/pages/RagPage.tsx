@@ -1917,7 +1917,12 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
           文档数副标题独立成行放在 header 下方——不参与右侧控件的对齐，避免右组被两行块挤动。 */}
       <div className="flex items-center justify-between gap-4 mb-1 flex-wrap">
         <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
-          <h1 className="hub-h1">{t('pages.rag.title')}</h1>
+          <h1 className="hub-h1 flex items-center gap-2">
+            {t('pages.rag.title')}
+            <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
+              {t('nav.beta')}
+            </span>
+          </h1>
           {/* Switch group — always interactive even when page is disabled */}
           <div className="flex items-center gap-1.5" style={{ pointerEvents: 'auto' }}>
             <Switch

@@ -45,10 +45,75 @@ def main():
     dropped = sorted(fe - set(rust) - {'type'})
     if dropped:
         problems.append(f"frontend emits fields Rust ServerConfig does not have (silent drop): {dropped}")
+    problems += check_decision_commands()
     for p in problems:
         print("FAIL:", p)
     print("OK: no silent-drop contract mismatches" if not problems else f"{len(problems)} problem(s)")
     sys.exit(1 if problems else 0)
+
+DECISION_COMMANDS = {
+    # command: set of invoke arg keys the frontend must send (snake_case as Rust expects)
+    'decision_set_enabled': {'enabled'},
+    'decision_select_model': {'model'},
+    'decision_download_model': {'model', 'source'},
+    'decision_history_list': {'limit', 'offset'},
+    'decision_history_get': {'id'},
+    'decision_download_status': {'model'},
+    'decision_download_cancel': {'model'},
+    'decision_decide': {'request'},  # wrapped struct arg
+}
+
+def rust_command_params(path='src-tauri/src/commands/decision.rs'):
+    s = open(path).read()
+    out = {}
+    for m in re.finditer(r'#\[tauri::command\]\s*\npub (?:async )?fn (\w+)\((.*?)\)', s, re.S):
+        name, params = m.group(1), m.group(2)
+        keys = set()
+        for pm in re.finditer(r'(\w+)\s*:\s*([^,]+)', params):
+            pname, ptype = pm.group(1), pm.group(2)
+            if 'State<' in ptype or 'AppHandle' in ptype or pname == 'crate':
+                continue  # injected params / generic-path false capture, not invoke args
+            keys.add(pname)
+        out[name] = keys
+    return out
+
+def fe_decision_args(path='frontend/src/utils/tauriClient.ts'):
+    # Limitation: an `args: { ...spread }` body evades the key regex below.
+    # Registered commands (DECISION_COMMANDS) are still caught by the reverse
+    # required-args check; a spread on a zero-arg command would pass silently.
+    s = open(path).read()
+    out = {}
+    for m in re.finditer(r"command:\s*'(decision_\w+)'[\s\S]{0,400}?args:\s*(\{[^}]*\})", s):
+        name, body = m.group(1), m.group(2)
+        keys = set(re.findall(r"(\w+)\s*:", body))
+        out.setdefault(name, set()).update(keys)
+    return out
+
+def check_decision_commands():
+    """decision 命令面 invoke 参数对账（camel→snake 后必须与 Rust 签名一致）。"""
+    rust = rust_command_params()
+    fe = fe_decision_args()
+    problems = []
+    for cmd, keys in fe.items():
+        if cmd not in rust:
+            problems.append(f"tauriClient invokes unknown decision command: {cmd}")
+            continue
+        want = {camel2snake(k) for k in keys}
+        missing = want - rust[cmd]
+        if missing:
+            problems.append(f"{cmd}: frontend sends args Rust does not accept: {sorted(missing)} (rust has {sorted(rust[cmd])})")
+    # reverse direction: required args (per DECISION_COMMANDS) must be sent
+    for cmd, required in DECISION_COMMANDS.items():
+        if cmd not in rust:
+            continue
+        sent = {camel2snake(k) for k in fe.get(cmd, set())}
+        absent = required - sent
+        if absent:
+            problems.append(f"{cmd}: Rust requires args frontend never sends: {sorted(absent)}")
+    for cmd in DECISION_COMMANDS:
+        if cmd in rust and cmd not in fe:
+            problems.append(f"{cmd}: registered in Rust but never invoked from tauriClient (dead surface or missing mapping)")
+    return problems
 
 if __name__ == '__main__':
     main()

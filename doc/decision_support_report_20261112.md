@@ -1,6 +1,6 @@
 # 决策支持（Decision Support）实现与测试报告
 
-> 日期：2026-11-12 · 版本基线：26.11.4 工作树 · 状态：✅ 完成（lib 427 passed / vitest 158 passed / tsc 0 错 / cargo check 0 错 0 警）
+> 日期：2026-11-12 · 版本基线：26.11.4 工作树 · 状态：✅ 完成（lib 431 passed / vitest 181 passed / tsc 0 错 / cargo check 0 错 0 警；2026-11-12 晚 UI 合并轮 + 第二复核战役后更新）
 
 ## 1. 需求（用户）
 
@@ -29,12 +29,12 @@
 
 | 组件 | 文件 | 说明 |
 | --- | --- | --- |
-| 决策支持页 | `pages/DecisionPage.tsx`（新） | 开关 + 历史列表（倒序，50/页）+ 详情弹框（类型/时间/State/问题/选项含分数·概率·选中标记/耗时/来源）+ 清空确认框；`isTauri()` 门控（web 渲染 null） |
-| 设置卡片 | `components/DecisionModelSettings.tsx`（新） | 决策开关 + ModelSelector 复用（列表/选择/下载/取消/进度条，`rag://model-download` 事件按 `kind==='decision'` 过滤）；切换即时生效（无向量库，无需重建索引） |
-| 服务层 | `services/decisionService.ts`（新） | 11 个 API 包装（apiGet/Post/Put/Delete，含 decideDecision） |
-| 路由映射 | `utils/tauriClient.ts` | `/decision/*` 11 条 REST→invoke 映射（limit/offset 显式 Number 转换——serde `Option<i64>` 不接受字符串） |
-| 路由/菜单 | `App.tsx`（/decision）+ `Sidebar.tsx`（RAG 下「决策支持」，isTauri 门控） | |
-| 设置页 | `SettingsPage.tsx` | ModelVectorSettings 后追加 DecisionModelSettings |
+| 决策支持页 | `pages/DecisionPage.tsx`（新） | 开关 + 历史列表（倒序，50/页）+ 详情弹框（类型/时间/State/问题/选项含分数·概率·选中标记/耗时/来源）+ 清空确认框 + 标题旁 Beta 标签 + 「查看工具」按钮（ToolsDialog 展示 `decision_decide` 名称/描述/参数 schema，镜像 RagPage ToolsDialog）；`isTauri()` 门控（web 渲染 null） |
+| 设置卡片 | `components/ModelVectorSettings.tsx`（决策区块，2026-11-12 晚合并） | 决策开关 + ModelSelector 复用（列表/选择/下载/取消/进度条，`rag://model-download` 事件按 `kind==='decision'` 分流）；卡片头部带「决策支持」标签（启用时点亮）；切换即时生效（无向量库，无需重建索引）。原独立 `DecisionModelSettings.tsx` 已删除 |
+| 服务层 | `services/decisionService.ts`（新） | 12 个 API 包装（apiGet/Post/Put/Delete，含 decideDecision） |
+| 路由映射 | `utils/tauriClient.ts` | `/decision/*` 12 条 REST→invoke 映射（limit/offset 显式 Number 转换——serde `Option<i64>` 不接受字符串） |
+| 路由/菜单 | `App.tsx`（/decision）+ `Sidebar.tsx`（RAG 下「决策支持」，isTauri 门控，带 Beta 标签） | |
+| 设置页 | `SettingsPage.tsx` | 仅渲染 ModelVectorSettings（决策区块已内含） |
 | 纯函数 | `utils/decisionFormat.ts`（新）+ vitest | 类型归一（未知值回退 choice，防枚举泄漏）/ 概率 / 分数格式化 / **`mergeHistoryPage`（前缀重取分页合并：prev+页内去重 + created_at DESC id DESC 排序）** |
 | 事件过滤 | `ModelSelector.tsx`（kind 可选字段）、`ModelVectorSettings.tsx`、`useRagData.tsx` | 共享下载事件总线按 kind 过滤，防跨 kind 进度串扰 |
 | i18n | `locales/{en,es,fr,tr,vi,zh}.json` | nav.decision + pages.decision.*（32 键）+ settings.decision*（9 键）+ mvTitle/mvModelSwitch 改名，6 语言全量对齐 |
@@ -63,7 +63,7 @@
 ### 第二波（修复合回炉，1 代理）
 
 5/6 修复验证正确；抓出 2 个修复合自身问题并修复：
-1. **[M]** 前端三处 `rag://model-download` 监听不读 `kind` 字段（跨 kind 进度条串扰——kind 字段加了但消费端没用）→ DecisionModelSettings（只收 decision）/ ModelVectorSettings + useRagData（只收 embedding/legacy）过滤。
+1. **[M]** 前端三处 `rag://model-download` 监听不读 `kind` 字段（跨 kind 进度条串扰——kind 字段加了但消费端没用）→ ModelVectorSettings 决策分支（只收 decision）/ ModelVectorSettings + useRagData（只收 embedding/legacy）过滤。
 2. **[M]** 决策测试并行抖动（全局 DECISION_ACTIVE flag 竞争 + 共享 decision_history 表 DELETE/INSERT 交错，实测 5 跑 4 挂）→ `TEST_LOCK` 串行化全部触 flag/表测试，连续 4 轮全绿。
 
 ### 第三至五波（R11-R50，30 代理逐行 + 亲核修复）
@@ -116,15 +116,15 @@
 - **[L]** 文档计数漂移（decisionService 10→11、tauriClient 10→11、locales 27+8→32+9、服务测试 10→12）→ 全部对齐。
 - **收官判定**：W10S10 跨面审计（缓存指纹×fire-and-forget 重下载、信号量×HTTP 并发、SYNC 锁×reindex、单槽 panic 守卫、清理循环、哨兵双桥映射、前端合并去重、locale 完整性）**零 High/Medium 残留，战役收官**。
 
-**战役总账（100 轮）**：发现曲线 1H+9M+3L → 3H+8M+4L → 1H+2M+8L → 2H+5M+6L → 4M+6L → 1M+1L → 5M+3L → 1H+4M+4L → 3M+2L → 1C+2M+4L；累计修复 **1C+8H+34M+30L**（另 12 项记录不修）。最终验证：**lib 427 passed / vitest 158 passed / tsc 0 错 / cargo check 0 错 0 警 / npm build ✓ / decisionFormat.ts 覆盖率 100%（16/16 语句、10/10 分支、7/7 函数、14/14 行）**。
+**战役总账（100 轮）**：发现曲线 1H+9M+3L → 3H+8M+4L → 1H+2M+8L → 2H+5M+6L → 4M+6L → 1M+1L → 5M+3L → 1H+4M+4L → 3M+2L → 1C+2M+4L；累计修复 **1C+8H+34M+30L**（另 12 项记录不修）。最终验证：**lib 427 passed / vitest 158 passed / tsc 0 错 / cargo check 0 错 0 警 / npm build ✓ / decisionFormat.ts 覆盖率 100%（16/16 语句、10/10 分支、7/7 函数、14/14 行）**。（第一战役收官时点数字；UI 合并轮 + 第二战役后为 lib 431 / vitest 181，见 §4 与 §5。）
 
 ## 4. 测试结果
 
 | 套件 | 结果 |
 | --- | --- |
-| `cargo test --lib -- --test-threads=1` | **427 passed / 0 failed**（14 ignored 为需真机/网络的 probe） |
-| 新增 Rust 单测 | 决策服务 12 个（工具门控/schema 契约/参数校验×4 含 noul 反转对+未知类型+字符上限/历史 CRUD/分页 clamp×2/cleanup 截断边界/malformed JSON 降级/历史截断边界）+ 迁移 v39+v40（表/列/索引/幂等/复合索引）+ `pick_default_size`（默认优先/回退序/空集）+ `valid_model_size_name` 路径穿越用例 |
-| 前端 vitest | **158 passed / 0 failed**（14 文件；decisionFormat 14 用例：类型归一/枚举泄漏/概率/分数 + mergeHistoryPage 7 用例：prev 去重/页内去重/排序/空页/泛型键） |
+| `cargo test --lib -- --test-threads=1` | **431 passed / 0 failed**（14 ignored 为需真机/网络的 probe） |
+| 新增 Rust 单测 | 决策服务 16 个（工具门控/schema 契约/**工具定义 JSON 形状+门控**/参数校验×4 含 noul 反转对+未知类型+字符上限/**invalid-params 哨兵链路**/**try_begin_decide 禁用+信号量 busy 双路径**/历史 CRUD/分页 clamp×2/cleanup 截断边界/malformed JSON 降级/历史截断边界/**行数上限 prune 低于上限 no-op**）+ 迁移 v39+v40（表/列/索引/幂等/复合索引）+ `pick_default_size`（默认优先/回退序/空集）+ `valid_model_size_name` 路径穿越用例 |
+| 前端 vitest | **181 passed / 0 failed**（17 文件；decisionFormat 14 用例 + mergeHistoryPage 7 用例 + **decisionService 7 用例**（getDecisionTools 成功/空回退/抛错 + status/toggle）+ **tauriClient.decision 10 用例**（12 条 /decision 映射抽样对账 + transform 数组包装）+ **DecisionToolsDialog 6 组件用例**（渲染含 required 标记/空态/错误态/双关闭钮/卸载后陈旧 resolve 安全）） |
 | `npx tsc --noEmit` | 0 错误 |
 | `cargo check` | 0 错 0 警 |
 | `npm run build`（前端） | ✓ |
@@ -138,3 +138,13 @@
 - `decision_decide` MCP 工具走 `call_builtin_tool` 统一 dispatch：bearer allow-list / 工具禁用 / 组过滤 / 活动日志 / 600s 超时全部继承 builtin 语义。
 - julia_1 打包随安装包分发（bundle:true，168MB）；如需瘦身改 deploy.json `bundle:false` 走下载。
 - 决策历史 `created_at` 为本地时间字符串（`%Y-%m-%d %H:%M:%S`），cleanup 按字典序比较（定宽格式下正确）。
+
+## 5. UI 合并轮 + 第二复核战役（2026-11-12 晚）
+
+四项 UI 变更：①决策模型设置合并进【本地模型】卡片（ModelVectorSettings，头部「决策支持」标签，原独立 DecisionModelSettings.tsx 删除）；②DecisionPage「查看工具」按钮 + ToolsDialog（镜像 RagPage，`decision_tools` 命令无门控、禁用返回空）；③DecisionPage + Sidebar Beta 标签；④RagPage 头部补 Beta pill 对齐。
+
+第二复核战役（10 波独立代理）：W1 四切片（合并正确性/ToolsDialog/Rust 契约/删除完整性）全 CLEAN；W2 回归扫描 + 全文重读 + 跨层契约 + 文档（文档过时 4L 修复）；W3 全文重读 + 契约审计 + locales（Switch aria-label 错键 L、契约脚本 decision 面零覆盖 + 缺失参数方向未校验 M 修复）；W4 修复合回炉（契约脚本缺失参数方向未校验 M + session/app 过滤 L + 计数 11→12 L + Beta pill 不一致 L 修复）；W5 测试覆盖审计（M×4 → 补测试）；W6 修复合回炉 + 全 diff 新视角 + i18n/a11y + 文档终审（数字过时修复）。
+
+**测试补强**：Rust +4（`decision_tool_definitions_shape_and_gating`、`invalid_params_sentinel_linkage`、`try_begin_decide_disabled_and_busy_paths`（`try_begin_decide` 从 decide_and_record 提取可测化，行为逐字保持）、`prune_history_row_cap_below_cap_is_noop`）；前端 +3 文件 23 用例（decisionService 7 / tauriClient.decision 10 / DecisionToolsDialog 组件 6）。契约脚本扩展 decision 命令 invoke 参数对账（正向全量 12 命令 + 反向 8 个带必参命令；缺失参数方向经变异测试验证可抓）。
+
+**最终验证**：lib **431 passed** / vitest **181 passed** / tsc 0 错 / cargo check 0 错 0 警 / npm build ✓ / 契约脚本 OK。**覆盖率口径（诚实声明）**：decisionFormat.ts 100%（实测 16/16 语句、10/10 分支、7/7 函数）；`decision_tool_definitions` 形状/门控有专项 Rust 测试；ToolsDialog 有 6 个组件测试。ModelVectorSettings 决策区块与 DecisionPage 主体（历史列表/分页/详情弹框）无组件级测试——「100%」仅指 decisionFormat.ts 纯函数层，不适用于新增 UI 组件（其依赖的服务/路由/后端逻辑均有专项测试）。

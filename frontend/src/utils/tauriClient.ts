@@ -806,6 +806,10 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
     // GET /decision/status — enable flag + selected model
     if (segs[1] === 'status' && m === 'GET')
       return { command: 'decision_status', args: {} };
+    // GET /decision/tools — app-level decision tool definitions (for the
+    // "view tools" dialog)
+    if (segs[1] === 'tools' && m === 'GET')
+      return { command: 'decision_tools', args: {} };
     // POST /decision/decide — run one structured decision (source "ui")
     if (segs[1] === 'decide' && m === 'POST') {
       const b = body as Record<string, unknown> | null;

@@ -1045,7 +1045,10 @@
       "loadMore": "Charger plus",
       "loadFailed": "Échec du chargement des données de décision",
       "retry": "Réessayer",
-      "clearConfirmAll": "Ceci supprime TOUT l'historique de décisions (y compris les pages non chargées), sans possibilité d'annulation. Continuer ?"
+      "clearConfirmAll": "Ceci supprime TOUT l'historique de décisions (y compris les pages non chargées), sans possibilité d'annulation. Continuer ?",
+      "viewTools": "Voir les outils",
+      "viewToolsHint": "Voir les outils MCP fournis par l'aide à la décision",
+      "toolsEmpty": "L'aide à la décision est désactivée — aucun outil disponible."
     }
   },
   "logs": {

@@ -87,7 +87,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed }) => {
     { path: '/skills', label: t('nav.skills'), icon: <Wrench className="h-4 w-4" />, badge: skills.length || undefined },
     { path: '/rag', label: t('nav.rag'), icon: <Library className="h-4 w-4" />, badge: ragDocs.length || undefined, beta: true },
     ...(isTauri()
-      ? [{ path: '/decision', label: t('nav.decision'), icon: <BrainCircuit className="h-4 w-4" /> }]
+      ? [{ path: '/decision', label: t('nav.decision'), icon: <BrainCircuit className="h-4 w-4" />, beta: true }]
       : []),
     { path: '/market', label: t('nav.market'), icon: <Store className="h-4 w-4" /> },
   ];

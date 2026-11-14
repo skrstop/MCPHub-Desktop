@@ -1045,7 +1045,10 @@
       "loadMore": "Tải thêm",
       "loadFailed": "Tải dữ liệu quyết định thất bại",
       "retry": "Thử lại",
-      "clearConfirmAll": "Thao tác này xóa TOÀN BỘ lịch sử quyết định (bao gồm cả các trang chưa tải) và không thể hoàn tác. Tiếp tục?"
+      "clearConfirmAll": "Thao tác này xóa TOÀN BỘ lịch sử quyết định (bao gồm cả các trang chưa tải) và không thể hoàn tác. Tiếp tục?",
+      "viewTools": "Xem công cụ",
+      "viewToolsHint": "Xem các công cụ MCP mà hỗ trợ quyết định cung cấp",
+      "toolsEmpty": "Hỗ trợ quyết định đang tắt — không có công cụ nào."
     }
   },
   "logs": {

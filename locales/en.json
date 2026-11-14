@@ -1045,7 +1045,10 @@
       "loadMore": "Load More",
       "loadFailed": "Failed to load decision data",
       "retry": "Retry",
-      "clearConfirmAll": "This deletes ALL decision history entries (including unloaded pages) and cannot be undone. Continue?"
+      "clearConfirmAll": "This deletes ALL decision history entries (including unloaded pages) and cannot be undone. Continue?",
+      "viewTools": "View Tools",
+      "viewToolsHint": "View the MCP tools decision support provides",
+      "toolsEmpty": "Decision support is off — no tools available."
     }
   },
   "logs": {

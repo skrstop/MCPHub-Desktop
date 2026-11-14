@@ -240,13 +240,7 @@ pub async fn decide_and_record(
     if !is_enabled() {
         return Err(anyhow!("decision support is not enabled"));
     }
-    // Concurrency bound: each decide holds a 168 MB model + O(seq×hidden)
-    // forward tensors. Unbounded parallel calls (HTTP allows unlimited
-    // concurrency) could OOM the desktop app — serialize decides; extra
-    // callers fail fast with a busy error instead of queueing forever.
-    let _permit = DECIDE_SEMAPHORE
-        .try_acquire()
-        .map_err(|_| anyhow!("decision runtime is busy, try again shortly"))?;
+    let _permit = try_begin_decide()?;
     let model = selected_model(app)
         .await
         .ok_or_else(|| anyhow!("no decision model is ready - download one first"))?;
@@ -264,6 +258,22 @@ pub async fn decide_and_record(
 /// At most one decide runs at a time (model memory + forward tensors are
 /// per-call costs; a desktop app has no use for parallel decides).
 static DECIDE_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Gate + concurrency bound for decide calls, extracted from
+/// `decide_and_record` for testability (the AppHandle-taking wrapper cannot
+/// run in unit tests). Disabled → Err; permit held elsewhere → busy Err.
+/// Concurrency bound rationale: each decide holds a 168 MB model +
+/// O(seq×hidden) forward tensors. Unbounded parallel calls (HTTP allows
+/// unlimited concurrency) could OOM the desktop app — serialize decides;
+/// extra callers fail fast with a busy error instead of queueing forever.
+fn try_begin_decide() -> Result<tokio::sync::SemaphorePermit<'static>> {
+    if !is_enabled() {
+        return Err(anyhow!("decision support is not enabled"));
+    }
+    DECIDE_SEMAPHORE
+        .try_acquire()
+        .map_err(|_| anyhow!("decision runtime is busy, try again shortly"))
+}
 
 /// Insert one history row (best-effort — a history write failure must not
 /// fail the decision itself; the failure is logged). Persisted fields are
@@ -622,6 +632,22 @@ pub fn parse_decision_tool_args(
     Ok(req)
 }
 
+/// The decision tool as JSON tool definitions (name / description /
+/// inputSchema) — the shape the `decision_tools` command returns and the
+/// "view tools" dialog renders. Empty when decision support is disabled.
+pub fn decision_tool_definitions() -> Vec<serde_json::Value> {
+    builtin_decision_tools()
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description.unwrap_or_default(),
+                "inputSchema": t.input_schema,
+            })
+        })
+        .collect()
+}
+
 /// Dispatch a builtin decision tool call. Gated on the enable flag (fail
 /// closed with a clear message). Returns the structured decision as pretty
 /// JSON text content.
@@ -675,6 +701,31 @@ mod tests {
         assert_eq!(tools[0].name, "decision_decide");
         assert_eq!(tools[0].server_name, crate::rag::service::BUILTIN_SERVER_NAME);
         assert!(tools[0].input_schema.get("required").is_some());
+        DECISION_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn decision_tool_definitions_shape_and_gating() {
+        let _g = test_lock();
+        // Disabled → empty (the "view tools" dialog shows the empty state).
+        DECISION_ACTIVE.store(false, Ordering::SeqCst);
+        assert!(decision_tool_definitions().is_empty());
+        // Enabled → exactly one entry with the dialog-rendered shape:
+        // name / description / inputSchema, schema mirroring the parser.
+        DECISION_ACTIVE.store(true, Ordering::SeqCst);
+        let defs = decision_tool_definitions();
+        assert_eq!(defs.len(), 1);
+        let d = &defs[0];
+        assert_eq!(d["name"], "decision_decide");
+        assert!(d["description"].as_str().is_some_and(|s| !s.is_empty()));
+        let schema = &d["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        let props = schema["properties"].as_object().unwrap();
+        for k in ["decisionType", "state", "question", "options"] {
+            assert!(props.contains_key(k), "schema property {k} missing");
+        }
+        assert_eq!(schema["required"], serde_json::json!(["state", "question", "options"]));
+        assert_eq!(props["decisionType"]["enum"], serde_json::json!(["choice", "score", "noul"]));
         DECISION_ACTIVE.store(false, Ordering::SeqCst);
     }
 
@@ -1010,6 +1061,82 @@ mod tests {
         // limit clamped to 500, offset floored at 0
         let big = list_history(10_000, 0).await.unwrap();
         assert_eq!(big.len(), 3);
+        sqlx::query("DELETE FROM decision_history").execute(pool).await.unwrap();
+    }
+
+    #[test]
+    fn invalid_params_sentinel_linkage() {
+        // Every parse_decision_tool_args rejection (except the unknown-tool
+        // 404 shape) must carry the sentinel so REST faces classify it 400.
+        let cases = vec![
+            serde_json::json!({}),                                     // missing fields
+            serde_json::json!({"state": "s", "question": "q", "options": ["a"]}), // too few
+            serde_json::json!({"state": 1, "question": "q", "options": ["a", "b"]}), // bad type
+        ];
+        for args in cases {
+            let err = parse_decision_tool_args("decision_decide", &args).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                is_invalid_params_error(&msg),
+                "error missing sentinel: {msg}"
+            );
+        }
+        // Unknown tool is 404-classified — must NOT carry the 400 sentinel.
+        let err = parse_decision_tool_args("not_a_tool", &serde_json::json!({})).unwrap_err();
+        assert!(!is_invalid_params_error(&format!("{err:#}")));
+        // Sentinel helpers agree on the exact constant.
+        assert!(is_invalid_params_error(INVALID_PARAMS_PREFIX));
+        assert!(!is_invalid_params_error("[invalid params]"));
+        assert!(!is_invalid_params_error(""));
+    }
+
+    #[tokio::test]
+    async fn try_begin_decide_disabled_and_busy_paths() {
+        let _g = test_lock();
+        // Disabled → gate error, regardless of semaphore state.
+        DECISION_ACTIVE.store(false, Ordering::SeqCst);
+        let err = try_begin_decide().unwrap_err();
+        assert!(format!("{err:#}").contains("not enabled"));
+        // Enabled → permit acquired; a second concurrent caller fails fast.
+        DECISION_ACTIVE.store(true, Ordering::SeqCst);
+        let permit = try_begin_decide().expect("first acquire must succeed");
+        let err = try_begin_decide().unwrap_err();
+        assert!(format!("{err:#}").contains("busy"));
+        // Released → acquirable again.
+        drop(permit);
+        let _again = try_begin_decide().expect("release must restore availability");
+        DECISION_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn prune_history_row_cap_below_cap_is_noop() {
+        let _g = test_lock();
+        let pool = crate::db::pool();
+        sqlx::query("DELETE FROM decision_history").execute(pool).await.unwrap();
+        let req = DecisionRequest {
+            decision_type: DecisionType::Choice,
+            state: "s".into(),
+            question: "q".into(),
+            options: vec!["a".into(), "b".into()],
+        };
+        let out = DecisionOutput {
+            decision_type: DecisionType::Choice,
+            scores: vec![0.1, 0.2],
+            probabilities: vec![0.3, 0.7],
+            index: 1,
+            option: "b".into(),
+        };
+        for i in 0..5 {
+            record_history(&req, &out, i, "mcp").await;
+        }
+        // Well below HISTORY_MAX_ROWS → nothing pruned.
+        let pruned = prune_history_row_cap().await.unwrap();
+        assert_eq!(pruned, 0);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM decision_history")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 5);
         sqlx::query("DELETE FROM decision_history").execute(pool).await.unwrap();
     }
 }

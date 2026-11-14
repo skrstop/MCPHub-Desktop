@@ -1095,7 +1095,10 @@
       "loadMore": "Cargar más",
       "loadFailed": "Error al cargar los datos de decisión",
       "retry": "Reintentar",
-      "clearConfirmAll": "Esto elimina TODO el historial de decisiones (incluidas las páginas no cargadas) y no se puede deshacer. ¿Continuar?"
+      "clearConfirmAll": "Esto elimina TODO el historial de decisiones (incluidas las páginas no cargadas) y no se puede deshacer. ¿Continuar?",
+      "viewTools": "Ver herramientas",
+      "viewToolsHint": "Ver las herramientas MCP que ofrece el soporte de decisiones",
+      "toolsEmpty": "El soporte de decisiones está desactivado — no hay herramientas disponibles."
     }
   },
   "logs": {
