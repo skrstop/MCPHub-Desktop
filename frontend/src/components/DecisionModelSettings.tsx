@@ -29,6 +29,7 @@ const DecisionModelSettings: React.FC = () => {
   const [models, setModels] = useState<RagModelInfo[]>([]);
   const [modelDownload, setModelDownload] = useState<ModelDownloadProgress | null>(null);
   const [toggling, setToggling] = useState(false);
+  const [selecting, setSelecting] = useState(false);
   const [sectionOpen, setSectionOpen] = useState(false);
   const mounted = useRef(true);
 
@@ -40,10 +41,26 @@ const DecisionModelSettings: React.FC = () => {
       setModels(m);
       if (st.model) {
         const p = await decisionModelDownloadStatus(st.model);
-        if (mounted.current && p && p.phase === 'downloading') setModelDownload(p);
+        if (!mounted.current) return;
+        // Restore-on-mount guard: an in-flight query can resolve AFTER a
+        // terminal event already updated the state — never overwrite a
+        // terminal snapshot (done/error/cancelled) with a stale
+        // "downloading" read (the bar would stick forever: no further
+        // events are coming).
+        if (p && p.phase === 'downloading') {
+          setModelDownload((cur) =>
+            cur && cur.phase !== 'downloading' ? cur : p,
+          );
+        }
       }
     } catch (e) {
       console.warn('[decision] failed to load status', e);
+      // A silent failure would render the switch as OFF while decision
+      // support may actually be ON — flipping it would then really disable
+      // it. Surface the failure loudly instead.
+      if (mounted.current) {
+        showToast(t('common.operationFailed'), 'error');
+      }
     }
   };
 
@@ -61,8 +78,16 @@ const DecisionModelSettings: React.FC = () => {
       if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
         void fetchAll();
         if (p.phase === 'done') {
+          // Clear the done snapshot after 1.5s — but ONLY if the state still
+          // holds THIS snapshot: a new download started within the window
+          // must not have its progress bar erased by the stale timer. The
+          // sentinel must be the SAME object put into state (a copy of p,
+          // not p itself — the state holds a fresh spread).
+          const snapshot = { ...p };
+          setModelDownload(snapshot);
           setTimeout(() => {
-            if (mounted.current) setModelDownload(null);
+            if (!mounted.current) return;
+            setModelDownload((cur) => (cur === snapshot ? null : cur));
           }, 1500);
         }
       }
@@ -93,6 +118,8 @@ const DecisionModelSettings: React.FC = () => {
   };
 
   const handleSelectModel = async (model: string) => {
+    if (selecting) return;
+    setSelecting(true);
     try {
       await selectDecisionModel(model);
       if (mounted.current) {
@@ -101,6 +128,8 @@ const DecisionModelSettings: React.FC = () => {
       }
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      if (mounted.current) setSelecting(false);
     }
   };
 
@@ -136,10 +165,21 @@ const DecisionModelSettings: React.FC = () => {
             </div>
             <div className="flex items-center gap-2">
               {toggling && <Loader2 size={13} className="animate-spin text-[var(--hub-ink-3)]" />}
-              <Switch disabled={toggling} checked={enabled} onCheckedChange={handleToggle} />
+              <Switch
+                disabled={toggling}
+                checked={enabled}
+                onCheckedChange={handleToggle}
+                aria-label={t('settings.decisionModelSwitch')}
+              />
             </div>
           </div>
           <p style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>{t('settings.decisionHint')}</p>
+
+          {status?.model && !status.modelReady && (
+            <p className="text-[12px] font-medium" style={{ color: 'var(--hub-warn, #d97706)' }}>
+              {t('settings.decisionModelMissing')}
+            </p>
+          )}
 
           <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${enabled ? '' : 'mv-disabled'}`}>
             <div className="flex items-center gap-2 mb-2">
@@ -151,7 +191,7 @@ const DecisionModelSettings: React.FC = () => {
               models={models}
               currentModel={status?.model ?? null}
               modelDownload={modelDownload}
-              disabled={!enabled || toggling}
+              disabled={!enabled || toggling || selecting}
               onSelect={handleSelectModel}
               onDownload={(model, source) => {
                 downloadDecisionModel(model, source).catch((e) =>

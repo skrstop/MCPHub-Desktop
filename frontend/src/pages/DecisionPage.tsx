@@ -16,6 +16,7 @@ import {
   decisionTypeLabelKey,
   formatProbability,
   formatScore,
+  mergeHistoryPage,
 } from '@/utils/decisionFormat';
 
 const PAGE_SIZE = 50;
@@ -31,23 +32,68 @@ const DecisionPage: React.FC = () => {
   const [toggling, setToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [entries, setEntries] = useState<DecisionHistoryEntry[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // True while the backend still has rows beyond the loaded page (heuristic:
+  // a full page came back — the backend clamps limit to 500, so a full page
+  // is the only reliable "maybe more" signal short of a count query).
+  const [hasMore, setHasMore] = useState(false);
+  // Initial-load failure: distinct from "empty history" — the user must be
+  // able to tell a backend/IPC error from a genuinely empty list, and retry.
+  const [loadError, setLoadError] = useState(false);
   const [viewing, setViewing] = useState<DecisionHistoryEntry | null>(null);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearing, setClearing] = useState(false);
   const mounted = useRef(true);
+  // True while a toggle is in flight — fetchAll consults it so a stale
+  // pre-toggle status can't revert an accepted toggle.
+  const togglingRef = useRef(false);
+  // Monotonic generation for status fetches: a toggle bumps it, so an
+  // in-flight fetch that resolves AFTER the toggle completes (guard window
+  // already closed) still discards its stale pre-toggle status.
+  const statusGenRef = useRef(0);
+  // Element that opened the detail dialog — focus is restored to it on close.
+  const viewTriggerRef = useRef<HTMLElement | null>(null);
 
   const fetchAll = useCallback(async () => {
+    setLoading(true);
+    const gen = ++statusGenRef.current;
     try {
       const [st, list] = await Promise.all([decisionStatus(), listDecisionHistory(PAGE_SIZE, 0)]);
       if (!mounted.current) return;
-      setEnabled(st.enabled);
+      // Discard a stale status: a toggle that started after this fetch (or
+      // completed while it was in flight) owns the enabled state now.
+      if (gen === statusGenRef.current && !togglingRef.current) {
+        setEnabled(st.enabled);
+      }
       setEntries(list);
+      setHasMore(list.length >= PAGE_SIZE);
+      setLoadError(false);
     } catch (e) {
       console.warn('[decision] failed to load page data', e);
+      if (mounted.current) setLoadError(true);
     } finally {
       if (mounted.current) setLoading(false);
     }
   }, []);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      // Refetch the whole loaded prefix (offset 0) instead of paging by
+      // offset: rows inserted between page fetches shift the window and
+      // offset paging would permanently skip them. The backend clamps limit
+      // to 500, so the prefix refetch doubles as the browsing depth cap.
+      const nextLimit = Math.min(entries.length + PAGE_SIZE, 500);
+      const list = await listDecisionHistory(nextLimit, 0);
+      if (!mounted.current) return;
+      setEntries((prev) => mergeHistoryPage(prev, list));
+      setHasMore(list.length >= nextLimit && nextLimit < 500);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      if (mounted.current) setLoadingMore(false);
+    }
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -59,6 +105,8 @@ const DecisionPage: React.FC = () => {
 
   const handleToggle = async (on: boolean) => {
     setToggling(true);
+    togglingRef.current = true;
+    statusGenRef.current += 1; // invalidate any in-flight status fetch
     try {
       await decisionSetEnabled(on);
       if (mounted.current) {
@@ -71,6 +119,7 @@ const DecisionPage: React.FC = () => {
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), 'error');
     } finally {
+      togglingRef.current = false;
       if (mounted.current) setToggling(false);
     }
   };
@@ -81,18 +130,46 @@ const DecisionPage: React.FC = () => {
       const n = await clearDecisionHistory();
       if (mounted.current) {
         setEntries([]);
+        setHasMore(false);
         setClearConfirm(false);
         showToast(t('pages.decision.clearedToast', { count: n }), 'success');
       }
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), 'error');
-      setClearConfirm(false);
+      if (mounted.current) setClearConfirm(false);
     } finally {
       if (mounted.current) setClearing(false);
     }
   };
 
   const typeLabel = (ty: string) => t(decisionTypeLabelKey(ty));
+
+  // Escape closes the TOPMOST dialog only (document-level listener — the
+  // repo's established dialog pattern; overlay onKeyDown would miss when
+  // focus sits outside the dialog). The clear-confirm can stack above the
+  // detail dialog: it closes first, the detail dialog on the next Escape.
+  useEffect(() => {
+    if (!viewing && !clearConfirm) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Escape') return;
+      if (clearConfirm) {
+        setClearConfirm(false);
+        return;
+      }
+      setViewing(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [viewing, clearConfirm]);
+
+  // Restore focus to the trigger that opened the detail dialog when it
+  // closes (keyboard users would otherwise be dropped at <body>).
+  useEffect(() => {
+    if (!viewing) {
+      viewTriggerRef.current?.focus();
+      viewTriggerRef.current = null;
+    }
+  }, [viewing]);
 
   return (
     <div className="p-6 max-w-6xl mx-auto" data-testid="decision-page">
@@ -107,7 +184,12 @@ const DecisionPage: React.FC = () => {
         </div>
         <div className="flex items-center gap-2">
           {toggling && <Loader2 size={14} className="animate-spin text-[var(--hub-ink-3)]" />}
-          <Switch disabled={toggling} checked={enabled} onCheckedChange={handleToggle} />
+          <Switch
+            disabled={toggling}
+            checked={enabled}
+            onCheckedChange={handleToggle}
+            aria-label={t('pages.decision.title')}
+          />
         </div>
       </div>
 
@@ -130,11 +212,21 @@ const DecisionPage: React.FC = () => {
             <Loader2 size={16} className="animate-spin mr-2" />
             {t('common.loading')}
           </div>
+        ) : loadError ? (
+          <div className="py-12 text-center text-sm text-[var(--hub-ink-3)]">
+            {t('pages.decision.loadFailed')}
+            <div className="mt-3">
+              <button type="button" className="hub-btn sm" onClick={() => void fetchAll()}>
+                {t('pages.decision.retry')}
+              </button>
+            </div>
+          </div>
         ) : entries.length === 0 ? (
           <div className="py-12 text-center text-sm text-[var(--hub-ink-3)]">
             {t('pages.decision.empty')}
           </div>
         ) : (
+          <>
           <ul className="divide-y divide-[var(--hub-line-2)]">
             {entries.map((e) => (
               <li key={e.id} className="flex items-center gap-3 py-2.5 px-5">
@@ -162,13 +254,25 @@ const DecisionPage: React.FC = () => {
                   type="button"
                   className="hub-btn sm"
                   style={{ flexShrink: 0 }}
-                  onClick={() => setViewing(e)}
+                  onClick={(ev) => {
+                    viewTriggerRef.current = ev.currentTarget;
+                    setViewing(e);
+                  }}
                 >
                   <Eye size={12} /> {t('pages.decision.view')}
                 </button>
               </li>
             ))}
           </ul>
+          {hasMore && (
+            <div className="flex justify-center py-3 border-t border-[var(--hub-line-2)]">
+              <button type="button" className="hub-btn sm" disabled={loadingMore} onClick={loadMore}>
+                {loadingMore && <Loader2 size={12} className="animate-spin" />}
+                {t('pages.decision.loadMore')}
+              </button>
+            </div>
+          )}
+          </>
         )}
       </div>
 
@@ -180,6 +284,7 @@ const DecisionPage: React.FC = () => {
           onClick={() => setViewing(null)}
           role="dialog"
           aria-modal="true"
+          aria-labelledby="decision-detail-title"
         >
           <div
             className="hub-card w-full max-w-2xl max-h-[80vh] overflow-y-auto"
@@ -187,8 +292,10 @@ const DecisionPage: React.FC = () => {
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="flex items-center justify-between py-3 px-5 border-b border-[var(--hub-line-2)]">
-              <h3 className="font-medium text-[var(--hub-ink)]">{t('pages.decision.detailTitle')}</h3>
-              <button type="button" className="hub-btn sm" onClick={() => setViewing(null)}>
+              <h3 id="decision-detail-title" className="font-medium text-[var(--hub-ink)]">
+                {t('pages.decision.detailTitle')}
+              </h3>
+              <button type="button" className="hub-btn sm" autoFocus onClick={() => setViewing(null)}>
                 {t('common.close')}
               </button>
             </div>
@@ -214,7 +321,7 @@ const DecisionPage: React.FC = () => {
               )}
               <div>
                 <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldQuestion')}</div>
-                <div className="text-[var(--hub-ink)]">{viewing.question}</div>
+                <div className="text-[var(--hub-ink)] break-all">{viewing.question}</div>
               </div>
               <div>
                 <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldOptions')}</div>
@@ -276,7 +383,11 @@ const DecisionPage: React.FC = () => {
         <ConfirmDialog
           isOpen
           title={t('pages.decision.clearConfirmTitle')}
-          message={t('pages.decision.clearConfirmMessage', { count: entries.length })}
+          message={
+            hasMore
+              ? t('pages.decision.clearConfirmAll')
+              : t('pages.decision.clearConfirmMessage', { count: entries.length })
+          }
           confirmText={t('pages.decision.clearAll')}
           onConfirm={handleClear}
           onClose={() => setClearConfirm(false)}

@@ -143,7 +143,12 @@ pub struct DecisionModel {
 }
 
 impl DecisionModel {
-    pub fn load<R: Read + Seek>(file: &mut R, size_dir: &Path, device: &Device) -> Result<Self> {
+    pub fn load<R: Read + Seek>(
+        file: &mut R,
+        size_dir: &Path,
+        device: &Device,
+        tokenizer_fallback: Option<&Path>,
+    ) -> Result<Self> {
         let mut content = Content::read(file).map_err(|e| anyhow!("read gguf: {e}"))?;
         let md = &content.metadata;
         let pfx = "modern-bert.";
@@ -204,21 +209,64 @@ impl DecisionModel {
         let max_context = get_u32(&format!("{pfx}context_length"), Some(8192))?;
 
         // Tokenizer: prefer a shipped tokenizer.json (official, exact); else
-        // reconstruct BPE from the GGUF metadata.
+        // the caller-supplied bundled fallback (downloaded dirs contain only
+        // model.gguf); else reconstruct BPE from the GGUF metadata. The GGUF
+        // fallback is a last resort: julia_1's GGUF declares a GPT-2 vocab
+        // while the real vocab is Metaspace, so ByteLevel pre-tokenization
+        // yields mass <unk> and garbage decisions.
         let tokenizer_path = size_dir.join("tokenizer.json");
         let tokenizer = if tokenizer_path.exists() {
-            Tokenizer::from_file(&tokenizer_path)
-                .map_err(|e| anyhow!("load tokenizer {}: {e}", tokenizer_path.display()))?
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+                // File name only — absolute paths must not leak to MCP
+                // clients / remote callers (resolve_model_path convention).
+                anyhow!(
+                    "load tokenizer {}: {e}",
+                    tokenizer_path.file_name().and_then(|n| n.to_str()).unwrap_or("tokenizer.json")
+                )
+            })?
+        } else if let Some(fb) = tokenizer_fallback.filter(|p| p.exists()) {
+            Tokenizer::from_file(fb).map_err(|e| {
+                anyhow!(
+                    "load bundled tokenizer {}: {e}",
+                    fb.file_name().and_then(|n| n.to_str()).unwrap_or("tokenizer.json")
+                )
+            })?
         } else {
             build_gguf_tokenizer(md)?
         };
 
         // Official config: cls_token_id = sep_token_id = eos_token_id = 1,
-        // bos = 2, mask = 4.
+        // bos = 2, mask = 4. The GGUF's bos/eos keys are the CLS/SEP source
+        // for this model family. Sanity-check the ids against the loaded
+        // tokenizer's vocab (this family uses <bos>/<eos>/<mask>-style
+        // special tokens — no bracket heuristic) so a GGUF/tokenizer.json
+        // mismatch fails loudly instead of silently pooling the wrong
+        // position.
         let cls_id = meta_u32(md, "tokenizer.ggml.bos_token_id").unwrap_or(1);
         let sep_id = meta_u32(md, "tokenizer.ggml.eos_token_id").unwrap_or(1);
         let mask_id = meta_u32(md, "tokenizer.ggml.mask_token_id")
             .ok_or_else(|| anyhow!("missing gguf key tokenizer.ggml.mask_token_id"))?;
+        for (id, expect) in [
+            (cls_id, "cls"),
+            (sep_id, "sep"),
+            (mask_id, "mask"),
+        ] {
+            match tokenizer.id_to_token(id) {
+                Some(t) if !t.is_empty() => {
+                    let _ = t;
+                }
+                Some(_) => {
+                    return Err(anyhow!(
+                        "tokenizer special-token mismatch: {expect} id {id} resolves to an empty token"
+                    ));
+                }
+                None => {
+                    return Err(anyhow!(
+                        "tokenizer special-token mismatch: {expect} id {id} not in tokenizer vocab"
+                    ));
+                }
+            }
+        }
 
         fn dq<R: Read + Seek>(
             file: &mut R,
@@ -373,7 +421,12 @@ impl DecisionModel {
     /// resolver (`decision/<family>/<size>/model.gguf`, downloaded copy
     /// preferred over bundled).
     pub fn resolve_model_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf> {
-        if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
+        if name.is_empty()
+            || name == "."
+            || name.contains("..")
+            || name.contains('/')
+            || name.contains('\\')
+        {
             return Err(anyhow!("invalid decision model name"));
         }
         let dir = super::models::resolve_model_paths_kind(
@@ -397,10 +450,45 @@ impl DecisionModel {
         if req.options.iter().any(|o| o.is_empty()) {
             return Err(anyhow!("options must be non-empty"));
         }
-        let mask_str = self
-            .tokenizer
-            .id_to_token(self.mask_id)
-            .unwrap_or_default();
+        // Resource-exhaustion guard: tokenization cost is proportional to
+        // input length and truncation (take(48)/take(budget)/take(room))
+        // happens only AFTER the full encode — reject absurd inputs before
+        // any tokenization. The model context is ~8k tokens; 64k chars per
+        // field / 128k total is far above anything useful.
+        const MAX_FIELD_CHARS: usize = 64 * 1024;
+        const MAX_TOTAL_CHARS: usize = 128 * 1024;
+        if req.question.chars().count() > MAX_FIELD_CHARS
+            || req.state.chars().count() > MAX_FIELD_CHARS
+            || req.options.iter().any(|o| o.chars().count() > MAX_FIELD_CHARS)
+        {
+            return Err(anyhow!(
+                "question/state/options exceed the {MAX_FIELD_CHARS}-character limit"
+            ));
+        }
+        let total_chars: usize = req.question.chars().count()
+            + req.state.chars().count()
+            + req.options.iter().map(|o| o.chars().count()).sum::<usize>();
+        if total_chars > MAX_TOTAL_CHARS {
+            return Err(anyhow!(
+                "question+state+options exceed the {MAX_TOTAL_CHARS}-character total limit"
+            ));
+        }
+        // Official validate_row contract: noul decisions are the fixed
+        // [false, true] option pair. Enforced here (not only in the MCP arg
+        // parser) so the Tauri command path shares one enforcement point.
+        if req.decision_type == DecisionType::Noul
+            && req.options != vec!["false".to_string(), "true".to_string()]
+        {
+            return Err(anyhow!(
+                "noul decisions require exactly the option pair [\"false\", \"true\"]"
+            ));
+        }
+        // An empty mask string would make `replace("", " ")` insert a space
+        // between EVERY character — fail loudly instead of silently mangling
+        // all input text.
+        let mask_str = self.tokenizer.id_to_token(self.mask_id).ok_or_else(|| {
+            anyhow!("tokenizer has no token for mask id {}", self.mask_id)
+        })?;
         let clean = |t: &str| t.replace(&mask_str, " ");
         let enc = |t: &str| -> Result<Vec<u32>> {
             Ok(self
@@ -428,7 +516,7 @@ impl DecisionModel {
             .head_length
             .saturating_sub(options.iter().map(|o| o.len()).sum::<usize>());
         if budget < 16 {
-            let per_option = std::cmp::max(4, (self.head_length - 16) / options.len());
+            let per_option = std::cmp::max(4, self.head_length.saturating_sub(16) / options.len());
             for o in options.iter_mut() {
                 o.truncate(per_option);
             }
@@ -654,7 +742,7 @@ mod tests {
     #[ignore]
     fn julia_reference_probe() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/decision/julia_1/model.gguf");
+            .join("runtimes/rag/model/decision/julia/1/model.gguf");
         if !gguf.is_file() {
             eprintln!("SKIP: julia_1 model.gguf not present");
             return;
@@ -662,7 +750,7 @@ mod tests {
         let device = Device::Cpu;
         let mut file = std::fs::File::open(&gguf).unwrap();
         let size_dir = gguf.parent().unwrap().to_path_buf();
-        let m = DecisionModel::load(&mut file, &size_dir, &device).expect("load");
+        let m = DecisionModel::load(&mut file, &size_dir, &device, None).expect("load");
         let cases = [
             (DecisionType::Choice, "user asks in Chinese how to check their public IP; tools available: getPublicIp (returns public IP), listFiles (lists local files)", "Which tool should be used?", vec!["getPublicIp: returns the machine public IP address", "listFiles: lists files in a local directory"], 0usize),
             (DecisionType::Choice, "user asks to list files in /tmp", "Which tool should be used?", vec!["getPublicIp: returns the machine public IP address", "listFiles: lists files in a local directory"], 1),

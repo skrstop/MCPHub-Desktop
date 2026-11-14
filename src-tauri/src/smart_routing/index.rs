@@ -515,30 +515,41 @@ pub async fn reindex_all() -> Result<usize> {
     // not search targets; indexing them would let smart_route_search return
     // itself/siblings as results). New builtin tools added later are picked
     // up automatically — no per-tool list to maintain here.
-    let builtin_desc = Some("Built-in capabilities (RAG, Smart Routing, prompts, resources)".to_string());
-    let builtin_tools = crate::rag::service::builtin_server_tools()
-        .await
-        .into_iter()
-        .filter(|t| !crate::smart_routing::meta::is_meta_tool(&t.name))
-        .collect::<Vec<_>>();
-    if !builtin_tools.is_empty() {
-        match save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, builtin_desc.as_deref(), &builtin_tools, Some(&|done: usize, total: usize| emit_prog(done as u32, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, total, done))).await {
-            Ok(()) => {
-                indexed += 1;
-                done += 1;
-                emit_prog(done, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, builtin_tools.len(), builtin_tools.len());
-                crate::services::app_logger::log_to_db("info", &format!("[smart] reindex builtin: {} tools", builtin_tools.len()));
+    //
+    // The read-decide-write runs under BUILTIN_INDEX_SYNC_LOCK (shared with
+    // the RAG/decision toggle syncs): the embedding below can take minutes,
+    // and a toggle landing mid-reindex must not be clobbered by this stale
+    // pre-toggle write. The guard is dropped at the end of the builtin
+    // section (not held across the rest of the reindex) so toggle syncs are
+    // only deferred for the builtin embedding, not the whole pass.
+    {
+        let builtin_sync_guard = crate::rag::service::BUILTIN_INDEX_SYNC_LOCK.lock().await;
+        let builtin_desc = Some(crate::rag::service::BUILTIN_SERVER_DESCRIPTION.to_string());
+        let builtin_tools = crate::rag::service::builtin_server_tools()
+            .await
+            .into_iter()
+            .filter(|t| !crate::smart_routing::meta::is_meta_tool(&t.name))
+            .collect::<Vec<_>>();
+        if !builtin_tools.is_empty() {
+            match save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, builtin_desc.as_deref(), &builtin_tools, Some(&|done: usize, total: usize| emit_prog(done as u32, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, total, done))).await {
+                Ok(()) => {
+                    indexed += 1;
+                    done += 1;
+                    emit_prog(done, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, builtin_tools.len(), builtin_tools.len());
+                    crate::services::app_logger::log_to_db("info", &format!("[smart] reindex builtin: {} tools", builtin_tools.len()));
+                }
+                Err(e) => {
+                    log::warn!("[smart] reindex builtin: {}", e);
+                    crate::services::app_logger::log_to_db("warn", &format!("[smart] reindex builtin failed: {e:#}"));
+                    done += 1;
+                    emit_prog(done, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, builtin_tools.len(), builtin_tools.len());
+                }
             }
-            Err(e) => {
-                log::warn!("[smart] reindex builtin: {}", e);
-                crate::services::app_logger::log_to_db("warn", &format!("[smart] reindex builtin failed: {e:#}"));
-                done += 1;
-                emit_prog(done, total as u32, crate::rag::service::BUILTIN_SERVER_NAME, builtin_tools.len(), builtin_tools.len());
-            }
+        } else {
+            let _ = remove_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME).await;
+            crate::services::app_logger::log_to_db("warn", "[smart] reindex builtin: NO tools to index (rag disabled or filtered empty)");
         }
-    } else {
-        let _ = remove_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME).await;
-        crate::services::app_logger::log_to_db("warn", "[smart] reindex builtin: NO tools to index (rag disabled or filtered empty)");
+        drop(builtin_sync_guard);
     }
     // Ghost cleanup: servers whose DB row is GONE but whose embeddings remain
     // (their delete hook no-op'd while Smart Routing was disabled) would keep

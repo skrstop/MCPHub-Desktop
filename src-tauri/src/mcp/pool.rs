@@ -742,6 +742,11 @@ pub async fn list_tools_for(server_name: &str) -> Result<Vec<Tool>> {
     // the RAG builtin tools - return them so the Tauri call_tool path and the
     // "servers" panel can list/enable/disable them like any other server.
     if server_name == crate::rag::service::BUILTIN_SERVER_NAME {
+        // Visibility parity with the HTTP/$smart faces: no bundled capability
+        // active → empty tool set (builtin_tools() self-gates per capability).
+        if !crate::rag::service::builtin_server_active() {
+            return Ok(Vec::new());
+        }
         let mut tools = crate::rag::service::builtin_tools();
         // Smart Routing meta tools ride on the builtin server too (UI listing
         // + test invocation) — empty when Smart Routing is disabled.

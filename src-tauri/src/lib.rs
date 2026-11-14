@@ -423,8 +423,15 @@ pub fn run() {
                         // OAuth provider: drop expired codes/tokens opportunistically.
                         services::oauth_provider::cleanup_expired().await;
                         // Decision-support request history: same 15-day
-                        // retention as the activity log.
-                        let _ = services::decision_service::cleanup_history(15).await;
+                        // retention as the activity log. A failure must be
+                        // visible — a silently dropped prune means rows pile
+                        // up forever with no signal.
+                        if let Err(e) = services::decision_service::cleanup_history(15).await {
+                            services::app_logger::log_to_db(
+                                "warn",
+                                &format!("decision history cleanup failed: {e}"),
+                            );
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await;
                     }
                 });

@@ -1603,19 +1603,13 @@ pub async fn toggle(app: &AppHandle, enabled: bool) -> Result<RagStatus> {
     // The builtin server's SR-index rows must follow the toggle: enabling
     // adds rag_* tools to smart_route_search's corpus, disabling removes
     // them (stale rows would advertise tools that now error "RAG disabled").
-    // Meta tools are excluded by the indexer itself. Best-effort.
+    // Meta tools are excluded by the indexer itself. Best-effort. The
+    // decide runs under BUILTIN_INDEX_SYNC_LOCK (shared with the decision
+    // toggle) so rapid toggles cannot interleave stale writes.
     {
         let h = app.clone();
         tauri::async_runtime::spawn(async move {
-            let desc = Some("Built-in capabilities (RAG, Smart Routing, prompts, resources)".to_string());
-            if enabled {
-                let tools = builtin_tools();
-                if !tools.is_empty() {
-                    let _ = crate::smart_routing::index::save_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME, desc.as_deref(), &tools, None).await;
-                }
-            } else {
-                let _ = crate::smart_routing::index::remove_server_embeddings(crate::rag::service::BUILTIN_SERVER_NAME).await;
-            }
+            sync_builtin_index().await;
             let _ = h;
         });
     }
@@ -2183,14 +2177,69 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
 /// servers may not use this name (server_service rejects it on create/update).
 pub const BUILTIN_SERVER_NAME: &str = "mcphub-desktop";
 
+/// Shared description for the builtin server (single source of truth — the
+/// string is rendered in the server list and stored as the Smart Routing
+/// index's server description; keeping it in one const prevents drift).
+pub const BUILTIN_SERVER_DESCRIPTION: &str =
+    "Built-in capabilities (RAG, Smart Routing, prompts, resources)";
+
+/// Serializes builtin-index sync decisions (RAG toggle + decision toggle).
+/// The decide (which tool set / save-vs-remove) must be atomic across BOTH
+/// toggles: EMBED_WRITE_LOCK serializes the writes but not the flag reads,
+/// so two rapid toggles could interleave and leave the index stale (an older
+/// task's write landing after a newer task's). No other path takes this lock,
+/// so the lock order SYNC → EMBED_WRITE_LOCK cannot invert.
+pub static BUILTIN_INDEX_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Converge the builtin server's Smart Routing index rows to the CURRENT
+/// flag state. Single decision point shared by both toggles (RAG enable/
+/// disable and decision enable/disable): re-reads the flags under
+/// BUILTIN_INDEX_SYNC_LOCK, so the last sync to run always reflects the
+/// final toggle state.
+pub async fn sync_builtin_index() {
+    let _g = BUILTIN_INDEX_SYNC_LOCK.lock().await;
+    let desc = Some(BUILTIN_SERVER_DESCRIPTION.to_string());
+    // Failures are logged, never silent: a stale index would advertise tools
+    // that dispatch rejects (or hide live ones) with zero signal until the
+    // next toggle/reindex converges it.
+    if builtin_server_active() {
+        let tools = builtin_tools();
+        if tools.is_empty() {
+            if let Err(e) =
+                crate::smart_routing::index::remove_server_embeddings(BUILTIN_SERVER_NAME).await
+            {
+                rag_log("warn", format!("builtin index sync (remove) failed: {e:#}"));
+            }
+        } else if let Err(e) = crate::smart_routing::index::save_server_embeddings(
+            BUILTIN_SERVER_NAME,
+            desc.as_deref(),
+            &tools,
+            None,
+        )
+        .await
+        {
+            rag_log("warn", format!("builtin index sync (save) failed: {e:#}"));
+        }
+    } else if let Err(e) =
+        crate::smart_routing::index::remove_server_embeddings(BUILTIN_SERVER_NAME).await
+    {
+        rag_log("warn", format!("builtin index sync (remove) failed: {e:#}"));
+    }
+}
+
 /// The RAG tools as proper `Tool` structs (for `list_servers`, which injects
 /// the builtin RAG server into the server list so the frontend can treat it
 /// uniformly - select it in groups, view its tools, etc.).
 pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
     use crate::models::server::Tool;
-    let mut tools: Vec<Tool> = tool_definitions()
-        .into_iter()
-        .map(|v| Tool {
+    // Each capability self-gates: rag_* tools only while RAG is enabled, the
+    // decision tool only while decision support is enabled. Callers gate
+    // server VISIBILITY on builtin_server_active() (either capability); this
+    // function must never advertise a tool whose dispatch would reject.
+    let mut tools: Vec<Tool> = if is_enabled() {
+        tool_definitions()
+            .into_iter()
+            .map(|v| Tool {
                     hidden_params: None,
             name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
             description: v.get("description").and_then(|d| d.as_str()).map(String::from),
@@ -2205,7 +2254,10 @@ pub fn builtin_tools() -> Vec<crate::models::server::Tool> {
             meta: None,
             description_overridden: false,
         })
-        .collect();
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Decision-support tool rides the same builtin server (empty while the
     // decision runtime is disabled).
     tools.extend(crate::services::decision_service::builtin_decision_tools());
@@ -2414,7 +2466,7 @@ pub async fn builtin_server_info() -> Option<crate::models::server::ServerInfo> 
             id: String::new(),
             name: BUILTIN_SERVER_NAME.to_string(),
             server_type: ServerType::Builtin,
-            description: Some("Built-in capabilities (RAG, prompts, resources)".to_string()),
+            description: Some(crate::rag::service::BUILTIN_SERVER_DESCRIPTION.to_string()),
             command: None,
             args: None,
             env: None,

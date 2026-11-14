@@ -963,6 +963,11 @@ async fn call_server_tool(
                 || lower.contains("no such tool");
             let status = if not_found {
                 StatusCode::NOT_FOUND
+            } else if crate::services::decision_service::is_invalid_params_error(&msg) {
+                // Caller-side argument validation failures (sentinel-tagged
+                // by parse_decision_tool_args) are client faults: 400, not
+                // 500 (which would imply a server fault and invite retries).
+                StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
@@ -1196,6 +1201,8 @@ async fn call_group_tool(
             // (review round 10, surface consistency).
             let status = if tool_call_error_is_not_found(&msg) {
                 StatusCode::NOT_FOUND
+            } else if tool_call_error_is_invalid_params(&msg) {
+                StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
@@ -1211,6 +1218,12 @@ fn tool_call_error_is_not_found(msg: &str) -> bool {
     msg.contains("[tool-not-found]")
         || (msg.contains("Tool '") && msg.contains("' not found"))
         || lower.contains("no such tool")
+}
+
+/// Whether a tool-call error is a caller-side argument validation failure
+/// (REST 400 semantics, mirroring the /mcp bridge's -32602 mapping).
+fn tool_call_error_is_invalid_params(msg: &str) -> bool {
+    crate::services::decision_service::is_invalid_params_error(msg)
 }
 
 // ────────────────────────────────────────────────────────────────────────────

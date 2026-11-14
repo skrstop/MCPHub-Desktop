@@ -1091,7 +1091,11 @@
       "clearConfirmMessage": "Esto elimina las {{count}} entradas del historial y no se puede deshacer. ¿Continuar?",
       "type_choice": "Elección",
       "type_score": "Puntuación",
-      "type_noul": "Sí/No"
+      "type_noul": "Sí/No",
+      "loadMore": "Cargar más",
+      "loadFailed": "Error al cargar los datos de decisión",
+      "retry": "Reintentar",
+      "clearConfirmAll": "Esto elimina TODO el historial de decisiones (incluidas las páginas no cargadas) y no se puede deshacer. ¿Continuar?"
     }
   },
   "logs": {
@@ -1832,7 +1836,8 @@
     "decisionModelSwitch": "Modelo de decisión",
     "decisionEnabledToast": "Soporte de decisión activado",
     "decisionDisabledToast": "Soporte de decisión desactivado",
-    "decisionModelSwitched": "Modelo de decisión cambiado"
+    "decisionModelSwitched": "Modelo de decisión cambiado",
+    "decisionModelMissing": "Los archivos del modelo seleccionado faltan en el disco: vuelva a descargarlo antes de decidir"
   },
   "mcpb": {
     "upload": "Subir",

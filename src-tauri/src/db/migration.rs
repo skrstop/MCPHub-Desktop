@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 39;
+pub const TARGET_VERSION: i64 = 40;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -282,6 +282,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         37 => migrate_v37(pool).await,
         38 => migrate_v38(pool).await,
         39 => migrate_v39(pool).await,
+        40 => migrate_v40(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -554,6 +555,21 @@ async fn migrate_v39(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     log::info!("[db] migration v39: created decision_history table");
+    Ok(())
+}
+
+/// v39 → v40: composite index for the decision-history ordering key.
+/// The v39 single-column index can't satisfy `ORDER BY created_at DESC,
+/// id DESC` (the id tiebreak forces a temp B-tree sort over the whole table
+/// on every page fetch and row-cap prune). The composite index turns both
+/// queries into index-range walks.
+async fn migrate_v40(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_decision_history_created_id ON decision_history(created_at DESC, id DESC)",
+    )
+    .execute(pool)
+    .await?;
+    log::info!("[db] migration v40: created decision_history composite ordering index");
     Ok(())
 }
 
@@ -1852,6 +1868,27 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
+        run_pending(&pool).await.expect("re-run migrations idempotent");
+    }
+
+    /// v40: decision_history 复合排序索引 (created_at DESC, id DESC) 存在，
+    /// 使历史分页与行数 prune 走索引范围扫描而非全表 temp B-tree 排序。
+    #[tokio::test]
+    async fn migrate_v40_creates_decision_history_composite_index() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        run_pending(&pool).await.expect("run migrations");
+        let sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_decision_history_created_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("composite index missing");
+        assert!(sql.contains("created_at"), "index sql missing created_at: {sql}");
+        assert!(sql.contains("id"), "index sql missing id tiebreak: {sql}");
+        // Idempotent re-run.
         run_pending(&pool).await.expect("re-run migrations idempotent");
     }
 

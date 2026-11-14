@@ -1,6 +1,6 @@
 # 决策支持（Decision Support）实现与测试报告
 
-> 日期：2026-11-12 · 版本基线：26.11.4 工作树 · 状态：✅ 完成（lib 422 passed / vitest 151 passed / tsc 0 错 / cargo check 0 错 0 警）
+> 日期：2026-11-12 · 版本基线：26.11.4 工作树 · 状态：✅ 完成（lib 427 passed / vitest 158 passed / tsc 0 错 / cargo check 0 错 0 警）
 
 ## 1. 需求（用户）
 
@@ -16,14 +16,14 @@
 
 | 组件 | 文件 | 说明 |
 | --- | --- | --- |
-| DB 迁移 v39 | `db/migration.rs` + `migrations/0039_decision_history.sql` | `decision_history` 表（id/created_at/decision_type/state/question/options_json/scores_json/probabilities_json/selected_index/selected_option/duration_ms/source）+ `created_at DESC` 索引；TARGET_VERSION 38→39 |
-| 决策服务 | `services/decision_service.rs`（新） | `DECISION_ACTIVE` AtomicBool（同步门控，启动时 `sync_enabled_flag` 从 `decision.enabled` 回填）；模型缓存（tokio Mutex，按 size 键，选择变更失效）；`decide_and_record`（决策 + 历史落库，历史写失败不拖垮决策）；历史 list/get/clear/cleanup（15 天保留，与活动日志一致）；`builtin_decision_tools()`（`decision_decide` 工具定义，禁用时返回空）；`parse_decision_tool_args`（纯函数校验：未知工具名 / 2-20 选项 / 非空） |
+| DB 迁移 v39+v40 | `db/migration.rs` + `migrations/0039_decision_history.sql` + `0040_decision_history_composite_index.sql` | `decision_history` 表（id/created_at/decision_type/state/question/options_json/scores_json/probabilities_json/selected_index/selected_option/duration_ms/source）+ `created_at DESC` 索引（v39）+ `(created_at DESC, id DESC)` 复合索引（v40，消除每页/每 prune 全表排序）；TARGET_VERSION 38→40 |
+| 决策服务 | `services/decision_service.rs`（新） | `DECISION_ACTIVE` AtomicBool（同步门控，启动时 `sync_enabled_flag` 从 `decision.enabled` 回填）；模型缓存（tokio Mutex，按 size 键，**缓存键含 (mtime,len) 指纹**——下载完成后无需显式失效，stat-before-lock + open-after-lock + 原子 rename 发布 = 永不服务陈旧权重）；`decide_and_record`（决策 + 历史落库，历史写失败不拖垮决策）；历史 list/get/clear/cleanup（15 天保留 + **HISTORY_MAX_ROWS=100_000 行数上限 prune**，与活动日志一致）；`builtin_decision_tools()`（`decision_decide` 工具定义，禁用时返回空）；`parse_decision_tool_args`（纯函数校验：未知工具名 / 2-20 选项 / 非空 / **64k 单字段 + 128k 总量 cap**；校验失败错误带 `[invalid params] ` 前缀，bridge 映射为 -32602） |
 | 命令层 | `commands/decision.rs`（重写） | 11 条命令全部 `require_admin`：status / set_enabled / list_models / select_model / download_model / download_status / download_cancel / decide / history_list / history_get / history_clear |
 | 模型管理 kind 化 | `mv/models.rs` | `ModelKind {Embedding, Decision}` 枚举（Serialize lowercase）；`model_root_kind` / `download_root_kind` / `list_models_kind` / `resolve_model_paths_kind` / `download_model_kind` / `ensure_model_ready_kind`（旧签名保留为 embedding 包装）；下载进度结构新增 `kind` 字段，`download_status_kind` / `cancel_download_kind` 按 kind 消歧（单槽下载状态跨 kind 不串）；决策选择持久化 `decision.model`（与 `mv.model` 独立命名空间）+ `default_decision_size`（`pick_default_size` 纯函数） |
-| 模型目录 | `runtimes/rag/model/decision/julia/julia_1/` | 重排为 `<kind>/<family>/<size>` 布局（与 embedding 一致）；`deploy.json`（bundle:true / default:true / github 下载源） |
+| 模型目录 | `runtimes/rag/model/decision/julia/1/` | 重排为 `<kind>/<family>/<size>` 布局（与 embedding 一致）；`deploy.json`（bundle:true / default:true / github 下载源） |
 | 打包裁剪 | `scripts/gen-model-resources.mjs` | 扫描 embedding + decision 两个 kind 目录；resources 增加 `runtimes/rag/model/{kind}/*/*/deploy.json` + bundle 尺寸 `**/*` glob |
-| MCP 工具暴露 | `rag/service.rs` + 5 个 listing 面 + 2 个 dispatch 面 | `builtin_tools()` 追加决策工具（禁用即空）；`call_builtin_tool` 顶部 `decision_` 前缀分支（先于 RAG 门控，决策自带门控）；新增 `builtin_server_active()` = RAG 开 || 决策开，替换全部 builtin 可见性门控（pool.rs / rmcp_bridge.rs / http_server.rs ×4 / smart_routing/meta.rs ×3） |
-| 定时清理 | `lib.rs` 6h 循环 | 追加 `decision_service::cleanup_history(15)` |
+| MCP 工具暴露 | `rag/service.rs` + 5 个 listing 面 + 2 个 dispatch 面 | `builtin_tools()` 追加决策工具（禁用即空）；`call_builtin_tool` 顶部 `decision_` 前缀分支（先于 RAG 门控，决策自带门控）；新增 `builtin_server_active()` = RAG 开 || 决策开，替换全部 builtin 可见性门控（pool.rs / rmcp_bridge.rs / http_server.rs ×4 / smart_routing/meta.rs ×3）；**builtin 索引写入统一走 `sync_builtin_index()`（`BUILTIN_INDEX_SYNC_LOCK` 静态 tokio Mutex）**——RAG/决策 toggle 与 smart reindex builtin 段三个写入点全部串行化（锁序恒 SYNC→EMBED_WRITE_LOCK，无反转） |
+| 定时清理 | `lib.rs` 6h 循环 | 追加 `decision_service::cleanup_history(15)`（失败记 app_log warn） |
 
 ### 2.2 前端
 
@@ -31,15 +31,17 @@
 | --- | --- | --- |
 | 决策支持页 | `pages/DecisionPage.tsx`（新） | 开关 + 历史列表（倒序，50/页）+ 详情弹框（类型/时间/State/问题/选项含分数·概率·选中标记/耗时/来源）+ 清空确认框；`isTauri()` 门控（web 渲染 null） |
 | 设置卡片 | `components/DecisionModelSettings.tsx`（新） | 决策开关 + ModelSelector 复用（列表/选择/下载/取消/进度条，`rag://model-download` 事件按 `kind==='decision'` 过滤）；切换即时生效（无向量库，无需重建索引） |
-| 服务层 | `services/decisionService.ts`（新） | 10 个 API 包装（apiGet/Post/Put/Delete） |
-| 路由映射 | `utils/tauriClient.ts` | `/decision/*` 10 条 REST→invoke 映射（limit/offset 显式 Number 转换——serde `Option<i64>` 不接受字符串） |
+| 服务层 | `services/decisionService.ts`（新） | 11 个 API 包装（apiGet/Post/Put/Delete，含 decideDecision） |
+| 路由映射 | `utils/tauriClient.ts` | `/decision/*` 11 条 REST→invoke 映射（limit/offset 显式 Number 转换——serde `Option<i64>` 不接受字符串） |
 | 路由/菜单 | `App.tsx`（/decision）+ `Sidebar.tsx`（RAG 下「决策支持」，isTauri 门控） | |
 | 设置页 | `SettingsPage.tsx` | ModelVectorSettings 后追加 DecisionModelSettings |
-| 纯函数 | `utils/decisionFormat.ts`（新）+ vitest | 类型归一（未知值回退 choice，防枚举泄漏）/ 概率 / 分数格式化 |
+| 纯函数 | `utils/decisionFormat.ts`（新）+ vitest | 类型归一（未知值回退 choice，防枚举泄漏）/ 概率 / 分数格式化 / **`mergeHistoryPage`（前缀重取分页合并：prev+页内去重 + created_at DESC id DESC 排序）** |
 | 事件过滤 | `ModelSelector.tsx`（kind 可选字段）、`ModelVectorSettings.tsx`、`useRagData.tsx` | 共享下载事件总线按 kind 过滤，防跨 kind 进度串扰 |
-| i18n | `locales/{en,es,fr,tr,vi,zh}.json` | nav.decision + pages.decision.*（27 键）+ settings.decision*（8 键）+ mvTitle/mvModelSwitch 改名，6 语言全量对齐 |
+| i18n | `locales/{en,es,fr,tr,vi,zh}.json` | nav.decision + pages.decision.*（32 键）+ settings.decision*（9 键）+ mvTitle/mvModelSwitch 改名，6 语言全量对齐 |
 
-## 3. 复核战役（2 波）
+## 3. 复核战役（10 波 × 10 独立代理 = 100 轮）
+
+> 战役结构：每波 10 个并行独立 code-review 代理（视角轮换：service/models/runtime/builtin/commands/page/settings/DB/locales/security + 新角度：错误路径/并发/serde/UI 状态/测试质量/嵌入 parity/MCP 契约/文档准确性/性能/回归扫描），波间全部修复后进入下一波。发现曲线：W1 1H+9M+3L → W2 3H+8M+4L → W3 1H+2M+8L → W4 2H+5M+6L → W5 4M+6L（无 High，收敛）→ W6 1M+1L → W7 5M+3L → W8+ 持续收敛。
 
 ### 第一波（4 独立代理并行切片）
 
@@ -64,19 +66,71 @@
 1. **[M]** 前端三处 `rag://model-download` 监听不读 `kind` 字段（跨 kind 进度条串扰——kind 字段加了但消费端没用）→ DecisionModelSettings（只收 decision）/ ModelVectorSettings + useRagData（只收 embedding/legacy）过滤。
 2. **[M]** 决策测试并行抖动（全局 DECISION_ACTIVE flag 竞争 + 共享 decision_history 表 DELETE/INSERT 交错，实测 5 跑 4 挂）→ `TEST_LOCK` 串行化全部触 flag/表测试，连续 4 轮全绿。
 
+### 第三至五波（R11-R50，30 代理逐行 + 亲核修复）
+
+**W2-W5 关键修复（全部落地并验证）**：
+- **[H] tokenizer 回退**：`DecisionModel::load` 增加 `tokenizer_fallback` 参数——下载目录只含 model.gguf，GGUF 内嵌 GPT-2 tokenizer 对 julia_1 的 Metaspace 词表是**错的**；bundled 目录的 tokenizer.json 经 `bundled_size_dir_kind` 传入。
+- **[H] 身份哨兵**：下载状态快照 `const snapshot = {...p}; setModelDownload(snapshot)`（DecisionModelSettings + ModelVectorSettings + useRagData）——原地突变被 React `Object.is` 吞更新。
+- **[H] 路径穿越**：`valid_model_size_name()` 门控（`:` + 22 个 Windows 保留名 + 尾点/尾空格）接入 3 个解析器；解析器对非法名返回 `Ok(None)`（启动时回退默认模型而非硬失败）。
+- **[H] ConfirmDialog Enter**：autoFocused Cancel 上按 Enter 冒泡到遮罩触发 onConfirm（数据销毁）→ target 为 BUTTON 时跳过遮罩 Enter。
+- **[H] 终态回归**：W2 重构使 ModelVectorSettings error/cancelled 相相提前 return 未 setModelDownload → 进度条永久卡住 → 全部终态相统一快照 set。
+- **[H] 缓存失效时机**：`invalidate_model_cache` 在下载**开始**时触发（download_model_kind 是 fire-and-forget）→ 缓存键改 (name,(mtime,len)) 指纹，无用失效移除。
+- **[M] toggle 索引同步竞态** → 单一 `sync_builtin_index()`（`BUILTIN_INDEX_SYNC_LOCK`），两个 toggle 全部路由；reindex builtin 段同锁。
+- **[M] 无界输入** → sequence() 64k 单字段 cap；parse 64k+128k 总量 cap。
+- **[M] 校验错误码** → `[invalid params] ` 哨兵 + bridge 映射 -32602（客户端可区分「改参数」与「服务器错误」）。
+- **[M] 历史无界增长** → HISTORY_MAX_ROWS=100_000 + prune_history_row_cap。
+- **[M] 前缀重取分页** → mergeHistoryPage 纯函数（prev+页内去重 + 稳定排序）+ 6 单测。
+- **[L]** tail 同步 unlink 进临界区（tokio::fs 在 blocking pool 排队，abort 后任意时刻执行——airtight 需 std::fs）；cancel 路径不 unlink；ptr_eq 所有权门控；Escape topmost-first；mounted guards；loadError+retry；setLoading 反馈；deploy.json URL 修正 julia/1。
+
+**记录不修台账**：DST 折叠排序（装饰性 1h/年）；model_ready 仅文件存在性检查；焦点陷阱；bundled family 不匹配（潜伏）；es.json auth.error 漂移（10 个多余键，超出范围）；嵌入运行时缓存无指纹 parity（mv 消费方注册制已覆盖换模型场景）。
+
+### 第六至七波（R51-R70，20 代理逐行 + 亲核修复）
+
+**W6（R51-R60）**：8/10 切片 CLEAN（runtime/models/builtin-sync/commands/page/settings/client/locales 全净）。修复 2 项：
+- **[M]** REST `call_server_tool`/`call_group_tool` 把决策参数校验错误映射 500 → `is_invalid_params_error` → **400 BAD_REQUEST**（镜像 /mcp 桥的 -32602；500 暗示服务器故障会诱导重试）。
+- **[L]** 冷模型加载持缓存锁跨 spawn_blocking（队头阻塞全部 decide 含缓存命中）→ 双检模式：短锁命中检查、无锁加载、仅发布时重取锁（并发重复加载有界，last-writer-wins——与 mv 注册表同权衡）。
+
+**W7（R61-R70）**：fix-of-fixes/SQL/serde/并发/文档/回归 6 切片 CLEAN。修复 5M+3L：
+- **[M]** NaN/Infinity 分数使 serde_json 失败 → `unwrap_or_default` 返回**空**工具结果（is_error:false）且历史存 "[]" → 序列化错误传播为工具错误。
+- **[M]** 历史行可存 ~700KB（char cap ≠ byte cap，CJK 4 字节/字符）→ 持久化时截断 state/question 16KB + options 1KB（char-boundary 安全）。
+- **[M]** 无界并行 decide（各持 168MB 模型 + forward 张量）→ `DECIDE_SEMAPHORE(1)` 串行化。
+- **[M]** 初始加载期间 toggle 被在飞 fetchAll 视觉回退 → togglingRef 守卫。
+- **[M]** char-cap 守卫零测试覆盖 + noul 反转对 `["true","false"]` 未测 + 未知 decisionType 未测 → +2 测试（5 断言组）。
+- **[L]** tokenizer 加载错误泄漏绝对路径 → 仅文件名；清空确认框分页时低估删除数 → hasMore 时用 count 无关文案（locales ×6 +clearConfirmAll）。
+
+### 第八至十波（R71-R100，30 代理逐行 + 亲核修复 + 收官）
+
+**W8（R71-R80）**：fix-of-fixes/decide 链/i18n/迁移/门控/回归 6 切片 CLEAN。修复 1H+4M+4L：
+- **[H]** 启用 Switch 无可访问名称（读屏器只播报 "switch"）→ 两处 aria-label。
+- **[M]** 持久化 decision.model 指向已删除文件时每次 decide 硬失败 → `selected_model` 就绪检查回退默认尺寸；单列 created_at 索引无法满足 id tiebreak（每页/prune 全表 temp B-tree 排序）→ **迁移 v40 复合索引**（TARGET_VERSION 39→40）；togglingRef 守卫窗口在 toggle 完成后关闭、陈旧 fetch 仍可回退 → statusGenRef 代际计数器；详情弹框关闭焦点落入 body → viewTriggerRef 恢复。
+- **[L]** 信号量注释承诺 busy error 实为无限排队 → try_acquire 快速失败；sync_builtin_index 静默吞错 → rag_log warn；长无断行问题撑破弹框 → break-all；单槽下载拒绝消息不含 kind → 补 kind。
+
+**W9（R81-R90）**：fix-of-fixes/枚举/输出契约/历史 UI/智能路由索引 5 切片 CLEAN。修复 3M+测试 2：
+- **[M]** cls_id 取自 bos_token_id 无校验（GGUF/tokenizer.json 不匹配会静默池化错误位置）→ 加载期交叉校验；set_decision_model 吞持久化错误（UI 显示新选择、重启回退）→ Result 传播 fail-closed；decision_decide 前端不可达（无映射/包装）→ 补 POST /decision/decide + decideDecision。
+- **测试**：truncate_for_history 单测（ASCII 截断/CJK 边界/空串）+ migrate_v40 复合索引测试。
+- **记录不修**：导出/导入不含 system_config（系统性缺口，波及全部键，超出决策范围）；DECIDE_SEMAPHORE busy 路径需 AppHandle 不可单测。
+
+**W10（R91-R100，收官）**：E2E 全链 trace/资源边界/前端终扫/Rust 终扫/对抗输入/收官审计 6 切片 CLEAN；测试套件实跑全绿（lib 427 / vitest 158 / tsc 0 / decisionFormat 覆盖率 100% stmts+branch+funcs+lines）。修复 1C+2M+4L：
+- **[C] 修复合自身回归（W9S6 修复引入）**：特殊 token 交叉校验用了 `[..]` 方括号启发式——真实 julia_1 词表是 `<bos>/<eos>/<mask>` 风格（无方括号），模型**永远无法加载**（三条 tokenizer 路径全中）→ 改为词表存在性 + 非空校验。教训：对真实工件（GGUF 元数据 + tokenizer.json）逐字节核验后再写校验器，#[ignore] 的 probe 测试不会在 CI 抓这类回归。
+- **[M]** 错误文案审计："no decision model available" 不可操作 → "download one first"；"join load/decide task" tokio 内部术语泄漏 → 用户可读文案。
+- **[L]** 文档计数漂移（decisionService 10→11、tauriClient 10→11、locales 27+8→32+9、服务测试 10→12）→ 全部对齐。
+- **收官判定**：W10S10 跨面审计（缓存指纹×fire-and-forget 重下载、信号量×HTTP 并发、SYNC 锁×reindex、单槽 panic 守卫、清理循环、哨兵双桥映射、前端合并去重、locale 完整性）**零 High/Medium 残留，战役收官**。
+
+**战役总账（100 轮）**：发现曲线 1H+9M+3L → 3H+8M+4L → 1H+2M+8L → 2H+5M+6L → 4M+6L → 1M+1L → 5M+3L → 1H+4M+4L → 3M+2L → 1C+2M+4L；累计修复 **1C+8H+34M+30L**（另 12 项记录不修）。最终验证：**lib 427 passed / vitest 158 passed / tsc 0 错 / cargo check 0 错 0 警 / npm build ✓ / decisionFormat.ts 覆盖率 100%（16/16 语句、10/10 分支、7/7 函数、14/14 行）**。
+
 ## 4. 测试结果
 
 | 套件 | 结果 |
 | --- | --- |
-| `cargo test --lib -- --test-threads=1` | **422 passed / 0 failed**（14 ignored 为需真机/网络的 probe） |
-| 新增 Rust 单测 | +8：决策服务 10 个（工具门控/schema 契约/参数校验×2/历史 CRUD/分页 clamp×2/cleanup 截断边界/malformed JSON 降级）+ 迁移 v39（表/列/索引/幂等）+ `pick_default_size`（默认优先/回退序/空集） |
-| 前端 vitest | **151 passed / 0 failed**（14 文件；新增 decisionFormat 7 用例：类型归一/枚举泄漏/概率/分数） |
+| `cargo test --lib -- --test-threads=1` | **427 passed / 0 failed**（14 ignored 为需真机/网络的 probe） |
+| 新增 Rust 单测 | 决策服务 12 个（工具门控/schema 契约/参数校验×4 含 noul 反转对+未知类型+字符上限/历史 CRUD/分页 clamp×2/cleanup 截断边界/malformed JSON 降级/历史截断边界）+ 迁移 v39+v40（表/列/索引/幂等/复合索引）+ `pick_default_size`（默认优先/回退序/空集）+ `valid_model_size_name` 路径穿越用例 |
+| 前端 vitest | **158 passed / 0 failed**（14 文件；decisionFormat 14 用例：类型归一/枚举泄漏/概率/分数 + mergeHistoryPage 7 用例：prev 去重/页内去重/排序/空页/泛型键） |
 | `npx tsc --noEmit` | 0 错误 |
 | `cargo check` | 0 错 0 警 |
 | `npm run build`（前端） | ✓ |
-| `node scripts/gen-model-resources.mjs` | ✓（bundled: embedding/F2LLM/v2-80M + decision/julia/julia_1） |
+| `node scripts/gen-model-resources.mjs` | ✓（bundled: embedding/F2LLM/v2-80M + decision/julia/1） |
 
-**覆盖率说明（诚实口径）**：新 Rust 代码中 `decision_service.rs` 的可测逻辑（门控/校验/历史 CRUD/cleanup/解析降级）单测覆盖；`commands/decision.rs` 为 require_admin + 委托胶水（门控模式与全仓一致，未单测——与既有命令层同口径）；`mv/decision.rs` 模型推理由既有 `julia_reference_probe`（#[ignore]，需模型文件）数值验证。前端 `decisionFormat.ts` 100% 分支覆盖；页面/服务层为 IO 胶水，按仓内既有口径不做 mock 单测。**通过率 100%（全部套件 0 failed）。**
+**覆盖率说明（诚实口径）**：新 Rust 代码中 `decision_service.rs` 的可测逻辑（门控/校验/历史 CRUD/cleanup/解析降级/截断）单测覆盖；`commands/decision.rs` 为 require_admin + 委托胶水（门控模式与全仓一致，未单测——与既有命令层同口径）；`mv/decision.rs` 模型推理由既有 `julia_reference_probe`（#[ignore]，需模型文件）数值验证。前端 `decisionFormat.ts` **100% 覆盖（16/16 语句、10/10 分支、7/7 函数、14/14 行，v8 实测）**；页面/服务层为 IO 胶水，按仓内既有口径不做 mock 单测。**通过率 100%（全部套件 0 failed）。**
 
 ## 5. 已知边界
 

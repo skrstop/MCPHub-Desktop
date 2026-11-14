@@ -83,7 +83,12 @@ const ModelVectorSettings: React.FC = () => {
       // 后端内存中，切回来时查询恢复）。
       if (cur) {
         const p = await modelDownloadStatus(cur);
-        if (mounted.current && p && p.phase === 'downloading') setModelDownload(p);
+        if (!mounted.current) return;
+        // Same stale-restore guard as DecisionModelSettings: never overwrite
+        // a terminal snapshot with an in-flight "downloading" read.
+        if (p && p.phase === 'downloading') {
+          setModelDownload((c) => (c && c.phase !== 'downloading' ? c : p));
+        }
       }
     } catch (e) {
       console.warn('[mv] failed to load model/vector status', e);
@@ -108,15 +113,26 @@ const ModelVectorSettings: React.FC = () => {
       // Shared event bus: ignore decision-kind downloads (absent kind =
       // legacy payload from before the field existed → embedding).
       if (p.kind === 'decision') return;
-      setModelDownload({ ...p });
       if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
+        // Terminal phases MUST reach state (the render shows the error/
+        // cancelled message and ModelSelector's bar keys off phase) — set
+        // the snapshot for all three, with the identity-guarded timer only
+        // for done.
+        const snapshot = { ...p };
+        setModelDownload(snapshot);
         void fetchAll();
         if (p.phase === 'done') {
+          // Identity-guarded clear: a new download within the window keeps
+          // its own progress bar. The sentinel must be the SAME object put
+          // into state (a copy of p, not p itself).
           setTimeout(() => {
-            if (mounted.current) setModelDownload(null);
+            if (!mounted.current) return;
+            setModelDownload((c) => (c === snapshot ? null : c));
           }, 1500);
         }
+        return;
       }
+      setModelDownload({ ...p });
     });
     return () => {
       mounted.current = false;

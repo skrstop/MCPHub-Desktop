@@ -44,10 +44,11 @@ pub async fn decision_status(
 #[tauri::command]
 pub async fn decision_set_enabled(
     session: State<'_, crate::commands::auth::SessionState>,
+    app: AppHandle,
     enabled: bool,
 ) -> Result<(), String> {
     crate::commands::config::require_admin(&session).await?;
-    crate::services::decision_service::set_enabled(enabled)
+    crate::services::decision_service::set_enabled(&app, enabled)
         .await
         .map_err(|e| e.to_string())
 }
@@ -73,7 +74,9 @@ pub async fn decision_select_model(
     crate::commands::config::require_admin(&session).await?;
     crate::mv::models::ensure_model_ready_kind(&app, ModelKind::Decision, &model)
         .map_err(|e| e.to_string())?;
-    crate::mv::models::set_decision_model(&model).await;
+    crate::mv::models::set_decision_model(&model)
+        .await
+        .map_err(|e| e.to_string())?;
     crate::services::decision_service::invalidate_model_cache().await;
     Ok(())
 }
@@ -95,6 +98,10 @@ pub async fn decision_download_model(
     })
     .await
     .map_err(|e| format!("join download task: {e}"))?
+    // Note: download_model_kind is fire-and-forget (the GGUF is replaced
+    // asynchronously by the background task), so there is deliberately NO
+    // cache invalidation here — cached_model's file fingerprint (mtime+len)
+    // detects the replacement on the next decide.
 }
 
 /// Download progress snapshot for a decision model size.

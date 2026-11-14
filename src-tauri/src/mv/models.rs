@@ -72,7 +72,12 @@ pub(crate) fn model_root_kind(app: &AppHandle, kind: ModelKind) -> Result<PathBu
 pub(crate) fn download_root_kind(app: &AppHandle, kind: ModelKind) -> Result<PathBuf> {
     let base = data_dir(app)?.join("models");
     let root = base.join(kind.dir_name());
-    if base.exists() {
+    // Legacy flat-dir migration (pre-`embedding` downloads lived directly
+    // under models/<family>) is an EMBEDDING-era concern: legacy dirs can
+    // only be embedding models, so run the rename sweep only for the
+    // embedding kind — under the decision root it would strand embedding
+    // families inside models/decision/.
+    if kind == ModelKind::Embedding && base.exists() {
         if let Err(e) = std::fs::create_dir_all(&root) {
             log::warn!("create download model dir {}: {}", root.display(), e);
         }
@@ -225,13 +230,17 @@ pub fn list_models_kind(app: &AppHandle, kind: ModelKind) -> Result<Vec<RagModel
         return Ok(out);
     }
     for fam in std::fs::read_dir(&root)? {
-        let fam_path = fam?.path();
+        // Skip unreadable entries instead of failing the whole list (same
+        // as the other family scans).
+        let Ok(fam_entry) = fam else { continue };
+        let fam_path = fam_entry.path();
         if !fam_path.is_dir() {
             continue;
         }
         let fam_name = fam_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         for sz in std::fs::read_dir(&fam_path)? {
-            let sz_path = sz?.path();
+            let Ok(sz_entry) = sz else { continue };
+            let sz_path = sz_entry.path();
             if !sz_path.is_dir() {
                 continue;
             }
@@ -299,6 +308,65 @@ pub fn list_models_kind(app: &AppHandle, kind: ModelKind) -> Result<Vec<RagModel
 /// bundled size dir if it has a model file. Returns `None` if the size isn't
 /// found or not ready (download.url only). Each size dir is self-contained
 /// (holds a *.gguf file + tokenizer.json + config.json).
+/// Validate a user-supplied model size name before it is joined into any
+/// filesystem path: rejects empty, ".", "..", and any path separators. The
+/// same predicate `DecisionModel::resolve_model_path` enforces, applied at
+/// the shared resolvers so EVERY kind's path (select/status/download) is
+/// guarded — an unvalidated `../../embedding/...` size would let a decision
+/// selection resolve into (or a download overwrite) another kind's model.
+pub(crate) fn valid_model_size_name(size: &str) -> bool {
+    if size.is_empty()
+        || size == "."
+        || size.contains("..")
+        || size.contains('/')
+        || size.contains('\\')
+        // Windows: a mid-path drive specifier ("C:evil") re-anchors the
+        // path, and "name:ads" is NTFS alternate-data-stream syntax.
+        || size.contains(':')
+    {
+        return false;
+    }
+    // Windows: trailing dots/spaces are stripped by Win32 path
+    // normalization; reserved device names map to devices regardless of
+    // the intended directory.
+    if size.ends_with('.') || size.ends_with(' ') {
+        return false;
+    }
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    !RESERVED.iter().any(|r| size.eq_ignore_ascii_case(r))
+}
+
+/// The bundled size dir for `size` (regardless of any downloaded copy) —
+/// used to source aux files (e.g. tokenizer.json) that the download
+/// machinery does not write into downloaded dirs.
+pub(crate) fn bundled_size_dir_kind(
+    app: &AppHandle,
+    kind: ModelKind,
+    size: &str,
+) -> Option<PathBuf> {
+    if !valid_model_size_name(size) {
+        return None;
+    }
+    let root = model_root_kind(app, kind).ok()?;
+    for fam in std::fs::read_dir(&root).ok()? {
+        // A single unreadable entry (concurrent removal, transient EPERM)
+        // must not truncate the whole family scan — skip it.
+        let Ok(fam_path) = fam else { continue };
+        let fam_path = fam_path.path();
+        if !fam_path.is_dir() {
+            continue;
+        }
+        let bundled = fam_path.join(size);
+        if bundled.is_dir() {
+            return Some(bundled);
+        }
+    }
+    None
+}
+
 pub(crate) fn resolve_model_paths(app: &AppHandle, size: &str) -> Result<Option<PathBuf>> {
     resolve_model_paths_kind(app, ModelKind::Embedding, size)
 }
@@ -308,10 +376,24 @@ pub(crate) fn resolve_model_paths_kind(
     kind: ModelKind,
     size: &str,
 ) -> Result<Option<PathBuf>> {
+    // An invalid (traversal-shaped) name resolves to None — "not ready" —
+    // rather than Err: the persisted selection flows through decide_model,
+    // whose Err branch is reserved for transient fs errors and would
+    // otherwise hard-fail the whole mv runtime at startup instead of
+    // falling back to the bundled default. Callers that need a loud
+    // rejection (select/download) get it from ensure_model_ready_kind's
+    // not-ready error or find_download_source's own gate.
+    if !valid_model_size_name(size) {
+        return Ok(None);
+    }
     let root = model_root_kind(app, kind)?;
     let dl_root = download_root_kind(app, kind)?;
     for fam in std::fs::read_dir(&root)? {
-        let fam_path = fam?.path();
+        // A single unreadable entry (concurrent removal, transient EPERM)
+        // must not fail the whole scan — skip it (same as
+        // bundled_size_dir_kind).
+        let Ok(entry) = fam else { continue };
+        let fam_path = entry.path();
         if !fam_path.is_dir() {
             continue;
         }
@@ -446,12 +528,19 @@ pub(crate) fn pick_default_size(models: &[RagModelInfo]) -> Option<String> {
         .map(|m| m.size.clone())
 }
 
-/// Persist `decision.model = <size>` (deep-merge).
-pub async fn set_decision_model(size: &str) {
+/// Persist `decision.model = <size>` (deep-merge). Propagates persist
+/// failures (fail-closed, mirroring `set_enabled`) — a silently-swallowed
+/// error would show the new selection in the UI while the next restart
+/// reverts it.
+pub async fn set_decision_model(size: &str) -> Result<()> {
     let patch = json!({ "decision": { "model": size } });
-    if let Err(e) = crate::services::config_service::update(&patch).await {
-        rag_log("warn", format!("failed to persist decision.model: {}", e));
-    }
+    crate::services::config_service::update(&patch)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            rag_log("warn", format!("failed to persist decision.model: {}", e));
+            anyhow::anyhow!("failed to persist decision model selection: {}", e)
+        })
 }
 
 /// Validate that `size` resolves to a ready model dir.
@@ -853,6 +942,7 @@ async fn download_lfs_object(
 
 pub(crate) async fn download_from_git(
     app: &AppHandle,
+    kind: ModelKind,
     size: &str,
     source_name: &str,
     git: &GitModelSource,
@@ -887,7 +977,7 @@ pub(crate) async fn download_from_git(
             match st.as_ref() {
                 Some(DownloadState {
                     progress: Some(p), ..
-                }) if p.size == size => Some(p.clone()),
+                }) if p.size == size && p.kind == kind => Some(p.clone()),
                 _ => None,
             }
         };
@@ -917,6 +1007,7 @@ pub(crate) async fn download_from_git(
     // them into the shared download state while the blocking clone runs.
     let pump_app = app.clone();
     let pump_size = size.to_string();
+    let pump_kind = kind;
     let pump_counters = counters.clone();
     let pump_cancel = cancel.clone();
     let pump_interrupt = interrupt.clone();
@@ -950,7 +1041,12 @@ pub(crate) async fn download_from_git(
                         // indistinguishable from the old slot — one stale
                         // progress write can land before the new pump takes
                         // over; self-heals on the next tick.
-                        if p.size == pump_size && p.phase == "downloading" {
+                        // Kind-aware (like every other slot match): a
+                        // cross-kind download of the same size name may
+                        // legally occupy the slot inside this pump's 200ms
+                        // wake window — never write into (or emit) that
+                        // snapshot from this pump.
+                        if p.size == pump_size && p.kind == pump_kind && p.phase == "downloading" {
                             p.downloaded = received;
                             p.speed = speed;
                             p.percent = 0;
@@ -960,7 +1056,7 @@ pub(crate) async fn download_from_git(
                     match st.as_ref() {
                         Some(DownloadState {
                             progress: Some(p), ..
-                        }) if p.size == pump_size => Some(p.clone()),
+                        }) if p.size == pump_size && p.kind == pump_kind => Some(p.clone()),
                         _ => None,
                     }
                 };
@@ -1015,7 +1111,7 @@ pub(crate) async fn download_from_git(
                 {
                     let mut st = state_lock();
                     if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                        if p.size == size2 {
+                        if p.size == size2 && p.kind == kind {
                             p.downloaded = downloaded;
                             p.total = total;
                             p.speed = speed;
@@ -1029,7 +1125,7 @@ pub(crate) async fn download_from_git(
                     match st.as_ref() {
                         Some(DownloadState {
                             progress: Some(p), ..
-                        }) if p.size == size2 => Some(p.clone()),
+                        }) if p.size == size2 && p.kind == kind => Some(p.clone()),
                         _ => None,
                     }
                 };
@@ -1059,7 +1155,7 @@ pub(crate) async fn download_from_git(
     {
         let mut st = state_lock();
         if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-            if p.size == size {
+            if p.size == size && p.kind == kind {
                 p.total = total;
                 p.downloaded = 0;
                 p.percent = 0;
@@ -1091,7 +1187,7 @@ pub(crate) async fn download_from_git(
             {
                 let mut st = state_lock();
                 if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                    if p.size == size {
+                    if p.size == size && p.kind == kind {
                         p.downloaded = copied;
                         p.speed = speed;
                         p.percent = pct(copied, total);
@@ -1119,9 +1215,15 @@ fn find_download_source(
     kind: ModelKind,
     size: &str,
 ) -> Result<(String, PathBuf, Vec<(String, String)>)> {
+    if !valid_model_size_name(size) {
+        return Err(anyhow!("invalid model size name '{size}'"));
+    }
     let root = model_root_kind(app, kind)?;
     for fam in std::fs::read_dir(&root)? {
-        let fam_path = fam?.path();
+        // Skip unreadable entries instead of failing the whole scan (same
+        // as resolve_model_paths_kind / bundled_size_dir_kind).
+        let Ok(entry) = fam else { continue };
+        let fam_path = entry.path();
         if !fam_path.is_dir() {
             continue;
         }
@@ -1183,9 +1285,15 @@ pub fn download_model_kind(
             if p.phase == "downloading" {
                 // Single-slot download state: a second (different-size)
                 // download would orphan the running task's cancel flag,
-                // handle and progress — reject instead.
+                // handle and progress — reject instead. Name the kind too:
+                // both kinds can hold the same size name, so a bare size
+                // would read as the caller's own model.
                 return Err(anyhow!(
-                    "another model download ('{}') is in progress",
+                    "another {} model download ('{}') is in progress",
+                    match p.kind {
+                        ModelKind::Embedding => "embedding",
+                        ModelKind::Decision => "decision",
+                    },
                     p.size
                 ));
             }
@@ -1249,7 +1357,7 @@ pub fn download_model_kind(
                             .and_then(|ds| ds.temp_path.clone());
                         if let Some(ds) = st.as_mut() {
                             if let Some(p) = ds.progress.as_mut() {
-                                if p.size == size2 && p.phase == "downloading" {
+                                if p.size == size2 && p.kind == kind && p.phase == "downloading" {
                                     p.phase = "error".into();
                                     p.message = Some("internal error".into());
                                 }
@@ -1270,7 +1378,7 @@ pub fn download_model_kind(
                             match st.as_ref() {
                                 Some(DownloadState {
                                     progress: Some(p), ..
-                                }) if p.size == size2 => Some(p.clone()),
+                                }) if p.size == size2 && p.kind == kind => Some(p.clone()),
                                 _ => None,
                             }
                         };
@@ -1341,7 +1449,11 @@ async fn run_download(
     let set_phase = |phase: &str, msg: Option<String>| {
         let mut st = state_lock();
         if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-            if p.size == size {
+            // Kind-aware: the slot may already hold a DIFFERENT kind's
+            // download that reused it after this task wrote a terminal phase
+            // (the round-8 guard only blocks starts while "downloading") —
+            // never touch that snapshot from this task's tail.
+            if p.size == size && p.kind == kind {
                 p.phase = phase.to_string();
                 p.message = msg;
             }
@@ -1353,7 +1465,7 @@ async fn run_download(
             match st.as_ref() {
                 Some(DownloadState {
                     progress: Some(p), ..
-                }) if p.size == size => Some(p.clone()),
+                }) if p.size == size && p.kind == kind => Some(p.clone()),
                 _ => None,
             }
         };
@@ -1375,7 +1487,7 @@ async fn run_download(
         {
             let mut st = state_lock();
             if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                if p.size == size {
+                if p.size == size && p.kind == kind {
                     p.message = Some(source_name.clone());
                     p.downloaded = 0;
                     p.total = 0;
@@ -1391,7 +1503,7 @@ async fn run_download(
         // clone + copy the worktree's model.gguf into the shared temp slot.
         if let Some(git) = parse_git_source(url) {
             let result =
-                download_from_git(&app, &size, source_name, &git, &temp_path, cancel.clone())
+                download_from_git(&app, kind, &size, source_name, &git, &temp_path, cancel.clone())
                     .await;
             match result {
                 Ok(copied) => {
@@ -1411,7 +1523,7 @@ async fn run_download(
                                     progress: Some(p), ..
                                 }) = st.as_mut()
                                 {
-                                    if p.size == size {
+                                    if p.size == size && p.kind == kind {
                                         p.downloaded = copied;
                                         p.total = copied;
                                         p.percent = 100;
@@ -1476,7 +1588,7 @@ async fn run_download(
         {
             let mut st = state_lock();
             if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                if p.size == size {
+                if p.size == size && p.kind == kind {
                     p.total = total;
                 }
             }
@@ -1509,7 +1621,7 @@ async fn run_download(
             if total > 0 {
                 let mut st = state_lock();
                 if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                    if p.size == size {
+                    if p.size == size && p.kind == kind {
                         p.total = total;
                     }
                 }
@@ -1550,7 +1662,7 @@ async fn run_download(
                     {
                         let mut st = state_lock();
                         if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                            if p.size == size {
+                            if p.size == size && p.kind == kind {
                                 p.downloaded = downloaded;
                                 p.speed = speed;
                                 p.eta = eta;
@@ -1593,7 +1705,7 @@ async fn run_download(
                         {
                             let mut st = state_lock();
                             if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
-                                if p.size == size {
+                                if p.size == size && p.kind == kind {
                                     p.downloaded = downloaded;
                                     p.total = total.max(downloaded);
                                     p.percent = 100;
@@ -1628,28 +1740,107 @@ async fn run_download(
         }
     }
 
-    // Failure / cancellation: clean the temp file so no partial model lingers.
-    let _ = tokio::fs::remove_file(&temp_path).await;
+    // Failure / cancellation tail. Ownership gate: after
+    // cancel_download_kind releases the slot, a same-size re-download can
+    // start immediately and reuse the byte-identical temp path — size/kind
+    // comparisons would match the NEW task's slot too. The slot's cancel
+    // flag Arc is the only reliable identity token (each download mints a
+    // fresh one): a stale tail must not delete the new task's temp file or
+    // write terminal phases into its snapshot. Every check-and-write below
+    // happens under ONE state_lock() critical section (no awaits inside),
+    // so no interleaving can slip between the ownership decision and the
+    // write it guards.
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        set_phase("cancelled", None);
-        emit_current(&app);
+        // Cancel path: NO temp unlink here at all — cancel_download_kind
+        // already removed the temp synchronously, and unlinking from this
+        // (possibly stale) tail could delete a successor download's
+        // byte-identical temp file (the slot admits a re-download while
+        // this tail is in flight).
+        let snapshot = {
+            let mut st = state_lock();
+            let owns_slot = st
+                .as_ref()
+                .and_then(|ds| ds.cancel.as_ref())
+                .map(|c| std::sync::Arc::ptr_eq(c, &cancel))
+                .unwrap_or(false);
+            if !owns_slot {
+                None
+            } else {
+                if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
+                    if p.size == size && p.kind == kind {
+                        p.phase = "cancelled".into();
+                        p.message = None;
+                        p.speed = 0;
+                        p.eta = 0;
+                    }
+                }
+                match st.as_ref() {
+                    Some(DownloadState { progress: Some(p), .. })
+                        if p.size == size && p.kind == kind =>
+                    {
+                        Some(p.clone())
+                    }
+                    _ => None,
+                }
+            }
+        };
+        if let Some(p) = snapshot {
+            emit_model_download(&app, &p);
+        }
         rag_log("info", format!("model '{}' download cancelled", size));
         return Ok(());
     }
+    // Error path: the phase is still "downloading", so the round-8 start
+    // guard blocks any successor from taking the slot — the ownership check
+    // is stable. The unlink is SYNCHRONOUS (std::fs): a tokio::fs unlink
+    // would queue the syscall on the blocking pool where it could execute
+    // AFTER a cancel+successor re-created the temp file at the same path.
+    // A single unlink is a microsecond metadata op — no spawn_blocking
+    // ceremony needed.
     let err = last_err.unwrap_or_else(|| anyhow!("download failed"));
-    // A concurrent cancel_download may have already written "cancelled"
-    // (abort only prevents future polls; the current poll can still finish
-    // and reach here) — never overwrite that terminal state with "error".
-    let cancelled_already = {
-        let st = state_lock();
-        matches!(
-            st.as_ref().and_then(|ds| ds.progress.as_ref()),
-            Some(p) if p.size == size && p.phase == "cancelled"
-        )
+    let snapshot = {
+        let mut st = state_lock();
+        let owns_slot = st
+            .as_ref()
+            .and_then(|ds| ds.cancel.as_ref())
+            .map(|c| std::sync::Arc::ptr_eq(c, &cancel))
+            .unwrap_or(false);
+        if !owns_slot {
+            None
+        } else {
+            // A concurrent cancel_download may have landed between the
+            // sources loop and here and written "cancelled" — never
+            // overwrite that terminal state with "error".
+            let cancelled_already = matches!(
+                st.as_ref().and_then(|ds| ds.progress.as_ref()),
+                Some(p) if p.size == size && p.kind == kind && p.phase == "cancelled"
+            );
+            if !cancelled_already {
+                // Unlink INSIDE the critical section: the phase write below
+                // is what admits a successor (round-8 guard), so performing
+                // the removal before it makes a successor's temp file
+                // un-reachable for this unlink — airtight, no post-lock
+                // race window.
+                let _ = std::fs::remove_file(&temp_path);
+                if let Some(DownloadState { progress: Some(p), .. }) = st.as_mut() {
+                    if p.size == size && p.kind == kind {
+                        p.phase = "error".into();
+                        p.message = Some(err.to_string());
+                    }
+                }
+            }
+            match st.as_ref() {
+                Some(DownloadState { progress: Some(p), .. })
+                    if p.size == size && p.kind == kind =>
+                {
+                    Some(p.clone())
+                }
+                _ => None,
+            }
+        }
     };
-    if !cancelled_already {
-        set_phase("error", Some(err.to_string()));
-        emit_current(&app);
+    if let Some(p) = snapshot {
+        emit_model_download(&app, &p);
     }
     rag_log("error", format!("model '{}' download failed: {}", size, err));
     Err(err)
@@ -2210,6 +2401,35 @@ mod publish_and_truncation_tests {
         // nothing ready → None
         assert_eq!(pick_default_size(&[mk_model("a", false, true)]), None);
         assert_eq!(pick_default_size(&[]), None);
+    }
+
+    #[test]
+    fn valid_model_size_name_rejects_traversal() {
+        // Legitimate names pass.
+        assert!(valid_model_size_name("v2-80M"));
+        assert!(valid_model_size_name("1"));
+        assert!(valid_model_size_name("97m-r2"));
+        // Traversal / separator / empty forms are rejected — an unvalidated
+        // size would let a selection resolve into (or a download overwrite)
+        // another kind's model dir.
+        assert!(!valid_model_size_name(""));
+        assert!(!valid_model_size_name("."));
+        assert!(!valid_model_size_name(".."));
+        assert!(!valid_model_size_name("../embedding/F2LLM/v2-80M"));
+        assert!(!valid_model_size_name("a/../b"));
+        assert!(!valid_model_size_name("a/b"));
+        assert!(!valid_model_size_name("a\\b"));
+        assert!(!valid_model_size_name("..\\embedding"));
+        assert!(!valid_model_size_name("v2-80M/"));
+        // Windows-specific hazards: drive specifiers / ADS syntax, trailing
+        // dots/spaces (stripped by Win32 normalization), reserved devices.
+        assert!(!valid_model_size_name("C:evil"));
+        assert!(!valid_model_size_name("name:ads"));
+        assert!(!valid_model_size_name("v2-80M."));
+        assert!(!valid_model_size_name("v2-80M "));
+        assert!(!valid_model_size_name("CON"));
+        assert!(!valid_model_size_name("nul"));
+        assert!(!valid_model_size_name("COM1"));
     }
 
 }

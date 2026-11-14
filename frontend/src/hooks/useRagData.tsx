@@ -467,16 +467,18 @@ const useRagDataState = () => {
       // Shared event bus: ignore decision-kind downloads (absent kind =
       // legacy payload → embedding).
       if (p.kind === 'decision') return;
-      setModelDownload({ ...p });
-      if (p.phase === 'done' || p.phase === 'error') {
+      const snapshot = { ...p };
+      setModelDownload(snapshot);
+      if (p.phase === 'done' || p.phase === 'error' || p.phase === 'cancelled') {
         // Refresh the model list so the downloaded size becomes "ready" /
-        // selectable. Clear the progress shortly after.
+        // selectable. Terminal snapshots clear shortly after — but ONLY if
+        // the state still holds THIS snapshot (a new download within the
+        // window keeps its own progress bar). RagPage renders no terminal
+        // badge of its own, so the timed clear applies to all three phases.
         fetchModels();
-        if (p.phase === 'done') {
-          setTimeout(() => {
-            if (mounted.current) setModelDownload(null);
-          }, 1500);
-        }
+        setTimeout(() => {
+          if (mounted.current) setModelDownload((c) => (c === snapshot ? null : c));
+        }, 1500);
       }
     }).then((un) => {
       if (cancelled) un();

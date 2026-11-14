@@ -36,6 +36,15 @@ export const decisionSetEnabled = async (enabled: boolean): Promise<void> => {
   if (!response.success) throw new Error(response.message || 'Failed to toggle decision support');
 };
 
+/** Run one structured decision from the UI (recorded with source "ui"). */
+export const decideDecision = async (
+  request: { decisionType?: string; state: string; question: string; options: string[] },
+): Promise<unknown> => {
+  const response: ApiResponse<unknown> = await apiPost('/decision/decide', request);
+  if (!response.success) throw new Error(response.message || 'Failed to run decision');
+  return response.data;
+};
+
 export const listDecisionModels = async (): Promise<RagModelInfo[]> => {
   const response: ApiResponse<RagModelInfo[]> = await apiGet('/decision/models');
   if (!response.success) throw new Error(response.message || 'Failed to list decision models');

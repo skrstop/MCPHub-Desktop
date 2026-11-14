@@ -627,7 +627,7 @@ mod tests {
 }
 
     /// Probe: can our embedder path load the Julia-1 decision GGUF
-    /// (`decision/julia_1`)? It is a modern-bert classifier, not an embedder —
+    /// (`decision/julia/1`)? It is a modern-bert classifier, not an embedder —
     /// this documents what our current code does with it.
     /// `cargo test --lib mv::gguf_modernbert::tests::julia_decision_probe -- --ignored --nocapture`
     #[test]
@@ -635,15 +635,8 @@ mod tests {
     fn julia_decision_probe() {
         use crate::mv::embedder::Embedder;
         let gguf = std::path::PathBuf::from(
-            "runtimes/rag/model/embedding/decision/julia_1/model.gguf",
+            "runtimes/rag/model/decision/julia/1/model.gguf",
         );
-        let gguf = if gguf.is_file() {
-            gguf
-        } else {
-            std::path::PathBuf::from(
-                "runtimes/rag/model/decision/julia_1/model.gguf",
-            )
-        };
         if !gguf.is_file() {
             eprintln!("SKIP: julia_1 model.gguf not present");
             return;

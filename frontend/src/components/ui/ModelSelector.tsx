@@ -31,8 +31,10 @@ export interface ModelDownloadProgress {
   percent: number;
   speed: number;
   eta: number;
-  fileCurrent: number;
-  fileTotal: number;
+  /** Per-file progress readout (multi-file downloads only; the Rust
+   *  payload does not carry these today — optional + guarded render). */
+  fileCurrent?: number;
+  fileTotal?: number;
   message?: string;
 }
 
@@ -374,9 +376,9 @@ const ModelSelector: React.FC<{
                           {formatEta(dl.eta)} {t('pages.rag.modelLeft')}
                         </span>
                       )}
-                      {dl.fileTotal > 0 && (
+                      {(dl.fileTotal ?? 0) > 0 && (
                         <span>
-                          {dl.fileCurrent}/{dl.fileTotal} {t('pages.rag.modelFiles')}
+                          {dl.fileCurrent ?? 0}/{dl.fileTotal} {t('pages.rag.modelFiles')}
                         </span>
                       )}
                     </div>

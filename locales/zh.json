@@ -1041,7 +1041,11 @@
       "clearConfirmMessage": "将删除全部 {{count}} 条决策请求历史，且不可恢复。确定继续吗？",
       "type_choice": "单选",
       "type_score": "评分",
-      "type_noul": "可否"
+      "type_noul": "可否",
+      "loadMore": "加载更多",
+      "loadFailed": "加载数据失败",
+      "retry": "重试",
+      "clearConfirmAll": "将删除全部决策请求历史（包括未加载的分页），且不可恢复。确定继续吗？"
     }
   },
   "logs": {
@@ -1773,7 +1777,8 @@
     "decisionModelSwitch": "决策模型切换",
     "decisionEnabledToast": "决策支持已开启",
     "decisionDisabledToast": "决策支持已关闭",
-    "decisionModelSwitched": "决策模型已切换"
+    "decisionModelSwitched": "决策模型已切换",
+    "decisionModelMissing": "所选模型文件已丢失——请重新下载后再使用决策"
   },
   "mcpb": {
     "upload": "上传",

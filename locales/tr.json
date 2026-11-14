@@ -1041,7 +1041,11 @@
       "clearConfirmMessage": "Bu işlem {{count}} karar geçmişi kaydını siler ve geri alınamaz. Devam edilsin mi?",
       "type_choice": "Seçim",
       "type_score": "Puan",
-      "type_noul": "Evet/Hayır"
+      "type_noul": "Evet/Hayır",
+      "loadMore": "Daha Fazla Yükle",
+      "loadFailed": "Karar verileri yüklenemedi",
+      "retry": "Yeniden dene",
+      "clearConfirmAll": "Bu işlem TÜM karar geçmişi kayıtlarını (yüklenmemiş sayfalar dahil) siler ve geri alınamaz. Devam edilsin mi?"
     }
   },
   "logs": {
@@ -1773,7 +1777,8 @@
     "decisionModelSwitch": "Karar Modeli",
     "decisionEnabledToast": "Karar desteği etkinleştirildi",
     "decisionDisabledToast": "Karar desteği devre dışı bırakıldı",
-    "decisionModelSwitched": "Karar modeli değiştirildi"
+    "decisionModelSwitched": "Karar modeli değiştirildi",
+    "decisionModelMissing": "Seçili model dosyaları diskte eksik — karara vermeden önce yeniden indirin"
   },
   "mcpb": {
     "upload": "Yükle",

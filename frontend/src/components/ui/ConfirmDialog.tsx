@@ -77,6 +77,12 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     if (e.key === 'Escape') {
       onClose();
     } else if (e.key === 'Enter') {
+      // Buttons activate natively on Enter; an overlay-level Enter here
+      // would ALSO fire onConfirm even when the auto-focused CANCEL button
+      // holds focus (keydown bubbles from the button) — turning "Cancel"
+      // into "Confirm" on a destructive dialog. Let the focused button
+      // decide; only treat Enter as confirm when no button holds focus.
+      if ((e.target as HTMLElement | null)?.tagName === 'BUTTON') return;
       onConfirm();
     }
   };

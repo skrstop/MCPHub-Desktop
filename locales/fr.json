@@ -1041,7 +1041,11 @@
       "clearConfirmMessage": "Ceci supprime les {{count}} entrées d'historique, sans possibilité d'annulation. Continuer ?",
       "type_choice": "Choix",
       "type_score": "Score",
-      "type_noul": "Oui/Non"
+      "type_noul": "Oui/Non",
+      "loadMore": "Charger plus",
+      "loadFailed": "Échec du chargement des données de décision",
+      "retry": "Réessayer",
+      "clearConfirmAll": "Ceci supprime TOUT l'historique de décisions (y compris les pages non chargées), sans possibilité d'annulation. Continuer ?"
     }
   },
   "logs": {
@@ -1773,7 +1777,8 @@
     "decisionModelSwitch": "Modèle de décision",
     "decisionEnabledToast": "Aide à la décision activée",
     "decisionDisabledToast": "Aide à la décision désactivée",
-    "decisionModelSwitched": "Modèle de décision changé"
+    "decisionModelSwitched": "Modèle de décision changé",
+    "decisionModelMissing": "Les fichiers du modèle sélectionné sont absents du disque — retéléchargez-le avant de décider"
   },
   "mcpb": {
     "upload": "Télécharger",

@@ -1632,7 +1632,18 @@ impl HubBridge {
                     ).await;
                 }
             }
-            let result = result.map_err(|e| Self::err(e.to_string()))?;
+            let result = result.map_err(|e| {
+                let m = e.to_string();
+                // Caller-side argument validation failures (sentinel-tagged
+                // by parse_decision_tool_args) map to -32602 so MCP clients
+                // can distinguish "fix your arguments" from a retryable
+                // server error; everything else stays INTERNAL_ERROR.
+                if crate::services::decision_service::is_invalid_params_error(&m) {
+                    Self::invalid_params(m)
+                } else {
+                    Self::err(m)
+                }
+            })?;
             return Ok(to_call_response(result, strip_2024, sep_2322));
         }
 

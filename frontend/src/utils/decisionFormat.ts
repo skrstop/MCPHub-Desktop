@@ -30,3 +30,38 @@ export function formatProbability(p: number): string {
 export function formatScore(s: number): string {
   return s.toFixed(4);
 }
+
+/** Minimal row shape mergeHistoryPage operates on (structurally satisfied by
+ *  the service layer's `DecisionHistoryEntry`). */
+export interface HistoryRowKey {
+  id: string;
+  createdAt: string;
+}
+
+/** Merge a prefix-refetch page into the loaded entries and restore the
+ *  backend's ordering contract (`created_at DESC, id DESC`).
+ *
+ *  The page refetches the newest `limit` rows from offset 0 (offset paging
+ *  would permanently skip rows inserted between fetches); rows inserted in
+ *  between surface mid-list, so the merged set is re-sorted. Dedup by id —
+ *  overlap between the previously loaded rows and the refetched prefix is
+ *  expected. */
+export function mergeHistoryPage<T extends HistoryRowKey>(
+  prev: T[],
+  list: T[],
+): T[] {
+  const seen = new Set(prev.map((e) => e.id));
+  const merged = [...prev];
+  for (const e of list) {
+    // Dedup against prev AND within list itself (a defensive guard — the
+    // backend never returns duplicate ids in one page, but the merge must
+    // not depend on that).
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    merged.push(e);
+  }
+  merged.sort((a, b) =>
+    a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : -1,
+  );
+  return merged;
+}

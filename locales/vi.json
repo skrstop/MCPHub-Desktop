@@ -1041,7 +1041,11 @@
       "clearConfirmMessage": "Thao tác này xóa {{count}} mục lịch sử quyết định và không thể hoàn tác. Tiếp tục?",
       "type_choice": "Lựa chọn",
       "type_score": "Chấm điểm",
-      "type_noul": "Có/Không"
+      "type_noul": "Có/Không",
+      "loadMore": "Tải thêm",
+      "loadFailed": "Tải dữ liệu quyết định thất bại",
+      "retry": "Thử lại",
+      "clearConfirmAll": "Thao tác này xóa TOÀN BỘ lịch sử quyết định (bao gồm cả các trang chưa tải) và không thể hoàn tác. Tiếp tục?"
     }
   },
   "logs": {
@@ -1773,7 +1777,8 @@
     "decisionModelSwitch": "Mô hình quyết định",
     "decisionEnabledToast": "Đã bật hỗ trợ quyết định",
     "decisionDisabledToast": "Đã tắt hỗ trợ quyết định",
-    "decisionModelSwitched": "Đã chuyển mô hình quyết định"
+    "decisionModelSwitched": "Đã chuyển mô hình quyết định",
+    "decisionModelMissing": "Tệp mô hình đã chọn bị thiếu trên đĩa — hãy tải lại trước khi ra quyết định"
   },
   "mcpb": {
     "upload": "Tải lên",
