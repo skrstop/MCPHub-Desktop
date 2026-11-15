@@ -28,3 +28,4 @@ pub mod tool_call_guard;
 pub mod tool_policy;
 pub mod capability_snapshot_service;
 pub mod decision_service;
+pub mod tool_i18n;

@@ -9,6 +9,7 @@ import './i18n';
 import './utils/setupInterceptors';
 import { loadRuntimeConfig } from './utils/runtime';
 import { installExternalLinkInterceptor } from './utils/externalLink';
+import { initUiLanguageSync } from './utils/uiLanguageSync';
 
 /** Remove the splash loading screen (index.html) with a fade-out animation */
 function removeSplash() {
@@ -61,6 +62,9 @@ async function initializeApp() {
     // Route bare target="_blank" external links through the `open_external_url`
     // Tauri command (replaces the removed tauri-plugin-shell's interceptor).
     installExternalLinkInterceptor();
+    // Persist the UI language (mcp.uiLanguage) so `mcp.toolLanguage: "auto"`
+    // can follow it; also re-syncs on every language switch.
+    initUiLanguageSync();
     // Start React app
     ReactDOM.createRoot(document.getElementById('root')!).render(
       // 注意：StrictMode 在 dev 下会把 setState updater 以不同 base 重放两次，

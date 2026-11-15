@@ -619,7 +619,7 @@
       "zoomOut": "缩小",
       "zoomReset": "重置",
       "zoomHint": "Ctrl+滚轮或双指捏合缩放",
-      "toolsEmpty": "RAG 未开启，暂无可用工具。",
+      "toolsEmpty": "暂无可用工具。",
       "uploadDialogTitle": "导入文档",
       "uploadHint": "支持 Markdown、代码、Office 文档、PDF 与图片，导入时自动提取内容并建立检索索引。",
       "uploadSelect": "选择文件",
@@ -1011,7 +1011,8 @@
       "scanPhaseGit": "拉取 Git 数据源远端… ({{current}}/{{total}})",
       "scanPhaseScan": "扫描数据源目录（检测新增/删除）…",
       "scanPhaseChecking": "比对文件变更 ({{current}}/{{total}})：{{name}}",
-      "scanPhaseCheckingCount": "比对文件变更 ({{current}}/{{total}})"
+      "scanPhaseCheckingCount": "比对文件变更 ({{current}}/{{total}})",
+      "toolsDisabledHint": "知识库未开启——这些工具暂不会暴露给 MCP 客户端。"
     },
     "decision": {
       "title": "决策支持",
@@ -1785,7 +1786,10 @@
     "decisionStatusStopped": "未运行：在「决策支持」页面开启",
     "decisionLostHint": "当前由备用模型代为决策——可在列表中选用它，或重新下载上方的模型。",
     "decisionModelGone": "所选模型 {{model}} 已不可用——请改用列表中的其他模型",
-    "decisionLostHintGone": "当前由备用模型代为决策——可在列表中选用它。"
+    "decisionLostHintGone": "当前由备用模型代为决策——可在列表中选用它。",
+    "mcpToolLanguage": "MCP 工具语言",
+    "mcpToolLanguageAuto": "跟随界面语言",
+    "mcpToolLanguageHint": "内置工具（rag_*、decision_decide 等）的描述语言；默认英文。选择「跟随界面语言」可随界面语言自动切换。"
   },
   "mcpb": {
     "upload": "上传",

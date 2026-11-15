@@ -616,7 +616,7 @@
       "zoomOut": "Küçült",
       "zoomReset": "Sıfırla",
       "zoomHint": "Yakınlaştırmak için Ctrl+kaydırma veya sıkıştırma",
-      "toolsEmpty": "RAG kapalı - kullanılabilir araç yok.",
+      "toolsEmpty": "Kullanılabilir araç yok.",
       "uploadDialogTitle": "Doküman İçe Aktar",
       "uploadHint": "Markdown, kod, Office belgeleri, PDF ve görselleri destekler. İçe aktarımda içerik çıkarılır ve arama için dizinlenir.",
       "uploadSelect": "Dosya Seç",
@@ -1008,7 +1008,8 @@
       "scanPhaseGit": "Git kaynağı uzaktan alınıyor… ({{current}}/{{total}})",
       "scanPhaseScan": "Kaynak dizinleri taranıyor (ekleme/silme algılama)…",
       "scanPhaseChecking": "Dosya değişiklikleri karşılaştırılıyor ({{current}}/{{total}}): {{name}}",
-      "scanPhaseCheckingCount": "Dosya değişiklikleri karşılaştırılıyor ({{current}}/{{total}})"
+      "scanPhaseCheckingCount": "Dosya değişiklikleri karşılaştırılıyor ({{current}}/{{total}})",
+      "toolsDisabledHint": "Bilgi tabanı kapalı — bu araçlar belgelenmiştir ancak henüz MCP istemcilerine sunulmuyor."
     },
     "skills": {
       "title": "Beceriler"
@@ -1785,7 +1786,10 @@
     "decisionStatusStopped": "Çalışmıyor: Karar Destek sayfasından etkinleştirin",
     "decisionLostHint": "Kararları şu anda bir yedek model yürütüyor — listeden onu seçin veya yukarıdaki modeli yeniden indirin.",
     "decisionModelGone": "Seçilen model {{model}} artık kullanılamıyor — listedeki başka bir modele geçin",
-    "decisionLostHintGone": "Kararları şu anda bir yedek model yürütüyor — listeden onu seçin."
+    "decisionLostHintGone": "Kararları şu anda bir yedek model yürütüyor — listeden onu seçin.",
+    "mcpToolLanguage": "MCP Araç Dili",
+    "mcpToolLanguageAuto": "Arayüz dilini takip et",
+    "mcpToolLanguageHint": "Hub'ın yerleşik araçlarının (rag_*, decision_decide, …) açıklama dili. Varsayılan İngilizcedir. Arayüz diliyle otomatik değişmesi için \"Arayüz dilini takip et\" seçeneğini seçin."
   },
   "mcpb": {
     "upload": "Yükle",

@@ -270,6 +270,7 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
   const {
     ragDocs,
     enabled,
+    statusKnown,
     initializing,
     togglingTo,
     switchingModel,
@@ -1944,7 +1945,6 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
             <button
               type="button"
               onClick={() => setShowTools(true)}
-              disabled={!enabled}
               className="hub-btn sm"
               style={{ pointerEvents: 'auto' }}
               title={t('pages.rag.viewToolsHint')}
@@ -2591,7 +2591,12 @@ const RagPage: React.FC = () => {  const { t } = useTranslation();
 
       {/* View RAG tools dialog — shows the MCP tools RAG exposes (rag_search /
           rag_get / rag_tag_search) with their description + input schema. */}
-      {showTools && <ToolsDialog onClose={() => setShowTools(false)} />}
+      {showTools && (
+        <ToolsDialog
+          onClose={() => setShowTools(false)}
+          enabled={statusKnown ? enabled : null}
+        />
+      )}
 
       {/* Reindex dialog moved to RagDataProvider (global) — the startup
           model-mismatch check must pop it on any page, so RagPage no longer
@@ -4322,7 +4327,14 @@ const NumericSlider: React.FC<{
 
 /** Dialog showing the MCP tools RAG exposes (rag_search / rag_get /
  *  rag_tag_search) - name, description, and input schema. Read-only. */
-const ToolsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/** Exported for tests. `enabled` mirrors the page switch: only a KNOWN-off
+ *  flag (`false`) shows the "not exposed to MCP clients" hint — `null`
+ *  (status not loaded yet) must not claim off. The catalog is always
+ *  viewable: `rag_tools` returns it regardless of the enable flag. */
+export const ToolsDialog: React.FC<{ onClose: () => void; enabled?: boolean | null }> = ({
+  onClose,
+  enabled,
+}) => {
   const { t } = useTranslation();
   const [tools, setTools] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
@@ -4355,6 +4367,14 @@ const ToolsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          {enabled === false && (
+            <p
+              className="text-[12px] font-medium"
+              style={{ color: 'var(--hub-warn, #d97706)' }}
+            >
+              {t('pages.rag.toolsDisabledHint')}
+            </p>
+          )}
           {loading ? (
             <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
               <Loader2 size={14} className="animate-spin" /> {t('pages.rag.opening')}

@@ -178,11 +178,13 @@ pub fn build_meta_tools(
     progressive: bool,
     full_schema_top_n: Option<u32>,
 ) -> Vec<Value> {
+    use crate::services::tool_i18n as ti;
+    let lang = ti::current_tool_language();
     if progressive {
         vec![
             json!({
                 "name": "smart_route_search",
-                "description": format!("STEP 1 of 3: Use this tool FIRST to discover and search for relevant tools across {scope_description}. Returns tool names and descriptions only - use smart_route_describe to get full parameter details before calling.\n\nFor optimal results, use specific queries matching your exact needs. Call this tool multiple times with different queries for different parts of complex tasks. Example queries: \"image generation tools\", \"code review tools\", \"data analysis\", \"translation capabilities\", etc. Results are sorted by relevance using vector similarity.\n\nWorkflow: smart_route_search → smart_route_describe (for parameter details) → smart_route_call (to execute)\n\nAvailable servers: {servers_list}"),
+                "description": ti::smart_route_search_desc(&lang, true, &scope_description, &servers_list, ""),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -191,11 +193,11 @@ pub fn build_meta_tools(
                     },
                     "required": ["query"]
                 },
-                "annotations": {"title": "Search Tools", "readOnlyHint": true}
+                "annotations": {"title": ti::smart_tool_title("search", &lang), "readOnlyHint": true}
             }),
             json!({
                 "name": "smart_route_describe",
-                "description": "STEP 2 of 3: Use this tool AFTER smart_route_search to get the full parameter schema for a specific tool. This provides the complete inputSchema needed to correctly invoke the tool with smart_route_call.\n\nWorkflow: smart_route_search → smart_route_describe → smart_route_call",
+                "description": ti::smart_route_describe_desc(&lang, true),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -203,11 +205,11 @@ pub fn build_meta_tools(
                     },
                     "required": ["toolName"]
                 },
-                "annotations": {"title": "Describe Tool", "readOnlyHint": true}
+                "annotations": {"title": ti::smart_tool_title("describe", &lang), "readOnlyHint": true}
             }),
             json!({
                 "name": "smart_route_call",
-                "description": "STEP 3 of 3: Use this tool AFTER smart_route_describe to actually execute/invoke any tool you found. This is the execution step.\n\nWorkflow: smart_route_search → smart_route_describe → smart_route_call with the chosen tool name and required arguments.\n\nIMPORTANT: Always use smart_route_describe first to get the tool's inputSchema before invoking to ensure you provide the correct arguments.",
+                "description": ti::smart_route_call_desc(&lang, true),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -216,7 +218,7 @@ pub fn build_meta_tools(
                     },
                     "required": ["toolName"]
                 },
-                "annotations": {"title": "Call Tool", "openWorldHint": true}
+                "annotations": {"title": ti::smart_tool_title("call", &lang), "openWorldHint": true}
             }),
         ]
     } else {
@@ -229,7 +231,7 @@ pub fn build_meta_tools(
         let mut tools = vec![
             json!({
                 "name": "smart_route_search",
-                "description": format!("STEP 1 of 2: Use this tool FIRST to discover and search for relevant tools across {scope_description}. This tool and smart_route_call work together as a two-step process: 1) smart_route_search to find what you need, 2) smart_route_call to execute it.\n\nFor optimal results, use specific queries matching your exact needs. Call this tool multiple times with different queries for different parts of complex tasks. Example queries: \"image generation tools\", \"code review tools\", \"data analysis\", \"translation capabilities\", etc. Results are sorted by relevance using vector similarity.\n\nAfter finding relevant tools, you MUST use the smart_route_call to actually execute them. The smart_route_search only finds tools - it doesn't execute them.{schema_note}\n\nAvailable servers: {servers_list}"),
+                "description": ti::smart_route_search_desc(&lang, false, &scope_description, &servers_list, &schema_note),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -238,13 +240,13 @@ pub fn build_meta_tools(
                     },
                     "required": ["query"]
                 },
-                "annotations": {"title": "Search Tools", "readOnlyHint": true}
+                "annotations": {"title": ti::smart_tool_title("search", &lang), "readOnlyHint": true}
             }),
         ];
         if full_schema_top_n.is_some() {
             tools.push(json!({
                 "name": "smart_route_describe",
-                "description": "Use this tool to get the full parameter schema of a smart_route_search result that was returned without an inputSchema, before invoking it with smart_route_call.",
+                "description": ti::smart_route_describe_desc(&lang, false),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -252,12 +254,12 @@ pub fn build_meta_tools(
                     },
                     "required": ["toolName"]
                 },
-                "annotations": {"title": "Describe Tool", "readOnlyHint": true}
+                "annotations": {"title": ti::smart_tool_title("describe", &lang), "readOnlyHint": true}
             }));
         }
         tools.push(json!({
             "name": "smart_route_call",
-            "description": "STEP 2 of 2: Use this tool AFTER smart_route_search to actually execute/invoke any tool you found. This is the execution step - smart_route_search finds tools, smart_route_call runs them.\n\nWorkflow: smart_route_search → examine results → smart_route_call with the chosen tool name and required arguments.\n\nIMPORTANT: Always check the tool's inputSchema from smart_route_search results before invoking to ensure you provide the correct arguments. The search results will show you exactly what parameters each tool expects.",
+                "description": ti::smart_route_call_desc(&lang, false),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -266,7 +268,7 @@ pub fn build_meta_tools(
                 },
                 "required": ["toolName"]
             },
-            "annotations": {"title": "Call Tool", "openWorldHint": true}
+            "annotations": {"title": ti::smart_tool_title("call", &lang), "openWorldHint": true}
         }));
         tools
     }

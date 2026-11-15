@@ -143,6 +143,26 @@ pub async fn update_system_config(session: State<'_, SessionState>, config: serd
     // Sync HTTP server state (start/stop) based on updated config
     http_server::sync_with_config().await;
 
+    // MCP tool description language: refresh the cached resolution whenever
+    // either key is touched; a toolLanguage change also rebuilds the builtin
+    // rows in the smart index (their embeddings are built from the
+    // descriptions, and the skip-check hash deliberately ignores them).
+    let mcp_patch = config.get("mcp");
+    let tool_lang_touched = mcp_patch.and_then(|m| m.get("toolLanguage")).is_some();
+    let ui_lang_touched = mcp_patch.and_then(|m| m.get("uiLanguage")).is_some();
+    if tool_lang_touched || ui_lang_touched {
+        crate::services::tool_i18n::refresh_from_config().await;
+        if tool_lang_touched {
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::smart_routing::index::remove_server_embeddings(
+                    crate::rag::service::BUILTIN_SERVER_NAME,
+                )
+                .await;
+                crate::rag::service::sync_builtin_index().await;
+            });
+        }
+    }
+
     // Smart Routing enable/disable transitions (fire-and-forget; errors logged).
     let new_smart_enabled = result
         .get("smartRouting")

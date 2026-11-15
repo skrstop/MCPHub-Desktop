@@ -281,12 +281,14 @@ pub fn run() {
             services::app_logger::init(app.path().app_data_dir().ok());
             services::app_logger::log_to_db("info", "Application started, database initialized");
 
-            // Decision-support enable flag: sync from persisted config once the
-            // DB is up (the builtin tool listing reads the in-memory flag).
+            // Decision-support enable flag + builtin tool description
+            // language: sync from persisted config once the DB is up (the
+            // builtin tool listing reads both in-memory values).
             {
                 let app_handle_decision = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     services::decision_service::sync_enabled_flag().await;
+                    services::tool_i18n::refresh_from_config().await;
                     let _ = &app_handle_decision;
                 });
             }

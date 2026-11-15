@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Boxes, BrainCircuit, Check, ChevronDown, Database, Loader2, RefreshCw } from 'lucide-react';
+import { Boxes, BrainCircuit, Check, ChevronDown, Database, Languages, Loader2, RefreshCw } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import ModelSelector, { type ModelDownloadProgress } from '@/components/ui/ModelSelector';
+import { SimpleSelect } from '@/components/ui/SimpleSelect';
 import ReindexDialog from '@/components/ReindexDialog';
 import { reindexSmartRouting } from '@/services/smartRoutingService';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -34,6 +35,18 @@ import type { RagModelInfo, RagStatus } from '@/types';
 type MvDevice = 'auto' | 'gpu' | 'cpu';
 const DEVICES: MvDevice[] = ['auto', 'gpu', 'cpu'];
 
+/** MCP 内置工具描述语言选项（'auto' 跟随界面语言）。语言名按惯例用本语言
+ *  书写，不参与翻译。 */
+const MCP_TOOL_LANGUAGES: { value: string; label: string }[] = [
+  { value: 'auto', label: '' }, // label = t('settings.mcpToolLanguageAuto') at render
+  { value: 'en', label: 'English' },
+  { value: 'zh', label: '中文' },
+  { value: 'fr', label: 'Français' },
+  { value: 'tr', label: 'Türkçe' },
+  { value: 'vi', label: 'Tiếng Việt' },
+  { value: 'es', label: 'Español' },
+];
+
 /** 设置页【模型和向量】卡片（桌面端专属）：共享的本地 embedding 模型与向量库
  *  运行时的统一管理入口。RAG 与 Smart Routing 是当前的两个消费方——任一开启
  *  即自动加载模型（全局单实例），全部关闭后释放。 */
@@ -58,6 +71,8 @@ const ModelVectorSettings: React.FC = () => {
   // the current model) — same shared ReindexDialog, different lead/done text.
   const [reindexMode, setReindexMode] = useState<'switch' | 'reload'>('switch');
   const [sectionOpen, setSectionOpen] = useState(false);
+  // MCP 内置工具描述语言（system_config.mcp.toolLanguage，默认 en）。
+  const [toolLanguage, setToolLanguage] = useState<string>('en');
   // ── 决策支持（合并自原独立【决策模型】卡片）──
   const [decision, setDecision] = useState<DecisionStatus | null>(null);
   const [decisionModels, setDecisionModels] = useState<RagModelInfo[]>([]);
@@ -133,6 +148,17 @@ const ModelVectorSettings: React.FC = () => {
     }
   };
 
+  const handleToolLanguageChange = async (v: string) => {
+    try {
+      // 后端在 update_system_config 里刷新缓存并按需重建 builtin 索引
+      // （描述参与 smart 索引嵌入）。
+      await apiPut('system-config', { mcp: { toolLanguage: v } });
+      if (mounted.current) setToolLanguage(v);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error');
+    }
+  };
+
   // 设备自定义下拉的点击外部关闭。
   useEffect(() => {
     if (!deviceOpen) return;
@@ -182,6 +208,10 @@ const ModelVectorSettings: React.FC = () => {
         if (!mounted.current) return;
         const d = res?.data?.systemConfig?.mv?.device;
         if (d === 'gpu' || d === 'cpu' || d === 'auto') setDevice(d);
+        const tl = res?.data?.systemConfig?.mcp?.toolLanguage;
+        if (typeof tl === 'string' && MCP_TOOL_LANGUAGES.some((o) => o.value === tl)) {
+          setToolLanguage(tl);
+        }
       })
       .catch(() => undefined);
     // 模型下载进度（与 RagPage 同一事件源；两处监听互不影响）。事件按
@@ -413,6 +443,30 @@ const ModelVectorSettings: React.FC = () => {
           </button>
         </div>
         <p style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>{t('settings.mvHint')}</p>
+
+        {/* MCP 工具语言：内置工具（rag_*、decision_decide、smart_route_* 等）
+            的描述语言；默认英文，「跟随界面语言」时由前端同步的 uiLanguage
+            解析。作用于 tools/list 与两个「查看工具」弹框。 */}
+        <div className="rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)]">
+          <div className="flex items-center gap-2 mb-2">
+            <Languages size={13} className="text-[var(--hub-ink-3)]" />
+            <h3 className="text-[13px] font-medium flex-1" style={{ color: 'var(--hub-ink)' }}>
+              {t('settings.mcpToolLanguage')}
+            </h3>
+          </div>
+          <SimpleSelect
+            value={toolLanguage}
+            onChange={handleToolLanguageChange}
+            options={MCP_TOOL_LANGUAGES.map((o) => ({
+              value: o.value,
+              label: o.value === 'auto' ? t('settings.mcpToolLanguageAuto') : o.label,
+            }))}
+            ariaLabel={t('settings.mcpToolLanguage')}
+          />
+          <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
+            {t('settings.mcpToolLanguageHint')}
+          </p>
+        </div>
 
         {/* 模型切换（唯一入口；未启动时禁用） */}
         <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${mvRunning ? '' : 'mv-disabled'}`}>

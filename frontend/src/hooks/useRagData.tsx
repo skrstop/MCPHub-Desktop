@@ -71,6 +71,10 @@ const useRagDataState = () => {
   // just the current page and would under-report.
   const [docCountTotal, setDocCountTotal] = useState<number | null>(null);
   const [enabled, setEnabled] = useState(false);
+  // True once the real backend flag has been read at least once — consumers
+  // use it to tell "known off" from "not loaded yet" (the uninitialized
+  // default must not assert OFF, mirroring the decision page's tri-state).
+  const [statusKnown, setStatusKnown] = useState(false);
   const [initializing, setInitializing] = useState(false);
   // Target state of an in-flight toggle ('on' | 'off' | null) so the loading
   // overlay can say "开启中" vs "关闭中" — `initializing` alone can't tell the
@@ -293,6 +297,7 @@ const useRagDataState = () => {
       const st = await ragStatus();
       if (mounted.current) {
         setEnabled(st.enabled);
+        setStatusKnown(true);
         setInitializing(st.initializing);
         // Startup check: the loaded model differs from the one that built the
         // vector index (rag.indexedModel) — prompt the reload dialog, same as
@@ -316,6 +321,7 @@ const useRagDataState = () => {
     if (auth.loading || auth.isAuthenticated) return;
     setRagDocs([]);
     setEnabled(false);
+    setStatusKnown(false);
     setInitializing(false);
   }, [auth.loading, auth.isAuthenticated]);
 
@@ -505,6 +511,7 @@ const useRagDataState = () => {
         const st = await ragStatus();
         if (mounted.current) {
           setEnabled(st.enabled);
+          setStatusKnown(true);
           setInitializing(st.initializing);
           // Auto-start on boot settles here (initializing → ready): apply the
           // same startup model-mismatch prompt as syncStatus (mode 'reload' —
@@ -587,6 +594,7 @@ const useRagDataState = () => {
         if (!mounted.current) return 'clean';
         setCurrentModel(size);
         setEnabled(st.enabled);
+        setStatusKnown(true);
         setInitializing(st.initializing);
         if (st.enabled) fetchModelLimits();
         if (!st.needsReindex) {
@@ -680,6 +688,7 @@ const useRagDataState = () => {
         const st = await ragToggle(next);
         if (mounted.current) {
           setEnabled(st.enabled);
+          setStatusKnown(true);
           setInitializing(st.initializing);
           setTogglingTo(null);
           // After a successful enable the model is freshly loaded from disk -
@@ -1122,6 +1131,7 @@ const useRagDataState = () => {
     ragDocs,
     docsVersion,
     enabled,
+    statusKnown,
     initializing,
     togglingTo,
     switchingModel,

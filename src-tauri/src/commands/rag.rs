@@ -614,15 +614,13 @@ pub async fn rag_model_limits(app: AppHandle) -> Result<RagModelLimits, String> 
     })
 }
 
-/// The app-level RAG tools (rag_search / rag_get / rag_tag_search) as MCP
-/// tool definitions (name / description / inputSchema). Returns an empty list
-/// when RAG is disabled. Powers the "view tools" dialog in the RAG page and is
-/// the same source the HTTP MCP layer advertises in tools/list.
+/// The app-level RAG tools (rag_search / rag_get / …) as MCP tool definitions
+/// (name / description / inputSchema). Always returns the catalog — the
+/// "view tools" dialog documents the tools even while RAG is disabled (enable
+/// gating applies to the MCP tools/list surface via `builtin_tools`, not this
+/// documentation view). Read-only, no admin gate.
 #[tauri::command]
 pub async fn rag_tools() -> Result<Vec<serde_json::Value>, String> {
-    if !service::is_enabled() {
-        return Ok(Vec::new());
-    }
     Ok(service::tool_definitions())
 }
 
@@ -856,4 +854,18 @@ pub async fn diff_rag_doc_history(
     service::diff_doc_history(&app, &doc_id, from_version, to_version)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The "view tools" dialog documents the catalog even while RAG is off —
+    /// `RAG_ACTIVE` rests at false in tests, so a command-level re-gate
+    /// regression (returning []) fails here. Enable gating lives in
+    /// `builtin_tools()` (MCP surface), not in this documentation command.
+    #[tokio::test]
+    async fn rag_tools_command_returns_catalog_regardless_of_flag() {
+        let defs = super::rag_tools().await.unwrap();
+        assert!(!defs.is_empty());
+        assert_eq!(defs[0]["name"], "rag_search");
+    }
 }

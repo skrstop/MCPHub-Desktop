@@ -666,7 +666,7 @@
       "zoomOut": "Alejar",
       "zoomReset": "Restablecer",
       "zoomHint": "Ctrl+rueda o pellizco para hacer zoom",
-      "toolsEmpty": "RAG está desactivado: no hay herramientas disponibles.",
+      "toolsEmpty": "No hay herramientas disponibles.",
       "uploadDialogTitle": "Importar documentos",
       "uploadHint": "Admite Markdown, código, documentos de Office, PDF e imágenes. El contenido se extrae e indexa para su recuperación al importar.",
       "uploadSelect": "Seleccionar archivos",
@@ -1058,7 +1058,8 @@
       "scanPhaseGit": "Obteniendo el remoto de la fuente Git… ({{current}}/{{total}})",
       "scanPhaseScan": "Escaneando directorios de origen (detectando altas/bajas)…",
       "scanPhaseChecking": "Comparando cambios de archivos ({{current}}/{{total}}): {{name}}",
-      "scanPhaseCheckingCount": "Comparando cambios de archivos ({{current}}/{{total}})"
+      "scanPhaseCheckingCount": "Comparando cambios de archivos ({{current}}/{{total}})",
+      "toolsDisabledHint": "La base de conocimientos está desactivada: estas herramientas están documentadas pero aún no se exponen a los clientes MCP."
     },
     "skills": {
       "title": "Skills"
@@ -1844,7 +1845,10 @@
     "decisionStatusStopped": "En parado: actívalo en la página de Soporte de decisiones",
     "decisionLostHint": "Un modelo de respaldo se está encargando de las decisiones: selecciónelo desde la lista o vuelva a descargar el modelo de arriba.",
     "decisionModelGone": "El modelo seleccionado {{model}} ya no está disponible: cambie a otro modelo de la lista",
-    "decisionLostHintGone": "Un modelo de respaldo se está encargando de las decisiones: selecciónelo desde la lista."
+    "decisionLostHintGone": "Un modelo de respaldo se está encargando de las decisiones: selecciónelo desde la lista.",
+    "mcpToolLanguage": "Idioma de las herramientas MCP",
+    "mcpToolLanguageAuto": "Seguir el idioma de la interfaz",
+    "mcpToolLanguageHint": "Idioma de las descripciones de las herramientas integradas del hub (rag_*, decision_decide, …). Por defecto, inglés. Elija \"Seguir el idioma de la interfaz\" para cambiar automáticamente."
   },
   "mcpb": {
     "upload": "Subir",

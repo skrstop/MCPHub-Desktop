@@ -546,6 +546,14 @@ npm run build                     # 生产构建
 - **UI 合并轮 + 第二复核战役（2026-11-12 晚，10 波独立代理，进行中→收官）**：四项 UI 变更（决策模型合并进【本地模型】卡片 + 决策支持标签、DecisionPage 查看工具按钮 + ToolsDialog、Beta 标签 ×2、RagPage 头部补 Beta pill 对齐）+ 契约脚本扩展（decision 命令 invoke 参数对账（正向 12 + 反向 8 带必参），变异测试验证）+ try_begin_decide 可测化提取 + 7 个新测试。修复台账：Switch aria-label 错键（L）、契约脚本 decision 面零覆盖 + 缺失参数方向未校验（M）、文档计数 11→12（L）、Beta pill 不一致（L）、测试覆盖缺口（M×4 → 3 新前端测试文件 + 3 新 Rust 测试）。详见 doc/decision_support_report_20261112.md §5。
 - **W6-W8 机制补充**：`DECIDE_SEMAPHORE(1)` + `try_acquire` 忙碌快速失败（decision_service.rs）；`selected_model` 就绪检查回退默认尺寸（持久化名失效不再硬失败）；`sync_builtin_index` 失败 rag_log warn（rag/service.rs）；历史持久化截断（state/question 16KB + options 1KB，char-boundary 安全）；REST invalid-params → 400（http_server.rs）；单槽下载拒绝消息含 kind（mv/models.rs）；迁移 v40 复合排序索引；前端 statusGenRef 代际守卫 / viewTriggerRef 焦点恢复 / Switch aria-label / clearConfirmAll 文案 / decideDecision 包装器。
 
+### 3.13 MCP 工具语言 + 工具查看恒可见（2026-11-15）
+
+- **`services/tool_i18n.rs`（新）**：内置工具（rag_* 10 个 / decision_decide / smart_route_* 3 个含 progressive×standard 变体）的**工具级 description** 六语本地化（en/zh/fr/tr/vi/es；en 与历史字节一致，schema/参数说明保留英文）。`resolve_tool_language(tool, ui)` 纯函数（"auto"→跟随 `mcp.uiLanguage`，未知→en）；解析结果缓存进程内 RwLock（tools/list 同步热路径）。
+- **配置**：`system_config.mcp.toolLanguage`（默认 `"en"`，可选 `"auto"`/6 语言）+ `mcp.uiLanguage`（前端 `utils/uiLanguageSync.ts` 启动时与 `languageChanged` 时同步写入；admin-only 端点，失败静默——auto 模式回退英文）。`update_system_config` 触及任一键即 `refresh_from_config()`；toolLanguage 变更时 remove+`sync_builtin_index` 重建 builtin 行（描述参与智能路由嵌入，而 toolSetHash 刻意不含 description——skip-check 不会自愈）。
+- **UI**：设置【本地模型】卡片「向量模型」上方新增「MCP 工具语言」下拉（跟随界面语言/English/中文/Français/Türkçe/Tiếng Việt/Español，SimpleSelect）。生效面 = tools/list + 知识库/决策「查看工具」弹框。
+- **工具查看恒可见**：`rag_tools` 命令去 is_enabled 门控（与 `decision_tools` 同语义——弹框是文档面，enable 门控只作用 MCP `builtin_tools()`）；RagPage 查看工具按钮不再 `disabled={!enabled}`，ToolsDialog 带「未开启暂不暴露给 MCP 客户端」提示（`enabled === false` 才显示——`statusKnown` 三态，未知不妄断）；`pages.rag.toolsEmpty` 文案中性化。
+- **测试**：tool_i18n 5 单测（解析矩阵/六语非空且非英/英文字节不变/占位符保留/标题+set-current）+ `rag_tools_command_returns_catalog_regardless_of_flag` + RagToolsDialog 组件 5 用例 + uiLanguageSync 3 用例。
+
 ### 3.11 MCPB（.mcpb 文件安装，2026-10-19）
 
 > 计划：`doc/mcpb_implementation_plan_20261018.md`（含 origin 逐处扫描结论）。DXT 无独立逻辑（origin dxtController 仅 1 行 shim）。

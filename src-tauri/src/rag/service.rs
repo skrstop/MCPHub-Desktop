@@ -2040,10 +2040,12 @@ pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
 /// truth - consumed both by the rmcp bridge (`rmcp_bridge.rs`) and by the
 /// `rag_tools` command that powers the "view tools" dialog in the UI.
 pub fn tool_definitions() -> Vec<serde_json::Value> {
+    use crate::services::tool_i18n::{current_tool_language, rag_tool_description};
+    let lang = current_tool_language();
     vec![
         json!({
             "name": "rag_search",
-            "description": "Search RAG documents by semantic similarity. Returns matching text fragments with their document ids, titles, and similarity scores. Optionally filter to documents that have any of the given tags.",
+            "description": rag_tool_description("rag_search", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2055,7 +2057,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_get",
-            "description": "Get the full text content of a RAG document by its id (as returned by rag_search).",
+            "description": rag_tool_description("rag_get", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2066,7 +2068,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_tag_search",
-            "description": "List distinct tags in the RAG library. Pass `search_key` (an array of strings) to filter tags by case-insensitive substring (returns tags matching any key); omit/empty to return all tags.",
+            "description": rag_tool_description("rag_tag_search", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2077,7 +2079,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_create",
-            "description": "Create a new RAG document from UTF-8 text content and index it for semantic search. The file is stored as {docName}.{docType} (e.g. readme.md). Returns the created docId. Documents with duplicate names coexist (a new docId is created); use rag_file_update to modify an existing document.",
+            "description": rag_tool_description("rag_file_create", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2091,7 +2093,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_update",
-            "description": "Update an existing RAG document by docId. Any of docName/docType/docContent can be omitted (only supplied fields are updated). When docContent is provided, docContentAppend decides whether to append to the existing content (true) or replace it (false, default); the document is re-indexed so semantic search reflects the new text. docId stays the same. By default only the copy stored inside rag/files is modified; pass updateExternalFile=true to also overwrite the external source file (see that parameter for scope and risks).",
+            "description": rag_tool_description("rag_file_update", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2109,7 +2111,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_delete",
-            "description": "Delete a RAG document by docId. Removes its content file, metadata, and all its vector chunks from the index. Irreversible.",
+            "description": rag_tool_description("rag_file_delete", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2120,7 +2122,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_history_versions",
-            "description": "List the historical versions of a RAG document, newest first. A snapshot is taken each time a document's content is overwritten (via rag_file_update or a source refresh). Returns version, savedAt, size, name, md5 and source per entry.",
+            "description": rag_tool_description("rag_file_history_versions", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2131,7 +2133,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_history_get",
-            "description": "Read the full text content of one historical version of a RAG document (use rag_file_history_versions to list available versions).",
+            "description": rag_tool_description("rag_file_history_get", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2143,7 +2145,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_history_diff",
-            "description": "Compare two versions of a RAG document and return a unified diff. Omit toVersion to diff a historical version against the CURRENT document content.",
+            "description": rag_tool_description("rag_file_history_diff", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2156,7 +2158,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "rag_file_diff",
-            "description": "Compare two DIFFERENT RAG documents and return a unified diff (docIdA is the old side, docIdB the new side). Independent of version history.",
+            "description": rag_tool_description("rag_file_diff", &lang),
             "inputSchema": {
                 "type": "object",
                 "properties": {

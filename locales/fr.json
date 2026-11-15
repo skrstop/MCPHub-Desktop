@@ -616,7 +616,7 @@
       "zoomOut": "Réduire",
       "zoomReset": "Réinitialiser",
       "zoomHint": "Ctrl+molette ou pincer pour zoomer",
-      "toolsEmpty": "RAG est désactivé - aucun outil disponible.",
+      "toolsEmpty": "Aucun outil disponible.",
       "uploadDialogTitle": "Importer des documents",
       "uploadHint": "Prend en charge Markdown, code, documents Office, PDF et images. Le contenu est extrait et indexé pour la recherche lors de l'import.",
       "uploadSelect": "Choisir des fichiers",
@@ -1008,7 +1008,8 @@
       "scanPhaseGit": "Récupération du dépôt Git distant… ({{current}}/{{total}})",
       "scanPhaseScan": "Analyse des répertoires sources (détection des ajouts/suppressions)…",
       "scanPhaseChecking": "Comparaison des modifications de fichiers ({{current}}/{{total}}) : {{name}}",
-      "scanPhaseCheckingCount": "Comparaison des modifications de fichiers ({{current}}/{{total}})"
+      "scanPhaseCheckingCount": "Comparaison des modifications de fichiers ({{current}}/{{total}})",
+      "toolsDisabledHint": "La base de connaissances est désactivée — ces outils sont documentés mais pas encore exposés aux clients MCP."
     },
     "skills": {
       "title": "Skills"
@@ -1785,7 +1786,10 @@
     "decisionStatusStopped": "En arrêt : activez-le sur la page Aide à la décision",
     "decisionLostHint": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste ou retéléchargez le modèle ci-dessus.",
     "decisionModelGone": "Le modèle sélectionné {{model}} n’est plus disponible — passez à un autre modèle de la liste",
-    "decisionLostHintGone": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste."
+    "decisionLostHintGone": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste.",
+    "mcpToolLanguage": "Langue des outils MCP",
+    "mcpToolLanguageAuto": "Suivre la langue de l'interface",
+    "mcpToolLanguageHint": "Langue des descriptions des outils intégrés du hub (rag_*, decision_decide, …). Anglais par défaut. Choisissez « Suivre la langue de l'interface » pour basculer automatiquement."
   },
   "mcpb": {
     "upload": "Télécharger",

@@ -619,7 +619,7 @@
       "zoomOut": "Zoom Out",
       "zoomReset": "Reset",
       "zoomHint": "Ctrl+scroll or pinch to zoom",
-      "toolsEmpty": "RAG is off - no tools available.",
+      "toolsEmpty": "No tools available.",
       "uploadDialogTitle": "Import Documents",
       "uploadHint": "Supports Markdown, code, Office documents, PDF and images. Content is extracted and indexed for retrieval on import.",
       "uploadSelect": "Select Files",
@@ -1011,7 +1011,8 @@
       "scanPhaseGit": "Fetching Git source remote… ({{current}}/{{total}})",
       "scanPhaseScan": "Scanning source directories (detecting additions/removals)…",
       "scanPhaseChecking": "Comparing file changes ({{current}}/{{total}}): {{name}}",
-      "scanPhaseCheckingCount": "Comparing file changes ({{current}}/{{total}})"
+      "scanPhaseCheckingCount": "Comparing file changes ({{current}}/{{total}})",
+      "toolsDisabledHint": "RAG is off — these tools are documented but not yet exposed to MCP clients."
     },
     "decision": {
       "title": "Decision Support",
@@ -1785,7 +1786,10 @@
     "decisionStatusStopped": "Not running: enable it on the Decision Support page",
     "decisionLostHint": "A fallback model is currently handling decisions — adopt it from the list, or re-download the model above.",
     "decisionModelGone": "Selected model {{model}} is no longer available — switch to another model from the list",
-    "decisionLostHintGone": "A fallback model is currently handling decisions — adopt it from the list."
+    "decisionLostHintGone": "A fallback model is currently handling decisions — adopt it from the list.",
+    "mcpToolLanguage": "MCP Tool Language",
+    "mcpToolLanguageAuto": "Follow UI language",
+    "mcpToolLanguageHint": "Description language for the hub's builtin tools (rag_*, decision_decide, …). Defaults to English. Choose \"Follow UI language\" to switch automatically with the interface language."
   },
   "mcpb": {
     "upload": "Upload",

@@ -619,7 +619,7 @@
       "zoomOut": "Thu nhỏ",
       "zoomReset": "Đặt lại",
       "zoomHint": "Ctrl+cuộn hoặc chụm để thu phóng",
-      "toolsEmpty": "RAG chưa bật — không có công cụ nào.",
+      "toolsEmpty": "Không có công cụ khả dụng.",
       "uploadDialogTitle": "Nhập tài liệu",
       "uploadHint": "Hỗ trợ Markdown, mã nguồn, tài liệu Office, PDF và hình ảnh. Nội dung sẽ được trích xuất và lập chỉ mục để truy xuất khi nhập.",
       "uploadSelect": "Chọn tệp",
@@ -1011,7 +1011,8 @@
       "scanPhaseGit": "Đang lấy nguồn Git từ xa… ({{current}}/{{total}})",
       "scanPhaseScan": "Đang quét thư mục nguồn (phát hiện thêm/xóa)…",
       "scanPhaseChecking": "Đang so sánh thay đổi tệp ({{current}}/{{total}}): {{name}}",
-      "scanPhaseCheckingCount": "Đang so sánh thay đổi tệp ({{current}}/{{total}})"
+      "scanPhaseCheckingCount": "Đang so sánh thay đổi tệp ({{current}}/{{total}})",
+      "toolsDisabledHint": "Cơ sở tri thức đang tắt — các công cụ này đã được mô tả nhưng chưa cung cấp cho MCP client."
     },
     "decision": {
       "title": "Hỗ trợ quyết định",
@@ -1785,7 +1786,10 @@
     "decisionStatusStopped": "Không chạy: bật tại trang Hỗ trợ quyết định",
     "decisionLostHint": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách hoặc tải lại mô hình ở trên.",
     "decisionModelGone": "Mô hình đã chọn {{model}} không còn khả dụng — hãy chuyển sang mô hình khác trong danh sách",
-    "decisionLostHintGone": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách."
+    "decisionLostHintGone": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách.",
+    "mcpToolLanguage": "Ngôn ngữ công cụ MCP",
+    "mcpToolLanguageAuto": "Theo ngôn ngữ giao diện",
+    "mcpToolLanguageHint": "Ngôn ngữ mô tả của các công cụ có sẵn trong hub (rag_*, decision_decide, …). Mặc định tiếng Anh. Chọn \"Theo ngôn ngữ giao diện\" để tự động đổi theo giao diện."
   },
   "mcpb": {
     "upload": "Tải lên",

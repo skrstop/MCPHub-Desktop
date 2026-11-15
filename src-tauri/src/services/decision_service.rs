@@ -579,15 +579,11 @@ async fn prune_history_row_cap() -> Result<u64> {
 /// while decision support is off; enable gating applies to the MCP surface
 /// (`builtin_decision_tools`) and the dispatch path, not to documentation.
 pub fn decision_tool_catalog() -> Vec<Tool> {
+    let lang = crate::services::tool_i18n::current_tool_language();
     vec![Tool {
         hidden_params: None,
         name: "decision_decide".to_string(),
-        description: Some(
-            "Run a structured decision with the local decision model: given a question type, \
-             context state, question and 2-20 candidate options, returns per-option scores, \
-             probabilities and the selected option."
-                .to_string(),
-        ),
+        description: Some(crate::services::tool_i18n::decision_tool_description(&lang).to_string()),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
