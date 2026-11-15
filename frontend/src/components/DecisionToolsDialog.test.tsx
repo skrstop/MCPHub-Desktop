@@ -55,10 +55,31 @@ describe('DecisionPage ToolsDialog', () => {
     expect(screen.getByText('options', { exact: true }).textContent).toBe('options*');
   });
 
-  it('shows the empty state when decision support is off (no tools)', async () => {
+  it('shows the empty state when the backend returns no tools', async () => {
     render(<ToolsDialog onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText('pages.decision.toolsEmpty')).toBeTruthy());
     expect(toolsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the disabled hint when decision support is off (catalog still visible)', async () => {
+    toolsMock.mockResolvedValue([tool]);
+    render(<ToolsDialog onClose={() => {}} enabled={false} />);
+    await waitFor(() => expect(screen.getByText('decision_decide')).toBeTruthy());
+    expect(screen.getByText('pages.decision.toolsDisabledHint')).toBeTruthy();
+  });
+
+  it('shows no disabled hint when the enabled prop is omitted', async () => {
+    toolsMock.mockResolvedValue([tool]);
+    render(<ToolsDialog onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('decision_decide')).toBeTruthy());
+    expect(screen.queryByText('pages.decision.toolsDisabledHint')).toBeNull();
+  });
+
+  it('shows no disabled hint while the enable flag is unknown (null)', async () => {
+    toolsMock.mockResolvedValue([tool]);
+    render(<ToolsDialog onClose={() => {}} enabled={null} />);
+    await waitFor(() => expect(screen.getByText('decision_decide')).toBeTruthy());
+    expect(screen.queryByText('pages.decision.toolsDisabledHint')).toBeNull();
   });
 
   it('shows the error message when the fetch fails', async () => {
@@ -93,18 +114,5 @@ describe('DecisionPage ToolsDialog', () => {
     resolve([tool]);
     await waitFor(() => expect(screen.getByText('decision_decide')).toBeTruthy());
     unmount();
-  });
-
-  it('does not throw when the fetch settles after unmount (smoke — React 18 makes the guarded setState a silent no-op, unobservable at this level)', async () => {
-    let resolve!: (v: unknown) => void;
-    toolsMock.mockReturnValue(
-      new Promise((res) => {
-        resolve = res;
-      }),
-    );
-    const { unmount } = render(<ToolsDialog onClose={() => {}} />);
-    unmount();
-    expect(() => resolve([tool])).not.toThrow();
-    await Promise.resolve();
   });
 });

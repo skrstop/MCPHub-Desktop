@@ -38,9 +38,12 @@ pub async fn ensure_test_pool() {
         // dies with it — the pool then opens a FRESH EMPTY :memory: database
         // for the next test ("no such table" races only in the full parallel
         // suite). A file survives connection recycling. Deleted first so
-        // every test process starts from a clean migrated schema.
+        // every test process starts from a clean migrated schema. The path
+        // is per-PID: concurrent test PROCESSES (cargo test + IDE runs)
+        // sharing one file raced each other's migrations ("table already
+        // exists" / stale statement cache).
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-pool.sqlite");
+            .join(format!("target/test-pool-{}.sqlite", std::process::id()));
         for p in [path.clone(),
                   path.with_extension("sqlite-wal"),
                   path.with_extension("sqlite-shm")] {

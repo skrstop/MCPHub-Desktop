@@ -88,7 +88,7 @@ describe('transformTauriResponse: decision_tools', () => {
     });
   });
 
-  it('preserves an empty array (decision disabled) instead of nulling it', () => {
+  it('preserves an empty array instead of nulling it', () => {
     const r = transformTauriResponse('decision_tools', []) as { success: boolean; data: unknown[] };
     expect(r.success).toBe(true);
     expect(r.data).toEqual([]);

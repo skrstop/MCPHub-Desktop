@@ -2,11 +2,14 @@ import { apiDelete, apiGet, apiPost, apiPut } from '../utils/fetchInterceptor';
 import type { ModelDownloadProgress } from '@/components/ui/ModelSelector';
 import type { ApiResponse, RagModelInfo } from '@/types';
 
-/** Decision-support status (enable flag + selected model). */
+/** Decision-support status (enable flag + selected model). `selectionLost` is
+ *  the persisted selection when its files no longer resolve (the decide path
+ *  falls back to a ready default, so the UI must surface it for re-download). */
 export interface DecisionStatus {
   enabled: boolean;
   model: string | null;
   modelReady: boolean;
+  selectionLost?: string | null;
 }
 
 /** One recorded decision request (row of decision_history). */
@@ -46,8 +49,10 @@ export const decideDecision = async (
 };
 
 /** The app-level decision MCP tool (decision_decide) — name/description/
- *  inputSchema. Empty if decision support is off. Powers the "view tools"
- *  dialog in the decision page. */
+ *  inputSchema. Always returns the catalog: the "view tools" dialog
+ *  documents the tool even while decision support is off (enable gating
+ *  applies to the MCP surface only). Powers the "view tools" dialog in the
+ *  decision page. */
 export const getDecisionTools = async (): Promise<Record<string, unknown>[]> => {
   const response: ApiResponse<Record<string, unknown>[]> = await apiGet('/decision/tools');
   if (!response.success) throw new Error(response.message || 'Failed to get decision tools');

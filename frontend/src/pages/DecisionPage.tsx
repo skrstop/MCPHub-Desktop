@@ -29,7 +29,9 @@ const DecisionPage: React.FC = () => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
-  const [enabled, setEnabled] = useState(false);
+  // null until the first successful status read — a load failure must not
+  // assert "已关闭" from the uninitialized default (the flag may really be ON).
+  const [enabled, setEnabled] = useState<boolean | null>(null);
   const [toggling, setToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [entries, setEntries] = useState<DecisionHistoryEntry[]>([]);
@@ -177,36 +179,40 @@ const DecisionPage: React.FC = () => {
 
   return (
     <div className="p-6 max-w-6xl mx-auto" data-testid="decision-page">
-      {/* Header: title + beta tag + tools button + enable switch */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold text-[var(--hub-ink)] flex items-center gap-2">
-            <BrainCircuit size={20} className="text-[var(--hub-ink-2)]" />
-            {t('pages.decision.title')}
-            <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
-              {t('nav.beta')}
-            </span>
-          </h1>
-          <p className="text-sm text-[var(--hub-ink-3)] mt-1">{t('pages.decision.subtitle')}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="hub-btn sm"
-            onClick={() => setShowTools(true)}
-            title={t('pages.decision.viewToolsHint')}
-          >
-            <Sparkles size={12} /> {t('pages.decision.viewTools')}
-          </button>
+      {/* Header: title + beta tag + switch + status + view-tools — mirrors
+          the RAG page header (interactive controls sit beside the title).
+          The tools button stays enabled while decision support is off: the
+          dialog documents the tool regardless of the enable flag. */}
+      <div className="flex items-center gap-2.5 flex-wrap mb-1">
+        <h1 className="text-xl font-semibold text-[var(--hub-ink)] flex items-center gap-2">
+          <BrainCircuit size={20} className="text-[var(--hub-ink-2)]" />
+          {t('pages.decision.title')}
+          <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
+            {t('nav.beta')}
+          </span>
+        </h1>
+        <div className="flex items-center gap-1.5">
           {toggling && <Loader2 size={14} className="animate-spin text-[var(--hub-ink-3)]" />}
           <Switch
             disabled={toggling}
-            checked={enabled}
+            checked={enabled ?? false}
             onCheckedChange={handleToggle}
             aria-label={t('pages.decision.title')}
           />
+          <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
+            {enabled === null ? '—' : enabled ? t('pages.decision.enabled') : t('pages.decision.disabled')}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowTools(true)}
+            className="hub-btn sm"
+            title={t('pages.decision.viewToolsHint')}
+          >
+            {t('pages.decision.viewTools')}
+          </button>
         </div>
       </div>
+      <p className="text-sm text-[var(--hub-ink-3)] mb-6">{t('pages.decision.subtitle')}</p>
 
       {/* History list */}
       <div className="hub-card">
@@ -411,7 +417,7 @@ const DecisionPage: React.FC = () => {
 
       {/* View decision tools dialog — shows the MCP tools decision support
           exposes (decision_decide): name, description, input schema. */}
-      {showTools && <ToolsDialog onClose={() => setShowTools(false)} />}
+      {showTools && <ToolsDialog onClose={() => setShowTools(false)} enabled={enabled} />}
     </div>
   );
 };
@@ -419,8 +425,14 @@ const DecisionPage: React.FC = () => {
 /** Dialog showing the MCP tools decision support exposes (decision_decide) —
  *  name, description, and input schema. Read-only; mirrors the RAG page's
  *  tools dialog. */
-/** Exported for tests (DecisionToolsDialog.test.tsx). */
-export const ToolsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/** Exported for tests (DecisionToolsDialog.test.tsx). `enabled` mirrors the
+ *  page switch: only a KNOWN-off flag (`false`) shows the "not exposed to
+ *  MCP clients" hint — `null` (status not loaded yet) must not claim off.
+ *  The catalog is always viewable per product req. */
+export const ToolsDialog: React.FC<{ onClose: () => void; enabled?: boolean | null }> = ({
+  onClose,
+  enabled,
+}) => {
   const { t } = useTranslation();
   const [tools, setTools] = useState<Record<string, unknown>[]>([]);
   const [loading, setLoading] = useState(true);
@@ -453,6 +465,14 @@ export const ToolsDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          {enabled === false && (
+            <p
+              className="text-[12px] font-medium"
+              style={{ color: 'var(--hub-warn, #d97706)' }}
+            >
+              {t('pages.decision.toolsDisabledHint')}
+            </p>
+          )}
           {loading ? (
             <div className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--hub-ink-3)' }}>
               <Loader2 size={14} className="animate-spin" /> {t('common.loading')}

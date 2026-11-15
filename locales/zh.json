@@ -1048,7 +1048,10 @@
       "clearConfirmAll": "将删除全部决策请求历史（包括未加载的分页），且不可恢复。确定继续吗？",
       "viewTools": "查看工具",
       "viewToolsHint": "查看决策支持提供的 MCP 工具",
-      "toolsEmpty": "决策支持未开启，暂无可用工具。"
+      "toolsEmpty": "暂无可用工具。",
+      "enabled": "已开启",
+      "disabled": "已关闭",
+      "toolsDisabledHint": "决策支持未开启——该工具暂不会暴露给 MCP 客户端。"
     }
   },
   "logs": {
@@ -1774,14 +1777,15 @@
     "fieldServerName": "提供该工具的 MCP 服务器名。",
     "mvSourceRag": "知识库",
     "decisionTitle": "决策模型",
-    "decisionEnable": "启用决策支持",
-    "decisionEnableDescription": "开启后在内置 mcphub-desktop 服务器上暴露 decision_decide MCP 工具，并记录请求历史。",
     "decisionHint": "决策模型与向量模型相互独立：切换即时生效，无需重建索引。",
-    "decisionModelSwitch": "决策模型切换",
-    "decisionEnabledToast": "决策支持已开启",
-    "decisionDisabledToast": "决策支持已关闭",
     "decisionModelSwitched": "决策模型已切换",
-    "decisionModelMissing": "所选模型文件已丢失——请重新下载后再使用决策"
+    "decisionModelMissing": "所选模型 {{model}} 的文件已丢失——请重新下载该模型，或改用列表中的其他模型",
+    "decisionStatusRunning": "运行中：{{model}}",
+    "decisionStatusNoModel": "已开启：模型未就绪",
+    "decisionStatusStopped": "未运行：在「决策支持」页面开启",
+    "decisionLostHint": "当前由备用模型代为决策——可在列表中选用它，或重新下载上方的模型。",
+    "decisionModelGone": "所选模型 {{model}} 已不可用——请改用列表中的其他模型",
+    "decisionLostHintGone": "当前由备用模型代为决策——可在列表中选用它。"
   },
   "mcpb": {
     "upload": "上传",

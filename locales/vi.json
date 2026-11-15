@@ -1048,7 +1048,10 @@
       "clearConfirmAll": "Thao tác này xóa TOÀN BỘ lịch sử quyết định (bao gồm cả các trang chưa tải) và không thể hoàn tác. Tiếp tục?",
       "viewTools": "Xem công cụ",
       "viewToolsHint": "Xem các công cụ MCP mà hỗ trợ quyết định cung cấp",
-      "toolsEmpty": "Hỗ trợ quyết định đang tắt — không có công cụ nào."
+      "toolsEmpty": "Không có công cụ khả dụng.",
+      "enabled": "Đã bật",
+      "disabled": "Đã tắt",
+      "toolsDisabledHint": "Hỗ trợ quyết định đang tắt — công cụ này đã được mô tả nhưng chưa cung cấp cho MCP client."
     }
   },
   "logs": {
@@ -1774,14 +1777,15 @@
     "fieldServerName": "Tên máy chủ MCP cung cấp công cụ.",
     "mvSourceRag": "Cơ sở tri thức",
     "decisionTitle": "Mô hình quyết định",
-    "decisionEnable": "Bật hỗ trợ quyết định",
-    "decisionEnableDescription": "Công cụ MCP decision_decide trên máy chủ tích hợp mcphub-desktop và ghi lại lịch sử yêu cầu.",
     "decisionHint": "Mô hình quyết định độc lập với mô hình embedding: chuyển đổi có hiệu lực ngay, không cần tạo lại chỉ mục.",
-    "decisionModelSwitch": "Mô hình quyết định",
-    "decisionEnabledToast": "Đã bật hỗ trợ quyết định",
-    "decisionDisabledToast": "Đã tắt hỗ trợ quyết định",
     "decisionModelSwitched": "Đã chuyển mô hình quyết định",
-    "decisionModelMissing": "Tệp mô hình đã chọn bị thiếu trên đĩa — hãy tải lại trước khi ra quyết định"
+    "decisionModelMissing": "Tệp của mô hình đã chọn {{model}} bị thiếu trên đĩa — hãy tải lại hoặc chuyển sang mô hình khác trong danh sách",
+    "decisionStatusRunning": "Đang chạy: {{model}}",
+    "decisionStatusNoModel": "Đã bật: mô hình chưa sẵn sàng",
+    "decisionStatusStopped": "Không chạy: bật tại trang Hỗ trợ quyết định",
+    "decisionLostHint": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách hoặc tải lại mô hình ở trên.",
+    "decisionModelGone": "Mô hình đã chọn {{model}} không còn khả dụng — hãy chuyển sang mô hình khác trong danh sách",
+    "decisionLostHintGone": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách."
   },
   "mcpb": {
     "upload": "Tải lên",

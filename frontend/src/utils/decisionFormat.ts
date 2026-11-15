@@ -31,6 +31,19 @@ export function formatScore(s: number): string {
   return s.toFixed(4);
 }
 
+/** i18n key for the decision-model runtime status row in 【本地模型】设置
+ *  (mirrors the RAG runtime's mvStatus text). Three states: running with a
+ *  ready model, enabled but the model file is missing, and not running. */
+export type DecisionStatusKey =
+  | 'settings.decisionStatusRunning'
+  | 'settings.decisionStatusNoModel'
+  | 'settings.decisionStatusStopped';
+
+export function decisionStatusKey(enabled: boolean, modelReady: boolean): DecisionStatusKey {
+  if (!enabled) return 'settings.decisionStatusStopped';
+  return modelReady ? 'settings.decisionStatusRunning' : 'settings.decisionStatusNoModel';
+}
+
 /** Minimal row shape mergeHistoryPage operates on (structurally satisfied by
  *  the service layer's `DecisionHistoryEntry`). */
 export interface HistoryRowKey {

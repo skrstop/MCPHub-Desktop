@@ -1098,7 +1098,10 @@
       "clearConfirmAll": "Esto elimina TODO el historial de decisiones (incluidas las páginas no cargadas) y no se puede deshacer. ¿Continuar?",
       "viewTools": "Ver herramientas",
       "viewToolsHint": "Ver las herramientas MCP que ofrece el soporte de decisiones",
-      "toolsEmpty": "El soporte de decisiones está desactivado — no hay herramientas disponibles."
+      "toolsEmpty": "No hay herramientas disponibles.",
+      "enabled": "Activado",
+      "disabled": "Desactivado",
+      "toolsDisabledHint": "El soporte de decisiones está desactivado — esta herramienta está documentada pero aún no se expone a los clientes MCP."
     }
   },
   "logs": {
@@ -1833,14 +1836,15 @@
     "fieldServerName": "Nombre del servidor MCP que proporciona la herramienta.",
     "mvSourceRag": "Base de conocimiento",
     "decisionTitle": "Modelo de decisión",
-    "decisionEnable": "Activar soporte de decisión",
-    "decisionEnableDescription": "Expone la herramienta MCP decision_decide en el servidor integrado mcphub-desktop y registra el historial de solicitudes.",
     "decisionHint": "Los modelos de decisión son independientes del modelo de embedding: el cambio es inmediato, sin reindexación.",
-    "decisionModelSwitch": "Modelo de decisión",
-    "decisionEnabledToast": "Soporte de decisión activado",
-    "decisionDisabledToast": "Soporte de decisión desactivado",
     "decisionModelSwitched": "Modelo de decisión cambiado",
-    "decisionModelMissing": "Los archivos del modelo seleccionado faltan en el disco: vuelva a descargarlo antes de decidir"
+    "decisionModelMissing": "Los archivos del modelo seleccionado {{model}} faltan en el disco: vuelva a descargarlo o cambie a otro modelo de la lista",
+    "decisionStatusRunning": "En ejecución: {{model}}",
+    "decisionStatusNoModel": "Activado: modelo no listo",
+    "decisionStatusStopped": "En parado: actívalo en la página de Soporte de decisiones",
+    "decisionLostHint": "Un modelo de respaldo se está encargando de las decisiones: selecciónelo desde la lista o vuelva a descargar el modelo de arriba.",
+    "decisionModelGone": "El modelo seleccionado {{model}} ya no está disponible: cambie a otro modelo de la lista",
+    "decisionLostHintGone": "Un modelo de respaldo se está encargando de las decisiones: selecciónelo desde la lista."
   },
   "mcpb": {
     "upload": "Subir",

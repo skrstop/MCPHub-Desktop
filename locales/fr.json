@@ -1048,7 +1048,10 @@
       "clearConfirmAll": "Ceci supprime TOUT l'historique de décisions (y compris les pages non chargées), sans possibilité d'annulation. Continuer ?",
       "viewTools": "Voir les outils",
       "viewToolsHint": "Voir les outils MCP fournis par l'aide à la décision",
-      "toolsEmpty": "L'aide à la décision est désactivée — aucun outil disponible."
+      "toolsEmpty": "Aucun outil disponible.",
+      "enabled": "Activé",
+      "disabled": "Désactivé",
+      "toolsDisabledHint": "L’aide à la décision est désactivée — cet outil est documenté mais pas encore exposé aux clients MCP."
     }
   },
   "logs": {
@@ -1774,14 +1777,15 @@
     "fieldServerName": "Nom du serveur MCP fournissant l'outil.",
     "mvSourceRag": "Base de connaissances",
     "decisionTitle": "Modèle de décision",
-    "decisionEnable": "Activer l'aide à la décision",
-    "decisionEnableDescription": "Expose l'outil MCP decision_decide sur le serveur intégré mcphub-desktop et enregistre l'historique des requêtes.",
     "decisionHint": "Les modèles de décision sont indépendants du modèle d'embedding : le changement est immédiat, sans réindexation.",
-    "decisionModelSwitch": "Modèle de décision",
-    "decisionEnabledToast": "Aide à la décision activée",
-    "decisionDisabledToast": "Aide à la décision désactivée",
     "decisionModelSwitched": "Modèle de décision changé",
-    "decisionModelMissing": "Les fichiers du modèle sélectionné sont absents du disque — retéléchargez-le avant de décider"
+    "decisionModelMissing": "Les fichiers du modèle sélectionné {{model}} sont absents du disque — retéléchargez-le ou passez à un autre modèle de la liste",
+    "decisionStatusRunning": "En cours d’exécution : {{model}}",
+    "decisionStatusNoModel": "Activé : modèle non prêt",
+    "decisionStatusStopped": "En arrêt : activez-le sur la page Aide à la décision",
+    "decisionLostHint": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste ou retéléchargez le modèle ci-dessus.",
+    "decisionModelGone": "Le modèle sélectionné {{model}} n’est plus disponible — passez à un autre modèle de la liste",
+    "decisionLostHintGone": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste."
   },
   "mcpb": {
     "upload": "Télécharger",

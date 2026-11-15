@@ -1048,7 +1048,10 @@
       "clearConfirmAll": "Bu işlem TÜM karar geçmişi kayıtlarını (yüklenmemiş sayfalar dahil) siler ve geri alınamaz. Devam edilsin mi?",
       "viewTools": "Araçları Gör",
       "viewToolsHint": "Karar desteğinin sağladığı MCP araçlarını gör",
-      "toolsEmpty": "Karar desteği kapalı — kullanılabilir araç yok."
+      "toolsEmpty": "Kullanılabilir araç yok.",
+      "enabled": "Etkin",
+      "disabled": "Devre dışı",
+      "toolsDisabledHint": "Karar desteği kapalı — bu araç belgelenmiştir ancak henüz MCP istemcilerine sunulmuyor."
     }
   },
   "logs": {
@@ -1774,14 +1777,15 @@
     "fieldServerName": "Aracı sağlayan MCP sunucusunun adı.",
     "mvSourceRag": "Bilgi Tabanı",
     "decisionTitle": "Karar Modeli",
-    "decisionEnable": "Karar Desteğini Etkinleştir",
-    "decisionEnableDescription": "Yerleşik mcphub-desktop sunucusunda decision_decide MCP aracını kullanıma sunar ve istek geçmişini kaydeder.",
     "decisionHint": "Karar modelleri gömme modelinden bağımsızdır: geçiş anında etkili olur, yeniden indeksleme gerekmez.",
-    "decisionModelSwitch": "Karar Modeli",
-    "decisionEnabledToast": "Karar desteği etkinleştirildi",
-    "decisionDisabledToast": "Karar desteği devre dışı bırakıldı",
     "decisionModelSwitched": "Karar modeli değiştirildi",
-    "decisionModelMissing": "Seçili model dosyaları diskte eksik — karara vermeden önce yeniden indirin"
+    "decisionModelMissing": "Seçilen model {{model}} dosyaları diskte eksik — yeniden indirin veya listedeki başka bir modele geçin",
+    "decisionStatusRunning": "Çalışıyor: {{model}}",
+    "decisionStatusNoModel": "Etkin: model hazır değil",
+    "decisionStatusStopped": "Çalışmıyor: Karar Destek sayfasından etkinleştirin",
+    "decisionLostHint": "Kararları şu anda bir yedek model yürütüyor — listeden onu seçin veya yukarıdaki modeli yeniden indirin.",
+    "decisionModelGone": "Seçilen model {{model}} artık kullanılamıyor — listedeki başka bir modele geçin",
+    "decisionLostHintGone": "Kararları şu anda bir yedek model yürütüyor — listeden onu seçin."
   },
   "mcpb": {
     "upload": "Yükle",

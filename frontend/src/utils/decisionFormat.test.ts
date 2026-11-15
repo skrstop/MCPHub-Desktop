@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DECISION_TYPES,
+  decisionStatusKey,
   decisionTypeLabelKey,
   formatProbability,
   formatScore,
@@ -96,5 +97,17 @@ describe('mergeHistoryPage', () => {
     const copy = [...prev];
     mergeHistoryPage(prev, [row('x', '2026-01-05 00:00:00')]);
     expect(prev).toEqual(copy);
+  });
+});
+
+describe('decisionStatusKey', () => {
+  it('maps the three runtime states to distinct i18n keys', () => {
+    // Running: enabled + ready model → model name shown.
+    expect(decisionStatusKey(true, true)).toBe('settings.decisionStatusRunning');
+    // Enabled but model missing → actionable "not ready" copy.
+    expect(decisionStatusKey(true, false)).toBe('settings.decisionStatusNoModel');
+    // Disabled → stopped copy regardless of the model state.
+    expect(decisionStatusKey(false, true)).toBe('settings.decisionStatusStopped');
+    expect(decisionStatusKey(false, false)).toBe('settings.decisionStatusStopped');
   });
 });

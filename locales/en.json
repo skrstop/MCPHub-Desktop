@@ -1048,7 +1048,10 @@
       "clearConfirmAll": "This deletes ALL decision history entries (including unloaded pages) and cannot be undone. Continue?",
       "viewTools": "View Tools",
       "viewToolsHint": "View the MCP tools decision support provides",
-      "toolsEmpty": "Decision support is off — no tools available."
+      "toolsEmpty": "No tools available.",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "toolsDisabledHint": "Decision support is off — this tool is documented but not yet exposed to MCP clients."
     }
   },
   "logs": {
@@ -1774,14 +1777,15 @@
     "fieldServerName": "Name of the MCP server providing the tool.",
     "mvSourceRag": "Knowledge Base",
     "decisionTitle": "Decision Model",
-    "decisionEnable": "Enable Decision Support",
-    "decisionEnableDescription": "Exposes the decision_decide MCP tool on the builtin mcphub-desktop server and records request history.",
     "decisionHint": "Decision models are independent of the embedding model: switching takes effect immediately, no reindex needed.",
-    "decisionModelSwitch": "Decision Model",
-    "decisionEnabledToast": "Decision support enabled",
-    "decisionDisabledToast": "Decision support disabled",
     "decisionModelSwitched": "Decision model switched",
-    "decisionModelMissing": "Selected model files are missing on disk — re-download it before deciding"
+    "decisionModelMissing": "Selected model {{model}} is missing on disk — re-download it, or switch to another model from the list",
+    "decisionStatusRunning": "Running: {{model}}",
+    "decisionStatusNoModel": "Enabled: model not ready",
+    "decisionStatusStopped": "Not running: enable it on the Decision Support page",
+    "decisionLostHint": "A fallback model is currently handling decisions — adopt it from the list, or re-download the model above.",
+    "decisionModelGone": "Selected model {{model}} is no longer available — switch to another model from the list",
+    "decisionLostHintGone": "A fallback model is currently handling decisions — adopt it from the list."
   },
   "mcpb": {
     "upload": "Upload",

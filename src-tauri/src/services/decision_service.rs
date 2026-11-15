@@ -101,6 +101,55 @@ pub async fn selected_model(app: &AppHandle) -> Option<String> {
     crate::mv::models::default_decision_size(app)
 }
 
+/// The persisted selection's name when it exists but its files no longer
+/// resolve (deleted download dir / removed bundled size). Pure so the
+/// UI-facing "lost selection" derivation is unit-testable without an
+/// AppHandle — the decide path's ready-fallback hides this state from
+/// `selected_model`, but the settings UI must warn about it.
+pub fn selection_lost(persisted: Option<String>, persisted_ready: bool) -> Option<String> {
+    match persisted {
+        Some(name) if !persisted_ready => Some(name),
+        _ => None,
+    }
+}
+
+/// The UI-facing decision status fields (pure derivation — the AppHandle-
+/// dependent resolve calls stay in the command). Keeping the effective-vs-
+/// persisted distinction here pins the bug class where the lost-model
+/// warning silently dies: the effective model's readiness must NOT decide
+/// `selection_lost` (the decide path's ready-fallback makes it always true).
+pub struct DecisionStatusView {
+    pub model: Option<String>,
+    pub model_ready: bool,
+    pub selection_lost: Option<String>,
+}
+
+/// A resolved model fact (name + whether its files resolve on disk). The
+/// struct pairing keeps name/ready together — the bare-`bool` parameter list
+/// made an effective/persisted swap at the call site compile silently.
+pub struct ResolvedModel {
+    pub name: Option<String>,
+    pub ready: bool,
+}
+
+/// Position-distinct wrappers: swapping the effective and persisted models
+/// at the `decision_status_view` call site is a COMPILE error, not a silent
+/// selection_lost derivation swap.
+pub struct EffectiveModel(pub ResolvedModel);
+pub struct PersistedModel(pub ResolvedModel);
+
+pub fn decision_status_view(
+    effective: EffectiveModel,
+    persisted: PersistedModel,
+) -> DecisionStatusView {
+    let selection_lost = selection_lost(persisted.0.name, persisted.0.ready);
+    DecisionStatusView {
+        model: effective.0.name,
+        model_ready: effective.0.ready,
+        selection_lost,
+    }
+}
+
 /// Load (or fetch from cache) the selected decision model.
 ///
 /// The cache is keyed by size name AND a freshness fingerprint of the GGUF
@@ -441,8 +490,19 @@ pub async fn clear_history() -> Result<u64> {
 /// failure mode `remove_doc_sql` guards against) — retry instead of silently
 /// skipping this cycle's prune.
 pub async fn cleanup_history(days: i64) -> Result<u64> {
+    cleanup_history_with_now(days, Local::now()).await
+}
+
+/// `cleanup_history` with an explicit clock — extracted so the boundary
+/// tests are deterministic (a wall-clock second tick between the test's
+/// fixture timestamps and the call would shift the cutoff and flip the
+/// `<`-vs-`<=` boundary assertions).
+pub(crate) async fn cleanup_history_with_now(
+    days: i64,
+    now: chrono::DateTime<Local>,
+) -> Result<u64> {
     let days = days.clamp(1, 3650);
-    let cutoff = (Local::now() - chrono::Duration::days(days))
+    let cutoff = (now - chrono::Duration::days(days))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
     let mut last_err: Option<sqlx::Error> = None;
@@ -514,13 +574,11 @@ async fn prune_history_row_cap() -> Result<u64> {
 
 // ── builtin MCP tool exposure ───────────────────────────────────────────────
 
-/// The decision tool as a proper `Tool` on the builtin "mcphub-desktop"
-/// server. Empty when decision support is disabled (the caller gates on
-/// `is_enabled()`).
-pub fn builtin_decision_tools() -> Vec<Tool> {
-    if !is_enabled() {
-        return Vec::new();
-    }
+/// The decision tool catalog — the full `Tool` definition regardless of the
+/// enable flag. The "view tools" dialog documents what the tool accepts even
+/// while decision support is off; enable gating applies to the MCP surface
+/// (`builtin_decision_tools`) and the dispatch path, not to documentation.
+pub fn decision_tool_catalog() -> Vec<Tool> {
     vec![Tool {
         hidden_params: None,
         name: "decision_decide".to_string(),
@@ -560,6 +618,17 @@ pub fn builtin_decision_tools() -> Vec<Tool> {
         meta: None,
         description_overridden: false,
     }]
+}
+
+/// The decision tool as a proper `Tool` on the builtin "mcphub-desktop"
+/// server. Empty when decision support is disabled — gated here on
+/// `is_enabled()`; callers rely on this self-gating so the tools/list
+/// surfaces never advertise a tool whose dispatch would reject.
+pub fn builtin_decision_tools() -> Vec<Tool> {
+    if !is_enabled() {
+        return Vec::new();
+    }
+    decision_tool_catalog()
 }
 
 /// Parse + validate the tool arguments (pure — unit-testable without an app
@@ -634,9 +703,11 @@ pub fn parse_decision_tool_args(
 
 /// The decision tool as JSON tool definitions (name / description /
 /// inputSchema) — the shape the `decision_tools` command returns and the
-/// "view tools" dialog renders. Empty when decision support is disabled.
+/// "view tools" dialog renders. Always returns the catalog, regardless of
+/// the enable flag: the dialog documents the tool even while decision
+/// support is off (enable gating applies to the MCP surface only).
 pub fn decision_tool_definitions() -> Vec<serde_json::Value> {
-    builtin_decision_tools()
+    decision_tool_catalog()
         .into_iter()
         .map(|t| {
             serde_json::json!({
@@ -673,21 +744,25 @@ pub async fn call_builtin_decision_tool(
     })
 }
 
+/// Serializes every test that touches the process-global DECISION_ACTIVE
+/// flag or the shared decision_history table — parallel `cargo test`
+/// otherwise races on both (flag flips + DELETE/INSERT interleavings).
+/// `pub(crate)` so commands::decision's tests can hold it too (the resting
+/// flag state is then deterministic: every lock-holder restores false).
+#[cfg(test)]
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    match TEST_LOCK.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serializes every test that touches the process-global DECISION_ACTIVE
-    /// flag or the shared decision_history table — parallel `cargo test`
-    /// otherwise races on both (flag flips + DELETE/INSERT interleavings).
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        match TEST_LOCK.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
 
     #[test]
     fn decision_tools_gated_on_flag() {
@@ -707,13 +782,19 @@ mod tests {
     #[test]
     fn decision_tool_definitions_shape_and_gating() {
         let _g = test_lock();
-        // Disabled → empty (the "view tools" dialog shows the empty state).
+        // Disabled → the catalog is STILL returned: the "view tools" dialog
+        // documents the tool even while decision support is off. Enable
+        // gating applies to the MCP surface (builtin_decision_tools, covered
+        // by decision_tools_gated_on_flag), not to documentation.
         DECISION_ACTIVE.store(false, Ordering::SeqCst);
-        assert!(decision_tool_definitions().is_empty());
-        // Enabled → exactly one entry with the dialog-rendered shape:
+        let defs_off = decision_tool_definitions();
+        assert_eq!(defs_off.len(), 1);
+        assert_eq!(defs_off[0]["name"], "decision_decide");
+        // Enabled → identical entry (the catalog must be flag-independent):
         // name / description / inputSchema, schema mirroring the parser.
         DECISION_ACTIVE.store(true, Ordering::SeqCst);
         let defs = decision_tool_definitions();
+        assert_eq!(defs, defs_off, "catalog output must not depend on the enable flag");
         assert_eq!(defs.len(), 1);
         let d = &defs[0];
         assert_eq!(d["name"], "decision_decide");
@@ -727,6 +808,45 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["state", "question", "options"]));
         assert_eq!(props["decisionType"]["enum"], serde_json::json!(["choice", "score", "noul"]));
         DECISION_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn decision_tool_catalog_is_flag_independent() {
+        let _g = test_lock();
+        // The catalog seam itself: always exactly the decision_decide tool,
+        // regardless of the enable flag (gating lives in builtin_decision_tools).
+        DECISION_ACTIVE.store(false, Ordering::SeqCst);
+        let off = decision_tool_catalog();
+        DECISION_ACTIVE.store(true, Ordering::SeqCst);
+        let on = decision_tool_catalog();
+        DECISION_ACTIVE.store(false, Ordering::SeqCst);
+        // Field-wise identity (Tool has no PartialEq derive): the catalog
+        // must be a pure constant regardless of the flag.
+        assert_eq!(off.len(), on.len());
+        for (a, b) in off.iter().zip(on.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.description, b.description);
+            assert_eq!(a.input_schema, b.input_schema);
+            assert_eq!(a.server_name, b.server_name);
+        }
+        assert_eq!(off.len(), 1);
+        assert_eq!(off[0].name, "decision_decide");
+        assert_eq!(off[0].server_name, crate::rag::service::BUILTIN_SERVER_NAME);
+        assert!(off[0].enabled);
+    }
+
+    #[test]
+    fn selection_lost_only_when_persisted_unready() {
+        // Ready selection → no warning. Unready persisted name → surfaced
+        // (the effective-model fallback hides it from `model`). No persisted
+        // selection → never "lost".
+        assert_eq!(selection_lost(Some("julia/1".into()), true), None);
+        assert_eq!(
+            selection_lost(Some("user/2".into()), false),
+            Some("user/2".to_string())
+        );
+        assert_eq!(selection_lost(None, true), None);
+        assert_eq!(selection_lost(None, false), None);
     }
 
     #[test]
@@ -833,7 +953,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let n = cleanup_history(1).await.unwrap();
+        // Explicit clock (same `now` the fixtures derive from) — a wall-clock
+        // tick during the inserts must not shift the cutoff and flip the
+        // boundary assertions.
+        let n = cleanup_history_with_now(1, now).await.unwrap();
         assert_eq!(n, 1, "only the strictly-older row is deleted");
         let remaining: Vec<(String,)> = sqlx::query_as("SELECT id FROM decision_history")
             .fetch_all(pool)
@@ -843,8 +966,32 @@ mod tests {
         assert!(remaining.contains(&"at".to_string()), "row exactly at cutoff must survive (< not <=)");
         assert!(remaining.contains(&"new".to_string()));
         // days=0 / negative clamp to 1 → nothing new deleted.
-        assert_eq!(cleanup_history(0).await.unwrap(), 0);
-        assert_eq!(cleanup_history(-5).await.unwrap(), 0);
+        assert_eq!(cleanup_history_with_now(0, now).await.unwrap(), 0);
+        assert_eq!(cleanup_history_with_now(-5, now).await.unwrap(), 0);
+        // Upper clamp: days=99999 must clamp to 3650 — a 4000d-old row falls
+        // inside the clamped cutoff and is deleted (without the clamp the
+        // cutoff would reach 99999d back and the row would survive), while a
+        // 3600d-old row must SURVIVE — pinning the 3650 constant from both
+        // sides (a clamp lowered below ~3650 would delete it).
+        sqlx::query("INSERT INTO decision_history (id, created_at, decision_type, question, options_json, scores_json, probabilities_json, selected_index, selected_option) VALUES ('ancient', ?, 'choice', 'q', '[]', '[]', '[]', 0, 'x')")
+            .bind(fmt(now - chrono::Duration::days(4000)))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO decision_history (id, created_at, decision_type, question, options_json, scores_json, probabilities_json, selected_index, selected_option) VALUES ('oldish', ?, 'choice', 'q', '[]', '[]', '[]', 0, 'x')")
+            .bind(fmt(now - chrono::Duration::days(3600)))
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(cleanup_history_with_now(99_999, now).await.unwrap(), 1);
+        let remaining: Vec<(String,)> = sqlx::query_as("SELECT id FROM decision_history")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        let ids: Vec<String> = remaining.into_iter().map(|(id,)| id).collect();
+        assert!(!ids.contains(&"ancient".to_string()), "4000d row must be deleted at the 3650d clamp");
+        assert!(ids.contains(&"oldish".to_string()), "3600d row must survive the 3650d clamp");
+        assert!(ids.contains(&"at".to_string()));
         sqlx::query("DELETE FROM decision_history").execute(pool).await.unwrap();
     }
 
@@ -1111,6 +1258,7 @@ mod tests {
     #[tokio::test]
     async fn prune_history_row_cap_below_cap_is_noop() {
         let _g = test_lock();
+        crate::db::ensure_test_pool().await;
         let pool = crate::db::pool();
         sqlx::query("DELETE FROM decision_history").execute(pool).await.unwrap();
         let req = DecisionRequest {

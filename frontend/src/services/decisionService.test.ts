@@ -33,7 +33,7 @@ describe('getDecisionTools', () => {
     expect(out).toEqual(tools);
   });
 
-  it('falls back to [] when data is missing (decision disabled)', async () => {
+  it('falls back to [] when data is missing', async () => {
     mockedGet.mockResolvedValue({ success: true, data: undefined as never });
     expect(await getDecisionTools()).toEqual([]);
   });
@@ -50,13 +50,27 @@ describe('getDecisionTools', () => {
 });
 
 describe('decisionStatus / decisionSetEnabled', () => {
-  it('returns the status payload', async () => {
+  it('returns the status payload (including selectionLost passthrough)', async () => {
     mockedGet.mockResolvedValue({
       success: true,
-      data: { enabled: true, model: 'julia/1', modelReady: true },
+      data: { enabled: true, model: 'julia/1', modelReady: true, selectionLost: null },
     });
-    expect(await decisionStatus()).toEqual({ enabled: true, model: 'julia/1', modelReady: true });
+    expect(await decisionStatus()).toEqual({
+      enabled: true,
+      model: 'julia/1',
+      modelReady: true,
+      selectionLost: null,
+    });
     expect(mockedGet).toHaveBeenCalledWith('/decision/status');
+  });
+
+  it('passes a lost selection name through unchanged', async () => {
+    mockedGet.mockResolvedValue({
+      success: true,
+      data: { enabled: true, model: 'julia/1', modelReady: true, selectionLost: 'user/2' },
+    });
+    const out = await decisionStatus();
+    expect(out.selectionLost).toBe('user/2');
   });
 
   it('sends the enabled flag via PUT', async () => {
