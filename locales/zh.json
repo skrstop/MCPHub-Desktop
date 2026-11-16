@@ -560,7 +560,8 @@
       "httpFailSuggestionLoopback": "勾选「结束占用进程并重启」自动处理；或停用占用应用 / 在 设置 → 路由配置 中更换端口。",
       "httpFailCauseloopbackOccupied": "本机回环地址 127.0.0.1:{{port}} 已被其它进程占用（通配绑定成功但本机地址被抢，本机客户端会被劫持）。",
       "httpFailActionloopbackOccupied": "结束下方检测到的占用进程（勾选后点击「结束进程并重启」），或在 设置 → 路由配置 中更换端口后重试。",
-      "smartRoutingFootprint": "智能路由上下文占用"
+      "smartRoutingFootprint": "智能路由上下文占用",
+      "groupCount": "分组数"
     },
     "servers": {
       "title": "服务器管理"
@@ -1043,7 +1044,6 @@
       "type_choice": "单选",
       "type_score": "评分",
       "type_noul": "可否",
-      "loadMore": "加载更多",
       "loadFailed": "加载数据失败",
       "retry": "重试",
       "clearConfirmAll": "将删除全部决策请求历史（包括未加载的分页），且不可恢复。确定继续吗？",
@@ -1052,7 +1052,8 @@
       "toolsEmpty": "暂无可用工具。",
       "enabled": "已开启",
       "disabled": "已关闭",
-      "toolsDisabledHint": "决策支持未开启——该工具暂不会暴露给 MCP 客户端。"
+      "toolsDisabledHint": "决策支持未开启——该工具暂不会暴露给 MCP 客户端。",
+      "pageInfo": "第 {{page}} 页"
     }
   },
   "logs": {

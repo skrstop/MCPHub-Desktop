@@ -102,6 +102,24 @@ const DashboardPage: React.FC = () => {
   const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);
+  // Group count for the stats row — lightweight standalone fetch (the
+  // dashboard does not need the full Group objects, just the count).
+  const [groupCount, setGroupCount] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    let disposed = false;
+    apiGet<{ success?: boolean; data?: unknown[] }>('/groups')
+      .then((res) => {
+        if (!disposed) {
+          setGroupCount(res && res.success && Array.isArray(res.data) ? res.data.length : null);
+        }
+      })
+      .catch(() => {
+        if (!disposed) setGroupCount(null);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
   React.useEffect(() => {
     // Mark as loaded once the first loading cycle finishes (isLoading went true → false).
     // If the initial load returns 0 servers with no error, isLoading transitions
@@ -231,30 +249,41 @@ const DashboardPage: React.FC = () => {
 
       {/* Stat row */}
       {showSkeleton ? (
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div
-              key={i}
-              className="hub-card animate-pulse"
-              style={{ padding: '14px 16px', height: 78 }}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="hub-card animate-pulse"
+                style={{ padding: '14px 16px', height: 78 }}
+              />
+            ))}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
+            <div className="hub-card animate-pulse" style={{ padding: '14px 16px', height: 78 }} />
+          </div>
+        </>
       ) : (
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
-          <Stat label={t('pages.dashboard.totalServers')} value={stats.total} />
-          <Stat label={t('pages.dashboard.onlineServers')} value={stats.online} tone="ok" />
-          <Stat label={t('pages.dashboard.connectingServers')} value={stats.connecting} tone="warn" />
-          <Stat label={t('pages.dashboard.offlineServers')} value={stats.offline} tone="err" />
-          <Stat label={t('pages.dashboard.disabledServers')} value={stats.disabled} tone="muted" />
-          <Stat label={t('cost.totalFootprint')} value={formatTokens(footprint)} />
-          {smartRoutingConfig?.enabled && smartMetaTokens !== null && (
-            <Stat
-              label={t('pages.dashboard.smartRoutingFootprint')}
-              value={`${(smartMetaTokens / 1000).toFixed(1)}k`}
-            />
-          )}
-        </div>
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-3">
+            <Stat label={t('pages.dashboard.totalServers')} value={stats.total} />
+            <Stat label={t('pages.dashboard.onlineServers')} value={stats.online} tone="ok" />
+            <Stat label={t('pages.dashboard.connectingServers')} value={stats.connecting} tone="warn" />
+            <Stat label={t('pages.dashboard.offlineServers')} value={stats.offline} tone="err" />
+            <Stat label={t('pages.dashboard.disabledServers')} value={stats.disabled} tone="muted" />
+            <Stat label={t('pages.dashboard.groupCount')} value={groupCount ?? '—'} />
+          </div>
+          {/* Context footprints on their own row (total + smart-routing). */}
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
+            <Stat label={t('cost.totalFootprint')} value={formatTokens(footprint)} />
+            {smartRoutingConfig?.enabled && smartMetaTokens !== null && (
+              <Stat
+                label={t('pages.dashboard.smartRoutingFootprint')}
+                value={`${(smartMetaTokens / 1000).toFixed(1)}k`}
+              />
+            )}
+          </div>
+        </>
       )}
 
       {/* Recent servers */}

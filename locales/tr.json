@@ -560,7 +560,8 @@
       "httpFailSuggestionLoopback": "Otomatik işlem için \"Sonlandır ve yeniden başlat\" seçeneğini kullanın; veya diğer uygulamayı durdurun / Ayarlar → Yönlendirme bölümünden portu değiştirin.",
       "httpFailCauseloopbackOccupied": "Geri döngü adresi 127.0.0.1:{{port}} zaten başka bir süreçte (genel bağlama başarılı oldu, ancak yerel adres işgal edildi — yerel istemciler yönlendirilecek).",
       "httpFailActionloopbackOccupied": "Algılanan işgal eden süreci sonlandırın (seçeneği işaretleyip \"Sonlandır ve yeniden başlat\" öğesine tıklayın) veya Ayarlar → Yönlendirme bölümünden portu değiştirip yeniden deneyin.",
-      "smartRoutingFootprint": "Akıllı Yönlendirme Ayak İzi"
+      "smartRoutingFootprint": "Akıllı Yönlendirme Ayak İzi",
+      "groupCount": "Gruplar"
     },
     "servers": {
       "title": "Sunucu Yönetimi"
@@ -1043,7 +1044,6 @@
       "type_choice": "Seçim",
       "type_score": "Puan",
       "type_noul": "Evet/Hayır",
-      "loadMore": "Daha Fazla Yükle",
       "loadFailed": "Karar verileri yüklenemedi",
       "retry": "Yeniden dene",
       "clearConfirmAll": "Bu işlem TÜM karar geçmişi kayıtlarını (yüklenmemiş sayfalar dahil) siler ve geri alınamaz. Devam edilsin mi?",
@@ -1052,7 +1052,8 @@
       "toolsEmpty": "Kullanılabilir araç yok.",
       "enabled": "Etkin",
       "disabled": "Devre dışı",
-      "toolsDisabledHint": "Karar desteği kapalı — bu araç belgelenmiştir ancak henüz MCP istemcilerine sunulmuyor."
+      "toolsDisabledHint": "Karar desteği kapalı — bu araç belgelenmiştir ancak henüz MCP istemcilerine sunulmuyor.",
+      "pageInfo": "Sayfa {{page}}"
     }
   },
   "logs": {

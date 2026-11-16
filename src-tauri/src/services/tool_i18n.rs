@@ -220,12 +220,12 @@ pub fn rag_tool_description(name: &str, lang: &str) -> &'static str {
 /// Tool-level description for `decision_decide` in `lang`.
 pub fn decision_tool_description(lang: &str) -> &'static str {
     match normalize_lang(lang) {
-        "zh" => "用本地决策模型运行一次结构化决策：给定决策类型、上下文 state、问题和 2-20 个候选选项，返回每个选项的分数、概率与选中项。",
-        "fr" => "Exécute une décision structurée avec le modèle de décision local : étant donné un type de décision, un contexte state, une question et 2 à 20 options candidates, renvoie les scores, probabilités et l'option retenue pour chaque option.",
-        "tr" => "Yerel karar modeliyle yapılandırılmış bir karar çalıştırır: bir karar türü, bağlam state, bir soru ve 2-20 aday seçenek verildiğinde, seçenek başına puanları, olasılıkları ve seçilen seçeneği döndürür.",
-        "vi" => "Chạy một quyết định có cấu trúc với mô hình quyết định cục bộ: với loại quyết định, ngữ cảnh state, câu hỏi và 2-20 tùy chọn ứng viên, trả về điểm, xác suất và tùy chọn được chọn cho từng lựa chọn.",
-        "es" => "Ejecuta una decisión estructurada con el modelo de decisión local: dado un tipo de decisión, un contexto state, una pregunta y de 2 a 20 opciones candidatas, devuelve las puntuaciones, probabilidades y la opción seleccionada de cada una.",
-        _ => "Run a structured decision with the local decision model: given a question type, context state, question and 2-20 candidate options, returns per-option scores, probabilities and the selected option.",
+        "zh" => "用本地决策模型运行一次结构化决策：给定决策类型、上下文 state、问题和 2-20 个候选选项，返回每个选项的分数、概率与选中项。模型是一个小型本地路由模型，适合在选项间挑选、判断是否需要调用工具、评估相关度；不适合事实性、计算或知识类问题。",
+        "fr" => "Exécute une décision structurée avec le modèle de décision local : étant donné un type de décision, un contexte state, une question et 2 à 20 options candidates, renvoie les scores, probabilités et l'option retenue pour chaque option. Le modèle est un petit modèle de routage local, adapté pour choisir entre des options, décider d'appeler un outil ou évaluer une pertinence ; il ne convient pas aux questions factuelles, de calcul ou de connaissance.",
+        "tr" => "Yerel karar modeliyle yapılandırılmış bir karar çalıştırır: bir karar türü, bağlam state, bir soru ve 2-20 aday seçenek verildiğinde, seçenek başına puanları, olasılıkları ve seçilen seçeneği döndürür. Model küçük bir yerel yönlendirme modelidir; seçenekler arasında seçim yapmak, araç çağırma kararı vermek ve alaka düzeyini puanlamak için uygundur; olgusal, hesaplama veya bilgi soruları için uygun değildir.",
+        "vi" => "Chạy một quyết định có cấu trúc với mô hình quyết định cục bộ: với loại quyết định, ngữ cảnh state, câu hỏi và 2-20 tùy chọn ứng viên, trả về điểm, xác suất và tùy chọn được chọn cho từng lựa chọn. Mô hình là một mô hình định tuyến cục bộ nhỏ, phù hợp để chọn giữa các tùy chọn, quyết định có gọi công cụ hay không và chấm điểm mức độ liên quan; không phù hợp cho câu hỏi sự thật, tính toán hay kiến thức.",
+        "es" => "Ejecuta una decisión estructurada con el modelo de decisión local: dado un tipo de decisión, un contexto state, una pregunta y de 2 a 20 opciones candidatas, devuelve las puntuaciones, probabilidades y la opción seleccionada de cada una. El modelo es un pequeño modelo de enrutamiento local, adecuado para elegir entre opciones, decidir si llamar a una herramienta y puntuar relevancia; no es adecuado para preguntas fácticas, de cálculo o de conocimiento.",
+        _ => "Run a structured decision with the local decision model: given a question type, context state, question and 2-20 candidate options, returns per-option scores, probabilities and the selected option. The model is a small local routing model — suited to picking between options, tool-call routing and relevance scoring; do not use it for factual, calculation or knowledge questions.",
     }
 }
 
@@ -881,7 +881,7 @@ mod tests {
         }
         assert_eq!(
             fnv1a64(&buf),
-            1520988123207586255,
+            14481401532452695178,
             "English builtin description surface changed — update translations and re-pin deliberately"
         );
     }

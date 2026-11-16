@@ -44,37 +44,10 @@ export function decisionStatusKey(enabled: boolean, modelReady: boolean): Decisi
   return modelReady ? 'settings.decisionStatusRunning' : 'settings.decisionStatusNoModel';
 }
 
-/** Minimal row shape mergeHistoryPage operates on (structurally satisfied by
- *  the service layer's `DecisionHistoryEntry`). */
-export interface HistoryRowKey {
-  id: string;
-  createdAt: string;
-}
-
-/** Merge a prefix-refetch page into the loaded entries and restore the
- *  backend's ordering contract (`created_at DESC, id DESC`).
- *
- *  The page refetches the newest `limit` rows from offset 0 (offset paging
- *  would permanently skip rows inserted between fetches); rows inserted in
- *  between surface mid-list, so the merged set is re-sorted. Dedup by id —
- *  overlap between the previously loaded rows and the refetched prefix is
- *  expected. */
-export function mergeHistoryPage<T extends HistoryRowKey>(
-  prev: T[],
-  list: T[],
-): T[] {
-  const seen = new Set(prev.map((e) => e.id));
-  const merged = [...prev];
-  for (const e of list) {
-    // Dedup against prev AND within list itself (a defensive guard — the
-    // backend never returns duplicate ids in one page, but the merge must
-    // not depend on that).
-    if (seen.has(e.id)) continue;
-    seen.add(e.id);
-    merged.push(e);
-  }
-  merged.sort((a, b) =>
-    a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : a.id < b.id ? 1 : -1,
-  );
-  return merged;
+/** Slice a fetched history page into display rows + a next-page flag.
+ *  The page fetch requests `pageSize + 1` rows; an extra row is the only
+ *  reliable "more pages" signal short of a count query, and must be sliced
+ *  off before display. */
+export function pageSlice<T>(raw: T[], pageSize: number): { rows: T[]; hasMore: boolean } {
+  return { rows: raw.slice(0, pageSize), hasMore: raw.length > pageSize };
 }

@@ -8,7 +8,12 @@ vi.mock('../utils/fetchInterceptor', () => ({
 }));
 
 import { apiGet, apiPut } from '../utils/fetchInterceptor';
-import { getDecisionTools, decisionStatus, decisionSetEnabled } from './decisionService';
+import {
+  getDecisionTools,
+  decisionStatus,
+  decisionSetEnabled,
+  listDecisionHistory,
+} from './decisionService';
 
 const mockedGet = vi.mocked(apiGet);
 const mockedPut = vi.mocked(apiPut);
@@ -82,5 +87,35 @@ describe('decisionStatus / decisionSetEnabled', () => {
   it('throws on toggle failure', async () => {
     mockedPut.mockResolvedValue({ success: false, message: 'nope' });
     await expect(decisionSetEnabled(false)).rejects.toThrow('nope');
+  });
+});
+
+describe('listDecisionHistory', () => {
+  it('passes limit/offset through to the query string (offset paging contract)', async () => {
+    mockedGet.mockResolvedValue({ success: true, data: [] });
+    await listDecisionHistory(51, 50);
+    expect(mockedGet).toHaveBeenCalledWith('/decision/history?limit=51&offset=50');
+  });
+
+  it('defaults to limit=50 offset=0 when called without args', async () => {
+    mockedGet.mockResolvedValue({ success: true, data: [] });
+    await listDecisionHistory();
+    expect(mockedGet).toHaveBeenCalledWith('/decision/history?limit=50&offset=0');
+  });
+
+  it('returns the entry array on success', async () => {
+    const entry = { id: 'a', createdAt: 'x' };
+    mockedGet.mockResolvedValue({ success: true, data: [entry] });
+    expect(await listDecisionHistory(10, 0)).toEqual([entry]);
+  });
+
+  it('returns [] when data is missing', async () => {
+    mockedGet.mockResolvedValue({ success: true });
+    expect(await listDecisionHistory(10, 0)).toEqual([]);
+  });
+
+  it('throws on success:false with the server message', async () => {
+    mockedGet.mockResolvedValue({ success: false, message: 'db locked' });
+    await expect(listDecisionHistory(10, 0)).rejects.toThrow('db locked');
   });
 });

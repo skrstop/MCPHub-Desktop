@@ -5,7 +5,7 @@ import {
   decisionTypeLabelKey,
   formatProbability,
   formatScore,
-  mergeHistoryPage,
+  pageSlice,
   normalizeDecisionType,
 } from './decisionFormat';
 
@@ -51,55 +51,6 @@ describe('formatScore', () => {
   });
 });
 
-describe('mergeHistoryPage', () => {
-  const row = (id: string, createdAt: string) => ({ id, createdAt });
-
-  it('appends only unseen rows (dedup by id)', () => {
-    const prev = [row('a', '2026-01-01 00:00:00'), row('b', '2026-01-02 00:00:00')];
-    const list = [row('b', '2026-01-02 00:00:00'), row('c', '2026-01-03 00:00:00')];
-    const merged = mergeHistoryPage(prev, list);
-    expect(merged.map((r) => r.id)).toEqual(['c', 'b', 'a']);
-  });
-
-  it('restores time-desc order when inserts surface mid-list', () => {
-    // Rows inserted between page fetches appear at the TOP of the refetched
-    // prefix — the merge must re-sort, not append.
-    const prev = [row('a', '2026-01-01 00:00:00')];
-    const list = [row('x', '2026-01-05 00:00:00'), row('a', '2026-01-01 00:00:00'), row('b', '2026-01-02 00:00:00')];
-    expect(mergeHistoryPage(prev, list).map((r) => r.id)).toEqual(['x', 'b', 'a']);
-  });
-
-  it('breaks created_at ties by id DESC (backend ORDER BY contract)', () => {
-    const prev = [row('a', '2026-01-01 00:00:00')];
-    const list = [row('c', '2026-01-01 00:00:00'), row('b', '2026-01-01 00:00:00'), row('a', '2026-01-01 00:00:00')];
-    expect(mergeHistoryPage(prev, list).map((r) => r.id)).toEqual(['c', 'b', 'a']);
-  });
-
-  it('returns prev order untouched when the page adds nothing new', () => {
-    const prev = [row('b', '2026-01-02 00:00:00'), row('a', '2026-01-01 00:00:00')];
-    const list = [row('b', '2026-01-02 00:00:00'), row('a', '2026-01-01 00:00:00')];
-    expect(mergeHistoryPage(prev, list).map((r) => r.id)).toEqual(['b', 'a']);
-  });
-
-  it('merges into an empty prev (initial fetch shape)', () => {
-    const list = [row('b', '2026-01-02 00:00:00'), row('a', '2026-01-01 00:00:00')];
-    expect(mergeHistoryPage([], list).map((r) => r.id)).toEqual(['b', 'a']);
-  });
-
-  it('dedups duplicates within the incoming list itself', () => {
-    const prev = [row('a', '2026-01-01 00:00:00')];
-    const list = [row('x', '2026-01-05 00:00:00'), row('x', '2026-01-05 00:00:00')];
-    expect(mergeHistoryPage(prev, list).map((r) => r.id)).toEqual(['x', 'a']);
-  });
-
-  it('does not mutate the prev array', () => {
-    const prev = [row('a', '2026-01-01 00:00:00')];
-    const copy = [...prev];
-    mergeHistoryPage(prev, [row('x', '2026-01-05 00:00:00')]);
-    expect(prev).toEqual(copy);
-  });
-});
-
 describe('decisionStatusKey', () => {
   it('maps the three runtime states to distinct i18n keys', () => {
     // Running: enabled + ready model → model name shown.
@@ -109,5 +60,34 @@ describe('decisionStatusKey', () => {
     // Disabled → stopped copy regardless of the model state.
     expect(decisionStatusKey(false, true)).toBe('settings.decisionStatusStopped');
     expect(decisionStatusKey(false, false)).toBe('settings.decisionStatusStopped');
+  });
+});
+
+describe('pageSlice', () => {
+  const row = (i: number) => ({ id: `id-${i}`, createdAt: '' });
+
+  it('slices the extra probe row off and reports hasMore', () => {
+    const raw = Array.from({ length: 4 }, (_, i) => row(i));
+    const { rows, hasMore } = pageSlice(raw, 3);
+    expect(rows.map((r) => r.id)).toEqual(['id-0', 'id-1', 'id-2']);
+    expect(hasMore).toBe(true);
+  });
+
+  it('reports no next page when the fetch is shorter than pageSize+1', () => {
+    const raw = Array.from({ length: 3 }, (_, i) => row(i));
+    const { rows, hasMore } = pageSlice(raw, 3);
+    expect(rows).toHaveLength(3);
+    expect(hasMore).toBe(false);
+  });
+
+  it('returns empty rows and no next page for an empty fetch', () => {
+    expect(pageSlice([], 50)).toEqual({ rows: [], hasMore: false });
+  });
+
+  it('does not mutate the input array', () => {
+    const raw = Array.from({ length: 2 }, (_, i) => row(i));
+    const copy = [...raw];
+    pageSlice(raw, 1);
+    expect(raw).toEqual(copy);
   });
 });

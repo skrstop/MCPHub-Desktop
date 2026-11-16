@@ -560,7 +560,8 @@
       "httpFailSuggestionLoopback": "Activez « Terminer et redémarrer » pour traiter automatiquement, ou arrêtez l’autre application / changez le port dans Paramètres → Routage.",
       "httpFailCauseloopbackOccupied": "L'adresse de bouclage 127.0.0.1:{{port}} est déjà détenue par un autre processus (le bind générique a réussi, mais l'adresse locale est squattée — les clients locaux seraient détournés).",
       "httpFailActionloopbackOccupied": "Terminez le processus occupant détecté ci-dessous (cochez l'option puis « Terminer et redémarrer »), ou changez le port dans Paramètres → Routage et réessayez.",
-      "smartRoutingFootprint": "Empreinte Smart Routing"
+      "smartRoutingFootprint": "Empreinte Smart Routing",
+      "groupCount": "Groupes"
     },
     "servers": {
       "title": "Gestion des serveurs"
@@ -1043,7 +1044,6 @@
       "type_choice": "Choix",
       "type_score": "Score",
       "type_noul": "Oui/Non",
-      "loadMore": "Charger plus",
       "loadFailed": "Échec du chargement des données de décision",
       "retry": "Réessayer",
       "clearConfirmAll": "Ceci supprime TOUT l'historique de décisions (y compris les pages non chargées), sans possibilité d'annulation. Continuer ?",
@@ -1052,7 +1052,8 @@
       "toolsEmpty": "Aucun outil disponible.",
       "enabled": "Activé",
       "disabled": "Désactivé",
-      "toolsDisabledHint": "L’aide à la décision est désactivée — cet outil est documenté mais pas encore exposé aux clients MCP."
+      "toolsDisabledHint": "L’aide à la décision est désactivée — cet outil est documenté mais pas encore exposé aux clients MCP.",
+      "pageInfo": "Page {{page}}"
     }
   },
   "logs": {

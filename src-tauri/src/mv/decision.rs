@@ -782,4 +782,146 @@ mod tests {
             }
         }
     }
+
+    /// Decisive probe for the "user reports odd decision output" ticket:
+    /// the SAME user input run through (A) the shipped tokenizer.json and
+    /// (B) the GGUF-embedded tokenizer reconstruction. If (B) reproduces the
+    /// user's exact scores, the running binary took the GGUF-tokenizer path
+    /// (missing tokenizer.json) — proving the shipped tokenizer.json is
+    /// REQUIRED, not optional.
+    /// `cargo test --lib mv::decision::tests::julia_user_case_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn julia_user_case_probe() {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/decision/julia/1");
+        let gguf = src.join("model.gguf");
+        if !gguf.is_file() {
+            eprintln!("SKIP: julia_1 model.gguf not present");
+            return;
+        }
+        // Print the GGUF-embedded tokenizer family for the record.
+        {
+            let mut f = std::fs::File::open(&gguf).unwrap();
+            let content = Content::read(&mut f).unwrap();
+            let model = content
+                .metadata
+                .get("tokenizer.ggml.model")
+                .and_then(|v| v.to_string().ok());
+            eprintln!("GGUF-embedded tokenizer.ggml.model = {model:?}");
+        }
+        let req = DecisionRequest {
+            decision_type: DecisionType::Score,
+            state: "今天是11月16号，今天的白天温度是20~30度，天气预报说天气很高".into(),
+            question: "请问今天10~13点有可能下雨么".into(),
+            options: vec!["晴天".into(), "下雨".into()],
+        };
+        // Math case reported by the user (score type, 3 options).
+        let math = DecisionRequest {
+            decision_type: DecisionType::Score,
+            state: "在义务教育的数学场景下".into(),
+            question: "1+1等于几".into(),
+            options: vec!["4".into(), "3".into(), "2".into()],
+        };
+        // Order-swapped control: score semantics should be order-invariant.
+        let math_swapped = DecisionRequest {
+            options: vec!["2".into(), "3".into(), "4".into()],
+            ..math.clone()
+        };
+        // English-state control.
+        let math_en = DecisionRequest {
+            state: "in a compulsory-education math context".into(),
+            question: "What is 1+1 equal to?".into(),
+            options: vec!["4".into(), "3".into(), "2".into()],
+            decision_type: DecisionType::Score,
+        };
+        // Choice-type control for the same math question.
+        let math_choice = DecisionRequest {
+            decision_type: DecisionType::Choice,
+            ..math.clone()
+        };
+        // A) shipped tokenizer.json fast path.
+        let mut f = std::fs::File::open(&gguf).unwrap();
+        let m = DecisionModel::load(&mut f, &src, &Device::Cpu, None).expect("load shipped");
+        // Tokenization round-trip diagnostics for the math inputs.
+        for text in ["score question: 1+1等于几", "1+1等于几", " 4", " 3", " 2", "今天天气怎么样"] {
+            let enc = m.tokenizer.encode(text, false).expect("encode");
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            let toks: Vec<String> = ids
+                .iter()
+                .map(|&i| m.tokenizer.id_to_token(i).unwrap_or_default())
+                .collect();
+            let dec = m.tokenizer.decode(&ids, false).map(|d| d.to_string()).unwrap_or_default();
+            eprintln!("tok {text:?} -> ids {ids:?}\n   tokens {toks:?}\n   decode {dec:?}");
+        }
+        let out = m.decide(&req).expect("decide A");
+        let math_mid = DecisionRequest { options: vec!["4".into(), "2".into(), "3".into()], ..math.clone() };
+        let math_first = DecisionRequest { options: vec!["2".into(), "4".into(), "3".into()], ..math.clone() };
+        let math_two = DecisionRequest { options: vec!["4".into(), "2".into()], ..math.clone() };
+        for (tag, r) in [
+            ("[math score]", &math),
+            ("[math score swapped]", &math_swapped),
+            ("[math mid-answer]", &math_mid),
+            ("[math first-answer]", &math_first),
+            ("[math 2-options]", &math_two),
+            ("[math score EN]", &math_en),
+            ("[math choice]", &math_choice),
+        ] {
+            let o = m.decide(r).expect("decide math");
+            eprintln!(
+                "{tag:<22} scores {:?} probs {:?} -> {}",
+                o.scores.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+                o.probabilities.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+                o.option
+            );
+        }
+        // Choice-type control: the same weather input is semantically a
+        // pick-one question, not a rating task.
+        let req_choice = DecisionRequest {
+            decision_type: DecisionType::Choice,
+            ..req.clone()
+        };
+        let oc = m.decide(&req_choice).expect("decide A-choice");
+        eprintln!(
+            "[A choice-type control]     scores {:?} probs {:?} -> {}",
+            oc.scores.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            oc.probabilities.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            oc.option
+        );
+        // Score-type with cleaner state (standard phrasing).
+        let req2 = DecisionRequest {
+            decision_type: DecisionType::Score,
+            state: "今天白天温度20到30度，天气晴朗，无降水迹象".into(),
+            ..req.clone()
+        };
+        let o2 = m.decide(&req2).expect("decide A2");
+        eprintln!(
+            "[A score, cleaner state]    scores {:?} probs {:?} -> {}",
+            o2.scores.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            o2.probabilities.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            o2.option
+        );
+        eprintln!(
+            "[A shipped tokenizer.json]  scores {:?} probs {:?} -> {}",
+            out.scores.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            out.probabilities.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            out.option
+        );
+        // B) GGUF-reconstructed tokenizer (size dir WITHOUT tokenizer.json).
+        let tmp = std::env::temp_dir().join("julia_probe_gguf_tok");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::hard_link(&gguf, tmp.join("model.gguf")).unwrap();
+        let mut f = std::fs::File::open(&gguf).unwrap();
+        let m2 = DecisionModel::load(&mut f, &tmp, &Device::Cpu, None).expect("load gguf-tok");
+        let out2 = m2.decide(&req).expect("decide B");
+        eprintln!(
+            "[B GGUF tokenizer]          scores {:?} probs {:?} -> {}   (user reported: [1.2778271, 1.6409860] -> 下雨)",
+            out2.scores.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            out2.probabilities.iter().map(|v| format!("{v:.7}")).collect::<Vec<_>>(),
+            out2.option
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
+

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BrainCircuit, Eye, Loader2, Sparkles, Trash2, X } from 'lucide-react';
+import { BrainCircuit, ChevronLeft, ChevronRight, Eye, Loader2, Sparkles, Trash2, X } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import {
@@ -17,7 +17,7 @@ import {
   decisionTypeLabelKey,
   formatProbability,
   formatScore,
-  mergeHistoryPage,
+    pageSlice,
 } from '@/utils/decisionFormat';
 
 const PAGE_SIZE = 50;
@@ -35,11 +35,12 @@ const DecisionPage: React.FC = () => {
   const [toggling, setToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [entries, setEntries] = useState<DecisionHistoryEntry[]>([]);
-  const [loadingMore, setLoadingMore] = useState(false);
   // True while the backend still has rows beyond the loaded page (heuristic:
-  // a full page came back — the backend clamps limit to 500, so a full page
-  // is the only reliable "maybe more" signal short of a count query).
+  // fetch PAGE_SIZE+1 rows — an extra row is the only reliable "maybe more"
+  // signal short of a count query; it is sliced off before display).
   const [hasMore, setHasMore] = useState(false);
+  // 1-based page number for the offset-paged history list.
+  const [page, setPage] = useState(1);
   // Initial-load failure: distinct from "empty history" — the user must be
   // able to tell a backend/IPC error from a genuinely empty list, and retry.
   const [loadError, setLoadError] = useState(false);
@@ -60,19 +61,36 @@ const DecisionPage: React.FC = () => {
   // Element that opened the detail dialog — focus is restored to it on close.
   const viewTriggerRef = useRef<HTMLElement | null>(null);
 
+  // Load one history page by offset (page is 1-based). Fetches PAGE_SIZE+1
+  // rows so an extra row can drive the next-page affordance.
+  const loadPage = useCallback(async (p: number) => {
+    const list = await listDecisionHistory(PAGE_SIZE + 1, (p - 1) * PAGE_SIZE);
+    if (!mounted.current) return;
+    const { rows, hasMore } = pageSlice(list, PAGE_SIZE);
+    setEntries(rows);
+    setHasMore(hasMore);
+    setPage(p);
+    setLoadError(false);
+  }, []);
+
   const fetchAll = useCallback(async () => {
     setLoading(true);
     const gen = ++statusGenRef.current;
     try {
-      const [st, list] = await Promise.all([decisionStatus(), listDecisionHistory(PAGE_SIZE, 0)]);
+      const [st, list] = await Promise.all([
+        decisionStatus(),
+        listDecisionHistory(PAGE_SIZE + 1, 0),
+      ]);
       if (!mounted.current) return;
       // Discard a stale status: a toggle that started after this fetch (or
       // completed while it was in flight) owns the enabled state now.
       if (gen === statusGenRef.current && !togglingRef.current) {
         setEnabled(st.enabled);
       }
-      setEntries(list);
-      setHasMore(list.length >= PAGE_SIZE);
+      const { rows, hasMore } = pageSlice(list, PAGE_SIZE);
+      setEntries(rows);
+      setHasMore(hasMore);
+      setPage(1);
       setLoadError(false);
     } catch (e) {
       console.warn('[decision] failed to load page data', e);
@@ -81,25 +99,6 @@ const DecisionPage: React.FC = () => {
       if (mounted.current) setLoading(false);
     }
   }, []);
-
-  const loadMore = async () => {
-    setLoadingMore(true);
-    try {
-      // Refetch the whole loaded prefix (offset 0) instead of paging by
-      // offset: rows inserted between page fetches shift the window and
-      // offset paging would permanently skip them. The backend clamps limit
-      // to 500, so the prefix refetch doubles as the browsing depth cap.
-      const nextLimit = Math.min(entries.length + PAGE_SIZE, 500);
-      const list = await listDecisionHistory(nextLimit, 0);
-      if (!mounted.current) return;
-      setEntries((prev) => mergeHistoryPage(prev, list));
-      setHasMore(list.length >= nextLimit && nextLimit < 500);
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : String(e), 'error');
-    } finally {
-      if (mounted.current) setLoadingMore(false);
-    }
-  };
 
   useEffect(() => {
     mounted.current = true;
@@ -137,6 +136,7 @@ const DecisionPage: React.FC = () => {
       if (mounted.current) {
         setEntries([]);
         setHasMore(false);
+        setPage(1);
         setClearConfirm(false);
         showToast(t('pages.decision.clearedToast', { count: n }), 'success');
       }
@@ -285,11 +285,28 @@ const DecisionPage: React.FC = () => {
               </li>
             ))}
           </ul>
-          {hasMore && (
-            <div className="flex justify-center py-3 border-t border-[var(--hub-line-2)]">
-              <button type="button" className="hub-btn sm" disabled={loadingMore} onClick={loadMore}>
-                {loadingMore && <Loader2 size={12} className="animate-spin" />}
-                {t('pages.decision.loadMore')}
+          {(page > 1 || hasMore) && (
+            <div className="flex items-center justify-center gap-3 py-3 border-t border-[var(--hub-line-2)]">
+              <button
+                type="button"
+                className="hub-btn sm"
+                disabled={page <= 1}
+                aria-label={t('common.prevPage')}
+                onClick={() => void loadPage(page - 1)}
+              >
+                <ChevronLeft size={12} /> {t('common.prevPage')}
+              </button>
+              <span className="text-xs text-[var(--hub-ink-3)]">
+                {t('pages.decision.pageInfo', { page })}
+              </span>
+              <button
+                type="button"
+                className="hub-btn sm"
+                disabled={!hasMore}
+                aria-label={t('common.nextPage')}
+                onClick={() => void loadPage(page + 1)}
+              >
+                {t('common.nextPage')} <ChevronRight size={12} />
               </button>
             </div>
           )}

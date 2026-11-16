@@ -560,7 +560,8 @@
       "httpFailSuggestionLoopback": "Enable \"Kill & restart\" to handle it automatically, or stop the other app / change the port in Settings → Routing.",
       "httpFailCauseloopbackOccupied": "The loopback address 127.0.0.1:{{port}} is already held by another process (the wildcard bind succeeded, but the local address is squatted — local clients would be hijacked).",
       "httpFailActionloopbackOccupied": "Kill the detected occupying process below (check the option, then \"Kill & restart\"), or change the port in Settings → Routing and retry.",
-      "smartRoutingFootprint": "Smart Routing Footprint"
+      "smartRoutingFootprint": "Smart Routing Footprint",
+      "groupCount": "Groups"
     },
     "servers": {
       "title": "Server Management"
@@ -1043,7 +1044,6 @@
       "type_choice": "Choice",
       "type_score": "Score",
       "type_noul": "Yes/No",
-      "loadMore": "Load More",
       "loadFailed": "Failed to load decision data",
       "retry": "Retry",
       "clearConfirmAll": "This deletes ALL decision history entries (including unloaded pages) and cannot be undone. Continue?",
@@ -1052,7 +1052,8 @@
       "toolsEmpty": "No tools available.",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "toolsDisabledHint": "Decision support is off — this tool is documented but not yet exposed to MCP clients."
+      "toolsDisabledHint": "Decision support is off — this tool is documented but not yet exposed to MCP clients.",
+      "pageInfo": "Page {{page}}"
     }
   },
   "logs": {
