@@ -73,6 +73,8 @@ const DashboardPage: React.FC = () => {
   // Smart Routing context footprint: token estimate of the $smart meta tools
   // as a client would receive them (backend computes from the real definitions).
   const [smartMetaTokens, setSmartMetaTokens] = useState<number | null>(null);
+  // Manual-refresh counter: bumping it re-runs the status fetch below.
+  const [smartMetaRefreshKey, setSmartMetaRefreshKey] = useState(0);
   useEffect(() => {
     if (!smartRoutingConfig?.enabled) {
       setSmartMetaTokens(null);
@@ -97,14 +99,29 @@ const DashboardPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [smartRoutingConfig?.enabled]);
-  const { serverCosts } = useCostData();
+  }, [smartRoutingConfig?.enabled, smartMetaRefreshKey]);
+  const { serverCosts, refetch: refetchCosts } = useCostData();
   const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);
+  // Manual refresh: previously only refreshed the server list — the context
+  // footprint (costs), group count, smart-routing footprint and settings were
+  // left stale (the reported "refresh button does nothing" symptom). All
+  // independent sources are refetched here; `refreshing` gives the button a
+  // visible spin while the slowest source (costs) is in flight.
+  const [refreshing, setRefreshing] = React.useState(false);
+  const handleManualRefresh = React.useCallback(() => {
+    setRefreshing(true);
+    triggerRefresh();
+    setSmartMetaRefreshKey((k) => k + 1);
+    setGroupRefreshKey((k) => k + 1);
+    void refetchCosts().finally(() => setRefreshing(false));
+  }, [triggerRefresh, refetchCosts]);
   // Group count for the stats row — lightweight standalone fetch (the
   // dashboard does not need the full Group objects, just the count).
   const [groupCount, setGroupCount] = React.useState<number | null>(null);
+  // Manual-refresh counter: bumping it re-runs the groups fetch below.
+  const [groupRefreshKey, setGroupRefreshKey] = React.useState(0);
   React.useEffect(() => {
     let disposed = false;
     apiGet<{ success?: boolean; data?: unknown[] }>('/groups')
@@ -119,7 +136,7 @@ const DashboardPage: React.FC = () => {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [groupRefreshKey]);
   React.useEffect(() => {
     // Mark as loaded once the first loading cycle finishes (isLoading went true → false).
     // If the initial load returns 0 servers with no error, isLoading transitions
@@ -214,8 +231,9 @@ const DashboardPage: React.FC = () => {
               {t('pages.dashboard.httpFailBadge') || 'MCP HTTP service is not running'}
             </button>
           )}
-          <button className="hub-btn" onClick={() => triggerRefresh()}>
-            <RefreshCw size={13} /> {t('common.refresh')}
+          <button className="hub-btn" onClick={handleManualRefresh} disabled={refreshing}>
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : undefined} />
+            {t('common.refresh')}
           </button>
           <button className="hub-btn primary" onClick={() => navigate('/servers')}>
             <Plus size={13} /> {t('server.add')}
