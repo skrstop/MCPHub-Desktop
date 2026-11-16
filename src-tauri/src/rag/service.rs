@@ -2040,7 +2040,7 @@ pub async fn select_model(app: &AppHandle, size: &str) -> Result<RagStatus> {
 /// truth - consumed both by the rmcp bridge (`rmcp_bridge.rs`) and by the
 /// `rag_tools` command that powers the "view tools" dialog in the UI.
 pub fn tool_definitions() -> Vec<serde_json::Value> {
-    use crate::services::tool_i18n::{current_tool_language, rag_tool_description};
+    use crate::services::tool_i18n::{current_tool_language, prop_description, rag_tool_description};
     let lang = current_tool_language();
     vec![
         json!({
@@ -2049,8 +2049,8 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "The search query." },
-                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag filter: only return documents that have at least one of these tags." }
+                    "query": { "type": "string", "description": prop_description("query_simple", &lang), },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": prop_description("tags_filter", &lang), }
                 },
                 "required": ["query"]
             }
@@ -2061,7 +2061,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docId": { "type": "string", "description": "The document id." }
+                    "docId": { "type": "string", "description": prop_description("doc_id_plain", &lang), }
                 },
                 "required": ["docId"]
             }
@@ -2072,7 +2072,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "search_key": { "type": "array", "items": { "type": "string" }, "description": "Optional substring filters; returns tags matching any of them." }
+                    "search_key": { "type": "array", "items": { "type": "string" }, "description": prop_description("search_key", &lang), }
                 },
                 "required": []
             }
@@ -2083,10 +2083,10 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docName": { "type": "string", "description": "Document name (without extension, e.g. \"readme\"). Path separators are sanitized to dashes." },
-                    "docType": { "type": "string", "description": "File type as a bare extension without dot, e.g. \"md\", \"java\", \"py\", \"txt\"." },
-                    "docContent": { "type": "string", "description": "Full text content of the document (UTF-8). Encoding detection is skipped - the input must already be valid UTF-8." },
-                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to attach to the document (used for tag-filtered searches)." }
+                    "docName": { "type": "string", "description": prop_description("doc_name_create", &lang), },
+                    "docType": { "type": "string", "description": prop_description("doc_type_create", &lang), },
+                    "docContent": { "type": "string", "description": prop_description("doc_content_create", &lang), },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": prop_description("tags_attach", &lang), }
                 },
                 "required": ["docName", "docType", "docContent"]
             }
@@ -2097,14 +2097,14 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docId": { "type": "string", "description": "The document id (as returned by rag_file_create or rag_search)." },
-                    "docName": { "type": "string", "description": "New document name (optional)." },
-                    "docType": { "type": "string", "description": "New file type as a bare extension, e.g. \"md\" (optional)." },
-                    "docContent": { "type": "string", "description": "New text content (optional). When set, docContentAppend controls append vs replace." },
-                    "docContentAppend": { "type": "boolean", "description": "Only meaningful when docContent is set. true = append to existing content; false (default) = replace. Ignored if docContent is omitted.", "default": false },
-                    "updateExternalFile": { "type": "boolean", "description": "Write-through to the EXTERNAL source file. Default false. FUNCTION: when true, the new text content is additionally written to the file the document was imported from (original_path), keeping the source in sync. SCOPE: (1) symlink-imported docs — read-only via this tool by default; this flag unlocks overwriting the linked original. (2) copy-imported docs — the external source file is overwritten too, so a later source refresh will not revert MCP-written content. Docs without an external source (MCP-created, lost original) are unaffected — only the local copy changes. IMPACT/RISKS: text sources (.txt/.md/code) are replaced with the new text as-is; binary sources (PDF/Office/image) are REPLACED by plain text — the binary content is destroyed irreversibly. A history snapshot of the pre-update content is always taken first and is recoverable via rag_file_history_versions/rag_file_history_get. When false (default): symlink docs reject content updates; copy docs only modify the local copy inside rag/files.", "default": false },
-                    "addTags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to add to the document (case-insensitive dedup; preserves existing order)." },
-                    "removeTags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to remove from the document (case-insensitive match)." }
+                    "docId": { "type": "string", "description": prop_description("doc_id_create_or_search", &lang), },
+                    "docName": { "type": "string", "description": prop_description("doc_name_new", &lang), },
+                    "docType": { "type": "string", "description": prop_description("doc_type_new", &lang), },
+                    "docContent": { "type": "string", "description": prop_description("doc_content_new", &lang), },
+                    "docContentAppend": { "type": "boolean", "description": prop_description("doc_content_append", &lang), "default": false },
+                    "updateExternalFile": { "type": "boolean", "description": prop_description("update_external_file", &lang), "default": false },
+                    "addTags": { "type": "array", "items": { "type": "string" }, "description": prop_description("tags_add", &lang), },
+                    "removeTags": { "type": "array", "items": { "type": "string" }, "description": prop_description("tags_remove", &lang), }
                 },
                 "required": ["docId"]
             }
@@ -2115,7 +2115,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docId": { "type": "string", "description": "The document id (as returned by rag_file_create or rag_search)." }
+                    "docId": { "type": "string", "description": prop_description("doc_id_create_or_search", &lang), }
                 },
                 "required": ["docId"]
             }
@@ -2126,7 +2126,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docId": { "type": "string", "description": "The document id." }
+                    "docId": { "type": "string", "description": prop_description("doc_id_plain", &lang), }
                 },
                 "required": ["docId"]
             }
@@ -2137,8 +2137,8 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docId": { "type": "string", "description": "The document id." },
-                    "version": { "type": "integer", "description": "The history version number to read." }
+                    "docId": { "type": "string", "description": prop_description("doc_id_plain", &lang), },
+                    "version": { "type": "integer", "description": prop_description("history_version_read", &lang), }
                 },
                 "required": ["docId", "version"]
             }
@@ -2149,9 +2149,9 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docId": { "type": "string", "description": "The document id." },
-                    "fromVersion": { "type": "integer", "description": "The older history version number (old side of the diff)." },
-                    "toVersion": { "type": "integer", "description": "The newer history version number (optional; omit to compare against the current content)." }
+                    "docId": { "type": "string", "description": prop_description("doc_id_plain", &lang), },
+                    "fromVersion": { "type": "integer", "description": prop_description("from_version", &lang), },
+                    "toVersion": { "type": "integer", "description": prop_description("to_version", &lang), }
                 },
                 "required": ["docId", "fromVersion"]
             }
@@ -2162,8 +2162,8 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "docIdA": { "type": "string", "description": "First document id (old side)." },
-                    "docIdB": { "type": "string", "description": "Second document id (new side)." }
+                    "docIdA": { "type": "string", "description": prop_description("doc_id_a", &lang), },
+                    "docIdB": { "type": "string", "description": prop_description("doc_id_b", &lang), }
                 },
                 "required": ["docIdA", "docIdB"]
             }

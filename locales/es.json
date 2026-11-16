@@ -1848,7 +1848,7 @@
     "decisionLostHintGone": "Un modelo de respaldo se está encargando de las decisiones: selecciónelo desde la lista.",
     "mcpToolLanguage": "Idioma de las herramientas MCP",
     "mcpToolLanguageAuto": "Seguir el idioma de la interfaz",
-    "mcpToolLanguageHint": "Idioma de las descripciones de las herramientas integradas del hub (rag_*, decision_decide, …). Por defecto, inglés. Elija \"Seguir el idioma de la interfaz\" para cambiar automáticamente."
+    "mcpToolLanguageHint": "Idioma de las descripciones Y de la documentación de parámetros de las herramientas integradas (rag_*, decision_decide, …). Por defecto, inglés. Elija \"Seguir el idioma de la interfaz\" para cambiar automáticamente."
   },
   "mcpb": {
     "upload": "Subir",

@@ -51,7 +51,9 @@ const MCP_TOOL_LANGUAGES: { value: string; label: string }[] = [
  *  运行时的统一管理入口。RAG 与 Smart Routing 是当前的两个消费方——任一开启
  *  即自动加载模型（全局单实例），全部关闭后释放。 */
 const ModelVectorSettings: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n: i18nInst } = useTranslation();
+  // UI 语言主子标签（zh-CN → zh），随写 mcp.uiLanguage 供 "auto" 解析。
+  const uiLangPrimary = () => (i18nInst.language || 'en').split('-')[0].toLowerCase();
   const { showToast } = useToast();
   const { smartRoutingConfig } = useSettings();
 
@@ -150,9 +152,17 @@ const ModelVectorSettings: React.FC = () => {
 
   const handleToolLanguageChange = async (v: string) => {
     try {
+      // apiRequest 不抛错——失败返回 { success:false }，必须显式检查
+      // （同 handleDeviceChange 模式）；SimpleSelect 受控，保存失败时值
+      // 不前进，下拉保持旧值并报错。
+      // 随写 uiLanguage：登录后首次设置（auth 模式下启动同步会失败）或
+      // 选择「跟随界面语言」时，解析基准必须是当前真实 UI 语言。
+      const res = await apiPut('system-config', {
+        mcp: { toolLanguage: v, uiLanguage: uiLangPrimary() },
+      });
+      if (!res?.success) throw new Error(res?.message || 'Failed to save tool language');
       // 后端在 update_system_config 里刷新缓存并按需重建 builtin 索引
       // （描述参与 smart 索引嵌入）。
-      await apiPut('system-config', { mcp: { toolLanguage: v } });
       if (mounted.current) setToolLanguage(v);
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), 'error');
@@ -211,6 +221,11 @@ const ModelVectorSettings: React.FC = () => {
         const tl = res?.data?.systemConfig?.mcp?.toolLanguage;
         if (typeof tl === 'string' && MCP_TOOL_LANGUAGES.some((o) => o.value === tl)) {
           setToolLanguage(tl);
+          if (tl === 'auto') {
+            // 自愈：auth 模式下启动期 uiLanguage 同步被 401 拒绝、且用户不
+            // 再改动下拉时，auto 会一直解析到英文——设置页打开即补写一次。
+            void apiPut('system-config', { mcp: { uiLanguage: uiLangPrimary() } });
+          }
         }
       })
       .catch(() => undefined);
@@ -322,6 +337,7 @@ const ModelVectorSettings: React.FC = () => {
   };
 
   const handleDeviceChange = async (d: MvDevice) => {
+    const prev = device;
     setDevice(d);
     try {
       const res = await apiPut('system-config', { mv: { device: d } });
@@ -329,6 +345,8 @@ const ModelVectorSettings: React.FC = () => {
       if (mounted.current) setDeviceDirty(mvRunning && d !== 'auto');
       showToast(t('settings.mvDeviceSaved'), 'success');
     } catch (e) {
+      // 保存失败回滚 UI（与 handleToolLanguageChange 悲观更新语义一致）
+      if (mounted.current) setDevice(prev);
       showToast(e instanceof Error ? e.message : String(e), 'error');
     }
   };
@@ -414,6 +432,33 @@ const ModelVectorSettings: React.FC = () => {
 
       {sectionOpen && (
       <div className="px-5 py-4 border-t space-y-4" style={{ borderColor: 'var(--hub-line-2)' }}>
+        {/* MCP 工具语言——【本地模型】卡的顶层配置（不属于向量模型、也不属于
+            决策模型），置于卡体最上方：内置工具（rag_*、decision_decide、
+            smart_route_* 等）的描述语言；默认英文，「跟随界面语言」时由前端同步
+            的 uiLanguage 解析。作用于 tools/list 与两个「查看工具」弹框。 */}
+        <div className="rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)]">
+          <div className="flex items-center gap-2 mb-2">
+            <Languages size={13} className="text-[var(--hub-ink-3)]" />
+            <h3 className="text-[13px] font-medium flex-1" style={{ color: 'var(--hub-ink)' }}>
+              {t('settings.mcpToolLanguage')}
+            </h3>
+          </div>
+          <SimpleSelect
+            value={toolLanguage}
+            onChange={handleToolLanguageChange}
+            options={MCP_TOOL_LANGUAGES.map((o) => ({
+              value: o.value,
+              label: o.value === 'auto' ? t('settings.mcpToolLanguageAuto') : o.label,
+            }))}
+            ariaLabel={t('settings.mcpToolLanguage')}
+          />
+          <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
+            {t('settings.mcpToolLanguageHint')}
+          </p>
+        </div>
+        {/* 分段线：MCP 工具语言（本地模型级配置）/ 向量模型段 */}
+        <div style={{ borderTop: '1px solid var(--hub-line-2)' }} />
+
         {/* 运行状态（只读）：单实例共享运行时 + 启用来源徽章 */}
         <div className="flex items-center gap-2 flex-wrap">
           <span className="hub-status" data-state={mvRunning ? 'on' : 'off'}>
@@ -443,30 +488,6 @@ const ModelVectorSettings: React.FC = () => {
           </button>
         </div>
         <p style={{ fontSize: 12, color: 'var(--hub-ink-3)' }}>{t('settings.mvHint')}</p>
-
-        {/* MCP 工具语言：内置工具（rag_*、decision_decide、smart_route_* 等）
-            的描述语言；默认英文，「跟随界面语言」时由前端同步的 uiLanguage
-            解析。作用于 tools/list 与两个「查看工具」弹框。 */}
-        <div className="rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)]">
-          <div className="flex items-center gap-2 mb-2">
-            <Languages size={13} className="text-[var(--hub-ink-3)]" />
-            <h3 className="text-[13px] font-medium flex-1" style={{ color: 'var(--hub-ink)' }}>
-              {t('settings.mcpToolLanguage')}
-            </h3>
-          </div>
-          <SimpleSelect
-            value={toolLanguage}
-            onChange={handleToolLanguageChange}
-            options={MCP_TOOL_LANGUAGES.map((o) => ({
-              value: o.value,
-              label: o.value === 'auto' ? t('settings.mcpToolLanguageAuto') : o.label,
-            }))}
-            ariaLabel={t('settings.mcpToolLanguage')}
-          />
-          <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
-            {t('settings.mcpToolLanguageHint')}
-          </p>
-        </div>
 
         {/* 模型切换（唯一入口；未启动时禁用） */}
         <div className={`rounded-lg p-4 bg-gray-50 dark:bg-[var(--hub-item)] ${mvRunning ? '' : 'mv-disabled'}`}>

@@ -548,11 +548,12 @@ npm run build                     # 生产构建
 
 ### 3.13 MCP 工具语言 + 工具查看恒可见（2026-11-15）
 
-- **`services/tool_i18n.rs`（新）**：内置工具（rag_* 10 个 / decision_decide / smart_route_* 3 个含 progressive×standard 变体）的**工具级 description** 六语本地化（en/zh/fr/tr/vi/es；en 与历史字节一致，schema/参数说明保留英文）。`resolve_tool_language(tool, ui)` 纯函数（"auto"→跟随 `mcp.uiLanguage`，未知→en）；解析结果缓存进程内 RwLock（tools/list 同步热路径）。
-- **配置**：`system_config.mcp.toolLanguage`（默认 `"en"`，可选 `"auto"`/6 语言）+ `mcp.uiLanguage`（前端 `utils/uiLanguageSync.ts` 启动时与 `languageChanged` 时同步写入；admin-only 端点，失败静默——auto 模式回退英文）。`update_system_config` 触及任一键即 `refresh_from_config()`；toolLanguage 变更时 remove+`sync_builtin_index` 重建 builtin 行（描述参与智能路由嵌入，而 toolSetHash 刻意不含 description——skip-check 不会自愈）。
-- **UI**：设置【本地模型】卡片「向量模型」上方新增「MCP 工具语言」下拉（跟随界面语言/English/中文/Français/Türkçe/Tiếng Việt/Español，SimpleSelect）。生效面 = tools/list + 知识库/决策「查看工具」弹框。
+- **`services/tool_i18n.rs`（新）**：内置工具（rag_* 10 个 / decision_decide / smart_route_* 3 个含 progressive×standard 变体）的**描述（工具级 description + inputSchema 参数级说明，31 个参数文案）**六语本地化（en/zh/fr/tr/vi/es；en 与历史字节一致）。`resolve_tool_language(tool, ui)` 纯函数（"auto"→跟随 `mcp.uiLanguage`，未知→en）；解析结果缓存进程内 RwLock（tools/list 同步热路径）。
+- **配置**：`system_config.mcp.toolLanguage`（默认 `"en"`，可选 `"auto"`/6 语言）+ `mcp.uiLanguage`（前端 `utils/uiLanguageSync.ts` 启动时与 `languageChanged` 时同步写入；admin-only 端点，失败静默——auto 模式回退英文）。`update_system_config` 触及任一键即 `refresh_from_config_and_report_change()`（REFRESH_LOCK 串行化读-改-比窗口）；**解析语言实际变化**时（无论 toolLanguage 还是 uiLanguage 通道触发）`sync_builtin_index` 重建 builtin 行（不先 remove：skip-check 哈希含 inputSchema（内嵌本地化参数文案）⇒ 语言变化哈希必变 ⇒ save 自身原子 delete+insert 覆盖；先 remove 反而在 save 失败时丢行）。启动路径同样消费 changed 报告触发重建。
+- **UI**：设置【本地模型】卡片体**最上方**（本地模型级配置，分段线与向量/决策段隔开）「MCP 工具语言」下拉（跟随界面语言/English/中文/Français/Türkçe/Tiếng Việt/Español，SimpleSelect）。生效面 = tools/list + 知识库/决策「查看工具」弹框。
+- **全语言遍历不变量测试**：6 语言分别构建全部内置工具 JSON 递归收集每个 `description` 与 `annotations.title`（工具级+参数级+标题）断言非空且非英≠英——未接线的残留硬编码必红。
 - **工具查看恒可见**：`rag_tools` 命令去 is_enabled 门控（与 `decision_tools` 同语义——弹框是文档面，enable 门控只作用 MCP `builtin_tools()`）；RagPage 查看工具按钮不再 `disabled={!enabled}`，ToolsDialog 带「未开启暂不暴露给 MCP 客户端」提示（`enabled === false` 才显示——`statusKnown` 三态，未知不妄断）；`pages.rag.toolsEmpty` 文案中性化。
-- **测试**：tool_i18n 5 单测（解析矩阵/六语非空且非英/英文字节不变/占位符保留/标题+set-current）+ `rag_tools_command_returns_catalog_regardless_of_flag` + RagToolsDialog 组件 5 用例 + uiLanguageSync 3 用例。
+- **测试**：tool_i18n 11 单测（schema_note 六语 + 解析矩阵/rag en 锚+非英/decision/smart 模板+标题/set-current/prop en 锚/全语言遍历不变量（含 en 非空 + title 收集）/PROP_KEYS×TOOL_LANGS 机械对齐/en 全表面 FNV 字节钉死）+ `rag_tools_command_returns_catalog_regardless_of_flag` + RagToolsDialog 组件 5 用例 + uiLanguageSync 3 用例；`lang_test_lock()` 提为 pub(crate) 供 decision 恒等测试持锁（跨模块 TOOL_LANG 竞态 ~2% flake 根治）；工具语言下拉保存显式 `res.success` 检查（apiRequest 不抛错）。
 
 ### 3.11 MCPB（.mcpb 文件安装，2026-10-19）
 

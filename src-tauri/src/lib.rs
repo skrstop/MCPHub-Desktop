@@ -288,7 +288,13 @@ pub fn run() {
                 let app_handle_decision = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     services::decision_service::sync_enabled_flag().await;
-                    services::tool_i18n::refresh_from_config().await;
+                    // Consume the change report: if the resolved language
+                    // differs from the cache default (e.g. user saved "zh"
+                    // while the app was closed), the builtin rows indexed at
+                    // the previous language must be rebuilt too.
+                    if services::tool_i18n::refresh_from_config_and_report_change().await {
+                        crate::rag::service::sync_builtin_index().await;
+                    }
                     let _ = &app_handle_decision;
                 });
             }

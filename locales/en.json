@@ -1789,7 +1789,7 @@
     "decisionLostHintGone": "A fallback model is currently handling decisions — adopt it from the list.",
     "mcpToolLanguage": "MCP Tool Language",
     "mcpToolLanguageAuto": "Follow UI language",
-    "mcpToolLanguageHint": "Description language for the hub's builtin tools (rag_*, decision_decide, …). Defaults to English. Choose \"Follow UI language\" to switch automatically with the interface language."
+    "mcpToolLanguageHint": "Language for the builtin tools' descriptions AND parameter docs (rag_*, decision_decide, …). Defaults to English. Choose \"Follow UI language\" to switch automatically with the interface language."
   },
   "mcpb": {
     "upload": "Upload",

@@ -159,12 +159,21 @@ pub async fn format_servers_list(allowed: &[String], full: bool) -> String {
 /// search_tools hits come without an inputSchema (without the leading blank
 /// line). Shared by the meta-tool description and the result guideline so the
 /// N=0 / N=1 wordings stay in sync.
-fn describe_full_schema_top_n(full_schema_top_n: u32) -> String {
-    match full_schema_top_n {
-        0 => "Results do not include the inputSchema; use smart_route_describe to get it before calling a tool.".to_string(),
-        1 => "Only the first result includes the full inputSchema; use smart_route_describe to get it for any other result before calling it.".to_string(),
-        n => format!("Only the first {n} results include the full inputSchema; use smart_route_describe to get it for any other result before calling it."),
-    }
+fn describe_full_schema_top_n(full_schema_top_n: u32, lang: &str) -> String {
+    crate::services::tool_i18n::schema_note_full_schema_top_n(full_schema_top_n, lang)
+}
+
+/// Trimmed-results guideline (origin #1234) including the localized schema
+/// note. Reads the tool language internally so call sites cannot hardcode
+/// one — the seam itself is unit-tested under the lang lock.
+fn trimmed_results_guideline(full_schema_top_n: u32) -> String {
+    format!(
+        "Found relevant tools, most relevant first. {}. If these tools don't match exactly what you need, try another search with more specific keywords.",
+        describe_full_schema_top_n(
+            full_schema_top_n,
+            &crate::services::tool_i18n::current_tool_language()
+        )
+    )
 }
 
 /// Build the meta tool definitions (origin `buildSmartRoutingMetaTools`).
@@ -188,8 +197,8 @@ pub fn build_meta_tools(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "The search query to find relevant tools. Be specific and descriptive about the task you want to accomplish."},
-                        "limit": {"type": "integer", "description": "Maximum number of results to return. Use higher values (20-30) for broad searches and lower values (5-10) for specific searches.", "default": 10}
+                        "query": {"type": "string", "description": ti::prop_description("smart_query", &lang),},
+                        "limit": {"type": "integer", "description": ti::prop_description("smart_limit", &lang), "default": 10}
                     },
                     "required": ["query"]
                 },
@@ -201,7 +210,7 @@ pub fn build_meta_tools(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "toolName": {"type": "string", "description": "The exact name of the tool to describe (from smart_route_search results)"}
+                        "toolName": {"type": "string", "description": ti::prop_description("smart_tool_name_describe", &lang),}
                     },
                     "required": ["toolName"]
                 },
@@ -213,8 +222,8 @@ pub fn build_meta_tools(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "toolName": {"type": "string", "description": "The exact name of the tool to invoke (from smart_route_search results)"},
-                        "arguments": {"type": "object", "additionalProperties": true, "description": "The arguments to pass to the tool based on its inputSchema from smart_route_describe (optional if tool requires no arguments)"}
+                        "toolName": {"type": "string", "description": ti::prop_description("smart_tool_name_call", &lang),},
+                        "arguments": {"type": "object", "additionalProperties": true, "description": ti::prop_description("smart_arguments_full", &lang),}
                     },
                     "required": ["toolName"]
                 },
@@ -226,7 +235,7 @@ pub fn build_meta_tools(
         // hits when full_schema_top_n is set; describe_tool is listed so the
         // model can fetch schemas for the trimmed results (origin #1234).
         let schema_note = full_schema_top_n
-            .map(|n| format!("\n\n{}", describe_full_schema_top_n(n)))
+            .map(|n| format!("\n\n{}", describe_full_schema_top_n(n, &lang)))
             .unwrap_or_default();
         let mut tools = vec![
             json!({
@@ -235,8 +244,8 @@ pub fn build_meta_tools(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "The search query to find relevant tools. Be specific and descriptive about the task you want to accomplish."},
-                        "limit": {"type": "integer", "description": "Maximum number of results to return. Use higher values (20-30) for broad searches and lower values (5-10) for specific searches.", "default": 10}
+                        "query": {"type": "string", "description": ti::prop_description("smart_query", &lang),},
+                        "limit": {"type": "integer", "description": ti::prop_description("smart_limit", &lang), "default": 10}
                     },
                     "required": ["query"]
                 },
@@ -250,7 +259,7 @@ pub fn build_meta_tools(
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "toolName": {"type": "string", "description": "The exact name of the tool to describe (from smart_route_search results)"}
+                        "toolName": {"type": "string", "description": ti::prop_description("smart_tool_name_describe", &lang),}
                     },
                     "required": ["toolName"]
                 },
@@ -263,8 +272,8 @@ pub fn build_meta_tools(
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "toolName": {"type": "string", "description": "The exact name of the tool to invoke (from smart_route_search results)"},
-                    "arguments": {"type": "object", "additionalProperties": true, "description": "The arguments to pass to the tool based on its inputSchema (optional if tool requires no arguments)"}
+                    "toolName": {"type": "string", "description": ti::prop_description("smart_tool_name_call", &lang),},
+                    "arguments": {"type": "object", "additionalProperties": true, "description": ti::prop_description("smart_arguments", &lang),}
                 },
                 "required": ["toolName"]
             },
@@ -582,10 +591,7 @@ pub async fn handle_search_tools(
             && tools.len() > settings.full_schema_top_n.unwrap_or(0) as usize;
         (
             if trimmed {
-                format!(
-                    "Found relevant tools, most relevant first. {}. If these tools don't match exactly what you need, try another search with more specific keywords.",
-                    describe_full_schema_top_n(settings.full_schema_top_n.unwrap_or(0))
-                )
+                trimmed_results_guideline(settings.full_schema_top_n.unwrap_or(0))
             } else {
                 "Found relevant tools. If these tools don't match exactly what you need, try another search with more specific keywords.".to_string()
             },
@@ -1006,13 +1012,29 @@ mod tests {
     }
 
     #[test]
+    fn trimmed_results_guideline_follows_tool_language() {
+        let _lg = crate::services::tool_i18n::lang_test_lock();
+        crate::services::tool_i18n::set_tool_language("zh");
+        let zh = super::trimmed_results_guideline(0);
+        crate::services::tool_i18n::set_tool_language("en");
+        let en = super::trimmed_results_guideline(0);
+        assert!(en.contains("do not include"), "{en}");
+        assert!(zh.contains("结果不包含"), "{zh}");
+        assert!(!zh.contains("do not include"), "guideline ignored tool language: {zh}");
+    }
+
+    #[test]
     fn meta_tools_shape_progressive_vs_flat() {
+        // Asserts the English schema_note anchor on output built from the
+        // global TOOL_LANG — hold the lang lock against the tool_i18n
+        // mutators (same pattern as the decision identity tests).
+        let _lg = crate::services::tool_i18n::lang_test_lock();
         let p = build_meta_tools("all servers", "a, b", true, None);
         assert_eq!(p.len(), 3, "progressive = search/describe/call");
         let names: Vec<&str> = p.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect();
         assert_eq!(names, vec!["smart_route_search", "smart_route_describe", "smart_route_call"]);
         // Progressive search description should NOT inline the schemas hint.
-        assert!(names.iter().all(|n| !n.is_empty()));
+        assert!(!p[0]["description"].as_str().unwrap_or_default().contains("full inputSchema"), "progressive search must not inline the schema hint");
         let f = build_meta_tools("all servers", "a, b", false, None);
         assert_eq!(f.len(), 2, "flat = search/call (no describe without fullSchemaTopN)");
         // fullSchemaTopN set → describe_tool is listed in standard mode too (#1234).

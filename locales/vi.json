@@ -1789,7 +1789,7 @@
     "decisionLostHintGone": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách.",
     "mcpToolLanguage": "Ngôn ngữ công cụ MCP",
     "mcpToolLanguageAuto": "Theo ngôn ngữ giao diện",
-    "mcpToolLanguageHint": "Ngôn ngữ mô tả của các công cụ có sẵn trong hub (rag_*, decision_decide, …). Mặc định tiếng Anh. Chọn \"Theo ngôn ngữ giao diện\" để tự động đổi theo giao diện."
+    "mcpToolLanguageHint": "Ngôn ngữ của mô tả VÀ tài liệu tham số của các công cụ có sẵn (rag_*, decision_decide, …). Mặc định tiếng Anh. Chọn \"Theo ngôn ngữ giao diện\" để tự động đổi theo giao diện."
   },
   "mcpb": {
     "upload": "Tải lên",

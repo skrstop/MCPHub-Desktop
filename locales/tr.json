@@ -1789,7 +1789,7 @@
     "decisionLostHintGone": "Kararları şu anda bir yedek model yürütüyor — listeden onu seçin.",
     "mcpToolLanguage": "MCP Araç Dili",
     "mcpToolLanguageAuto": "Arayüz dilini takip et",
-    "mcpToolLanguageHint": "Hub'ın yerleşik araçlarının (rag_*, decision_decide, …) açıklama dili. Varsayılan İngilizcedir. Arayüz diliyle otomatik değişmesi için \"Arayüz dilini takip et\" seçeneğini seçin."
+    "mcpToolLanguageHint": "Yerleşik araçların (rag_*, decision_decide, …) açıklamalarının VE parametre belgelerinin dili. Varsayılan İngilizcedir. Arayüz diliyle otomatik değişmesi için \"Arayüz dilini takip et\" seçeneğini seçin."
   },
   "mcpb": {
     "upload": "Yükle",

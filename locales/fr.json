@@ -1789,7 +1789,7 @@
     "decisionLostHintGone": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste.",
     "mcpToolLanguage": "Langue des outils MCP",
     "mcpToolLanguageAuto": "Suivre la langue de l'interface",
-    "mcpToolLanguageHint": "Langue des descriptions des outils intégrés du hub (rag_*, decision_decide, …). Anglais par défaut. Choisissez « Suivre la langue de l'interface » pour basculer automatiquement."
+    "mcpToolLanguageHint": "Langue des descriptions ET de la documentation des paramètres des outils intégrés (rag_*, decision_decide, …). Anglais par défaut. Choisissez « Suivre la langue de l'interface » pour basculer automatiquement."
   },
   "mcpb": {
     "upload": "Télécharger",

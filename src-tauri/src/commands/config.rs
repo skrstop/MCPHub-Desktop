@@ -144,20 +144,25 @@ pub async fn update_system_config(session: State<'_, SessionState>, config: serd
     http_server::sync_with_config().await;
 
     // MCP tool description language: refresh the cached resolution whenever
-    // either key is touched; a toolLanguage change also rebuilds the builtin
-    // rows in the smart index (their embeddings are built from the
-    // descriptions, and the skip-check hash deliberately ignores them).
+    // either key is touched, and rebuild the builtin smart-index rows whenever
+    // the RESOLVED language actually changes — regardless of which key caused
+    // it (explicit toolLanguage edit, or a uiLanguage heal/write re-resolving
+    // "auto"). The refresh+compare is serialized inside
+    // `refresh_from_config_and_report_change` (concurrent config writes could
+    // otherwise interleave a stale snapshot into the detection window). The
+    // rebuild stays remove+sync as a guarantee: the skip-check hash covers
+    // inputSchema (which embeds the localized prop texts) but excludes the
+    // tool-level description, so plain sync would converge only by side
+    // effect. Untested glue — see the tool-language report's coverage note.
     let mcp_patch = config.get("mcp");
     let tool_lang_touched = mcp_patch.and_then(|m| m.get("toolLanguage")).is_some();
     let ui_lang_touched = mcp_patch.and_then(|m| m.get("uiLanguage")).is_some();
     if tool_lang_touched || ui_lang_touched {
-        crate::services::tool_i18n::refresh_from_config().await;
-        if tool_lang_touched {
+        if crate::services::tool_i18n::refresh_from_config_and_report_change().await {
             tauri::async_runtime::spawn(async move {
-                let _ = crate::smart_routing::index::remove_server_embeddings(
-                    crate::rag::service::BUILTIN_SERVER_NAME,
-                )
-                .await;
+                // 不先 remove：inputSchema 已含本地化文案 ⇒ toolset hash 必变 ⇒
+                // save 的 skip-check 必不命中，save 自身 delete+insert 是原子
+                // 替换；先 remove 反而在 save 失败时丢行（无人补回）。
                 crate::rag::service::sync_builtin_index().await;
             });
         }

@@ -590,16 +590,16 @@ pub fn decision_tool_catalog() -> Vec<Tool> {
                 "decisionType": {
                     "type": "string",
                     "enum": ["choice", "score", "noul"],
-                    "description": "Question type: choice (pick one), score (rate each), noul (choice with a no-answer option pair [false, true])."
+                    "description": crate::services::tool_i18n::prop_description("decision_type", &lang),
                 },
-                "state": { "type": "string", "description": "Context the decision is grounded in (text or JSON string)." },
-                "question": { "type": "string", "description": "The question to decide." },
+                "state": { "type": "string", "description": crate::services::tool_i18n::prop_description("decision_state", &lang), },
+                "question": { "type": "string", "description": crate::services::tool_i18n::prop_description("decision_question", &lang), },
                 "options": {
                     "type": "array",
                     "items": { "type": "string" },
                     "minItems": 2,
                     "maxItems": 20,
-                    "description": "2-20 non-empty candidate descriptions."
+                    "description": crate::services::tool_i18n::prop_description("decision_options", &lang),
                 }
             },
             "required": ["state", "question", "options"]
@@ -778,6 +778,9 @@ mod tests {
     #[test]
     fn decision_tool_definitions_shape_and_gating() {
         let _g = test_lock();
+        // Cross-call identity compares LOCALIZED output — hold the lang lock
+        // against the tool_i18n mutators (walk test flips TOOL_LANG).
+        let _lg = crate::services::tool_i18n::lang_test_lock();
         // Disabled → the catalog is STILL returned: the "view tools" dialog
         // documents the tool even while decision support is off. Enable
         // gating applies to the MCP surface (builtin_decision_tools, covered
@@ -809,6 +812,7 @@ mod tests {
     #[test]
     fn decision_tool_catalog_is_flag_independent() {
         let _g = test_lock();
+        let _lg = crate::services::tool_i18n::lang_test_lock();
         // The catalog seam itself: always exactly the decision_decide tool,
         // regardless of the enable flag (gating lives in builtin_decision_tools).
         DECISION_ACTIVE.store(false, Ordering::SeqCst);
