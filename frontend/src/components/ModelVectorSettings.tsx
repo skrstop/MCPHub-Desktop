@@ -62,6 +62,9 @@ const ModelVectorSettings: React.FC = () => {
   const [modelDownload, setModelDownload] = useState<ModelDownloadProgress | null>(null);
   const [status, setStatus] = useState<RagStatus | null>(null);
   const [device, setDevice] = useState<MvDevice>('auto');
+  // 决策运行设备（decision.device）：与向量模型设备相互独立（两份资源实例）。
+  const [decisionDevice, setDecisionDevice] = useState<MvDevice>('auto');
+  const [decisionDeviceOpen, setDecisionDeviceOpen] = useState(false);
   const [deviceDirty, setDeviceDirty] = useState(false);
   const [deviceOpen, setDeviceOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
@@ -218,6 +221,8 @@ const ModelVectorSettings: React.FC = () => {
         if (!mounted.current) return;
         const d = res?.data?.systemConfig?.mv?.device;
         if (d === 'gpu' || d === 'cpu' || d === 'auto') setDevice(d);
+        const dd = res?.data?.systemConfig?.decision?.device;
+        if (dd === 'gpu' || dd === 'cpu' || dd === 'auto') setDecisionDevice(dd);
         const tl = res?.data?.systemConfig?.mcp?.toolLanguage;
         if (typeof tl === 'string' && MCP_TOOL_LANGUAGES.some((o) => o.value === tl)) {
           setToolLanguage(tl);
@@ -347,6 +352,20 @@ const ModelVectorSettings: React.FC = () => {
     } catch (e) {
       // 保存失败回滚 UI（与 handleToolLanguageChange 悲观更新语义一致）
       if (mounted.current) setDevice(prev);
+      showToast(e instanceof Error ? e.message : String(e), 'error');
+    }
+  };
+
+  const handleDecisionDeviceChange = async (d: MvDevice) => {
+    const prev = decisionDevice;
+    setDecisionDevice(d);
+    try {
+      const res = await apiPut('system-config', { decision: { device: d } });
+      if (!res?.success) throw new Error(res?.message || 'Failed to save device');
+      showToast(t('settings.decisionDeviceSaved'), 'success');
+    } catch (e) {
+      // 保存失败回滚 UI（与 handleDeviceChange 悲观更新语义一致）
+      if (mounted.current) setDecisionDevice(prev);
       showToast(e instanceof Error ? e.message : String(e), 'error');
     }
   };
@@ -690,6 +709,87 @@ const ModelVectorSettings: React.FC = () => {
             {/* 与上方警告同门控 + modelReady（确有回退模型在跑）：未启用时
                 动作不可达；无回退模型时「代为决策」为假——两种情形下这行
                 都是失实/不可执行的指引。 */}
+            {/* 运行设备（AUTO/GPU/CPU）：决策模型独立资源实例，设备设置与
+                向量模型（mv.device）互不影响；保存后缓存失效、下一次决策
+                即按新设备加载（无需重启）。 */}
+            <div className="mt-4 pt-3 border-t" style={{ borderColor: 'var(--hub-line-2)' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <h3 className="text-[13px] font-medium" style={{ color: 'var(--hub-ink)' }}>
+                  {t('settings.decisionDevice')}
+                </h3>
+              </div>
+              <div className="relative w-full">
+                <button
+                  type="button"
+                  disabled={!decisionEnabled}
+                  onClick={() => setDecisionDeviceOpen((v) => !v)}
+                  className="hub-input flex items-center gap-1.5 w-full"
+                  style={{
+                    height: 28,
+                    fontSize: 12,
+                    padding: '0 6px',
+                    background: 'var(--hub-surface)',
+                    color: 'var(--hub-ink)',
+                    cursor: decisionEnabled ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  <span className="flex-1 text-left truncate">
+                    {t(
+                      `settings.mvDevice${decisionDevice.charAt(0).toUpperCase()}${decisionDevice.slice(1)}`,
+                    )}
+                  </span>
+                  <ChevronDown size={12} style={{ flexShrink: 0, opacity: 0.6 }} />
+                </button>
+                {decisionDeviceOpen && (
+                  <div
+                    className="absolute z-50 mt-1 rounded-lg shadow-2xl border overflow-hidden w-full"
+                    style={{
+                      background: 'var(--hub-surface)',
+                      borderColor: 'var(--hub-line-2)',
+                      maxHeight: 200,
+                      overflowY: 'auto',
+                    }}
+                  >
+                    {DEVICES.map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => {
+                          setDecisionDeviceOpen(false);
+                          if (d !== decisionDevice) handleDecisionDeviceChange(d);
+                        }}
+                        className="flex items-center justify-between w-full text-left"
+                        style={{
+                          padding: '6px 10px',
+                          fontSize: 12.5,
+                          color: d === decisionDevice ? 'var(--hub-accent)' : 'var(--hub-ink)',
+                          background: d === decisionDevice ? 'var(--hub-accent-soft)' : 'transparent',
+                        }}
+                        onMouseEnter={(e) => {
+                          if (d !== decisionDevice)
+                            e.currentTarget.style.background = 'var(--hub-surface-hover)';
+                        }}
+                        onMouseLeave={(e) => {
+                          if (d !== decisionDevice) e.currentTarget.style.background = 'transparent';
+                        }}
+                      >
+                        <span>
+                          {t(
+                            `settings.mvDevice${d.charAt(0).toUpperCase()}${d.slice(1)}`,
+                          )}
+                        </span>
+                        {d === decisionDevice && (
+                          <Check size={12} style={{ color: 'var(--hub-accent)' }} />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
+                {t('settings.decisionDeviceHint')}
+              </p>
+            </div>
             {decisionEnabled && decision?.selectionLost && decision?.modelReady && (
               <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
                 {t(

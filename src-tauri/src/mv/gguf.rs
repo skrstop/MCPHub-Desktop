@@ -682,7 +682,7 @@ fn tensor_mask(flat: &[u32], batch: u32, seq: u32, device: &Device) -> Result<ca
 /// - `Cpu` → CPU.
 /// - `Gpu` → force GPU; errors if no GPU available (no silent fallback).
 /// - `Auto` → GPU-first, CPU fallback.
-fn pick_device(platform: Platform) -> Result<(Device, &'static str)> {
+pub(crate) fn pick_device(platform: Platform) -> Result<(Device, &'static str)> {
     // For Cpu, skip GPU init entirely; otherwise try the platform GPU.
     let gpu = if platform == Platform::Cpu {
         None
@@ -697,7 +697,7 @@ fn pick_device(platform: Platform) -> Result<(Device, &'static str)> {
             Ok((Device::Cpu, "CPU"))
         }
         (None, Platform::Gpu) => Err(anyhow!(
-            "deploy.json forces GPU but no GPU device is available (set \"platform\":\"AUTO\" to allow CPU fallback)"
+            "GPU forced but no GPU device is available (AUTO falls back to CPU)"
         )),
     }
 }

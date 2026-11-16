@@ -1790,7 +1790,10 @@
     "decisionLostHintGone": "Un modèle de secours gère actuellement les décisions — adoptez-le dans la liste.",
     "mcpToolLanguage": "Langue des outils MCP",
     "mcpToolLanguageAuto": "Suivre la langue de l'interface",
-    "mcpToolLanguageHint": "Langue des descriptions ET de la documentation des paramètres des outils intégrés (rag_*, decision_decide, …). Anglais par défaut. Choisissez « Suivre la langue de l'interface » pour basculer automatiquement."
+    "mcpToolLanguageHint": "Langue des descriptions ET de la documentation des paramètres des outils intégrés (rag_*, decision_decide, …). Anglais par défaut. Choisissez « Suivre la langue de l'interface » pour basculer automatiquement.",
+    "decisionDevice": "Périphérique d'exécution de décision",
+    "decisionDeviceSaved": "Périphérique de décision enregistré",
+    "decisionDeviceHint": "Le mode automatique préfère le GPU (Metal) s'il est disponible et revient au CPU sinon. Prend effet à la prochaine requête de décision après l'enregistrement."
   },
   "mcpb": {
     "upload": "Télécharger",

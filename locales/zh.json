@@ -1790,7 +1790,10 @@
     "decisionLostHintGone": "当前由备用模型代为决策——可在列表中选用它。",
     "mcpToolLanguage": "MCP 工具语言",
     "mcpToolLanguageAuto": "跟随界面语言",
-    "mcpToolLanguageHint": "内置工具（rag_*、decision_decide 等）的描述与参数说明语言；默认英文。选择「跟随界面语言」可随界面语言自动切换。"
+    "mcpToolLanguageHint": "内置工具（rag_*、decision_decide 等）的描述与参数说明语言；默认英文。选择「跟随界面语言」可随界面语言自动切换。",
+    "decisionDevice": "决策运行设备",
+    "decisionDeviceSaved": "决策设备已保存",
+    "decisionDeviceHint": "自动模式优先使用 GPU（Metal），不可用时回退 CPU。保存后下一次决策请求生效。"
   },
   "mcpb": {
     "upload": "上传",

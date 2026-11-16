@@ -183,7 +183,10 @@ async fn cached_model(app: &AppHandle, name: &str) -> Result<Arc<DecisionModel>>
     )
     .map(|d| d.join("tokenizer.json"))
     .filter(|p| p.exists());
-    let device = candle_core::Device::Cpu;
+    // Runtime device for the decision model: env override > user setting.
+    let platform = resolve_decision_platform(env_decision_platform(), &device().await);
+    let (device, device_label) = crate::mv::gguf::pick_device(platform)?;
+    log::info!("[decision] loading model on {device_label}");
     let model = tokio::task::spawn_blocking({
         let path = path.clone();
         move || -> Result<DecisionModel> {
@@ -216,6 +219,54 @@ fn model_file_fingerprint(path: &std::path::Path) -> (std::time::SystemTime, u64
 }
 
 /// Evict the cached model (selection change / model file replaced).
+/// Env override for the decision runtime device (debug knob, mirrors the
+/// embedder's `RAG_GGUF_DEVICE`): "cpu" → Cpu, "metal"/"cuda"/"gpu" → Gpu;
+/// unset/anything else (including "auto") → None (follow the user setting).
+fn env_decision_platform() -> Option<crate::mv::embedder::Platform> {
+    use crate::mv::embedder::Platform;
+    match std::env::var("DECISION_GGUF_DEVICE")
+        .ok()
+        .map(|v| v.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cpu") => Some(Platform::Cpu),
+        Some("metal") | Some("cuda") | Some("gpu") => Some(Platform::Gpu),
+        _ => None,
+    }
+}
+
+/// Effective decision platform: env override wins; otherwise the user
+/// setting ("auto"/"gpu"/"cpu", unknown → Auto).
+fn resolve_decision_platform(
+    env: Option<crate::mv::embedder::Platform>,
+    setting: &str,
+) -> crate::mv::embedder::Platform {
+    env.unwrap_or_else(|| crate::mv::embedder::Platform::parse(setting))
+}
+
+/// The decision runtime device preference (`decision.device`, default "auto").
+/// Pure config read — the value is consumed when a model instance loads
+/// (cache miss), so a device change takes effect on the next decide after
+/// `invalidate_model_cache()`.
+pub async fn device() -> String {
+    let c = crate::services::config_service::get().await.unwrap_or_default();
+    c.get("decision")
+        .and_then(|d| d.get("device"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string()
+}
+
+/// Store the device preference (deep-merge patch, same shape the UI's
+/// system-config PUT uses). Callers invalidate the model cache afterwards.
+pub async fn set_device(value: &str) -> Result<()> {
+    crate::services::config_service::update(&serde_json::json!({
+        "decision": { "device": value }
+    }))
+    .await?;
+    Ok(())
+}
+
 pub async fn invalidate_model_cache() {
     *DECISION_MODEL.lock().await = None;
 }
@@ -1286,5 +1337,72 @@ mod tests {
             .unwrap();
         assert_eq!(n, 5);
         sqlx::query("DELETE FROM decision_history").execute(pool).await.unwrap();
+    }
+
+    /// Device resolution matrix: env override wins over the setting; unknown
+    /// settings fall back to Auto.
+    #[test]
+    fn resolve_decision_platform_matrix() {
+        use crate::mv::embedder::Platform;
+        // Env override wins even against an explicit cpu setting.
+        assert_eq!(
+            resolve_decision_platform(Some(Platform::Gpu), "cpu"),
+            Platform::Gpu
+        );
+        assert_eq!(
+            resolve_decision_platform(Some(Platform::Cpu), "gpu"),
+            Platform::Cpu
+        );
+        // No env: setting drives ("auto" → Auto default, unknown → Auto).
+        assert_eq!(resolve_decision_platform(None, "cpu"), Platform::Cpu);
+        assert_eq!(resolve_decision_platform(None, "gpu"), Platform::Gpu);
+        assert_eq!(resolve_decision_platform(None, "auto"), Platform::Auto);
+        assert_eq!(resolve_decision_platform(None, "klingon"), Platform::Auto);
+        assert_eq!(resolve_decision_platform(None, ""), Platform::Auto);
+    }
+
+    /// Env knob mapping (case-insensitive; mirrors RAG_GGUF_DEVICE).
+    #[test]
+    fn env_decision_platform_matrix() {
+        use crate::mv::embedder::Platform;
+        let orig = std::env::var("DECISION_GGUF_DEVICE").ok();
+        let mut set = |v: Option<&str>| {
+            match v {
+                Some(x) => std::env::set_var("DECISION_GGUF_DEVICE", x),
+                None => std::env::remove_var("DECISION_GGUF_DEVICE"),
+            }
+        };
+        set(Some("cpu"));
+        assert_eq!(env_decision_platform(), Some(Platform::Cpu));
+        set(Some("GPU"));
+        assert_eq!(env_decision_platform(), Some(Platform::Gpu));
+        set(Some("Metal"));
+        assert_eq!(env_decision_platform(), Some(Platform::Gpu));
+        set(Some("auto"));
+        assert_eq!(env_decision_platform(), None);
+        set(None);
+        assert_eq!(env_decision_platform(), None);
+        // Restore the original env for other tests.
+        match orig {
+            Some(x) => std::env::set_var("DECISION_GGUF_DEVICE", x),
+            None => std::env::remove_var("DECISION_GGUF_DEVICE"),
+        }
+    }
+
+    /// device() defaults to "auto"; set_device writes the deep-merge patch
+    /// shape the UI PUT uses.
+    #[tokio::test]
+    async fn decision_device_round_trip() {
+        db::ensure_test_pool().await;
+        let _lg = crate::services::tool_i18n::lang_test_lock();
+        // Default when the key is absent.
+        set_device("auto").await.expect("reset device");
+        assert_eq!(device().await, "auto");
+        set_device("gpu").await.expect("set gpu");
+        assert_eq!(device().await, "gpu");
+        set_device("cpu").await.expect("set cpu");
+        assert_eq!(device().await, "cpu");
+        set_device("auto").await.expect("restore");
+        assert_eq!(device().await, "auto");
     }
 }

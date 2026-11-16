@@ -154,6 +154,17 @@ pub async fn update_system_config(session: State<'_, SessionState>, config: serd
     // inputSchema (which embeds the localized prop texts) but excludes the
     // tool-level description, so plain sync would converge only by side
     // effect. Untested glue — see the tool-language report's coverage note.
+    // Decision runtime device: the model cache is device-bound (a loaded
+    // instance keeps its candle Device). Invalidate on a device write so the
+    // next decide reloads on the new device (hot effect — no restart).
+    if config
+        .get("decision")
+        .and_then(|d| d.get("device"))
+        .is_some()
+    {
+        crate::services::decision_service::invalidate_model_cache().await;
+    }
+
     let mcp_patch = config.get("mcp");
     let tool_lang_touched = mcp_patch.and_then(|m| m.get("toolLanguage")).is_some();
     let ui_lang_touched = mcp_patch.and_then(|m| m.get("uiLanguage")).is_some();

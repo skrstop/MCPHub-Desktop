@@ -1790,7 +1790,10 @@
     "decisionLostHintGone": "Một mô hình dự phòng đang xử lý các quyết định — chọn nó trong danh sách.",
     "mcpToolLanguage": "Ngôn ngữ công cụ MCP",
     "mcpToolLanguageAuto": "Theo ngôn ngữ giao diện",
-    "mcpToolLanguageHint": "Ngôn ngữ của mô tả VÀ tài liệu tham số của các công cụ có sẵn (rag_*, decision_decide, …). Mặc định tiếng Anh. Chọn \"Theo ngôn ngữ giao diện\" để tự động đổi theo giao diện."
+    "mcpToolLanguageHint": "Ngôn ngữ của mô tả VÀ tài liệu tham số của các công cụ có sẵn (rag_*, decision_decide, …). Mặc định tiếng Anh. Chọn \"Theo ngôn ngữ giao diện\" để tự động đổi theo giao diện.",
+    "decisionDevice": "Thiết bị chạy quyết định",
+    "decisionDeviceSaved": "Đã lưu thiết bị quyết định",
+    "decisionDeviceHint": "Chế độ tự động ưu tiên GPU (Metal) khi khả dụng, ngược lại quay về CPU. Có hiệu lực ở yêu cầu quyết định tiếp theo sau khi lưu."
   },
   "mcpb": {
     "upload": "Tải lên",
