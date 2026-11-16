@@ -184,8 +184,11 @@ async fn cached_model(app: &AppHandle, name: &str) -> Result<Arc<DecisionModel>>
     .map(|d| d.join("tokenizer.json"))
     .filter(|p| p.exists());
     // Runtime device for the decision model: env override > user setting.
+    // Snapshot the resolved device BEFORE the load; the publish step re-checks
+    // it so an in-flight load that raced a device change (invalidate) does not
+    // republish a stale-device instance that would then be served forever.
     let platform = resolve_decision_platform(env_decision_platform(), &device().await);
-    let (device, device_label) = crate::mv::gguf::pick_device(platform)?;
+    let (candle_device, device_label) = crate::mv::gguf::pick_device(platform)?;
     log::info!("[decision] loading model on {device_label}");
     let model = tokio::task::spawn_blocking({
         let path = path.clone();
@@ -195,7 +198,7 @@ async fn cached_model(app: &AppHandle, name: &str) -> Result<Arc<DecisionModel>>
                 .parent()
                 .ok_or_else(|| anyhow!("model path has no parent"))?
                 .to_path_buf();
-            DecisionModel::load(&mut file, &dir, &device, bundled_tokenizer.as_deref())
+            DecisionModel::load(&mut file, &dir, &candle_device, bundled_tokenizer.as_deref())
         }
     })
     .await
@@ -203,7 +206,14 @@ async fn cached_model(app: &AppHandle, name: &str) -> Result<Arc<DecisionModel>>
     let arc = Arc::new(model);
     // Re-acquire only to publish. Duplicate concurrent loads of the same size
     // are possible but bounded (each caller loads once, last writer wins) —
-    // the same trade the mv runtime registry makes for its cold path.
+    // the same trade the mv runtime registry makes for its cold path. A load
+    // that started before a device change loses the race: drop the instance
+    // (the next decide reloads on the new device) instead of republishing it.
+    let platform_now = resolve_decision_platform(env_decision_platform(), &device().await);
+    if platform_now != platform {
+        log::info!("[decision] device changed during load; discarding {device_label} instance");
+        return Ok(arc);
+    }
     *DECISION_MODEL.lock().await = Some((name.to_string(), fingerprint, arc.clone()));
     Ok(arc)
 }
@@ -223,12 +233,14 @@ fn model_file_fingerprint(path: &std::path::Path) -> (std::time::SystemTime, u64
 /// embedder's `RAG_GGUF_DEVICE`): "cpu" → Cpu, "metal"/"cuda"/"gpu" → Gpu;
 /// unset/anything else (including "auto") → None (follow the user setting).
 fn env_decision_platform() -> Option<crate::mv::embedder::Platform> {
+    parse_device_env(std::env::var("DECISION_GGUF_DEVICE").ok())
+}
+
+/// Pure mapping of the env value → platform (unit-tested without touching
+/// the process-global environment, which is racy under parallel tests).
+fn parse_device_env(v: Option<String>) -> Option<crate::mv::embedder::Platform> {
     use crate::mv::embedder::Platform;
-    match std::env::var("DECISION_GGUF_DEVICE")
-        .ok()
-        .map(|v| v.to_ascii_lowercase())
-        .as_deref()
-    {
+    match v.as_deref().map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("cpu") => Some(Platform::Cpu),
         Some("metal") | Some("cuda") | Some("gpu") => Some(Platform::Gpu),
         _ => None,
@@ -260,6 +272,12 @@ pub async fn device() -> String {
 /// Store the device preference (deep-merge patch, same shape the UI's
 /// system-config PUT uses). Callers invalidate the model cache afterwards.
 pub async fn set_device(value: &str) -> Result<()> {
+    // Whitelist: an unknown value would silently run as Auto (Platform::parse
+    // fallback) with no user feedback — reject at the write instead.
+    match value {
+        "auto" | "gpu" | "cpu" => {}
+        other => return Err(anyhow::anyhow!("invalid decision device '{other}' (auto|gpu|cpu)")),
+    }
     crate::services::config_service::update(&serde_json::json!({
         "decision": { "device": value }
     }))
@@ -1361,32 +1379,22 @@ mod tests {
         assert_eq!(resolve_decision_platform(None, ""), Platform::Auto);
     }
 
-    /// Env knob mapping (case-insensitive; mirrors RAG_GGUF_DEVICE).
+    /// Env knob mapping (case-insensitive; mirrors RAG_GGUF_DEVICE). Pure
+    /// function — the process-global env is never touched (racy under
+    /// parallel tests); `env_decision_platform` itself is the one-line
+    /// `std::env::var` read + this mapping.
     #[test]
     fn env_decision_platform_matrix() {
         use crate::mv::embedder::Platform;
-        let orig = std::env::var("DECISION_GGUF_DEVICE").ok();
-        let mut set = |v: Option<&str>| {
-            match v {
-                Some(x) => std::env::set_var("DECISION_GGUF_DEVICE", x),
-                None => std::env::remove_var("DECISION_GGUF_DEVICE"),
-            }
-        };
-        set(Some("cpu"));
-        assert_eq!(env_decision_platform(), Some(Platform::Cpu));
-        set(Some("GPU"));
-        assert_eq!(env_decision_platform(), Some(Platform::Gpu));
-        set(Some("Metal"));
-        assert_eq!(env_decision_platform(), Some(Platform::Gpu));
-        set(Some("auto"));
-        assert_eq!(env_decision_platform(), None);
-        set(None);
-        assert_eq!(env_decision_platform(), None);
-        // Restore the original env for other tests.
-        match orig {
-            Some(x) => std::env::set_var("DECISION_GGUF_DEVICE", x),
-            None => std::env::remove_var("DECISION_GGUF_DEVICE"),
-        }
+        let f = parse_device_env;
+        assert_eq!(f(Some("cpu".into())), Some(Platform::Cpu));
+        assert_eq!(f(Some("GPU".into())), Some(Platform::Gpu));
+        assert_eq!(f(Some("Metal".into())), Some(Platform::Gpu));
+        assert_eq!(f(Some("cuda".into())), Some(Platform::Gpu));
+        assert_eq!(f(Some("auto".into())), None);
+        assert_eq!(f(Some("gpus".into())), None);
+        assert_eq!(f(Some("".into())), None);
+        assert_eq!(f(None), None);
     }
 
     /// device() defaults to "auto"; set_device writes the deep-merge patch
@@ -1394,6 +1402,7 @@ mod tests {
     #[tokio::test]
     async fn decision_device_round_trip() {
         db::ensure_test_pool().await;
+        let _g = test_lock();
         let _lg = crate::services::tool_i18n::lang_test_lock();
         // Default when the key is absent.
         set_device("auto").await.expect("reset device");

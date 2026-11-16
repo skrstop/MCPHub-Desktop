@@ -41,6 +41,16 @@ export const useCostData = (revision = '') => {
     return inFlight.current;
   }, [loadCosts]);
 
+  // Force variant: bypasses the in-flight dedupe so a manual refresh always
+  // issues a fresh request (the dedupe would otherwise return the stale
+  // promise of a request that started before the data changed).
+  const refetchForce = useCallback(() => {
+    inFlight.current = loadCosts().finally(() => {
+      inFlight.current = null;
+    });
+    return inFlight.current;
+  }, [loadCosts]);
+
   useEffect(() => {
     // A revision change during an active request must still fetch the new state.
     let active = true;
@@ -64,5 +74,5 @@ export const useCostData = (revision = '') => {
     };
   }, [fetchCosts, revision]);
 
-  return { serverCosts, groupCosts, loading, refetch: fetchCosts };
+  return { serverCosts, groupCosts, loading, refetch: fetchCosts, refetchForce };
 };

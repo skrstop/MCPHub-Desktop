@@ -44,6 +44,7 @@ const DecisionPage: React.FC = () => {
   // Initial-load failure: distinct from "empty history" — the user must be
   // able to tell a backend/IPC error from a genuinely empty list, and retry.
   const [loadError, setLoadError] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);
   const [viewing, setViewing] = useState<DecisionHistoryEntry | null>(null);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -62,15 +63,24 @@ const DecisionPage: React.FC = () => {
   const viewTriggerRef = useRef<HTMLElement | null>(null);
 
   // Load one history page by offset (page is 1-based). Fetches PAGE_SIZE+1
-  // rows so an extra row can drive the next-page affordance.
+  // rows so an extra row can drive the next-page affordance. Failures set
+  // loadError (retry affordance) instead of leaving a dangling rejection.
   const loadPage = useCallback(async (p: number) => {
-    const list = await listDecisionHistory(PAGE_SIZE + 1, (p - 1) * PAGE_SIZE);
-    if (!mounted.current) return;
-    const { rows, hasMore } = pageSlice(list, PAGE_SIZE);
-    setEntries(rows);
-    setHasMore(hasMore);
-    setPage(p);
-    setLoadError(false);
+    setPageLoading(true);
+    try {
+      const list = await listDecisionHistory(PAGE_SIZE + 1, (p - 1) * PAGE_SIZE);
+      if (!mounted.current) return;
+      const { rows, hasMore } = pageSlice(list, PAGE_SIZE);
+      setEntries(rows);
+      setHasMore(hasMore);
+      setPage(p);
+      setLoadError(false);
+    } catch (e) {
+      console.warn('[decision] failed to load history page', e);
+      if (mounted.current) setLoadError(true);
+    } finally {
+      if (mounted.current) setPageLoading(false);
+    }
   }, []);
 
   const fetchAll = useCallback(async () => {
@@ -290,7 +300,7 @@ const DecisionPage: React.FC = () => {
               <button
                 type="button"
                 className="hub-btn sm"
-                disabled={page <= 1}
+                disabled={page <= 1 || pageLoading}
                 aria-label={t('common.prevPage')}
                 onClick={() => void loadPage(page - 1)}
               >
@@ -302,7 +312,7 @@ const DecisionPage: React.FC = () => {
               <button
                 type="button"
                 className="hub-btn sm"
-                disabled={!hasMore}
+                disabled={!hasMore || pageLoading}
                 aria-label={t('common.nextPage')}
                 onClick={() => void loadPage(page + 1)}
               >

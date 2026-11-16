@@ -100,7 +100,7 @@ const DashboardPage: React.FC = () => {
       cancelled = true;
     };
   }, [smartRoutingConfig?.enabled, smartMetaRefreshKey]);
-  const { serverCosts, refetch: refetchCosts } = useCostData();
+  const { serverCosts, refetchForce: refetchCosts } = useCostData();
   const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);
@@ -279,6 +279,9 @@ const DashboardPage: React.FC = () => {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
             <div className="hub-card animate-pulse" style={{ padding: '14px 16px', height: 78 }} />
+            {smartRoutingConfig?.enabled && (
+              <div className="hub-card animate-pulse" style={{ padding: '14px 16px', height: 78 }} />
+            )}
           </div>
         </>
       ) : (

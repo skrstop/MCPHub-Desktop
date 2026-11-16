@@ -90,4 +90,17 @@ describe('pageSlice', () => {
     pageSlice(raw, 1);
     expect(raw).toEqual(copy);
   });
+
+  it('treats pageSize 0 as an empty page with hasMore when rows exist', () => {
+    const raw = Array.from({ length: 2 }, (_, i) => row(i));
+    expect(pageSlice(raw, 0)).toEqual({ rows: [], hasMore: true });
+    expect(pageSlice([], 0)).toEqual({ rows: [], hasMore: false });
+  });
+
+  it('handles a fetch far longer than pageSize+1 (defensive cap)', () => {
+    const raw = Array.from({ length: 120 }, (_, i) => row(i));
+    const { rows, hasMore } = pageSlice(raw, 50);
+    expect(rows).toHaveLength(50);
+    expect(hasMore).toBe(true);
+  });
 });
