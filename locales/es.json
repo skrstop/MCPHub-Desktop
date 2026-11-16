@@ -1851,8 +1851,7 @@
     "mcpToolLanguageAuto": "Seguir el idioma de la interfaz",
     "mcpToolLanguageHint": "Idioma de las descripciones Y de la documentación de parámetros de las herramientas integradas (rag_*, decision_decide, …). Por defecto, inglés. Elija \"Seguir el idioma de la interfaz\" para cambiar automáticamente.",
     "decisionDevice": "Dispositivo de ejecución de decisiones",
-    "decisionDeviceSaved": "Dispositivo de decisión guardado",
-    "decisionDeviceHint": "El modo automático prefiere GPU (Metal) cuando está disponible y vuelve a CPU en caso contrario. Surte efecto en la siguiente solicitud de decisión tras guardar."
+    "decisionDeviceSaved": "Dispositivo de decisión guardado"
   },
   "mcpb": {
     "upload": "Subir",

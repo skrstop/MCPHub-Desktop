@@ -1792,8 +1792,7 @@
     "mcpToolLanguageAuto": "Arayüz dilini takip et",
     "mcpToolLanguageHint": "Yerleşik araçların (rag_*, decision_decide, …) açıklamalarının VE parametre belgelerinin dili. Varsayılan İngilizcedir. Arayüz diliyle otomatik değişmesi için \"Arayüz dilini takip et\" seçeneğini seçin.",
     "decisionDevice": "Karar Çalışma Aygıtı",
-    "decisionDeviceSaved": "Karar aygıtı kaydedildi",
-    "decisionDeviceHint": "Otomatik mod, kullanılabilir olduğunda GPU'yu (Metal) tercih eder, aksi halde CPU'ya döner. Kaydettikten sonraki karar isteğinde geçerli olur."
+    "decisionDeviceSaved": "Karar aygıtı kaydedildi"
   },
   "mcpb": {
     "upload": "Yükle",

@@ -1792,8 +1792,7 @@
     "mcpToolLanguageAuto": "Follow UI language",
     "mcpToolLanguageHint": "Language for the builtin tools' descriptions AND parameter docs (rag_*, decision_decide, …). Defaults to English. Choose \"Follow UI language\" to switch automatically with the interface language.",
     "decisionDevice": "Decision Runtime Device",
-    "decisionDeviceSaved": "Decision device saved",
-    "decisionDeviceHint": "Auto prefers GPU when available (Metal) and falls back to CPU. Takes effect on the next decision request after saving."
+    "decisionDeviceSaved": "Decision device saved"
   },
   "mcpb": {
     "upload": "Upload",

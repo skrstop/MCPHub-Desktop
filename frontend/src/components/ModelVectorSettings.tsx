@@ -786,9 +786,6 @@ const ModelVectorSettings: React.FC = () => {
                   </div>
                 )}
               </div>
-              <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
-                {t('settings.decisionDeviceHint')}
-              </p>
             </div>
             {decisionEnabled && decision?.selectionLost && decision?.modelReady && (
               <p style={{ fontSize: 11.5, color: 'var(--hub-ink-3)', marginTop: 6 }}>
