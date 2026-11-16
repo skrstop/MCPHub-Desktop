@@ -1,0 +1,91 @@
+{
+  "description": "decision_decide 工具 demo 用例：复制 request 到 MCP 工具调用即可。in = 模型训练域内（结果可信），out = 训练域外（分数是噪声，仅演示不可信）。",
+  "cases": [
+    {
+      "name": "域内 · 工具路由（choice）",
+      "domain": "in",
+      "request": {
+        "decisionType": "choice",
+        "state": "user asks in Chinese how to check their public IP; tools available: getPublicIp (returns public IP), listFiles (lists local files)",
+        "question": "Which tool should be used?",
+        "options": [
+          "getPublicIp: returns the machine public IP address",
+          "listFiles: lists files in a local directory"
+        ]
+      },
+      "expected": "getPublicIp（probs ≈ [0.939, 0.061]）"
+    },
+    {
+      "name": "域内 · 是否调用工具（noul，options 固定为 [false, true]）",
+      "domain": "in",
+      "request": {
+        "decisionType": "noul",
+        "state": "user message: \"帮我查一下公网ip\"",
+        "question": "Does this message require a tool call?",
+        "options": ["false", "true"]
+      },
+      "expected": "true（probs ≈ [0.362, 0.638]）"
+    },
+    {
+      "name": "域内 · 相关度评分（score）",
+      "domain": "in",
+      "request": {
+        "decisionType": "score",
+        "state": "candidate tools for the query \"translate this document to English\"",
+        "question": "Rate tool relevance",
+        "options": [
+          "translate_text: translates text between languages",
+          "get_weather: returns weather forecast"
+        ]
+      },
+      "expected": "translate_text（probs ≈ [0.999, 0.001]）"
+    },
+    {
+      "name": "域内 · 相关度评分（score）——天气查询工具路由",
+      "domain": "in",
+      "request": {
+        "decisionType": "score",
+        "state": "candidate tools for the query \"will it rain tomorrow in Beijing\"",
+        "question": "Rate tool relevance",
+        "options": [
+          "get_weather: returns weather forecast for a city",
+          "translate_text: translates text between languages"
+        ]
+      },
+      "expected": "get_weather（probs ≈ [0.997, 0.003]）——注意：把「天气」作为工具路由语义模型可信；把「天气」作为待推断的因果问题不可信（见下一条）"
+    },
+    {
+      "name": "域外 · 算术（score）——不可信，仅演示噪声",
+      "domain": "out",
+      "request": {
+        "decisionType": "score",
+        "state": "在义务教育的数学场景下",
+        "question": "1+1等于几",
+        "options": ["4", "3", "2"]
+      },
+      "expected": "模型输出 \"3\"（probs ≈ [0.020, 0.962, 0.019]）——纯噪声，正确答案是 \"2\"；144M 路由模型不做算术"
+    },
+    {
+      "name": "域外 · 天气因果推断（score）——不可信，仅演示噪声",
+      "domain": "out",
+      "request": {
+        "decisionType": "score",
+        "state": "今天是11月16号，今天的白天温度是20~30度，天气预报说天气很高",
+        "question": "请问今天10~13点有可能下雨么",
+        "options": ["晴天", "下雨"]
+      },
+      "expected": "模型输出 \"下雨\"（probs ≈ [0.410, 0.590]）——state 中无降水信号时输出接近均匀噪声"
+    },
+    {
+      "name": "域外 · 事实知识（choice）——不可信，仅演示噪声",
+      "domain": "out",
+      "request": {
+        "decisionType": "choice",
+        "state": "general knowledge quiz",
+        "question": "What is the capital of France?",
+        "options": ["Paris", "London"]
+      },
+      "expected": "碰巧选中 Paris，但这是分布残留不是推理——知识类问题换一种问法就不可靠"
+    }
+  ]
+}
