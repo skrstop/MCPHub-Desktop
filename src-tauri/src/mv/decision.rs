@@ -14,7 +14,7 @@ use anyhow::{anyhow, Result};
 use candle_core::quantized::gguf_file::{Content, Value};
 use candle_core::{Device, Tensor};
 use candle_core::Module;
-use candle_nn::{ops, LayerNorm, RmsNorm};
+use candle_nn::{ops, LayerNorm};
 use std::io::{Read, Seek};
 use std::path::Path;
 use tokenizers::Tokenizer;
@@ -81,8 +81,8 @@ pub struct DecisionOutput {
 /// sliding window, no biases). Locally owned so the decision loader stays
 /// independent of the embedding arch's private struct.
 struct EncoderBlock {
-    attn_norm: Option<RmsNorm>,
-    ffn_norm: RmsNorm,
+    attn_norm: Option<LayerNorm>,
+    ffn_norm: LayerNorm,
     qkv_w: Tensor,      // [in, out=3*hidden]
     out_w: Tensor,      // [in, out=hidden]
     ffn_up_w: Tensor,   // [in, out=2*ffn]
@@ -298,12 +298,17 @@ impl DecisionModel {
             type_emb_t.t()?
         };
 
-        // Julia's modernbert variant normalizes with RMSNorm (bias-free,
-        // no mean subtraction) — matches the official encoder reference
-        // (emb/final/attn/mlp norms all use rms(); head + scorer keep
-        // standard LayerNorm). The GGUF ships weight-only norm tensors.
-        let ln = |w: Tensor| -> Result<RmsNorm> {
-            Ok(RmsNorm::new(w, 1e-5))
+        // Julia's encoder is HF `ModernBertModel` (model_type=modernbert, no
+        // auto_map): HF modeling_modernbert.py uses BIAS-FREE LayerNorm
+        // (mean+variance, norm_bias=false) for emb/final/attn/mlp norms and
+        // nn.Identity for layer 0's attn_norm. Head + scorer keep standard
+        // LayerNorm with bias. Verified against the official inference code
+        // (julia/model.py + transformers AutoModel) — the GGUF ships
+        // weight-only norm tensors.
+        let ln = |w: Tensor| -> Result<LayerNorm> {
+            let h = w.dim(0)?;
+            let zero = Tensor::zeros(h, candle_core::DType::F32, device)?;
+            Ok(LayerNorm::new(w, zero, 1e-5))
         };
         let mut blocks = Vec::with_capacity(block_count);
         for i in 0..block_count {
@@ -553,7 +558,11 @@ impl DecisionModel {
         // Encoder: token embedding + RMSNorm, then ModernBert blocks.
         let mut x = self.token_embd.embedding(&ids_flat)?;
         x = x.reshape((1, seq, self.hidden))?;
-        let emb_ln = RmsNorm::new(self.token_embd_norm_w.clone(), 1e-5);
+        let emb_ln = LayerNorm::new(
+            self.token_embd_norm_w.clone(),
+            Tensor::zeros(self.hidden, candle_core::DType::F32, device)?,
+            1e-5,
+        );
         x = emb_ln.forward(&x)?;
         let mask_bias = attn_bias(&attn)?;
         let positions = Tensor::arange(0u32, seq as u32, device)?;
@@ -563,6 +572,16 @@ impl DecisionModel {
                 Block::Head(_) => break,
             }
         }
+        // Official order: encoder output (final_norm applied INSIDE the
+        // encoder, i.e. BEFORE type_emb) → + type_emb → head → gather →
+        // scorer. HF ModernBertModel.last_hidden_state already carries
+        // final_norm, so apply output_norm here, before type_emb.
+        let out_ln = LayerNorm::new(
+            self.output_norm_w.clone(),
+            Tensor::zeros(self.hidden, candle_core::DType::F32, device)?,
+            1e-5,
+        );
+        x = out_ln.forward(&x)?;
         // Official model: hidden = encoder(...) + type_emb(qtype) BEFORE the
         // head; the head blocks then run over the full sequence.
         let te = self.type_emb.narrow(0, req.decision_type.id() as usize, 1)?; // [1, hidden]
@@ -573,8 +592,6 @@ impl DecisionModel {
                 Block::Encoder(_) => {}
             }
         }
-        let out_ln = RmsNorm::new(self.output_norm_w.clone(), 1e-5);
-        x = out_ln.forward(&x)?;
 
         // Gather the marker positions and score each: LayerNorm → Linear →
         // GELU → Linear → scalar.
@@ -681,7 +698,11 @@ impl DecisionModel {
         let ids_flat = input.flatten_all()?;
         let mut x = self.token_embd.embedding(&ids_flat)?;
         x = x.reshape((1, seq, self.hidden))?;
-        let emb_ln = RmsNorm::new(self.token_embd_norm_w.clone(), 1e-5);
+        let emb_ln = LayerNorm::new(
+            self.token_embd_norm_w.clone(),
+            Tensor::zeros(self.hidden, candle_core::DType::F32, device)?,
+            1e-5,
+        );
         x = emb_ln.forward(&x)?;
         let mask_bias = attn_bias(&attn)?;
         let positions = Tensor::arange(0u32, seq as u32, device)?;
@@ -691,6 +712,12 @@ impl DecisionModel {
                 Block::Head(_) => break,
             }
         }
+        let out_ln = LayerNorm::new(
+            self.output_norm_w.clone(),
+            Tensor::zeros(self.hidden, candle_core::DType::F32, device)?,
+            1e-5,
+        );
+        x = out_ln.forward(&x)?;
         let te = self.type_emb.narrow(0, req.decision_type.id() as usize, 1)?;
         x = x.broadcast_add(&te.reshape((1, 1, self.hidden))?)?;
         for blk in self.blocks.iter().skip(self.encoder_layers) {
@@ -699,8 +726,6 @@ impl DecisionModel {
                 Block::Encoder(_) => {}
             }
         }
-        let out_ln = RmsNorm::new(self.output_norm_w.clone(), 1e-5);
-        x = out_ln.forward(&x)?;
         let n_opt = markers.len();
         let mk_u32: Vec<u32> = markers.iter().map(|&m| m as u32).collect();
         let mk_idx = Tensor::new(&mk_u32[..], device)?.reshape((1, n_opt, 1))?;
@@ -898,6 +923,7 @@ mod tests {
 
     /// Dump the scorer-head tensor shapes as candle sees them (GGUF dims are
     /// stored reversed; this shows the LOGICAL shapes the loader works with).
+
     /// `cargo test --lib mv::decision::tests::julia_shape_dump -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -950,6 +976,8 @@ mod tests {
     /// what the model was trained for) must match their target; OUT-OF-DOMAIN
     /// cases (math, causal weather inference, factual knowledge) print the
     /// raw scores to show they are noise — do not trust the model there.
+
+
     #[test]
     #[ignore]
     fn julia_demo_probe() {
