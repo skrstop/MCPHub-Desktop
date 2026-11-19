@@ -41,21 +41,22 @@ impl ModelKind {
 }
 
 pub(crate) fn model_root_kind(app: &AppHandle, kind: ModelKind) -> Result<PathBuf> {
-    let name = kind.dir_name();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("runtimes")
-        .join("rag")
-        .join("model")
-        .join(name);
+    // Decision models live in their own runtime dir (`runtimes/decision/model`)
+    //, a sibling of `runtimes/rag`; embedding models stay under `runtimes/rag/model`.
+    let rel: &[&str] = match kind {
+        ModelKind::Embedding => &["runtimes", "rag", "model", "embedding"],
+        ModelKind::Decision => &["runtimes", "decision", "model"],
+    };
+    let src = rel
+        .iter()
+        .fold(PathBuf::from(env!("CARGO_MANIFEST_DIR")), |p, s| p.join(s));
     if src.exists() {
         return Ok(src);
     }
     if let Ok(resource) = app.path().resource_dir() {
-        let p = resource
-            .join("runtimes")
-            .join("rag")
-            .join("model")
-            .join(name);
+        let p = rel
+            .iter()
+            .fold(resource, |p, s| p.join(s));
         if p.exists() {
             return Ok(p);
         }
@@ -1412,6 +1413,28 @@ async fn publish_temp(temp_path: &Path, final_path: &Path) -> Result<()> {
         .map_err(|e| anyhow!("publish {}: {}", final_path.display(), e))
 }
 
+/// Copy the bundled size dir's `deploy.json` (and gzip tokenizer, when the
+/// bundled dir ships one) into the downloaded dir after a successful
+/// download. Downloaded dirs otherwise contain only `model.gguf`, which
+/// would strip the model's metadata: the dropdown description, the default
+/// flag and the per-model MCP tool description (`toolDescriptions`) all
+/// live in deploy.json. Best-effort — a missing bundled dir (model removed
+/// from the repo) just skips the copy.
+fn copy_bundled_metadata(app: &AppHandle, kind: ModelKind, size: &str, final_dir: &Path) {
+    let Some(bundled) = bundled_size_dir_kind(app, kind, size) else {
+        return;
+    };
+    for name in ["deploy.json", "tokenizer.json.gz"] {
+        let src = bundled.join(name);
+        let dst = final_dir.join(name);
+        if src.is_file() && !dst.exists() {
+            if let Err(e) = std::fs::copy(&src, &dst) {
+                log::warn!("copy bundled {name} to {}: {}", dst.display(), e);
+            }
+        }
+    }
+}
+
 /// Truncation guard for streamed downloads: a body shorter than the
 /// advertised Content-Length must never be published (a truncated GGUF with
 /// a valid magic would be called "ready"). `total == 0` means the server
@@ -1510,6 +1533,7 @@ async fn run_download(
                     // Publish atomically (same contract as the HTTP path).
                     match publish_temp(&temp_path, &final_path).await {
                         Ok(()) => {
+                            copy_bundled_metadata(&app, kind, &size, final_path.parent().unwrap_or(Path::new(".")));
                             set_phase("done", Some("done".into()));
                             {
                                 let mut st = state_lock();
@@ -1695,6 +1719,7 @@ async fn run_download(
                 // truncated file that detect_format would call ready.
                 match publish_temp(&temp_path, &final_path).await {
                     Ok(()) => {
+                        copy_bundled_metadata(&app, kind, &size, final_path.parent().unwrap_or(Path::new(".")));
                         set_phase("done", Some("done".into()));
                         {
                             let mut st = state_lock();

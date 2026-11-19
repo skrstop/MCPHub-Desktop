@@ -121,6 +121,9 @@ pub async fn decision_select_model(
         .await
         .map_err(|e| e.to_string())?;
     crate::services::decision_service::invalidate_model_cache().await;
+    // The MCP tool description may differ per model (deploy.json
+    // `toolDescriptions`) — reload it for the new selection.
+    crate::services::decision_service::refresh_tool_description(&app).await;
     Ok(())
 }
 

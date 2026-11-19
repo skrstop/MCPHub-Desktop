@@ -29,7 +29,7 @@ pub enum DecisionType {
 }
 
 impl DecisionType {
-    fn id(self) -> u32 {
+    pub(crate) fn id(self) -> u32 {
         match self {
             DecisionType::Choice => 0,
             DecisionType::Score => 1,
@@ -111,7 +111,122 @@ enum Block {
     Head(HeadBlock),
 }
 
+/// Public decision-model handle: dispatches between the Julia-style
+/// `modern-bert` GGUF layout and the laya `ggmlc` fused-graph layout.
 pub struct DecisionModel {
+    pub tokenizer: Tokenizer,
+    inner: Inner,
+}
+
+enum Inner {
+    ModernBert(ModernBertModel),
+    Ggmlc(super::ggmlc::GgmlcModel),
+    Statim(super::gguf_statim::StatimModel),
+    Jev(super::gguf_jev::JevModel),
+}
+
+impl DecisionModel {
+    pub fn load<R: Read + Seek>(
+        file: &mut R,
+        size_dir: &Path,
+        device: &Device,
+        tokenizer_fallback: Option<&Path>,
+    ) -> Result<Self> {
+        use std::io::SeekFrom;
+        // Peek the architecture, then rewind and let the backend re-read.
+        let arch = {
+            file.seek(SeekFrom::Start(0))?;
+            let c = Content::read(file).map_err(|e| anyhow!("read gguf: {e}"))?;
+            c.metadata
+                .get("general.architecture")
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    _ => "modern-bert".to_string(),
+                })
+                .unwrap_or_else(|| "modern-bert".to_string())
+        };
+        file.seek(SeekFrom::Start(0))?;
+        match arch.as_str() {
+            "ggmlc" => {
+                let m = super::ggmlc::GgmlcModel::load(file, device)?;
+                let tokenizer = m.tokenizer.clone();
+                Ok(Self {
+                    tokenizer,
+                    inner: Inner::Ggmlc(m),
+                })
+            }
+            "laya" => {
+                let m = super::gguf_statim::StatimModel::load(file, device)?;
+                let tokenizer = m.tokenizer.clone();
+                Ok(Self {
+                    tokenizer,
+                    inner: Inner::Statim(m),
+                })
+            }
+            "qwen35" => {
+                let m = super::gguf_jev::JevModel::load(file, device)?;
+                let tokenizer = m.tokenizer.clone();
+                Ok(Self {
+                    tokenizer,
+                    inner: Inner::Jev(m),
+                })
+            }
+            _ => {
+                let m = ModernBertModel::load(file, size_dir, device, tokenizer_fallback)?;
+                let tokenizer = m.tokenizer.clone();
+                Ok(Self {
+                    tokenizer,
+                    inner: Inner::ModernBert(m),
+                })
+            }
+        }
+    }
+
+    /// Run the full decision forward and return the structured output.
+    pub fn decide(&self, req: &DecisionRequest) -> Result<DecisionOutput> {
+        match &self.inner {
+            Inner::ModernBert(m) => m.decide(req),
+            Inner::Ggmlc(m) => m.decide(req),
+            Inner::Statim(m) => m.decide(req),
+            Inner::Jev(m) => m.decide(req),
+        }
+    }
+
+    /// TEST-ONLY: same forward but with the tokenizer's post-processor
+    /// template applied (see `ModernBertModel::decide_with_special`).
+    #[cfg(test)]
+    fn decide_with_special(&self, req: &DecisionRequest) -> Result<DecisionOutput> {
+        match &self.inner {
+            Inner::ModernBert(m) => m.decide_with_special(req),
+            Inner::Ggmlc(_) => anyhow::bail!("decide_with_special is modern-bert only"),
+            Inner::Statim(_) => anyhow::bail!("decide_with_special is modern-bert only"),
+            Inner::Jev(_) => anyhow::bail!("decide_with_special is modern-bert only"),
+        }
+    }
+
+    /// Resolve the selected decision model GGUF via the shared kind-aware
+    /// resolver (`decision/<family>/<size>/model.gguf`, downloaded copy
+    /// preferred over bundled).
+    pub fn resolve_model_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf> {
+        if name.is_empty()
+            || name == "."
+            || name.contains("..")
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            return Err(anyhow!("invalid decision model name"));
+        }
+        let dir = super::models::resolve_model_paths_kind(
+            app,
+            super::models::ModelKind::Decision,
+            name,
+        )?
+        .ok_or_else(|| anyhow!("decision model '{name}' is not ready - download it first"))?;
+        Ok(dir.join("model.gguf"))
+    }
+}
+
+struct ModernBertModel {
     tokenizer: Tokenizer,
     token_embd: Tensor, // [vocab, hidden]
     token_embd_norm_w: Tensor,
@@ -142,7 +257,7 @@ pub struct DecisionModel {
     mask_id: u32,
 }
 
-impl DecisionModel {
+impl ModernBertModel {
     pub fn load<R: Read + Seek>(
         file: &mut R,
         size_dir: &Path,
@@ -214,23 +329,34 @@ impl DecisionModel {
         // fallback is a last resort: julia_1's GGUF declares a GPT-2 vocab
         // while the real vocab is Metaspace, so ByteLevel pre-tokenization
         // yields mass <unk> and garbage decisions.
-        let tokenizer_path = size_dir.join("tokenizer.json");
-        let tokenizer = if tokenizer_path.exists() {
-            Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-                // File name only — absolute paths must not leak to MCP
-                // clients / remote callers (resolve_model_path convention).
-                anyhow!(
-                    "load tokenizer {}: {e}",
-                    tokenizer_path.file_name().and_then(|n| n.to_str()).unwrap_or("tokenizer.json")
-                )
-            })?
+        // Tokenizer resolution order: `tokenizer.json` → `tokenizer.json.gz`
+        // (the 34MB gemma vocab compresses to ~9MB; decompressed in memory) →
+        // the caller-supplied bundled fallback (downloaded dirs contain only
+        // model.gguf) → reconstruct from the GGUF metadata. The GGUF path is
+        // verified token-exact for this family (`pre = mmbert`/`gemma` routes
+        // to the Metaspace builder) but the shipped file stays the primary
+        // source so a GGUF metadata regression cannot silently change
+        // tokenization.
+        let load_tokenizer_file = |p: &Path| -> Result<Tokenizer> {
+            if p.extension().and_then(|e| e.to_str()) == Some("gz") {
+                let f = std::fs::File::open(p).map_err(|e| anyhow!("open {}: {e}", p.display()))?;
+                let mut s = String::new();
+                flate2::read::GzDecoder::new(f)
+                    .read_to_string(&mut s)
+                    .map_err(|e| anyhow!("gunzip {}: {e}", p.display()))?;
+                Tokenizer::from_bytes(&s).map_err(|e| anyhow!("parse {}: {e}", p.display()))
+            } else {
+                Tokenizer::from_file(p).map_err(|e| anyhow!("load {}: {e}", p.display()))
+            }
+        };
+        let tokenizer_json = size_dir.join("tokenizer.json");
+        let tokenizer_gz = size_dir.join("tokenizer.json.gz");
+        let tokenizer = if tokenizer_json.exists() {
+            load_tokenizer_file(&tokenizer_json)?
+        } else if tokenizer_gz.exists() {
+            load_tokenizer_file(&tokenizer_gz)?
         } else if let Some(fb) = tokenizer_fallback.filter(|p| p.exists()) {
-            Tokenizer::from_file(fb).map_err(|e| {
-                anyhow!(
-                    "load bundled tokenizer {}: {e}",
-                    fb.file_name().and_then(|n| n.to_str()).unwrap_or("tokenizer.json")
-                )
-            })?
+            load_tokenizer_file(fb)?
         } else {
             build_gguf_tokenizer(md)?
         };
@@ -418,27 +544,6 @@ impl DecisionModel {
             sep_id,
             mask_id,
         })
-    }
-
-    /// Resolve the selected decision model GGUF via the shared kind-aware
-    /// resolver (`decision/<family>/<size>/model.gguf`, downloaded copy
-    /// preferred over bundled).
-    pub fn resolve_model_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf> {
-        if name.is_empty()
-            || name == "."
-            || name.contains("..")
-            || name.contains('/')
-            || name.contains('\\')
-        {
-            return Err(anyhow!("invalid decision model name"));
-        }
-        let dir = super::models::resolve_model_paths_kind(
-            app,
-            super::models::ModelKind::Decision,
-            name,
-        )?
-        .ok_or_else(|| anyhow!("decision model '{name}' is not ready - download it first"))?;
-        Ok(dir.join("model.gguf"))
     }
 
     /// Tokenize + serialize one request into `(ids, marker_positions)`
@@ -880,7 +985,7 @@ mod tests {
     #[ignore]
     fn julia_reference_probe() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/decision/julia/1/model.gguf");
+            .join("runtimes/decision/model/julia/1/model.gguf");
         if !gguf.is_file() {
             eprintln!("SKIP: julia_1 model.gguf not present");
             return;
@@ -921,6 +1026,101 @@ mod tests {
         }
     }
 
+    /// Run every decision model (julia, laya, statim) across all three
+    /// decision types and dump raw logits for comparison against the official
+    /// references:
+    ///   - julia:  official `JuliaDecisionModel` python (fp32) — values in
+    ///             `julia_reference_probe`
+    ///   - laya:   official laya python golden file
+    ///             (statim repo tests/data/golden_laya-multilingual.jsonl)
+    ///   - statim: official statim C++ engine (github.com/BEKO2210/statim)
+    /// `cargo test --lib mv::decision::tests::all_decision_models_all_types_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn all_decision_models_all_types_probe() {
+        let device = Device::Cpu;
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/decision/model");
+        let models = [
+            ("julia/1", "julia-1"),
+            ("laya/multilingual", "laya-multilingual"),
+            ("statim/multilingual", "statim"),
+            ("jev/0.8b", "jev-style"),
+        ];
+        // (type, state, question, options) — covers choice / score / noul.
+        let common = [
+            (DecisionType::Choice, "对话进行中", "用户想退出程序", vec!["继续运行", "退出程序"]),
+            (DecisionType::Choice, "对话进行中", "1+1", vec!["2", "3"]),
+            (DecisionType::Noul, "对话进行中", "今天天气很好", vec!["false", "true"]),
+            (DecisionType::Score, "对话进行中", "这段文字的情感倾向", vec!["负面", "正面"]),
+        ];
+        // Official laya golden inputs (state 0 of golden_laya-multilingual.jsonl).
+        let golden = [
+            (DecisionType::Choice, "I was charged twice for March, please refund the duplicate today or we cancel.", "Which department should handle this request?", vec!["billing: invoices, payments, refunds", "technical: bugs, outages, system errors", "sales: pricing, new contracts", "other: everything else"]),
+            (DecisionType::Choice, "I was charged twice for March, please refund the duplicate today or we cancel.", "What is the sentiment of the message?", vec!["positive", "neutral", "negative"]),
+            (DecisionType::Score, "I was charged twice for March, please refund the duplicate today or we cancel.", "How urgent is this request?", vec!["not urgent", "soon", "critical deadline or blocking issue"]),
+            (DecisionType::Noul, "I was charged twice for March, please refund the duplicate today or we cancel.", "Does the user threaten to cancel or leave?", vec!["false", "true"]),
+        ];
+        for (rel, name) in models {
+            let path = if rel.ends_with(".gguf") {
+                base.join(rel)
+            } else {
+                base.join(rel).join("model.gguf")
+            };
+            if !path.is_file() {
+                eprintln!("SKIP {name}: {} not present", path.display());
+                continue;
+            }
+            let mut file = std::fs::File::open(&path).unwrap();
+            let size_dir = path.parent().unwrap().to_path_buf();
+            let m = DecisionModel::load(&mut file, &size_dir, &device, None)
+                .unwrap_or_else(|e| panic!("load {name}: {e}"));
+            eprintln!("=== {name} ({}) ===", path.display());
+            // warm-up pass (first call includes lazy init), then timed runs
+            for (t, st, q, opts) in common.iter().take(1) {
+                let _ = m.decide(&DecisionRequest {
+                    decision_type: *t,
+                    state: st.to_string(),
+                    question: q.to_string(),
+                    options: opts.iter().map(|s| s.to_string()).collect(),
+                });
+            }
+            for (t, st, q, opts) in common.iter().chain(golden.iter()) {
+                let req = DecisionRequest {
+                    decision_type: *t,
+                    state: st.to_string(),
+                    question: q.to_string(),
+                    options: opts.iter().map(|s| s.to_string()).collect(),
+                };
+                // median of 5 runs
+                let mut times = Vec::new();
+                let mut out = None;
+                for _ in 0..5 {
+                    let t0 = std::time::Instant::now();
+                    let o = m
+                        .decide(&req)
+                        .unwrap_or_else(|e| panic!("{name} decide {q}: {e}"));
+                    times.push(t0.elapsed().as_secs_f64() * 1000.0);
+                    out = Some(o);
+                }
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let out = out.unwrap();
+                eprintln!(
+                    "{:?} state={:?} q={:?} opts={:?}\n  scores={:?}\n  probs={:?} idx={} opt={}  latency median={:.1}ms (min {:.1} max {:.1})",
+                    out.decision_type,
+                    st,
+                    q,
+                    opts,
+                    out.scores.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+                    out.probabilities.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+                    out.index,
+                    out.option,
+                    times[2], times[0], times[times.len() - 1]
+                );
+            }
+        }
+    }
+
     /// Dump the scorer-head tensor shapes as candle sees them (GGUF dims are
     /// stored reversed; this shows the LOGICAL shapes the loader works with).
 
@@ -929,7 +1129,7 @@ mod tests {
     #[ignore]
     fn julia_shape_dump() {
         let gguf = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/decision/julia/1/model.gguf");
+            .join("runtimes/decision/model/julia/1/model.gguf");
         if !gguf.is_file() {
             eprintln!("SKIP: julia_1 model.gguf not present");
             return;
@@ -982,7 +1182,7 @@ mod tests {
     #[ignore]
     fn julia_demo_probe() {
         let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("runtimes/rag/model/decision/julia/1");
+            .join("runtimes/decision/model/julia/1");
         let gguf = src.join("model.gguf");
         if !gguf.is_file() {
             eprintln!("SKIP: julia_1 model.gguf not present");
@@ -1090,3 +1290,222 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod suite_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Full interface suite: 61 cases (choice/score/noul across routing,
+    /// intent, sentiment, urgency, severity, fact-check, moderation, long
+    /// context, mixed-language, edge inputs) run through the PUBLIC
+    /// `DecisionModel::decide` API for every decision model, with a
+    /// cross-model agreement summary.
+    ///
+    /// `cargo test --release --lib mv::decision::suite_tests::all_models_61cases_suite -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn all_models_61cases_suite() {
+        let case_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/decision/testdata/decision_suite.json");
+        let raw = std::fs::read_to_string(&case_path).unwrap();
+        #[derive(serde::Deserialize)]
+        struct Case {
+            id: String,
+            #[serde(rename = "type")]
+            typ: String,
+            state: String,
+            question: String,
+            options: Vec<String>,
+        }
+        let cases: Vec<Case> = serde_json::from_str(&raw).unwrap();
+        assert!(cases.len() >= 50, "suite must have 50+ cases, got {}", cases.len());
+
+        let device = Device::Cpu;
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes/decision/model");
+        let models = [
+            ("julia/1", "julia"),
+            ("laya/multilingual", "laya"),
+            ("statim/multilingual", "statim"),
+            ("jev/0.8b", "jev-q8"),
+            ("jev/0.8b-q4", "jev-q4"),
+        ];
+        let mut results: Vec<(String, Vec<Option<(usize, f32, f64)>>)> = Vec::new();
+        let mut json_out: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+        for (rel, name) in models {
+            let path = if rel.ends_with(".gguf") { base.join(rel) } else { base.join(rel).join("model.gguf") };
+            let mut file = std::fs::File::open(&path).unwrap();
+            let size_dir = path.parent().unwrap().to_path_buf();
+            let m = DecisionModel::load(&mut file, &size_dir, &device, None)
+                .unwrap_or_else(|e| panic!("load {name}: {e}"));
+            eprintln!("=== {name} ===");
+            let mut per_model = Vec::new();
+            for c in &cases {
+                let req = DecisionRequest {
+                    decision_type: match c.typ.as_str() {
+                        "choice" => DecisionType::Choice,
+                        "score" => DecisionType::Score,
+                        _ => DecisionType::Noul,
+                    },
+                    state: c.state.clone(),
+                    question: c.question.clone(),
+                    options: c.options.clone(),
+                };
+                let t0 = std::time::Instant::now();
+                let out = m
+                    .decide(&req)
+                    .unwrap_or_else(|e| panic!("{name} {} decide: {e}", c.id));
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                per_model.push(Some((out.index, out.probabilities[out.index], ms)));
+                json_out.entry(name.to_string()).or_insert_with(Vec::new).push(serde_json::json!({
+                    "id": c.id, "index": out.index, "option": out.option,
+                    "prob": out.probabilities[out.index], "probabilities": out.probabilities, "scores": out.scores, "ms": ms
+                }));
+                eprintln!(
+                    "{} {:?} q={:?} -> {} (p={:.4}, {:.0}ms)",
+                    c.id, out.decision_type, c.question, out.option, out.probabilities[out.index], ms
+                );
+            }
+            results.push((name.to_string(), per_model));
+        }
+
+        // cross-model agreement summary
+        eprintln!("\n===== CROSS-MODEL AGREEMENT (61 cases) =====");
+        let n = cases.len();
+        for i in 0..results.len() {
+            for j in i + 1..results.len() {
+                let agree = results[i]
+                    .1
+                    .iter()
+                    .zip(results[j].1.iter())
+                    .filter(|(a, b)| a.map(|x| x.0) == b.map(|x| x.0))
+                    .count();
+                eprintln!("{} vs {}: {}/{} same argmax", results[i].0, results[j].0, agree, n);
+            }
+        }
+        // per-type agreement of all 4 models
+        for typ in ["choice", "score", "noul"] {
+            let same = cases
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.typ == typ)
+                .filter(|(i, _)| {
+                    let first = results[0].1[*i].map(|x| x.0);
+                    results.iter().all(|(_, r)| r[*i].map(|x| x.0) == first)
+                })
+                .count();
+            let total = cases.iter().filter(|c| c.typ == typ).count();
+            eprintln!("all-4-agree on {typ}: {same}/{total}");
+        }
+        let lat: Vec<String> = results
+            .iter()
+            .map(|(n, r)| {
+                let mut ts: Vec<f64> = r.iter().filter_map(|x| x.map(|y| y.2)).collect();
+                ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                format!("{n} median {:.0}ms", ts[ts.len() / 2])
+            })
+            .collect();
+        eprintln!("latency: {}", lat.join(", "));
+        let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/decision/testdata/suite_results.json");
+        std::fs::write(&out_path, serde_json::to_string_pretty(&json_out).unwrap()).unwrap();
+        eprintln!("results written to {}", out_path.display());
+    }
+
+    /// Cold model-load timing (disk read + dequantize + tokenizer build).
+    /// `cargo test --release --lib mv::decision::suite_tests::load_time_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn load_time_probe() {
+        let device = Device::Cpu;
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes/decision/model");
+        let models = [
+            ("julia/1", "julia"),
+            ("laya/multilingual", "laya"),
+            ("statim/multilingual", "statim"),
+            ("jev/0.8b", "jev-q8"),
+            ("jev/0.8b-q4", "jev-q4"),
+        ];
+        for (rel, name) in models {
+            let path = if rel.ends_with(".gguf") { base.join(rel) } else { base.join(rel).join("model.gguf") };
+            let t0 = std::time::Instant::now();
+            let mut file = std::fs::File::open(&path).unwrap();
+            let size_dir = path.parent().unwrap().to_path_buf();
+            let m = DecisionModel::load(&mut file, &size_dir, &device, None).unwrap();
+            let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            // first decide (includes any lazy init)
+            let req = DecisionRequest {
+                decision_type: DecisionType::Choice,
+                state: "s".into(),
+                question: "q".into(),
+                options: vec!["a".into(), "b".into()],
+            };
+            let t1 = std::time::Instant::now();
+            let _ = m.decide(&req);
+            let first_ms = t1.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("{name:8} load={load_ms:7.0}ms  first-decide={first_ms:7.0}ms  size={:.0}MB",
+                std::fs::metadata(&path).unwrap().len() as f64 / 1048576.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Resource footprint probe: loads ONE model (selected by env
+    /// RESOURCE_MODEL = julia|laya|statim|jev-q8|jev-q4), then runs 10
+    /// decide calls. Pair with `/usr/bin/time -l` for max-RSS.
+    /// `RESOURCE_MODEL=julia cargo test --release --lib mv::decision::resource_tests::resource_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn resource_probe() {
+        let which = std::env::var("RESOURCE_MODEL").unwrap_or_else(|_| "julia".into());
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes/decision/model");
+        let rel = match which.as_str() {
+            "julia" => "julia/1",
+            "laya" => "laya/multilingual",
+            "statim" => "temp/statim-decide-multilingual-base-q8_0.gguf",
+            "jev-q8" => "temp/Jev-Style-0.8B-Decision-v3-Q8_0.gguf",
+            "jev-q4" => "temp/Jev-Style-0.8B-Decision-v3-Q4_K_M.gguf",
+            other => panic!("unknown RESOURCE_MODEL {other}"),
+        };
+        let path = if rel.ends_with(".gguf") { base.join(rel) } else { base.join(rel).join("model.gguf") };
+        eprintln!("PHASE baseline (pid={})", std::process::id());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let t0 = std::time::Instant::now();
+        let mut file = std::fs::File::open(&path).unwrap();
+        let size_dir = path.parent().unwrap().to_path_buf();
+        let m = DecisionModel::load(&mut file, &size_dir, &Device::Cpu, None).unwrap();
+        eprintln!("PHASE loaded {} in {:.0}ms", which, t0.elapsed().as_secs_f64() * 1000.0);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let req = DecisionRequest {
+            decision_type: DecisionType::Choice,
+            state: "I was charged twice for March, please refund the duplicate today or we cancel.".into(),
+            question: "Which department should handle this request?".into(),
+            options: vec![
+                "billing: invoices, payments, refunds".into(),
+                "technical: bugs, outages, system errors".into(),
+                "sales: pricing, new contracts".into(),
+                "other: everything else".into(),
+            ],
+        };
+        let mut times = Vec::new();
+        for i in 0..10 {
+            let t = std::time::Instant::now();
+            let _ = m.decide(&req).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+            if i == 0 {
+                eprintln!("PHASE first-decide-done");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "PHASE done: decide median={:.0}ms min={:.0}ms max={:.0}ms",
+            times[5], times[0], times[9]
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}

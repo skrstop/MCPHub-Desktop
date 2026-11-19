@@ -43,7 +43,7 @@ static TOOL_LANG: RwLock<String> = RwLock::new(String::new()); // "" → "en"
 
 /// Normalize a language tag to one of `TOOL_LANGS`: lowercase primary
 /// subtag only ("zh-CN" → "zh", "EN" → "en"). Unknown → "".
-fn normalize_lang(tag: &str) -> &str {
+pub fn normalize_lang(tag: &str) -> &str {
     let primary = tag
         .split(['-', '_'])
         .next()
@@ -62,26 +62,23 @@ fn normalize_lang(tag: &str) -> &str {
 }
 
 /// Pure resolution: explicit `tool_language` wins; `"auto"` follows
-/// `ui_language`; anything unknown/empty falls back to English.
+/// `ui_language`. Tool descriptions ship only Chinese and English — Chinese
+/// users get Chinese, EVERY other language falls back to English.
 pub fn resolve_tool_language(tool_language: &str, ui_language: &str) -> String {
     let candidate = if tool_language.trim().eq_ignore_ascii_case("auto") {
         normalize_lang(ui_language)
     } else {
         normalize_lang(tool_language)
     };
-    if candidate.is_empty() {
-        "en".to_string()
-    } else {
-        candidate.to_string()
-    }
+    if candidate == "zh" { "zh".to_string() } else { "en".to_string() }
 }
 
 /// Store the resolved language (from `refresh_from_config` / tests).
 pub fn set_tool_language(lang: &str) {
-    let resolved = if normalize_lang(lang).is_empty() {
-        "en".to_string()
+    let resolved = if normalize_lang(lang) == "zh" {
+        "zh".to_string()
     } else {
-        normalize_lang(lang).to_string()
+        "en".to_string()
     };
     match TOOL_LANG.write() {
         Ok(mut g) => *g = resolved,
@@ -629,14 +626,18 @@ mod tests {
         assert_eq!(resolve_tool_language("en", "zh"), "en");
         assert_eq!(resolve_tool_language("zh", "en"), "zh");
         assert_eq!(resolve_tool_language("auto", "zh-CN"), "zh");
-        assert_eq!(resolve_tool_language("AUTO", "fr"), "fr");
+        // Non-Chinese UI languages fall back to English descriptions.
+        assert_eq!(resolve_tool_language("AUTO", "fr"), "en");
         assert_eq!(resolve_tool_language("auto", "klingon"), "en");
         assert_eq!(resolve_tool_language("klingon", "zh"), "en");
         assert_eq!(resolve_tool_language("", "zh"), "en");
         assert_eq!(resolve_tool_language("auto", ""), "en");
         // Region/case normalization.
         assert_eq!(resolve_tool_language("ZH-cn", "en"), "zh");
-        assert_eq!(resolve_tool_language("tr_TR", "en"), "tr");
+        // Only Chinese ships a translated tool description; everything else
+        // falls back to English.
+        assert_eq!(resolve_tool_language("tr_TR", "en"), "en");
+        assert_eq!(resolve_tool_language("fr", "en"), "en");
     }
 
     #[test]
@@ -656,7 +657,9 @@ mod tests {
         for name in names {
             let en = rag_tool_description(name, "en");
             assert!(!en.is_empty(), "{name} en description missing");
-            for lang in ["zh", "fr", "tr", "vi", "es"] {
+            // Only Chinese ships translated descriptions; every other language
+        // resolves to the English text (by design — see resolve_tool_language).
+        for lang in ["zh"] {
                 let d = rag_tool_description(name, lang);
                 assert!(!d.is_empty(), "{name} {lang} description missing");
                 assert_ne!(d, en, "{name} {lang} equals English (not translated)");
@@ -674,7 +677,9 @@ mod tests {
     #[test]
     fn decision_description_localized() {
         let en = decision_tool_description("en");
-        for lang in ["zh", "fr", "tr", "vi", "es"] {
+        // Only Chinese ships translated descriptions; every other language
+        // resolves to the English text (by design — see resolve_tool_language).
+        for lang in ["zh"] {
             let d = decision_tool_description(lang);
             assert!(!d.is_empty());
             assert_ne!(d, en, "decision {lang} equals English");
@@ -687,7 +692,9 @@ mod tests {
         for progressive in [true, false] {
             let en = smart_route_search_desc("en", progressive, "{S}", "{L}", "{N}");
             assert!(en.contains("smart_route_search"));
-            for lang in ["zh", "fr", "tr", "vi", "es"] {
+            // Only Chinese ships translated descriptions; every other language
+        // resolves to the English text (by design — see resolve_tool_language).
+        for lang in ["zh"] {
                 let d = smart_route_search_desc(lang, progressive, "{S}", "{L}", "{N}");
                 assert_ne!(d, en, "search {lang} prog={progressive} equals English");
                 assert!(d.contains("{S}") && d.contains("{L}"), "placeholder lost: {lang}");
@@ -701,7 +708,9 @@ mod tests {
             ] {
                 assert!(!f.is_empty());
             }
-            for lang in ["zh", "fr", "tr", "vi", "es"] {
+            // Only Chinese ships translated descriptions; every other language
+        // resolves to the English text (by design — see resolve_tool_language).
+        for lang in ["zh"] {
                 assert_ne!(smart_route_describe_desc(lang, progressive), smart_route_describe_desc("en", progressive));
                 assert_ne!(smart_route_call_desc(lang, progressive), smart_route_call_desc("en", progressive));
             }
@@ -797,7 +806,9 @@ mod tests {
         };
         let en = collect("en");
         assert!(en.len() >= 40, "expected tool+prop descriptions, got {}", en.len());
-        for lang in ["zh", "fr", "tr", "vi", "es"] {
+        // Only Chinese ships translated descriptions; every other language
+        // resolves to the English text (by design — see resolve_tool_language).
+        for lang in ["zh"] {
             let got = collect(lang);
             assert_eq!(got.len(), en.len(), "{lang}: description count differs");
             for (i, (a, b)) in en.iter().zip(got.iter()).enumerate() {
@@ -898,7 +909,9 @@ mod tests {
                 1 => assert!(en.contains("Only the first result"), "n=1 dispatch broken: {en}"),
                 _ => assert!(en.contains(&format!("first {n} results")), "n>1 fill broken: {en}"),
             }
-            for lang in ["zh", "fr", "tr", "vi", "es"] {
+            // Only Chinese ships translated descriptions; every other language
+        // resolves to the English text (by design — see resolve_tool_language).
+        for lang in ["zh"] {
                 let d = schema_note_full_schema_top_n(n, lang);
                 assert!(!d.is_empty(), "schema_note({n}) {lang} empty");
                 assert_ne!(d, en, "schema_note({n}) {lang} equals English");

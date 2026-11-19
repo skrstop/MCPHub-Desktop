@@ -111,10 +111,19 @@ pub struct DeployConfig {
     /// Default keyword weight (deploy.json `defaultWeightKeyword`, default
     /// 0.5). Same first-load / model-switch semantics as `default_score`.
     pub default_weight_keyword: f32,
-    /// Ordered download sources (deploy.json `downloadUrls`, an object of
-    /// `{"source name": "url"}`). Empty = not downloadable. The FIRST entry is
-    /// the default source; the rest are fallbacks.
+    /// Ordered download sources (deploy.json `downloadUrls`). Two entry
+    /// shapes are accepted: legacy `{"source name": "url"}` and the current
+    /// `{"source name": {"url": "...", "enabled": true}}` (disabled sources
+    /// are dropped at parse time). Empty = not downloadable. The FIRST entry
+    /// is the default source; the rest are fallbacks.
     pub download_urls: Vec<(String, String)>,
+    /// Per-language MCP tool description overrides (deploy.json
+    /// `toolDescriptions`, an object of `{"en": "...", "zh": "..."}`).
+    /// Decision models emphasize different strengths (languages, size,
+    /// calibration), so each model can ship its own `decision_decide` tool
+    /// description. Languages absent from the map fall back to the built-in
+    /// i18n description. Empty map = no override.
+    pub tool_descriptions: std::collections::HashMap<String, String>,
 }
 
 /// Render the embedding input for one document chunk from the deploy.json
@@ -176,6 +185,7 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         default_weight_vector: 0.5,
         default_weight_keyword: 0.5,
         download_urls: Vec::new(),
+        tool_descriptions: std::collections::HashMap::new(),
     };
     let Ok(text) = std::fs::read_to_string(size_dir.join("deploy.json")) else {
         return empty();
@@ -263,6 +273,34 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         .map(|m| {
             m.iter()
                 .filter_map(|(k, val)| {
+                    // Two shapes: legacy plain string, or
+                    // `{"url": "...", "enabled": bool}` (enabled defaults to
+                    // true; disabled sources are dropped entirely).
+                    let url = match val {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Object(o) => {
+                            let enabled = o.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+                            if !enabled {
+                                return None;
+                            }
+                            o.get("url")
+                                .and_then(|u| u.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                        }
+                        _ => None,
+                    }?;
+                    Some((k.clone(), url))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tool_descriptions = v
+        .get("toolDescriptions")
+        .and_then(|t| t.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| {
                     val.as_str()
                         .filter(|s| !s.is_empty())
                         .map(|s| (k.clone(), s.to_string()))
@@ -285,6 +323,7 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         default_weight_vector,
         default_weight_keyword,
         download_urls,
+        tool_descriptions,
     }
 }
 

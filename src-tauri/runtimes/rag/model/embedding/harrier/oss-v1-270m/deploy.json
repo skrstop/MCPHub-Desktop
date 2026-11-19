@@ -13,10 +13,17 @@
   "defaultWeightVector": 0.5,
   "defaultWeightKeyword": 0.5,
   "downloadUrls": {
-    "modelscope": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=harrier-oss-v1-270M.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
-    "github": "https://media.githubusercontent.com/media/skrstop/MCPHub-Desktop/refs/heads/main/src-tauri/runtimes/rag/model/harrier/oss-v1-270m/model.gguf?download=true",
-    "huggingface": "https://huggingface.co/mykor/harrier-oss-v1-270m-GGUF/resolve/main/harrier-oss-v1-270M-Q8_0.gguf",
-    "hf-mirror": "https://hf-mirror.com/mykor/harrier-oss-v1-270m-GGUF/resolve/main/harrier-oss-v1-270M-Q8_0.gguf",
-    "atomgit": "https://atomgit.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=embedding-harrier_oss_v1_270M"
+    "modelscope": {
+      "url": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=harrier-oss-v1-270M.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
+      "enabled": true
+    },
+    "github": {
+      "url": "https://media.githubusercontent.com/media/skrstop/MCPHub-Desktop/refs/heads/main/src-tauri/runtimes/rag/model/harrier/oss-v1-270m/model.gguf?download=true",
+      "enabled": true
+    },
+    "atomgit": {
+      "url": "https://atomgit.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=embedding-harrier_oss_v1_270M",
+      "enabled": false
+    }
   }
 }

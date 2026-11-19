@@ -635,7 +635,7 @@ mod tests {
     fn julia_decision_probe() {
         use crate::mv::embedder::Embedder;
         let gguf = std::path::PathBuf::from(
-            "runtimes/rag/model/decision/julia/1/model.gguf",
+            "runtimes/decision/model/julia/1/model.gguf",
         );
         if !gguf.is_file() {
             eprintln!("SKIP: julia_1 model.gguf not present");

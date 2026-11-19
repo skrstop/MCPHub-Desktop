@@ -68,7 +68,7 @@ jobs:
       # ─── 检出代码 ──────────────────────────────────────────────────────────
       # lfs: true 必须开启 —— .gitattributes 把 *.gguf 交给 Git LFS 管理，
       # 默认 lfs:false 只会检出 ~130B 的 LFS 指针文件，导致打包产物里的
-      # src-tauri/runtimes/rag/model/.../*.gguf 是索引指针而非真实模型（~110MB）。
+      # src-tauri/runtimes/{rag,decision}/model/.../*.gguf 是索引指针而非真实模型（~110MB）。
       - name: Checkout
         uses: actions/checkout@v6
         with:

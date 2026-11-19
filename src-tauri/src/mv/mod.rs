@@ -25,12 +25,15 @@
 
 pub mod embedder;
 pub mod decision;
+pub mod ggmlc;
 pub mod gguf;
 pub mod gguf_gemma;
 pub mod gguf_lfm2;
 pub mod gguf_modernbert;
 pub mod gguf_nomic;
 pub mod gguf_qwen3;
+pub mod gguf_statim;
+pub mod gguf_jev;
 pub mod models;
 
 use anyhow::{anyhow, Result};

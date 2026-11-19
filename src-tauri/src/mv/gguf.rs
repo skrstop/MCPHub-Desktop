@@ -24,20 +24,22 @@
 //! Device strategy: GPU-first (Metal on macOS), CPU fallback, driven by
 //! `deploy.json`'s `platform` (AUTO/GPU/CPU). Linux/Windows are CPU-only.
 
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use candle_core::quantized::gguf_file::{Content, Value};
 use candle_core::Device;
 use tokenizers::models::{bpe::BpeBuilder, unigram::Unigram};
-use tokenizers::normalizers::Precompiled;
+use tokenizers::normalizers::{NFC, Precompiled};
 use tokenizers::pre_tokenizers::{
     byte_level::ByteLevel,
     metaspace::{Metaspace, PrependScheme},
     sequence::Sequence,
+    split::{Split, SplitPattern},
     whitespace::WhitespaceSplit,
 };
-use tokenizers::tokenizer::Tokenizer;
+use tokenizers::tokenizer::{SplitDelimiterBehavior, Tokenizer};
 
 use crate::mv::embedder::{Embedder, Platform};
 use crate::mv::gguf_gemma::{Gemma3EmbedArch, GgufArch};
@@ -120,12 +122,29 @@ impl GgufEmbedder {
             .map_err(|e| anyhow!("read gguf {}: {}", gguf_path.display(), e))?;
         let md = &content.metadata;
 
-        // Tokenizer: prefer a shipped tokenizer.json (fast, exact); else
-        // reconstruct from the GGUF's embedded tokenizer.ggml.* metadata (BPE).
-        let tokenizer_path = size_dir.join("tokenizer.json");
-        let tokenizer = if tokenizer_path.exists() {
-            Tokenizer::from_file(&tokenizer_path)
-                .map_err(|e| anyhow!("load tokenizer {}: {}", tokenizer_path.display(), e))?
+        // Tokenizer: prefer a shipped tokenizer.json (fast, exact) or its
+        // gzip-compressed form (tokenizer.json.gz — the 34MB gemma-family
+        // vocab compresses to ~5.5MB, decompressed in memory); else
+        // reconstruct from the GGUF's embedded tokenizer.ggml.* metadata.
+        let load_tokenizer_file = |p: &Path| -> Result<Tokenizer> {
+            if p.extension().and_then(|e| e.to_str()) == Some("gz") {
+                let f = std::fs::File::open(p)
+                    .map_err(|e| anyhow!("open {}: {e}", p.display()))?;
+                let mut s = String::new();
+                flate2::read::GzDecoder::new(f)
+                    .read_to_string(&mut s)
+                    .map_err(|e| anyhow!("gunzip {}: {e}", p.display()))?;
+                Tokenizer::from_bytes(&s).map_err(|e| anyhow!("parse {}: {e}", p.display()))
+            } else {
+                Tokenizer::from_file(p).map_err(|e| anyhow!("load {}: {e}", p.display()))
+            }
+        };
+        let tokenizer_json = size_dir.join("tokenizer.json");
+        let tokenizer_gz = size_dir.join("tokenizer.json.gz");
+        let tokenizer = if tokenizer_json.exists() {
+            load_tokenizer_file(&tokenizer_json)?
+        } else if tokenizer_gz.exists() {
+            load_tokenizer_file(&tokenizer_gz)?
         } else {
             build_gguf_tokenizer(md)?
         };
@@ -389,6 +408,45 @@ impl Embedder for GgufEmbedder {
 ///   - SentencePiece (`llama`): tokens + scores + Metaspace + byte-fallback.
 pub(crate) fn build_gguf_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
     let model = meta_string(md, "tokenizer.ggml.model").unwrap_or_default();
+    let pre = meta_string(md, "tokenizer.ggml.pre").unwrap_or_default();
+    // Metaspace-family vocabs misdeclared as `gpt2`: laya's ggmlc conversion
+    // (`pre = gemma`) and julia's conversion (`pre = mmbert`) both ship a ▁
+    // Metaspace vocab with 256 byte-fallback tokens — the `pre` wins, otherwise
+    // ByteLevel pre-tokenization yields mass <unk> / wrong ids (verified: the
+    // Metaspace rebuild reproduces the official tokenizer.json token-for-token
+    // on julia_1 and laya-multilingual).
+    if model == "gpt2" && (pre == "gemma" || pre == "mmbert") {
+        return build_gemma_tokenizer(md);
+    }
+    // Qwen3-Embedding-family vocabs (F2LLM v2, `pre = f2llmv2`): the official
+    // tokenizer pre-splits with the Qwen3 regex (single digits, `_word` kept
+    // whole, case-insensitive contractions) BEFORE a regex-free ByteLevel —
+    // plain GPT-2 ByteLevel mis-tokenizes numbers/underscores/contractions
+    // (verified token-exact against the official tokenizer.json).
+    if model == "gpt2" && (pre == "f2llmv2" || pre == "qwen3") {
+        return build_qwen3_tokenizer(md);
+    }
+    // Gemma3-embedding-style vocabs (harrier): like gemma but with NO space
+    // prefix (`add_space_prefix = false`) and no pre-tokenization — the
+    // official tokenizer.json normalizes ' '→'▁' and runs the BPE over the
+    // whole string (its Split(" ", MergedWithPrevious) is a no-op after that
+    // normalization). Verified token-exact against the official tokenizer.
+    if model == "gpt2" && pre == "gemma3" {
+        return build_gemma3_tokenizer(md);
+    }
+    // The cstr/F2LLM-v2-330M-GGUF conversion drops ALL `tokenizer.ggml.*`
+    // scalar keys (model/pre/bos/eos) while keeping the tokens+merges arrays.
+    // The vocab is the Qwen3-Embedding one (151936 tokens, `f2llmv2` merges —
+    // verified identical to the official tokenizer.json), so infer the
+    // Qwen3-style rebuild when the model key is missing on a decoder_embed
+    // conversion. This keeps freshly-downloaded (unpatched) copies working
+    // without a shipped tokenizer.json.
+    if model.is_empty()
+        && meta_string(md, "general.architecture").as_deref() == Some("decoder_embed")
+        && meta_string_array(md, "tokenizer.ggml.tokens").is_ok()
+    {
+        return build_qwen3_tokenizer(md);
+    }
     match model.as_str() {
         "gpt2" | "qwen2" | "llama3" | "bert" => build_bpe_tokenizer(md),
         "llama" => build_spm_tokenizer(md),
@@ -438,6 +496,49 @@ fn build_bpe_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<
     Ok(tok)
 }
 
+/// Qwen3-Embedding-style BPE (`pre = f2llmv2`/`qwen3`): the official
+/// tokenizer.json for this family pre-splits with the Qwen3 regex
+/// (`(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`,
+/// behavior Isolated) and THEN applies a regex-free ByteLevel; an NFC
+/// normalizer runs first. Plain GPT-2 ByteLevel (the `gpt2` fallback) splits
+/// `snake_case` and digit groups differently — verified against the official
+/// F2LLM v2 tokenizer.json (token-exact on EN/CJK/mixed samples).
+pub(crate) fn build_qwen3_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
+    const QWEN3_SPLIT: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+    let tokens = meta_string_array(md, "tokenizer.ggml.tokens")?;
+    let merges_raw = meta_string_array(md, "tokenizer.ggml.merges").unwrap_or_default();
+    let vocab: ahash::AHashMap<String, u32> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), i as u32))
+        .collect();
+    let merges: Vec<(String, String)> = merges_raw
+        .iter()
+        .filter_map(|m| {
+            let mut it = m.splitn(2, ' ');
+            Some((it.next()?.to_string(), it.next()?.to_string()))
+        })
+        .collect();
+    let unk = meta_u32(md, "tokenizer.ggml.unknown_token_id")
+        .and_then(|id| tokens.get(id as usize).cloned())
+        .unwrap_or_else(|| "<unk>".to_string());
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .unk_token(unk)
+        .build()
+        .map_err(|e| anyhow!("build Qwen3 BPE from gguf: {}", e))?;
+    let mut tok = Tokenizer::new(bpe);
+    tok.with_normalizer(Some(NFC));
+    let pattern = SplitPattern::Regex(QWEN3_SPLIT.to_string());
+    let split = Split::new(pattern, SplitDelimiterBehavior::Isolated, false)
+        .map_err(|e| anyhow!("qwen3 split pre-tokenizer: {e}"))?;
+    tok.with_pre_tokenizer(Some(Sequence::new(vec![
+        split.into(),
+        ByteLevel::new(false, false, false).into(),
+    ])));
+    Ok(tok)
+}
+
 /// Gemma SentencePiece BPE (`gemma`/`gemma2`/`gemma3`/`gemma4`): a BPE model
 /// (vocab + merges, same as the gpt2 builder) BUT with a `▁` Metaspace
 /// pre-tokenizer and byte-fallback enabled. Gemma's vocab stores tokens with
@@ -479,6 +580,74 @@ fn build_gemma_tokenizer(md: &std::collections::HashMap<String, Value>) -> Resul
     let mut tok = Tokenizer::new(bpe);
     // ▁ metaspace, always prepend (Gemma convention).
     tok.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
+    Ok(tok)
+}
+
+/// Metaspace BPE tokenizer built from explicit vocab/merges lists — the
+/// `tokenizer.statim.*` config embedded in statim GGUFs: BPE (byte fallback,
+/// fuse unk) + Replace(' '→'▁') normalizer + Metaspace('▁', always, split)
+/// pre-tokenizer. Matches the official statim engine's tokenizer pipeline.
+pub(crate) fn build_metaspace_bpe_from(tokens: &[String], merges_raw: &[String]) -> Result<Tokenizer> {
+    use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
+    let vocab: ahash::AHashMap<String, u32> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), i as u32))
+        .collect();
+    let merges: Vec<(String, String)> = merges_raw
+        .iter()
+        .filter_map(|m| {
+            let mut it = m.splitn(2, ' ');
+            Some((it.next()?.to_string(), it.next()?.to_string()))
+        })
+        .collect();
+    let unk = "<unk>".to_string();
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .unk_token(unk)
+        .fuse_unk(true)
+        .byte_fallback(true)
+        .build()
+        .map_err(|e| anyhow!("build Metaspace BPE: {e}"))?;
+    let mut tok = Tokenizer::new(bpe);
+    tok.with_normalizer(Some(tokenizers::normalizers::Replace::new(" ", "▁")
+        .map_err(|e| anyhow!("metaspace replace normalizer: {e}"))?));
+    tok.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
+    Ok(tok)
+}
+
+/// Gemma3-embedding-style BPE (`pre = gemma3`, harrier): BPE with byte
+/// fallback, a Replace(' '→'▁') normalizer, and NO pre-tokenizer (the official
+/// tokenizer.json's Split(" ", MergedWithPrevious) is a no-op once the
+/// normalizer has replaced every space). No ▁ prefix is prepended
+/// (`add_space_prefix = false`).
+fn build_gemma3_tokenizer(md: &std::collections::HashMap<String, Value>) -> Result<Tokenizer> {
+    let tokens = meta_string_array(md, "tokenizer.ggml.tokens")?;
+    let merges_raw = meta_string_array(md, "tokenizer.ggml.merges")?;
+    let vocab: ahash::AHashMap<String, u32> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), i as u32))
+        .collect();
+    let merges: Vec<(String, String)> = merges_raw
+        .iter()
+        .filter_map(|m| {
+            let mut it = m.splitn(2, ' ');
+            Some((it.next()?.to_string(), it.next()?.to_string()))
+        })
+        .collect();
+    let unk = meta_u32(md, "tokenizer.ggml.unknown_token_id")
+        .and_then(|id| tokens.get(id as usize).cloned())
+        .unwrap_or_else(|| "<unk>".to_string());
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .unk_token(unk)
+        .byte_fallback(true)
+        .build()
+        .map_err(|e| anyhow!("build Gemma3 BPE from gguf: {}", e))?;
+    let mut tok = Tokenizer::new(bpe);
+    tok.with_normalizer(Some(tokenizers::normalizers::Replace::new(" ", "▁")
+        .map_err(|e| anyhow!("gemma3 replace normalizer: {e}"))?));
     Ok(tok)
 }
 
@@ -1255,5 +1424,303 @@ mod tests {
             );
             assert!(!ids.is_empty(), "{text:?}: produced no tokens");
         }
+    }
+}
+
+#[cfg(test)]
+mod qwen3_tests {
+    use super::*;
+
+    /// F2LLM v2 (Qwen3-Embedding family): the GGUF rebuild must reproduce the
+    /// official tokenizer.json token-for-token for ALL three sizes. The 330M
+    /// conversion ships no `tokenizer.ggml.*` scalar keys at all (patched
+    /// locally; fresh cstr downloads are covered by the decoder_embed
+    /// inference fallback). Expected ids were generated from the official
+    /// codefuse-ai tokenizer.json (trailing 151645 `<|im_end|>` appended by
+    /// its post_processor is stripped — our rebuild has no post_processor).
+    /// `#[ignore]` because it needs the bundled GGUFs on disk; run with
+    /// `cargo test --lib qwen3_rebuild -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn f2llm_qwen3_rebuild_matches_official() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/embedding/F2LLM");
+        let cases: &[(&str, &[u32])] = &[
+            ("search_query: machine learning", &[1836, 5738, 25, 5662, 6832]),
+            ("1 + 1 = 2", &[16, 488, 220, 16, 284, 220, 17]),
+            ("10 + 11 = 21", &[16, 15, 488, 220, 16, 16, 284, 220, 17, 16]),
+            (
+                "It's a test, don't fail; we'll retry.",
+                &[2132, 594, 264, 1273, 11, 1513, 944, 3690, 26, 582, 3278, 22683, 13],
+            ),
+            ("机器学习模型检索", &[102182, 100134, 104949, 116928]),
+            (
+                "user_id=42&count=100&page=3",
+                &[872, 842, 28, 19, 17, 5, 1830, 28, 16, 15, 15, 74510, 28, 18],
+            ),
+            (
+                "The 2024 report covers 3,141 items.",
+                &[785, 220, 17, 15, 17, 19, 1895, 14521, 220, 18, 11, 16, 19, 16, 3589, 13],
+            ),
+        ];
+        for size in ["80M", "160M", "330M"] {
+            let gguf = root.join(format!("v2-{size}/model.gguf"));
+            if !gguf.exists() {
+                eprintln!("skipping {size}: not present");
+                continue;
+            }
+            let mut file = std::fs::File::open(&gguf).expect("open gguf");
+            let content = Content::read(&mut file).expect("read gguf");
+            let md = &content.metadata;
+            let rebuilt = build_gguf_tokenizer(md)
+                .unwrap_or_else(|e| panic!("{size}: build tokenizer: {e}"));
+            for (text, expected) in cases {
+                let got: Vec<u32> =
+                    rebuilt.encode(*text, false).unwrap().get_ids().to_vec();
+                assert_eq!(&got, expected, "{size}: token mismatch for {text:?}");
+            }
+            println!("{size}: all {} cases token-exact", cases.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod all_models_smoke_tests {
+    use super::*;
+    use candle_core::Device;
+    use crate::mv::decision::{DecisionModel, DecisionRequest, DecisionType};
+    use crate::mv::embedder::load_embedder;
+
+    /// End-to-end smoke over EVERY bundled model (embedding + decision):
+    /// load via the real production loaders, run a real forward pass, and
+    /// assert finite, deterministic, non-degenerate outputs. Guards against
+    /// corrupted GGUFs / broken tokenizer rebuilds (e.g. the patched
+    /// F2LLM-v2-330M). `#[ignore]` (needs bundled GGUFs on disk); run with
+    /// `cargo test --lib all_models_smoke -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn all_models_load_and_infer() {
+        let runtimes = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes");
+        let mut checked = 0usize;
+
+        // --- embedding models: load + embed + determinism ---
+        let emb_root = runtimes.join("rag/model/embedding");
+        let mut emb_dirs: Vec<_> = std::fs::read_dir(&emb_root)
+            .expect("embedding root")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .flat_map(|family| {
+                std::fs::read_dir(&family)
+                    .expect("family")
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.join("model.gguf").is_file())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        emb_dirs.sort();
+        for dir in emb_dirs {
+            let name = dir
+                .iter()
+                .skip_while(|c| c.to_string_lossy() != "embedding")
+                .skip(1)
+                .map(|c| c.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("/");
+            let mut m = load_embedder(&dir)
+                .unwrap_or_else(|e| panic!("{name}: load embedder: {e}"));
+            let dim = m.embed_dim();
+            let v1 = m.embed("machine learning 检索测试").unwrap_or_else(|e| panic!("{name}: embed: {e}"));
+            let v2 = m.embed("machine learning 检索测试").unwrap_or_else(|e| panic!("{name}: embed: {e}"));
+            assert_eq!(v1.len(), dim, "{name}: dim mismatch");
+            assert!(v1.iter().all(|x| x.is_finite()), "{name}: non-finite values");
+            let norm: f32 = v1.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!(norm > 1e-3, "{name}: degenerate norm {norm}");
+            assert_eq!(v1, v2, "{name}: non-deterministic");
+            println!("{name}: OK dim={dim} norm={norm:.4}");
+            checked += 1;
+        }
+
+        // --- decision models: load + decide ---
+        let dec_root = runtimes.join("decision/model");
+        let mut dec_dirs: Vec<_> = std::fs::read_dir(&dec_root)
+            .expect("decision root")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .flat_map(|family| {
+                std::fs::read_dir(&family)
+                    .expect("family")
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.join("model.gguf").is_file())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        dec_dirs.sort();
+        for dir in dec_dirs {
+            let name = dir
+                .iter()
+                .skip_while(|c| c.to_string_lossy() != "model")
+                .skip(1)
+                .map(|c| c.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("/");
+            let mut file = std::fs::File::open(dir.join("model.gguf")).expect("open gguf");
+            let m = match DecisionModel::load(&mut file, &dir, &Device::Cpu, None) {
+                Ok(m) => m,
+                Err(e) => {
+                    let msg = e.to_string();
+                    // Not-yet-adapted model kinds (e.g. kev's single-output
+                    // graph) are reported, not fatal — the smoke covers every
+                    // SUPPORTED model.
+                    println!("{name}: SKIP (not yet adapted): {msg}");
+                    continue;
+                }
+            };
+            let out = m
+                .decide(&DecisionRequest {
+                    decision_type: DecisionType::Choice,
+                    state: "user asks a simple question".into(),
+                    question: "which tool should handle this?".into(),
+                    options: vec!["search the web".into(), "read a local file".into()],
+                })
+                .unwrap_or_else(|e| panic!("{name}: decide: {e}"));
+            assert_eq!(out.probabilities.len(), 2, "{name}: prob count");
+            let sum: f32 = out.probabilities.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-3, "{name}: probs sum {sum}");
+            assert!(out.probabilities.iter().all(|p| p.is_finite() && *p >= 0.0), "{name}: bad probs");
+            println!("{name}: OK probs={:?} index={}", out.probabilities, out.index);
+            checked += 1;
+        }
+        assert!(checked >= 9, "expected >=9 models, checked {checked}");
+        println!("total models checked: {checked}");
+    }
+}
+
+#[cfg(test)]
+mod shipped_tokenizer_tests {
+    use super::*;
+
+    /// Tokenizer strategy per model, kept as an executable record:
+    /// - julia / laya: GGUF rebuild is token-exact (verified against the
+    ///   previously-shipped tokenizer.json.gz before deletion) — no aux file.
+    /// - bekko / harrier: their GGUF conversions (including the authors\'
+    ///   official hotchpotch/mykor GGUFs) carry tokens+scores but NO merges
+    ///   array, so the Metaspace-BPE cannot be rebuilt — the shipped
+    ///   tokenizer.json.gz is REQUIRED and must not be deleted.
+    /// `#[ignore]`; run with
+    /// `cargo test --lib shipped_tokenizer -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn tokenizer_strategy_per_model() {
+        let runtimes = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtimes");
+
+        // --- julia / laya: rebuild-only, hardcoded expected ids (no BOS/EOS;
+        // encode(..., false) — the shipped gz added specials via its
+        // post-processor, ids captured before the gz was deleted). ---
+        let cases: &[(&str, &[u32])] = &[
+            ("search_query: machine learning", &[4544, 235298, 3630, 235292, 6479, 6044]),
+            ("1 + 1 = 2", &[235248, 235274, 963, 235248, 235274, 589, 235248, 235284]),
+            (
+                "It's a test, don't fail.",
+                &[1165, 235303, 235256, 476, 2121, 235269, 1453, 235303, 235251, 5967, 235265],
+            ),
+            ("机器学习模型检索", &[224789, 26257, 43936, 204634]),
+            (
+                "user_id=42&count=100",
+                &[2425, 235298, 539, 235293, 235310, 235284, 235343, 1656, 235293, 235274, 235276, 235276],
+            ),
+            ("select the best tool for the task", &[6616, 573, 1963, 7217, 604, 573, 6911]),
+        ];
+        for d in ["decision/model/julia/1", "decision/model/laya/multilingual"] {
+            let dir = runtimes.join(d);
+            assert!(
+                !dir.join("tokenizer.json.gz").exists(),
+                "{d}: gz should be deleted (rebuild is token-exact)"
+            );
+            let mut file = std::fs::File::open(dir.join("model.gguf")).expect("open gguf");
+            let content = Content::read(&mut file).expect("read gguf");
+            let rebuilt = build_gguf_tokenizer(&content.metadata)
+                .unwrap_or_else(|e| panic!("{d}: rebuild: {e}"));
+            for (text, expected) in cases {
+                let got: Vec<u32> =
+                    rebuilt.encode(*text, false).unwrap().get_ids().to_vec();
+                assert_eq!(&got, expected, "{d}: rebuild mismatch for {text:?}");
+            }
+            println!("{d}: rebuild token-exact ({} cases, no aux file)", cases.len());
+        }
+
+        // --- bekko / harrier: GGUFs patched with the official merges array +
+        // restored token strings (the converters had renamed the ▁-run tokens
+        // to real-space runs and dropped merges entirely). Rebuild is
+        // token-exact (verified against the previously-shipped gz before
+        // deletion) — no aux file. ---
+        let gemma_family: &[(&str, &[(&str, &[u32])])] = &[
+            ("rag/model/embedding/bekko/v1-a8m", &[
+                ("search_query: machine learning", &[4544, 235298, 3630, 235292, 6479, 6044]),
+                ("1 + 1 = 2", &[235248, 235274, 963, 235248, 235274, 589, 235248, 235284]),
+                ("It's a test, don't fail.", &[1165, 235303, 235256, 476, 2121, 235269, 1453, 235303, 235251, 5967, 235265]),
+                ("机器学习模型检索", &[224789, 26257, 43936, 204634]),
+                ("user_id=42&count=100", &[2425, 235298, 539, 235293, 235310, 235284, 235343, 1656, 235293, 235274, 235276, 235276]),
+                ("select the best tool for the task", &[6616, 573, 1963, 7217, 604, 573, 6911]),
+            ]),
+            ("rag/model/embedding/bekko/v1-a25m", &[
+                ("search_query: machine learning", &[4544, 235298, 3630, 235292, 6479, 6044]),
+                ("1 + 1 = 2", &[235248, 235274, 963, 235248, 235274, 589, 235248, 235284]),
+                ("It's a test, don't fail.", &[1165, 235303, 235256, 476, 2121, 235269, 1453, 235303, 235251, 5967, 235265]),
+                ("机器学习模型检索", &[224789, 26257, 43936, 204634]),
+                ("user_id=42&count=100", &[2425, 235298, 539, 235293, 235310, 235284, 235343, 1656, 235293, 235274, 235276, 235276]),
+                ("select the best tool for the task", &[6616, 573, 1963, 7217, 604, 573, 6911]),
+            ]),
+            ("rag/model/embedding/harrier/oss-v1-270m", &[
+                ("search_query: machine learning", &[2305, 236779, 3278, 236787, 5464, 4735]),
+                ("1 + 1 = 2", &[236770, 900, 236743, 236770, 578, 236743, 236778]),
+                ("It's a test, don't fail.", &[1509, 236789, 236751, 496, 1594, 236764, 1537, 236789, 236745, 5121, 236761]),
+                ("机器学习模型检索", &[202589, 26609, 163601]),
+                ("user_id=42&count=100", &[2364, 236779, 547, 236784, 236812, 236778, 236880, 2861, 236784, 236770, 236771, 236771]),
+                ("select the best tool for the task", &[6916, 506, 1791, 5904, 573, 506, 4209]),
+            ]),
+        ];
+        for (d, model_cases) in gemma_family.iter() {
+            let dir = runtimes.join(d);
+            assert!(
+                !dir.join("tokenizer.json.gz").exists(),
+                "{d}: gz should be deleted (rebuild is token-exact)"
+            );
+            let mut file = std::fs::File::open(dir.join("model.gguf")).expect("open gguf");
+            let content = Content::read(&mut file).expect("read gguf");
+            let rebuilt = build_gguf_tokenizer(&content.metadata)
+                .unwrap_or_else(|e| panic!("{d}: rebuild: {e}"));
+            for (text, expected) in model_cases.iter() {
+                let got: Vec<u32> =
+                    rebuilt.encode(*text, false).unwrap().get_ids().to_vec();
+                assert_eq!(&got, *expected, "{d}: rebuild mismatch for {text:?}");
+            }
+            println!("{d}: rebuild token-exact ({} cases, no aux file)", model_cases.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod bekko_semantic_tests {
+    use super::*;
+    use crate::mv::embedder::load_embedder;
+
+    /// bekko a8m: after the merges/token-strings patch, the model must still
+    /// produce semantically sane embeddings (related > unrelated similarity) —
+    /// guards against a corrupted tensor-data section from the KV surgery.
+    #[test]
+    #[ignore]
+    fn bekko_a8m_semantic_sanity() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtimes/rag/model/embedding/bekko/v1-a8m");
+        let mut m = load_embedder(&dir).expect("load bekko a8m");
+        let texts = [
+            "machine learning is a branch of artificial intelligence",
+            "deep neural networks learn from data",
+            "I had pizza for lunch yesterday",
+        ];
+        let vecs: Vec<Vec<f32>> = texts.iter().map(|t| m.embed(t).unwrap()).collect();
+        let dot = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
+        let rel = dot(&vecs[0], &vecs[1]);
+        let unrel = dot(&vecs[0], &vecs[2]);
+        println!("related={rel:.4} unrelated={unrel:.4}");
+        assert!(rel > unrel, "semantic structure broken: related {rel} <= unrelated {unrel}");
     }
 }

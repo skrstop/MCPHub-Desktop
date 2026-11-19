@@ -2,14 +2,12 @@
 
 > ## ⚠️ 重要声明（请先阅读）
 >
-> - 仓库内的 [`mcphub-origin/`](./mcphub-origin) 目录 **不属于本项目**，它是第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub) 的源码快照，**版权归原作者 [@samanhappy](https://github.com/samanhappy) 及其贡献者所有**。
-> - 之所以把它放进仓库，仅用于：① 让本项目的改写过程可追溯；② 方便比对桌面端与 Web 端的差异；③ 离线查阅原文档。
+> - 本项目是基于第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub) 的桌面端改写，上游项目的源码**不在本仓库内**，**版权归原作者 [@samanhappy](https://github.com/samanhappy) 及其贡献者所有**。
 > - **本项目自身的代码只包含**：[`frontend/`](./frontend)、[`src-tauri/`](./src-tauri)、[`scripts/`](./scripts)、[`locales/`](./locales) 以及根目录配置文件。
-> - 严禁修改 `mcphub-origin/` 中的任何文件；如需理解、调试或贡献代码，请只在上述本项目目录内操作。
 
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri)](https://tauri.app/)
 [![Upstream](https://img.shields.io/badge/Upstream-samanhappy%2Fmcphub-orange?logo=github)](https://github.com/samanhappy/mcphub)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](./mcphub-origin/LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/samanhappy/mcphub/blob/main/LICENSE)
 
 ![MCPHub Desktop 主界面](./doc/imgs/home.png)
 
@@ -28,7 +26,7 @@
 - **产品名称**：MCPHub Desktop
 - **应用标识**：`app.mcphub.desktop`
 - **当前版本**：见 [`src-tauri/tauri.conf.json`](./src-tauri/tauri.conf.json)
-- **上游项目**：<https://github.com/samanhappy/mcphub>（仓库内副本位于 [`mcphub-origin/`](./mcphub-origin)，**非本项目代码**）
+- **上游项目**：<https://github.com/samanhappy/mcphub>（**非本项目代码**）
 
 ## 核心功能
 
@@ -63,7 +61,7 @@
 
 ## 与上游项目的定位差异
 
-> 上游 [mcphub](https://github.com/samanhappy/mcphub)（仓库内副本位于 [`mcphub-origin/`](./mcphub-origin)，版权归原作者所有）是面向**服务端 / 团队侧**的 MCP 聚合 Web 服务；本项目是面向**个人本机**的桌面客户端。两者赛道不同，互补而非替代。
+> 上游 [mcphub](https://github.com/samanhappy/mcphub)（版权归原作者所有）是面向**服务端 / 团队侧**的 MCP 聚合 Web 服务；本项目是面向**个人本机**的桌面客户端。两者赛道不同，互补而非替代。
 
 | 维度 | 上游 mcphub（Web，第三方项目） | MCPHub Desktop（本项目） |
 | --- | --- | --- |
@@ -82,26 +80,22 @@
 
 ## 仓库结构
 
-> 下表中标注 **【本项目】** 的目录才属于本仓库自有代码；标注 **【第三方】** 的为上游 mcphub 的源码副本，仅作参考。
+> 下表中的目录均为本仓库自有代码。
 
 ```
 mcphub-desktop/
-├── frontend/          # 【本项目】桌面端使用的前端（源自上游 frontend，按需适配 Tauri）
-├── src-tauri/         # 【本项目】Tauri / Rust 后端
+├── frontend/          # 桌面端使用的前端（源自上游 frontend，按需适配 Tauri）
+├── src-tauri/         # Tauri / Rust 后端
 │   ├── src/           #   Rust 源码（业务逻辑、MCP 管理、鉴权、SQLite、RAG、Skills 等）
 │   ├── migrations/    #   SQLite 迁移脚本
 │   ├── runtimes/      #   随包分发的本地运行时（Node / UV / Bun）+ 嵌入模型
 │   └── tauri.conf.json
-├── locales/           # 【本项目】i18n 翻译文件（en / zh / fr / tr）
-├── scripts/           # 【本项目】构建辅助脚本（运行时下载、暗色模式同步等）
-├── doc/               # 【本项目】升级说明与设计文档
-├── AGENTS.md          # 【本项目】迁移与开发完整参考（强烈建议先阅读）
-├── package.json       # 【本项目】桌面端入口（tauri dev / tauri build）
-└── mcphub-origin/     # 【第三方】🔒 上游 samanhappy/mcphub 源码快照
-                       #            版权归原作者所有，仅供参考，禁止修改
+├── locales/           # i18n 翻译文件（en / zh / fr / tr）
+├── scripts/           # 构建辅助脚本（运行时下载、暗色模式同步等）
+├── doc/               # 升级说明与设计文档
+├── AGENTS.md          # 迁移与开发完整参考（强烈建议先阅读）
+└── package.json       # 桌面端入口（tauri dev / tauri build）
 ```
-
-> ⚠️ **重要约束**：`mcphub-origin/` **不是本项目的代码**，而是第三方上游项目的只读快照，**禁止以本项目名义修改、提交或重新发布其内容**。所有改动请只在标注 **【本项目】** 的目录下进行，详情见 [`AGENTS.md`](AGENTS.md)。
 
 ## 快速开始
 
@@ -184,12 +178,11 @@ xattr -cr "/Applications/MCPHub Desktop.app"
 
 - [`AGENTS.md`](AGENTS.md)：迁移背景、目录约定、模块划分、待办事项等完整开发参考。
 - [`doc/upgrade/`](./doc/upgrade)：各版本升级说明。
-- [`mcphub-origin/README.md`](./mcphub-origin/README.md)：**第三方上游项目** 的 README（英文）。
-- [`mcphub-origin/README.zh.md`](./mcphub-origin/README.zh.md)：**第三方上游项目** 的 README（中文）。
+- 上游项目文档：<https://github.com/samanhappy/mcphub>（[英文 README](https://github.com/samanhappy/mcphub/blob/main/README.md) / [中文 README](https://github.com/samanhappy/mcphub/blob/main/README.zh.md)）。
 
 ## 致谢与许可
 
 - [AtomGit](https://atomgit.com/skrstop/MCPHub-Desktop) 在国内托管, 帮助国内用户更快访问项目与下载Release
-- **上游项目归属**：[`mcphub-origin/`](./mcphub-origin) 内的全部代码、文档、资源均来自第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub)，**版权归原作者 [@samanhappy](https://github.com/samanhappy) 及其贡献者所有**，本项目仅作镜像保留以便溯源，未对其主张任何权利。
+- **上游项目归属**：本项目基于第三方开源项目 [samanhappy/mcphub](https://github.com/samanhappy/mcphub) 二次开发，上游项目的代码、文档、资源**版权归原作者 [@samanhappy](https://github.com/samanhappy) 及其贡献者所有**，本项目未对其主张任何权利。
 - **致谢**：感谢 [@samanhappy](https://github.com/samanhappy) 及所有上游贡献者提供了优秀的开源实现。
-- **许可证**：上游项目许可证见 [`mcphub-origin/LICENSE`](./mcphub-origin/LICENSE)；本桌面端在严格遵守该许可证的前提下进行二次开发与发布。
+- **许可证**：上游项目许可证见 [上游 LICENSE](https://github.com/samanhappy/mcphub/blob/main/LICENSE)；本桌面端在严格遵守该许可证的前提下进行二次开发与发布。

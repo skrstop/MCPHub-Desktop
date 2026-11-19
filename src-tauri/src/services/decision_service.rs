@@ -31,6 +31,56 @@ static DECISION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DECISION_MODEL: Mutex<Option<(String, (std::time::SystemTime, u64), Arc<DecisionModel>)>> =
     Mutex::const_new(None);
 
+/// Per-language `decision_decide` description overrides from the SELECTED
+/// model's deploy.json (`toolDescriptions`). Decision models emphasize
+/// different strengths (languages, size, calibration), so each model can
+/// ship its own tool description. Refreshed at startup, on model selection
+/// and on download; `None` = no override (the built-in i18n description is
+/// used for every language).
+static TOOL_DESCRIPTIONS: std::sync::RwLock<Option<std::collections::HashMap<String, String>>> =
+    std::sync::RwLock::new(None);
+
+/// Reload the tool-description overrides from the selected decision model's
+/// deploy.json (bundled or downloaded size dir). Best-effort: on any failure
+/// the cache is cleared and the built-in i18n description applies.
+pub async fn refresh_tool_description(app: &AppHandle) {
+    let name = crate::mv::models::current_decision_model()
+        .await
+        .or_else(|| crate::mv::models::default_decision_size(app));
+    let descs = name.and_then(|n| {
+        let dir = crate::mv::models::bundled_size_dir_kind(
+            app,
+            crate::mv::models::ModelKind::Decision,
+            &n,
+        )
+        .filter(|d| d.join("deploy.json").exists())
+        .or_else(|| {
+            crate::mv::models::download_root_kind(app, crate::mv::models::ModelKind::Decision)
+                .ok()
+                .map(|root| root.join(&n))
+                .filter(|d| d.join("deploy.json").exists())
+        })?;
+        let cfg = crate::mv::embedder::read_deploy_config(&dir);
+        (!cfg.tool_descriptions.is_empty()).then_some(cfg.tool_descriptions)
+    });
+    match TOOL_DESCRIPTIONS.write() {
+        Ok(mut g) => *g = descs,
+        Err(p) => *p.into_inner() = descs,
+    }
+}
+
+/// The custom description for `lang` from the selected model's deploy.json,
+/// if the model shipped one for that language.
+fn custom_tool_description(lang: &str) -> Option<String> {
+    let g = match TOOL_DESCRIPTIONS.read() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let map = g.as_ref()?;
+    let norm = crate::services::tool_i18n::normalize_lang(lang);
+    map.get(norm).or_else(|| map.get("en")).cloned()
+}
+
 pub fn is_enabled() -> bool {
     DECISION_ACTIVE.load(Ordering::SeqCst)
 }
@@ -176,12 +226,18 @@ async fn cached_model(app: &AppHandle, name: &str) -> Result<Arc<DecisionModel>>
     // family/size under the bundled root) ships the official tokenizer.json —
     // pass it as the loader's fallback (the GGUF-embedded tokenizer is wrong
     // for decision models).
+    // Bundled fallback tokenizer: plain or gzip-compressed (the 34MB gemma
+    // vocab ships as tokenizer.json.gz to save installer space).
     let bundled_tokenizer = crate::mv::models::bundled_size_dir_kind(
         app,
         crate::mv::models::ModelKind::Decision,
         name,
     )
-    .map(|d| d.join("tokenizer.json"))
+    .map(|d| {
+        let plain = d.join("tokenizer.json");
+        let gz = d.join("tokenizer.json.gz");
+        if plain.exists() { plain } else { gz }
+    })
     .filter(|p| p.exists());
     // Runtime device for the decision model: env override > user setting.
     // Snapshot the resolved device BEFORE the load; the publish step re-checks
@@ -649,10 +705,15 @@ async fn prune_history_row_cap() -> Result<u64> {
 /// (`builtin_decision_tools`) and the dispatch path, not to documentation.
 pub fn decision_tool_catalog() -> Vec<Tool> {
     let lang = crate::services::tool_i18n::current_tool_language();
+    // The selected model's deploy.json may override the tool description per
+    // language (its strengths/languages differ from other decision models);
+    // missing languages fall back to the built-in i18n text.
+    let description = custom_tool_description(&lang)
+        .unwrap_or_else(|| crate::services::tool_i18n::decision_tool_description(&lang).to_string());
     vec![Tool {
         hidden_params: None,
         name: "decision_decide".to_string(),
-        description: Some(crate::services::tool_i18n::decision_tool_description(&lang).to_string()),
+        description: Some(description),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

@@ -43,7 +43,8 @@
       "runtimes/node",
       "runtimes/uv",
       "runtimes/skill",
-      "runtimes/rag"
+      "runtimes/rag",
+      "runtimes/decision"
     ],
     "icon": [
       "icons/32x32.png",

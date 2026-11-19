@@ -288,6 +288,9 @@ pub fn run() {
                 let app_handle_decision = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     services::decision_service::sync_enabled_flag().await;
+                    // Load the selected decision model's custom MCP tool
+                    // description (deploy.json `toolDescriptions`), if any.
+                    services::decision_service::refresh_tool_description(&app_handle_decision).await;
                     // Consume the change report: if the resolved language
                     // differs from the cache default (e.g. user saved "zh"
                     // while the app was closed), the builtin rows indexed at
