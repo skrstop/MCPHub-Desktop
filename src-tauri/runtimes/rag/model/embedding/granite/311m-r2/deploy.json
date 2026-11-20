@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "Granite 家族精度最高。优势：多语言检索质量、重排。劣势：较大较慢（~347MB）。",
+    "en": "Highest accuracy of the Granite family. Pros: multilingual retrieval quality, rerank. Cons: larger and slower (~347MB)."
+  },
   "bundle": false,
   "default": false,
   "sort": 8,

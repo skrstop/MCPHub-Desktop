@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "家族精度最高，适合高要求检索。优势：召回质量。劣势：最大最慢（~360MB）。",
+    "en": "Highest accuracy of the family for demanding retrieval. Pros: recall quality. Cons: largest and slowest (~360MB)."
+  },
   "bundle": false,
   "default": false,
   "sort": 5,

@@ -25,7 +25,6 @@ use crate::mv::decision::{DecisionOutput, DecisionRequest, DecisionType};
 use anyhow::{anyhow, Result};
 use candle_core::quantized::gguf_file::{Content, Value};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::Module;
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 use tokenizers::Tokenizer;
@@ -80,8 +79,6 @@ enum Layer {
 pub struct JevModel {
     pub tokenizer: Tokenizer,
     device: Device,
-    n_embd: usize,
-    n_layers: usize,
     eps: f64,
     rope_theta: f32,
     rope_dim: usize, // 64 rotary dims of the 256-dim head
@@ -127,19 +124,6 @@ fn meta_f32(md: &HashMap<String, Value>, key: &str) -> Result<f32> {
     }
 }
 
-fn meta_u32_arr(md: &HashMap<String, Value>, key: &str) -> Result<Vec<u32>> {
-    match md.get(key) {
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|v| match v {
-                Value::U32(x) => Ok(*x),
-                _ => Err(anyhow!("{key}: non-u32 entry {v:?}")),
-            })
-            .collect(),
-        Some(v) => Err(anyhow!("{key}: expected array, got {v:?}")),
-        None => Err(anyhow!("{key}: missing")),
-    }
-}
 
 // -- math helpers ---------------------------------------------------------------------------
 
@@ -186,7 +170,6 @@ impl JevModel {
         let ct = &ct;
         let md = &ct.metadata;
         let n_layers = meta_u32(md, "qwen35.block_count")? as usize;
-        let n_embd = meta_u32(md, "qwen35.embedding_length")? as usize;
         let eps = meta_f32(md, "qwen35.attention.layer_norm_rms_epsilon")? as f64;
         let rope_theta = meta_f32(md, "qwen35.rope.freq_base")?;
         let rope_dim = meta_u32(md, "qwen35.rope.dimension_count")? as usize;
@@ -273,8 +256,6 @@ impl JevModel {
         Ok(Self {
             tokenizer,
             device: device.clone(),
-            n_embd,
-            n_layers,
             eps,
             rope_theta,
             rope_dim,
@@ -516,7 +497,7 @@ impl JevModel {
         let ids_t = Tensor::from_vec(ids.to_vec(), (seq,), &self.device)?;
         let mut x = self.tok_embd.index_select(&ids_t, 0)?; // [seq, d]
         let (cos, sin) = self.rope_cos_sin(seq)?;
-        for (li, layer) in self.layers.iter().enumerate() {
+        for layer in self.layers.iter() {
             match layer {
                 Layer::Ssm(l) => {
                     let h = rms(&x, &l.attn_norm, self.eps)?;

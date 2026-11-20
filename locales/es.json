@@ -1103,7 +1103,16 @@
       "enabled": "Activado",
       "disabled": "Desactivado",
       "toolsDisabledHint": "El soporte de decisiones está desactivado — esta herramienta está documentada pero aún no se expone a los clientes MCP.",
-      "pageInfo": "Página {{page}}"
+      "pageInfo": "Página {{page}}",
+      "replay": "Retry",
+      "replaying": "Retrying…",
+      "replayDone": "Retry done: {{option}} (probability {{prob}})",
+      "replayFailed": "Retry failed",
+      "refresh": "Refresh",
+      "fieldModel": "Modelo",
+      "sourceUi": "Solicitud desde la página",
+      "sourceMcp": "Llamada a herramienta MCP",
+      "scoreHint": "La puntuación es el logit bruto del modelo, solo para ordenar opciones — su signo no tiene significado absoluto; consulte la probabilidad"
     }
   },
   "logs": {

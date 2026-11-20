@@ -208,12 +208,15 @@ impl DecisionModel {
     /// resolver (`decision/<family>/<size>/model.gguf`, downloaded copy
     /// preferred over bundled).
     pub fn resolve_model_path(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf> {
-        if name.is_empty()
-            || name == "."
-            || name.contains("..")
-            || name.contains('/')
-            || name.contains('\\')
-        {
+        // Accept both legacy bare sizes ("multilingual") and the unique
+        // "<family>/<size>" selection keys ("statim/multilingual") — the
+        // key-aware resolver validates each segment (no traversal, no ':').
+        let key_ok = if name.contains('/') {
+            super::models::split_model_key(name).is_some()
+        } else {
+            super::models::valid_model_size_name(name)
+        };
+        if !key_ok {
             return Err(anyhow!("invalid decision model name"));
         }
         let dir = super::models::resolve_model_paths_kind(
@@ -1328,7 +1331,6 @@ mod suite_tests {
             ("laya/multilingual", "laya"),
             ("statim/multilingual", "statim"),
             ("jev/0.8b", "jev-q8"),
-            ("jev/0.8b-q4", "jev-q4"),
         ];
         let mut results: Vec<(String, Vec<Option<(usize, f32, f64)>>)> = Vec::new();
         let mut json_out: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
@@ -1424,7 +1426,6 @@ mod suite_tests {
             ("laya/multilingual", "laya"),
             ("statim/multilingual", "statim"),
             ("jev/0.8b", "jev-q8"),
-            ("jev/0.8b-q4", "jev-q4"),
         ];
         for (rel, name) in models {
             let path = if rel.ends_with(".gguf") { base.join(rel) } else { base.join(rel).join("model.gguf") };

@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "IBM 多语言模型，支持检索与重排。优势：企业级稳定性、重排能力。劣势：中文场景弱于 F2LLM。",
+    "en": "IBM multilingual model with retrieval and rerank support. Pros: enterprise-grade stability, rerank capability. Cons: weaker on Chinese than F2LLM."
+  },
   "bundle": false,
   "default": false,
   "sort": 7,

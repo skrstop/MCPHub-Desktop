@@ -26,6 +26,8 @@ export interface DecisionHistoryEntry {
   selectedOption: string;
   durationMs: number | null;
   source: string | null;
+  /** Selection key ("<family>/<size>") of the model that produced this row. */
+  model: string | null;
 }
 
 export const decisionStatus = async (): Promise<DecisionStatus> => {

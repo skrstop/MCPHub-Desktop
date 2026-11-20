@@ -363,6 +363,9 @@ pub struct DecisionHistoryEntry {
     pub selected_option: String,
     pub duration_ms: Option<i64>,
     pub source: Option<String>,
+    /// Selection key ("<family>/<size>") of the model that produced this
+    /// row; None for rows written before the column existed.
+    pub model: Option<String>,
 }
 
 fn parse_json_string_array(raw: &str) -> Vec<String> {
@@ -386,6 +389,7 @@ fn row_to_entry(
     selected_option: String,
     duration_ms: Option<i64>,
     source: Option<String>,
+    model: Option<String>,
 ) -> DecisionHistoryEntry {
     DecisionHistoryEntry {
         id,
@@ -400,6 +404,7 @@ fn row_to_entry(
         selected_option,
         duration_ms,
         source,
+        model,
     }
 }
 
@@ -425,7 +430,7 @@ pub async fn decide_and_record(
         .await
         .map_err(|e| anyhow!("decision failed: {e}"))??;
     let duration_ms = start.elapsed().as_millis() as i64;
-    record_history(&req, &out, duration_ms, source).await;
+    record_history(&req, &out, duration_ms, source, Some(&model)).await;
     Ok(out)
 }
 
@@ -472,6 +477,7 @@ pub async fn record_history(
     out: &DecisionOutput,
     duration_ms: i64,
     source: &str,
+    model: Option<&str>,
 ) {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -488,7 +494,7 @@ pub async fn record_history(
     let r = sqlx::query(
         "INSERT INTO decision_history (id, created_at, decision_type, state, question, \
          options_json, scores_json, probabilities_json, selected_index, selected_option, \
-         duration_ms, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         duration_ms, source, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&now)
@@ -502,6 +508,7 @@ pub async fn record_history(
     .bind(&out.option)
     .bind(duration_ms)
     .bind(source)
+    .bind(model)
     .execute(db::pool())
     .await;
     if let Err(e) = r {
@@ -526,9 +533,10 @@ pub async fn list_history(limit: i64, offset: i64) -> Result<Vec<DecisionHistory
         String,
         Option<i64>,
         Option<String>,
+        Option<String>,
     )>(
         "SELECT id, created_at, decision_type, state, question, options_json, scores_json, \
-         probabilities_json, selected_index, selected_option, duration_ms, source \
+         probabilities_json, selected_index, selected_option, duration_ms, source, model \
          FROM decision_history ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(limit)
@@ -538,7 +546,7 @@ pub async fn list_history(limit: i64, offset: i64) -> Result<Vec<DecisionHistory
     Ok(rows
         .into_iter()
         .map(
-            |(id, created_at, decision_type, state, question, options_json, scores_json, probabilities_json, selected_index, selected_option, duration_ms, source)| {
+            |(id, created_at, decision_type, state, question, options_json, scores_json, probabilities_json, selected_index, selected_option, duration_ms, source, model)| {
                 row_to_entry(
                     id,
                     created_at,
@@ -552,6 +560,7 @@ pub async fn list_history(limit: i64, offset: i64) -> Result<Vec<DecisionHistory
                     selected_option,
                     duration_ms,
                     source,
+                    model,
                 )
             },
         )
@@ -573,16 +582,17 @@ pub async fn get_history(id: &str) -> Result<Option<DecisionHistoryEntry>> {
         String,
         Option<i64>,
         Option<String>,
+        Option<String>,
     )>(
         "SELECT id, created_at, decision_type, state, question, options_json, scores_json, \
-         probabilities_json, selected_index, selected_option, duration_ms, source \
+         probabilities_json, selected_index, selected_option, duration_ms, source, model \
          FROM decision_history WHERE id = ?",
     )
     .bind(id)
     .fetch_all(db::pool())
     .await?;
     Ok(rows.into_iter().next().map(
-        |(id, created_at, decision_type, state, question, options_json, scores_json, probabilities_json, selected_index, selected_option, duration_ms, source)| {
+        |(id, created_at, decision_type, state, question, options_json, scores_json, probabilities_json, selected_index, selected_option, duration_ms, source, model)| {
             row_to_entry(
                 id,
                 created_at,
@@ -596,6 +606,7 @@ pub async fn get_history(id: &str) -> Result<Option<DecisionHistoryEntry>> {
                 selected_option,
                 duration_ms,
                 source,
+                model,
             )
         },
     ))
@@ -1145,7 +1156,7 @@ mod tests {
                 index: 0,
                 option: "x".into(),
             };
-            record_history(&req, &out, 0, "ui").await;
+            record_history(&req, &out, 0, "ui", Some("statim/multilingual")).await;
         }
         assert_eq!(list_history(0, 0).await.unwrap().len(), 1, "limit 0 clamps to 1, not an empty page");
         assert_eq!(list_history(-10, 0).await.unwrap().len(), 1, "negative limit clamps to 1");
@@ -1181,7 +1192,7 @@ mod tests {
         );
         let e = row_to_entry(
             "id".into(), "t".into(), "choice".into(), None, "q".into(),
-            "not-json".into(), "[1,\"x\"]".into(), "[0.5]".into(), 0, "x".into(), None, None,
+            "not-json".into(), "[1,\"x\"]".into(), "[0.5]".into(), 0, "x".into(), None, None, None,
         );
         assert!(e.options.is_empty() && e.scores.is_empty());
         assert_eq!(e.probabilities, vec![0.5]);
@@ -1287,7 +1298,7 @@ mod tests {
             index: 1,
             option: "b".into(),
         };
-        record_history(&req, &out, 12, "ui").await;
+        record_history(&req, &out, 12, "ui", Some("statim/multilingual")).await;
         let list = list_history(10, 0).await.unwrap();
         assert_eq!(list.len(), 1);
         let e = &list[0];
@@ -1329,7 +1340,7 @@ mod tests {
                 index: 0,
                 option: "x".into(),
             };
-            record_history(&req, &out, i, "mcp").await;
+            record_history(&req, &out, i, "mcp", Some("jev/0.8b")).await;
         }
         let page = list_history(2, 0).await.unwrap();
         assert_eq!(page.len(), 2);
@@ -1405,7 +1416,7 @@ mod tests {
             option: "b".into(),
         };
         for i in 0..5 {
-            record_history(&req, &out, i, "mcp").await;
+            record_history(&req, &out, i, "mcp", Some("jev/0.8b")).await;
         }
         // Well below HISTORY_MAX_ROWS → nothing pruned.
         let pruned = prune_history_row_cap().await.unwrap();

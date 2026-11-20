@@ -2,7 +2,10 @@
   "platform": "AUTO",
   "bundle": true,
   "default": true,
-  "description": "",
+  "description": {
+    "zh": "内置默认，零下载开箱即用。优势：速度、体积、多语言。劣势：家族中精度最低。",
+    "en": "Bundled default — zero download, works out of the box. Pros: speed, size, multilingual. Cons: lowest accuracy of the family."
+  },
   "sort": 1,
   "searchQueryPrefix": "Instruct: Given a question, retrieve passages that can help answer the question.\nQuery: {query}",
   "importDocPrefix": "",

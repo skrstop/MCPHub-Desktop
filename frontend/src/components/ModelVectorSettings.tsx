@@ -370,7 +370,9 @@ const ModelVectorSettings: React.FC = () => {
     }
   };
 
-  const currentInfo = models.find((m) => m.size === currentModel);
+  const currentInfo = models.find(
+    (m) => (m.key || m.size) === currentModel || m.size === currentModel,
+  );
   // 维度来自后端真实值（模型加载时读 GGUF embed_dim；未加载时无）。
   const statusText = mvRunning
     ? t('settings.mvStatusRunning', {
@@ -384,7 +386,9 @@ const ModelVectorSettings: React.FC = () => {
   // 启用但模型丢失/未运行分别给可操作文案（纯函数映射，单测覆盖）。
   // decision === null = 状态未加载/加载失败——显示「—」不得断言「未运行」
   // （flag 可能实际是开的，与 DecisionPage 的三态处理一致）。
-  const decisionCurrentInfo = decisionModels.find((m) => m.size === decision?.model);
+  const decisionCurrentInfo = decisionModels.find(
+    (m) => (m.key || m.size) === decision?.model || m.size === decision?.model,
+  );
   const decisionModelLabel = decisionCurrentInfo?.label || decision?.model || '—';
   // 丢失模型用显示名（label）而非原始 size 名（"1"），与状态行/列表一致。
   // 「重新下载」承诺的可达性门：目录里有该 size 且真的渲染下载动作
@@ -804,7 +808,7 @@ const ModelVectorSettings: React.FC = () => {
         <ReindexDialog
           open
           mode={reindexMode}
-          targetModel={models.find((m) => m.size === (pendingModel ?? currentModel))?.label ?? pendingModel ?? currentModel ?? ''}
+          targetModel={models.find((m) => (m.key || m.size) === (pendingModel ?? currentModel) || m.size === (pendingModel ?? currentModel))?.label ?? pendingModel ?? currentModel ?? ''}
           smartEnabled={smartRoutingConfig.enabled}
           onClose={handleReindexCancel}
           onStart={handleStartReindex}

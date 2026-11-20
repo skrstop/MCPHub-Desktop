@@ -551,6 +551,9 @@ export interface RagStatus {
  *  strategy + a dropdown badge). `fileSize`: model payload bytes (ready) or 0. */
 export interface RagModelInfo {
   size: string;
+  /** Unique selection key "<family>/<size>" (e.g. "statim/multilingual").
+   *  Sizes can collide across families, so selections persist the key. */
+  key?: string;
   label: string;
   status: string;
   ready: boolean;

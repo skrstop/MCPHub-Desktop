@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use sqlx::{Row, SqlitePool};
 
 /// Current target schema version — bump this when adding new migrations.
-pub const TARGET_VERSION: i64 = 40;
+pub const TARGET_VERSION: i64 = 41;
 
 /// Check whether any migration is pending (schema version below target).
 /// Used by the pre-migration backup step in `db::initialize`.
@@ -283,6 +283,7 @@ async fn apply_migration(pool: &SqlitePool, version: i64) -> Result<()> {
         38 => migrate_v38(pool).await,
         39 => migrate_v39(pool).await,
         40 => migrate_v40(pool).await,
+        41 => migrate_v41(pool).await,
         _ => Err(anyhow!("Unknown migration version: {}", version)),
     }
 }
@@ -570,6 +571,30 @@ async fn migrate_v40(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     log::info!("[db] migration v40: created decision_history composite ordering index");
+    Ok(())
+}
+
+/// v40 → v41: record which decision model produced each history row. The
+/// selection key ("<family>/<size>", e.g. "statim/multilingual") is stored
+/// verbatim so a replay/detail view can show exactly what ran; rows written
+/// before this migration have NULL (unknown).
+async fn migrate_v41(pool: &SqlitePool) -> Result<()> {
+    // Idempotent: a rewound schema_version (test harness / partial-apply
+    // recovery) re-runs this step against a table that already has the
+    // column — ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite.
+    let has_model: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('decision_history') WHERE name = 'model'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_model == 0 {
+        sqlx::query("ALTER TABLE decision_history ADD COLUMN model TEXT")
+            .execute(pool)
+            .await?;
+        log::info!("[db] migration v41: added decision_history.model column");
+    } else {
+        log::info!("[db] migration v41: decision_history.model already present, skipped");
+    }
     Ok(())
 }
 

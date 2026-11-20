@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "针对 web 查询-段落检索训练。优势：搜索式查询的召回。劣势：通用文档检索不如 F2LLM 均衡。",
+    "en": "Trained for web query-passage retrieval. Pros: recall on search-style queries. Cons: less balanced than F2LLM for general document retrieval."
+  },
   "bundle": false,
   "default": false,
   "sort": 6,

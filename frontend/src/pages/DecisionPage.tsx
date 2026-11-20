@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BrainCircuit, ChevronLeft, ChevronRight, Eye, Loader2, Sparkles, Trash2, X } from 'lucide-react';
+import { BrainCircuit, ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import {
   clearDecisionHistory,
+  decideDecision,
   decisionSetEnabled,
   decisionStatus,
   getDecisionTools,
   listDecisionHistory,
+  selectDecisionModel,
   type DecisionHistoryEntry,
 } from '@/services/decisionService';
 import { useToast } from '@/contexts/ToastContext';
@@ -46,6 +48,8 @@ const DecisionPage: React.FC = () => {
   const [loadError, setLoadError] = useState(false);
   const [pageLoading, setPageLoading] = useState(false);
   const [viewing, setViewing] = useState<DecisionHistoryEntry | null>(null);
+  // Replay: the entry id currently being re-run (button spinner), or null.
+  const [replayingId, setReplayingId] = useState<string | null>(null);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearing, setClearing] = useState(false);
   // "View tools" dialog — shows the MCP tools decision support exposes
@@ -158,7 +162,50 @@ const DecisionPage: React.FC = () => {
     }
   };
 
+  // Replay: switch to the entry's own model (the row records which model
+  // produced it), re-run the original request (recorded as a new history
+  // entry with source "ui"), then refresh the list so the new entry shows
+  // at the top.
+  const handleReplay = async (e: DecisionHistoryEntry) => {
+    if (replayingId) return;
+    setReplayingId(e.id);
+    try {
+      if (e.model) {
+        await selectDecisionModel(e.model);
+      }
+      const out = await decideDecision({
+        decisionType: e.decisionType,
+        state: e.state ?? '',
+        question: e.question,
+        options: e.options,
+      }) as { selectedIndex?: number; probabilities?: number[]; option?: string } | null;
+      if (mounted.current) {
+        await loadPage(1);
+        const prob = out?.probabilities?.[out.selectedIndex ?? -1];
+        showToast(
+          t('pages.decision.replayDone', {
+            option: out?.option ?? e.selectedOption,
+            prob: prob != null ? formatProbability(prob) : '—',
+          }),
+          'success',
+        );
+      }
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : t('pages.decision.replayFailed'),
+        'error',
+      );
+    } finally {
+      if (mounted.current) setReplayingId(null);
+    }
+  };
+
   const typeLabel = (ty: string) => t(decisionTypeLabelKey(ty));
+
+  // Friendly localized name for the recorded source ("ui" / "mcp");
+  // unknown values fall through verbatim.
+  const sourceLabel = (s: string) =>
+    s === 'ui' ? t('pages.decision.sourceUi') : s === 'mcp' ? t('pages.decision.sourceMcp') : s;
 
   // Escape closes the TOPMOST dialog only (document-level listener — the
   // repo's established dialog pattern; overlay onKeyDown would miss when
@@ -193,41 +240,49 @@ const DecisionPage: React.FC = () => {
           the RAG page header (interactive controls sit beside the title).
           The tools button stays enabled while decision support is off: the
           dialog documents the tool regardless of the enable flag. */}
-      <div className="flex items-center gap-2.5 flex-wrap mb-1">
-        <h1 className="text-xl font-semibold text-[var(--hub-ink)] flex items-center gap-2">
-          <BrainCircuit size={20} className="text-[var(--hub-ink-2)]" />
-          {t('pages.decision.title')}
-          <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
-            {t('nav.beta')}
-          </span>
-        </h1>
-        <div className="flex items-center gap-1.5">
-          {toggling && <Loader2 size={14} className="animate-spin text-[var(--hub-ink-3)]" />}
-          <Switch
-            disabled={toggling}
-            checked={enabled ?? false}
-            onCheckedChange={handleToggle}
-            aria-label={t('pages.decision.title')}
-          />
-          <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
-            {enabled === null ? '—' : enabled ? t('pages.decision.enabled') : t('pages.decision.disabled')}
-          </span>
+      <div className="flex items-center justify-between gap-4 mb-1 flex-wrap">
+        <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
+          <h1 className="text-xl font-semibold text-[var(--hub-ink)] flex items-center gap-2">
+            <BrainCircuit size={20} className="text-[var(--hub-ink-2)]" />
+            {t('pages.decision.title')}
+            <span className="ml-1 inline-flex flex-shrink-0 items-center rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300">
+              {t('nav.beta')}
+            </span>
+          </h1>
+          <div className="flex items-center gap-1.5">
+            {toggling && <Loader2 size={14} className="animate-spin text-[var(--hub-ink-3)]" />}
+            <Switch
+              disabled={toggling}
+              checked={enabled ?? false}
+              onCheckedChange={handleToggle}
+              aria-label={t('pages.decision.title')}
+            />
+            <span className="text-[12px] hub-mono" style={{ color: 'var(--hub-ink-3)' }}>
+              {enabled === null ? '—' : enabled ? t('pages.decision.enabled') : t('pages.decision.disabled')}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowTools(true)}
+              className="hub-btn sm"
+              title={t('pages.decision.viewToolsHint')}
+            >
+              {t('pages.decision.viewTools')}
+            </button>
+          </div>
+        </div>
+        {/* Top-right action buttons（RAG 页同款布局：justify-between 推到右上角，
+            flex-wrap：窄窗口换行不压缩按钮文字） */}
+        <div className="flex items-center gap-2 flex-wrap flex-shrink-0">
           <button
             type="button"
-            onClick={() => setShowTools(true)}
             className="hub-btn sm"
-            title={t('pages.decision.viewToolsHint')}
+            disabled={loading || pageLoading}
+            title={t('pages.decision.refresh')}
+            onClick={() => void fetchAll()}
           >
-            {t('pages.decision.viewTools')}
+            <RefreshCw size={12} className={loading || pageLoading ? 'animate-spin' : ''} />
+            {t('pages.decision.refresh')}
           </button>
-        </div>
-      </div>
-      <p className="text-sm text-[var(--hub-ink-3)] mb-6">{t('pages.decision.subtitle')}</p>
-
-      {/* History list */}
-      <div className="hub-card">
-        <div className="flex items-center justify-between py-3 px-5 border-b border-[var(--hub-line-2)]">
-          <h2 className="font-medium text-[var(--hub-ink)]">{t('pages.decision.historyTitle')}</h2>
           <button
             type="button"
             className="hub-btn sm"
@@ -237,6 +292,14 @@ const DecisionPage: React.FC = () => {
             {clearing ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
             {t('pages.decision.clearAll')}
           </button>
+        </div>
+      </div>
+      <p className="text-sm text-[var(--hub-ink-3)] mb-6">{t('pages.decision.subtitle')}</p>
+
+      {/* History list */}
+      <div className="hub-card">
+        <div className="flex items-center justify-between py-3 px-5 border-b border-[var(--hub-line-2)]">
+          <h2 className="font-medium text-[var(--hub-ink)]">{t('pages.decision.historyTitle')}</h2>
         </div>
         {loading ? (
           <div className="flex items-center justify-center py-12 text-[var(--hub-ink-3)]">
@@ -278,9 +341,27 @@ const DecisionPage: React.FC = () => {
                       {t('pages.decision.selected')}: {e.selectedOption}
                     </span>
                     {e.durationMs != null && <span>{e.durationMs}ms</span>}
-                    {e.source && <span>{e.source}</span>}
+                    {e.model && <span>{e.model}</span>}
+                    {e.source && <span>{sourceLabel(e.source)}</span>}
                   </div>
                 </div>
+                <button
+                  type="button"
+                  className="hub-btn sm"
+                  style={{ flexShrink: 0 }}
+                  disabled={replayingId !== null}
+                  title={t('pages.decision.replay')}
+                  onClick={() => void handleReplay(e)}
+                >
+                  {replayingId === e.id ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <RotateCcw size={12} />
+                  )}
+                  {replayingId === e.id
+                    ? t('pages.decision.replaying')
+                    : t('pages.decision.replay')}
+                </button>
                 <button
                   type="button"
                   className="hub-btn sm"
@@ -295,7 +376,7 @@ const DecisionPage: React.FC = () => {
               </li>
             ))}
           </ul>
-          {(page > 1 || hasMore) && (
+          {entries.length > 0 && (
             <div className="flex items-center justify-center gap-3 py-3 border-t border-[var(--hub-line-2)]">
               <button
                 type="button"
@@ -356,6 +437,24 @@ const DecisionPage: React.FC = () => {
                 <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldTime')}</div>
                 <div className="text-[var(--hub-ink)]">{viewing.createdAt}</div>
               </div>
+              {viewing.durationMs != null && (
+                <div>
+                  <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldDuration')}</div>
+                  <div className="text-[var(--hub-ink)]">{viewing.durationMs}ms</div>
+                </div>
+              )}
+              {viewing.model && (
+                <div>
+                  <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldModel')}</div>
+                  <div className="text-[var(--hub-ink)] hub-mono text-[12px]">{viewing.model}</div>
+                </div>
+              )}
+              {viewing.source && (
+                <div>
+                  <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldSource')}</div>
+                  <div className="text-[var(--hub-ink)]">{sourceLabel(viewing.source)}</div>
+                </div>
+              )}
               {viewing.state != null && viewing.state !== '' && (
                 <div>
                   <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldState')}</div>
@@ -390,14 +489,20 @@ const DecisionPage: React.FC = () => {
                         <span className="flex-1 min-w-0 truncate text-[var(--hub-ink)]" title={opt}>
                           {opt}
                         </span>
-                        {typeof score === 'number' && (
-                          <span className="text-[11.5px] text-[var(--hub-ink-3)]">
-                            {t('pages.decision.score')}: {formatScore(score)}
+                        {typeof prob === 'number' && (
+                          <span
+                            className="text-[12px] font-medium"
+                            style={{ color: selected ? 'var(--hub-accent)' : 'var(--hub-ink-2)' }}
+                          >
+                            {formatProbability(prob)}
                           </span>
                         )}
-                        {typeof prob === 'number' && (
-                          <span className="text-[11.5px] text-[var(--hub-ink-3)]">
-                            {t('pages.decision.probability')}: {formatProbability(prob)}
+                        {typeof score === 'number' && (
+                          <span
+                            className="text-[11px] text-[var(--hub-ink-3)] cursor-help"
+                            title={t('pages.decision.scoreHint')}
+                          >
+                            {t('pages.decision.score')}: {formatScore(score)}
                           </span>
                         )}
                         {selected && (
@@ -409,18 +514,6 @@ const DecisionPage: React.FC = () => {
                     );
                   })}
                 </ul>
-              </div>
-              <div className="flex gap-4 text-[11.5px] text-[var(--hub-ink-3)]">
-                {viewing.durationMs != null && (
-                  <span>
-                    {t('pages.decision.fieldDuration')}: {viewing.durationMs}ms
-                  </span>
-                )}
-                {viewing.source && (
-                  <span>
-                    {t('pages.decision.fieldSource')}: {viewing.source}
-                  </span>
-                )}
               </div>
             </div>
           </div>

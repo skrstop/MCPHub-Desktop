@@ -173,6 +173,12 @@ pub struct RagModelInfo {
     /// Size key, e.g. "default", "q4", "f16". Used as the selection key
     /// (persisted in `config_json.rag.model`).
     pub size: String,
+    /// Unique selection key "<family>/<size>" (e.g. "statim/multilingual").
+    /// Sizes alone can collide across families (laya/multilingual vs
+    /// statim/multilingual), so new selections persist the key; bare-size
+    /// selections (legacy) still resolve via the family scan.
+    #[serde(default)]
+    pub key: String,
     /// Dropdown label, e.g. "model_q4".
     pub label: String,
     /// "ready" (model file present, bundled or downloaded) | "downloadable"
@@ -272,6 +278,7 @@ pub fn list_models_kind(app: &AppHandle, kind: ModelKind) -> Result<Vec<RagModel
                 // Label = "<family-dir>-<size-dir>" (e.g. "embeddinggemma-default"),
                 // so multiple families/sizes are distinguishable in the dropdown.
                 label: format!("{}-{}", fam_name, size),
+                key: format!("{}/{}", fam_name, size),
                 status: if ready {
                     "ready".into()
                 } else if downloadable {
@@ -315,6 +322,17 @@ pub fn list_models_kind(app: &AppHandle, kind: ModelKind) -> Result<Vec<RagModel
 /// the shared resolvers so EVERY kind's path (select/status/download) is
 /// guarded — an unvalidated `../../embedding/...` size would let a decision
 /// selection resolve into (or a download overwrite) another kind's model.
+/// Split a unique model key "<family>/<size>" into its two path segments.
+/// Returns None for bare sizes (legacy selection keys, resolved by the
+/// family scan) and for anything traversal-shaped.
+pub(crate) fn split_model_key(name: &str) -> Option<(&str, &str)> {
+    let (fam, size) = name.split_once('/')?;
+    if fam.is_empty() || !valid_model_size_name(fam) || !valid_model_size_name(size) {
+        return None;
+    }
+    Some((fam, size))
+}
+
 pub(crate) fn valid_model_size_name(size: &str) -> bool {
     if size.is_empty()
         || size == "."
@@ -348,10 +366,15 @@ pub(crate) fn bundled_size_dir_kind(
     kind: ModelKind,
     size: &str,
 ) -> Option<PathBuf> {
+    let root = model_root_kind(app, kind).ok()?;
+    // Unique "<family>/<size>" key: resolve directly, no family scan.
+    if let Some((fam_name, size_name)) = split_model_key(size) {
+        let dir = root.join(fam_name).join(size_name);
+        return dir.is_dir().then_some(dir);
+    }
     if !valid_model_size_name(size) {
         return None;
     }
-    let root = model_root_kind(app, kind).ok()?;
     for fam in std::fs::read_dir(&root).ok()? {
         // A single unreadable entry (concurrent removal, transient EPERM)
         // must not truncate the whole family scan — skip it.
@@ -384,11 +407,24 @@ pub(crate) fn resolve_model_paths_kind(
     // falling back to the bundled default. Callers that need a loud
     // rejection (select/download) get it from ensure_model_ready_kind's
     // not-ready error or find_download_source's own gate.
+    let root = model_root_kind(app, kind)?;
+    let dl_root = download_root_kind(app, kind)?;
+    // Unique "<family>/<size>" key: resolve directly, no family scan.
+    if let Some((fam_name, size_name)) = split_model_key(size) {
+        let bundled = root.join(fam_name).join(size_name);
+        let downloaded_dir = dl_root.join(fam_name).join(size_name);
+        let size_dir = if !detect_format(&downloaded_dir).is_empty() {
+            downloaded_dir
+        } else if !detect_format(&bundled).is_empty() {
+            bundled
+        } else {
+            return Ok(None);
+        };
+        return Ok(Some(size_dir));
+    }
     if !valid_model_size_name(size) {
         return Ok(None);
     }
-    let root = model_root_kind(app, kind)?;
-    let dl_root = download_root_kind(app, kind)?;
     for fam in std::fs::read_dir(&root)? {
         // A single unreadable entry (concurrent removal, transient EPERM)
         // must not fail the whole scan — skip it (same as
@@ -526,7 +562,10 @@ pub(crate) fn pick_default_size(models: &[RagModelInfo]) -> Option<String> {
         .iter()
         .find(|m| m.is_default && m.ready)
         .or_else(|| models.iter().find(|m| m.ready))
-        .map(|m| m.size.clone())
+        // Persist the unique "<family>/<size>" key when available; bare
+        // sizes can collide across families (laya/multilingual vs
+        // statim/multilingual).
+        .map(|m| if m.key.is_empty() { m.size.clone() } else { m.key.clone() })
 }
 
 /// Persist `decision.model = <size>` (deep-merge). Propagates persist
@@ -1216,10 +1255,25 @@ fn find_download_source(
     kind: ModelKind,
     size: &str,
 ) -> Result<(String, PathBuf, Vec<(String, String)>)> {
+    let root = model_root_kind(app, kind)?;
+    // Unique "<family>/<size>" key: resolve directly, no family scan.
+    if let Some((fam_name, size_name)) = split_model_key(size) {
+        let size_dir = root.join(fam_name).join(size_name);
+        if !size_dir.is_dir() {
+            return Err(anyhow!("model '{}' not found", size));
+        }
+        let cfg = crate::mv::embedder::read_deploy_config(&size_dir);
+        if cfg.download_urls.is_empty() {
+            return Err(anyhow!(
+                "model '{}' has no downloadUrls in deploy.json",
+                size
+            ));
+        }
+        return Ok((fam_name.to_string(), size_dir, cfg.download_urls));
+    }
     if !valid_model_size_name(size) {
         return Err(anyhow!("invalid model size name '{size}'"));
     }
-    let root = model_root_kind(app, kind)?;
     for fam in std::fs::read_dir(&root)? {
         // Skip unreadable entries instead of failing the whole scan (same
         // as resolve_model_paths_kind / bundled_size_dir_kind).
@@ -2394,6 +2448,7 @@ mod publish_and_truncation_tests {
     }
     fn mk_model(size: &str, ready: bool, is_default: bool) -> RagModelInfo {
         RagModelInfo {
+            key: String::new(),
             size: size.into(),
             label: size.into(),
             status: if ready { "ready".into() } else { "unavailable".into() },

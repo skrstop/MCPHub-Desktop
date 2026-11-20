@@ -528,7 +528,7 @@ pub(crate) fn build_qwen3_tokenizer(md: &std::collections::HashMap<String, Value
         .build()
         .map_err(|e| anyhow!("build Qwen3 BPE from gguf: {}", e))?;
     let mut tok = Tokenizer::new(bpe);
-    tok.with_normalizer(Some(NFC));
+    let _ = tok.with_normalizer(Some(NFC));
     let pattern = SplitPattern::Regex(QWEN3_SPLIT.to_string());
     let split = Split::new(pattern, SplitDelimiterBehavior::Isolated, false)
         .map_err(|e| anyhow!("qwen3 split pre-tokenizer: {e}"))?;
@@ -610,7 +610,7 @@ pub(crate) fn build_metaspace_bpe_from(tokens: &[String], merges_raw: &[String])
         .build()
         .map_err(|e| anyhow!("build Metaspace BPE: {e}"))?;
     let mut tok = Tokenizer::new(bpe);
-    tok.with_normalizer(Some(tokenizers::normalizers::Replace::new(" ", "▁")
+    let _ = tok.with_normalizer(Some(tokenizers::normalizers::Replace::new(" ", "▁")
         .map_err(|e| anyhow!("metaspace replace normalizer: {e}"))?));
     tok.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
     Ok(tok)
@@ -646,7 +646,7 @@ fn build_gemma3_tokenizer(md: &std::collections::HashMap<String, Value>) -> Resu
         .build()
         .map_err(|e| anyhow!("build Gemma3 BPE from gguf: {}", e))?;
     let mut tok = Tokenizer::new(bpe);
-    tok.with_normalizer(Some(tokenizers::normalizers::Replace::new(" ", "▁")
+    let _ = tok.with_normalizer(Some(tokenizers::normalizers::Replace::new(" ", "▁")
         .map_err(|e| anyhow!("gemma3 replace normalizer: {e}"))?));
     Ok(tok)
 }

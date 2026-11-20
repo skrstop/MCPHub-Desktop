@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "超轻量（~130MB），低配设备首选。优势：内存与磁盘占用最小。劣势：精度有限，不适合高要求检索。",
+    "en": "Ultra-light (~130MB), first choice for low-end devices. Pros: smallest memory and disk footprint. Cons: limited accuracy."
+  },
   "bundle": false,
   "default": false,
   "sort": 3,

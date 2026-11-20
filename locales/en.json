@@ -1053,7 +1053,16 @@
       "enabled": "Enabled",
       "disabled": "Disabled",
       "toolsDisabledHint": "Decision support is off — this tool is documented but not yet exposed to MCP clients.",
-      "pageInfo": "Page {{page}}"
+      "pageInfo": "Page {{page}}",
+      "replay": "Retry",
+      "replaying": "Retrying…",
+      "replayDone": "Retry done: {{option}} (probability {{prob}})",
+      "replayFailed": "Retry failed",
+      "refresh": "Refresh",
+      "fieldModel": "Model",
+      "sourceUi": "Page request",
+      "sourceMcp": "MCP tool call",
+      "scoreHint": "Score is the raw model logit, used only to rank options — its sign has no absolute meaning; refer to the probability"
     }
   },
   "logs": {

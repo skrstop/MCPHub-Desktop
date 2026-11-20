@@ -169,6 +169,46 @@ pub fn render_query_embed_text(template: &str, query: &str) -> String {
 /// Missing file / invalid JSON / missing fields -> `Auto`, empty description,
 /// `is_default=false`. One file read; both `resolve_platform` (at load) and
 /// `list_models` (for the dropdown + default selection) use this.
+/// Resolve a deploy.json `description` value by the app's i18n language
+/// (zh → Chinese, every other language → English, mirroring
+/// `tool_i18n::resolve_tool_language`). Accepted shapes:
+/// - `{"zh": "...", "en": "..."}` (preferred bilingual object)
+/// - `"中文 | English"` (legacy single string with a ` | ` separator)
+/// - `"plain text"` (used verbatim for every language)
+pub fn parse_localized_description(v: Option<&serde_json::Value>) -> String {
+    let lang = crate::services::tool_i18n::current_tool_language();
+    match v {
+        Some(serde_json::Value::Object(o)) => {
+            let pick = |k: &str| {
+                o.get(k)
+                    .and_then(|d| d.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            };
+            pick(&lang)
+                .or_else(|| pick("en"))
+                .or_else(|| pick("zh"))
+                .unwrap_or_default()
+        }
+        Some(serde_json::Value::String(s)) => {
+            // Legacy "zh | en" composite: split on the first ` | `.
+            match s.split_once(" | ") {
+                Some((zh, _en)) if lang == "zh" => zh.trim().to_string(),
+                Some((zh, en)) => {
+                    let en = en.trim();
+                    if en.is_empty() {
+                        zh.trim().to_string()
+                    } else {
+                        en.to_string()
+                    }
+                }
+                None => s.clone(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
     let empty = || DeployConfig {
         platform: Platform::Auto,
@@ -198,11 +238,7 @@ pub fn read_deploy_config(size_dir: &Path) -> DeployConfig {
         Some(s) => Platform::parse(s),
         None => Platform::Auto,
     };
-    let description = v
-        .get("description")
-        .and_then(|d| d.as_str())
-        .unwrap_or("")
-        .to_string();
+    let description = parse_localized_description(v.get("description"));
     // Bundle flag: `bundle: true` ships the model files in the installer;
     // legacy `default: true` is honored as a fallback (older deploy.json
     // files). Either marks the size as the out-of-box model.
@@ -646,5 +682,34 @@ mod template_tests {
         assert_eq!(env_platform_override(), None);
         // Restore the caller's environment.
         set(original.as_deref());
+    }
+}
+
+#[cfg(test)]
+mod localized_description_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_localized_description() {
+        // bilingual object follows the cached tool language
+        let obj = json!({"zh": "中文描述", "en": "English description"});
+        crate::services::tool_i18n::set_tool_language("zh");
+        assert_eq!(parse_localized_description(Some(&obj)), "中文描述");
+        crate::services::tool_i18n::set_tool_language("ja");
+        assert_eq!(parse_localized_description(Some(&obj)), "English description");
+        // legacy "zh | en" composite string
+        let legacy = json!("中文 | English");
+        crate::services::tool_i18n::set_tool_language("zh");
+        assert_eq!(parse_localized_description(Some(&legacy)), "中文");
+        crate::services::tool_i18n::set_tool_language("en");
+        assert_eq!(parse_localized_description(Some(&legacy)), "English");
+        // plain string passes through
+        let plain = json!("plain");
+        assert_eq!(parse_localized_description(Some(&plain)), "plain");
+        // missing / empty
+        assert_eq!(parse_localized_description(None), "");
+        assert_eq!(parse_localized_description(Some(&json!({}))), "");
+        crate::services::tool_i18n::set_tool_language("en");
     }
 }

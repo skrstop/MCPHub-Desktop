@@ -1053,7 +1053,16 @@
       "enabled": "Activé",
       "disabled": "Désactivé",
       "toolsDisabledHint": "L’aide à la décision est désactivée — cet outil est documenté mais pas encore exposé aux clients MCP.",
-      "pageInfo": "Page {{page}}"
+      "pageInfo": "Page {{page}}",
+      "replay": "Retry",
+      "replaying": "Retrying…",
+      "replayDone": "Retry done: {{option}} (probability {{prob}})",
+      "replayFailed": "Retry failed",
+      "refresh": "Refresh",
+      "fieldModel": "Modèle",
+      "sourceUi": "Requête depuis la page",
+      "sourceMcp": "Appel d’outil MCP",
+      "scoreHint": "Le score est le logit brut du modèle, utilisé uniquement pour classer les options — son signe n’a pas de sens absolu ; reportez-vous à la probabilité"
     }
   },
   "logs": {

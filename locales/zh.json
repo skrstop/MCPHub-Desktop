@@ -1053,7 +1053,16 @@
       "enabled": "已开启",
       "disabled": "已关闭",
       "toolsDisabledHint": "决策支持未开启——该工具暂不会暴露给 MCP 客户端。",
-      "pageInfo": "第 {{page}} 页"
+      "pageInfo": "第 {{page}} 页",
+      "replay": "重试",
+      "replaying": "重试中…",
+      "replayDone": "重试完成：{{option}}（概率 {{prob}}）",
+      "replayFailed": "重试失败",
+      "refresh": "刷新",
+      "fieldModel": "模型",
+      "sourceUi": "页面手动请求",
+      "sourceMcp": "MCP 工具调用",
+      "scoreHint": "分数为模型原始打分（logit），仅用于选项间排序，正负无绝对含义；请以概率为准"
     }
   },
   "logs": {

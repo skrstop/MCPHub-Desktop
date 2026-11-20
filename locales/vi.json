@@ -1053,7 +1053,16 @@
       "enabled": "Đã bật",
       "disabled": "Đã tắt",
       "toolsDisabledHint": "Hỗ trợ quyết định đang tắt — công cụ này đã được mô tả nhưng chưa cung cấp cho MCP client.",
-      "pageInfo": "Trang {{page}}"
+      "pageInfo": "Trang {{page}}",
+      "replay": "Retry",
+      "replaying": "Retrying…",
+      "replayDone": "Retry done: {{option}} (probability {{prob}})",
+      "replayFailed": "Retry failed",
+      "refresh": "Refresh",
+      "fieldModel": "Mô hình",
+      "sourceUi": "Yêu cầu từ giao diện",
+      "sourceMcp": "Gọi công cụ MCP",
+      "scoreHint": "Điểm là logit thô của mô hình, chỉ dùng để xếp hạng các lựa chọn — dấu không có ý nghĩa tuyệt đối; hãy tham khảo xác suất"
     }
   },
   "logs": {

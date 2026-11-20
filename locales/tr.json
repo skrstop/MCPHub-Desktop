@@ -1053,7 +1053,16 @@
       "enabled": "Etkin",
       "disabled": "Devre dışı",
       "toolsDisabledHint": "Karar desteği kapalı — bu araç belgelenmiştir ancak henüz MCP istemcilerine sunulmuyor.",
-      "pageInfo": "Sayfa {{page}}"
+      "pageInfo": "Sayfa {{page}}",
+      "replay": "Retry",
+      "replaying": "Retrying…",
+      "replayDone": "Retry done: {{option}} (probability {{prob}})",
+      "replayFailed": "Retry failed",
+      "refresh": "Refresh",
+      "fieldModel": "Model",
+      "sourceUi": "Sayfa isteği",
+      "sourceMcp": "MCP araç çağrısı",
+      "scoreHint": "Puan, yalnızca seçenekleri sıralamak için kullanılan ham model logitidir — işaretinin mutlak anlamı yoktur; olasılığa bakın"
     }
   },
   "logs": {

@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "轻量与精度的折中（~147MB）。优势：低配设备上比 a8M 更准。劣势：多语言覆盖弱于 F2LLM 系列。",
+    "en": "Light quality/resource trade-off (~147MB). Pros: more accurate than a8M on low-end devices. Cons: weaker multilingual coverage than F2LLM."
+  },
   "bundle": false,
   "default": false,
   "sort": 4,

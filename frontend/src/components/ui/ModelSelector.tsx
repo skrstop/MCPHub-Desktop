@@ -121,7 +121,12 @@ const ModelSelector: React.FC<{
     );
   }
 
-  const current = models.find((m) => m.size === currentModel);
+  // Match by the unique "<family>/<size>" key first; fall back to the bare
+  // size for legacy persisted selections (pre-key config values).
+  const modelKey = (m: RagModelInfo) => m.key || m.size;
+  const isCurrentModel = (m: RagModelInfo) =>
+    modelKey(m) === currentModel || m.size === currentModel;
+  const current = models.find(isCurrentModel);
   const triggerLabel = current ? current.label : t('pages.rag.modelSelect');
 
   return (
@@ -160,7 +165,7 @@ const ModelSelector: React.FC<{
           }}
         >
           {models.map((m) => {
-            const isCurrent = m.size === currentModel;
+            const isCurrent = isCurrentModel(m);
             const dl = modelDownload && modelDownload.size === m.size ? modelDownload : null;
             const downloading = !!dl && dl.phase === 'downloading';
             const fmtBadge =
@@ -228,7 +233,7 @@ const ModelSelector: React.FC<{
                         type="button"
                         disabled={disabled || isCurrent}
                         onClick={() => {
-                          if (!isCurrent) onSelect(m.size);
+                          if (!isCurrent) onSelect(modelKey(m));
                           setOpen(false);
                         }}
                         className="hub-btn sm"
@@ -408,7 +413,7 @@ const ModelSelector: React.FC<{
             <div className="px-2.5 pt-1.5 pb-1" style={{ fontSize: 10, color: 'var(--hub-ink-3)' }}>
               {t('pages.rag.modelSelectSource')}
             </div>
-            {(models.find((m) => m.size === sourceFor.size)?.downloadSources ?? []).map((s, i) => {
+            {(models.find((m) => modelKey(m) === sourceFor.size || m.size === sourceFor.size)?.downloadSources ?? []).map((s, i) => {
               const selected = selectedSources[sourceFor.size] === s;
               return (
                 <button

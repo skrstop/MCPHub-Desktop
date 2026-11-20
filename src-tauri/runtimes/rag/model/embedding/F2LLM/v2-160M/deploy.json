@@ -1,6 +1,9 @@
 {
   "platform": "AUTO",
-  "description": "",
+  "description": {
+    "zh": "精度与速度均衡的中档选择。优势：比 80M 明显更准，仍轻量。劣势：需下载，长文本精度不及 330M。",
+    "en": "Balanced mid-tier choice. Pros: clearly better than 80M while staying light. Cons: needs download, below 330M on hard retrieval."
+  },
   "bundle": false,
   "default": false,
   "sort": 2,
