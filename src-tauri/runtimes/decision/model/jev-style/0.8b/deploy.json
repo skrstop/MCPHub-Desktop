@@ -1,0 +1,23 @@
+{
+  "description": {
+    "zh": "精度最强（官方对齐 99.2%，事实/情感/多语言最佳）。优势：判断质量。劣势：慢（CPU 2-5s）且占内存 2.1GB（文件~812MB），仅适合非实时高价值决策。",
+    "en": "Highest quality (99.2% official agreement; best factuality, sentiment and multilingual judgment). Pros: decision quality. Cons: slow (2-5s on CPU) and Highest quality (99.2% official agreement; best factuality, sentiment and multilingual judgment). Pros: decision quality. Cons: slow (2-5s on CPU) and 2.1GB memory — non-realtime, high-stakes decisions only. — non-realtime, high-stakes decisions only."
+  },
+  "toolDescriptions": {
+    "en": "Run a structured decision with the local Jev-Style 0.8B model (752M, Qwen3.5 hybrid decoder). Input: decisionType (choice = pick one option, score = rate on ordered levels, noul = true/false statement check), state (the context the decision is grounded in), question, and 2-20 candidate options in priority order. Output: per-option scores, probabilities and the selected option.\n\nJev is the high-accuracy tier of the decision model family: strongest factuality, sentiment and multilingual judgment in the family (99.2% agreement with the official fp32 reference over a 128-case benchmark, including Korean and Japanese), at the cost of speed — 2-5s per call on CPU and ~2.1GB memory (model file ~812MB).\n\nBest for: non-realtime or high-stakes decisions where quality matters more than latency — ambiguous sentiment, factual true/false checks, churn-risk and moderation calls, long-context analysis. Do not use it in tight request loops (per-call latency is 30-60x the real-time models); prefer Julia/Laya/Statim there. Scores are verdict-slot readouts calibrated with a fixed temperature; treat probabilities comparatively rather than as absolute confidences.",
+    "zh": "用本地 Jev-Style 0.8B 决策模型（752M，Qwen3.5 混合解码器）运行一次结构化决策。输入：decisionType（choice=从选项中挑选，score=按有序等级打分，noul=真假陈述判断）、state（决策所依据的上下文）、question 和 2-20 个按优先级排列的候选选项。输出：每个选项的分数、概率与选中项。\n\nJev 是决策模型家族中的高精度档位：事实判断、情感与多语言能力最强（128 例基准实测与官方 fp32 参照对齐率 99.2%，含韩语和日语），代价是速度——CPU 单次 2-5 秒、内存约 2.1GB（模型文件约 812MB）。\n\n最适合：质量优先于延迟的非实时或高价值决策——模糊情感判断、事实性真假判断、流失风险与内容审核、长上下文分析。不要用于紧凑的请求循环（单次延迟是实时模型的 30-60 倍），此类场景请用 Julia/Laya/Statim。分数为 verdict 槽位读出并经固定温度校准，建议横向比较概率而非当作绝对置信度。"
+  },
+  "bundle": false,
+  "default": false,
+  "sort": 2,
+  "downloadUrls": {
+    "modelscope": {
+      "url": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=jev-style-0.8b.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
+      "enabled": true
+    },
+    "github": {
+      "url": "https://github.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=decision-jev-style_0.8b",
+      "enabled": true
+    }
+  }
+}

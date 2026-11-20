@@ -565,7 +565,7 @@ mod tests {
     use std::path::PathBuf;
 
     const TEMP_GGUF: &str =
-        "runtimes/decision/model/jev/0.8b/model.gguf";
+        "runtimes/decision/model/jev-style/0.8b/model.gguf";
 
     fn load_model() -> Result<JevModel> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TEMP_GGUF);

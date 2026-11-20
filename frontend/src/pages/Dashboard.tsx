@@ -6,6 +6,7 @@ import { useServerData } from '@/hooks/useServerData';
 import { useSettingsData } from '@/hooks/useSettingsData';
 import { useCostData } from '@/hooks/useCostData';
 import { formatTokens } from '@/utils/contextCost';
+import { serverCostRevision } from '@/utils/costRevision';
 import { apiGet } from '@/utils/fetchInterceptor';
 import { buildMcpClientConfig, mcpConfigUsesTokenPlaceholder } from '@/utils/mcpConfig';
 import { isTauri } from '@/utils/tauriClient';
@@ -100,7 +101,10 @@ const DashboardPage: React.FC = () => {
       cancelled = true;
     };
   }, [smartRoutingConfig?.enabled, smartMetaRefreshKey]);
-  const { serverCosts, refetchForce: refetchCosts } = useCostData();
+  // Revision tracks server status/tool changes so costs refetch when servers
+  // connect after mount — otherwise the footprint stays at its initial 0.
+  const costRevision = useMemo(() => serverCostRevision(allServers), [allServers]);
+  const { serverCosts, refetchForce: refetchCosts } = useCostData(costRevision);
   const { failure: httpFailure, openDialog: openHttpFailDialog } = useHttpServerStatus();
 
   const [hasLoaded, setHasLoaded] = React.useState(false);

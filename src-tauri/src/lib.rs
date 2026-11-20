@@ -675,6 +675,7 @@ pub fn run() {
             commands::decision::decision_history_list,
             commands::decision::decision_history_get,
             commands::decision::decision_history_clear,
+            commands::decision::decision_history_count,
             commands::rag::rag_select_model,
             commands::rag::rag_download_model,
             commands::rag::rag_model_download_status,

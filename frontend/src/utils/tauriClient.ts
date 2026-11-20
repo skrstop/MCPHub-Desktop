@@ -865,6 +865,10 @@ export function mapRestToCommand(method: string, endpoint: string, body?: unknow
         args: { limit: num('limit'), offset: num('offset') },
       };
     }
+    // GET /decision/history/count — total rows (pagination footer). Must be
+    // matched before the /decision/history/:id branch.
+    if (segs[1] === 'history' && segs.length === 3 && segs[2] === 'count' && m === 'GET')
+      return { command: 'decision_history_count', args: {} };
     // GET /decision/history/:id — one entry
     if (segs[1] === 'history' && segs.length === 3 && m === 'GET')
       return { command: 'decision_history_get', args: { id: decodeURIComponent(segs[2]) } };

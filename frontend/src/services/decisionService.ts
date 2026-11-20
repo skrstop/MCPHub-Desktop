@@ -115,6 +115,12 @@ export const getDecisionHistory = async (id: string): Promise<DecisionHistoryEnt
   return response.data ?? null;
 };
 
+export const countDecisionHistory = async (): Promise<number> => {
+  const response: ApiResponse<number> = await apiGet('/decision/history/count');
+  if (!response.success) throw new Error(response.message || 'Failed to count decision history');
+  return response.data ?? 0;
+};
+
 export const clearDecisionHistory = async (): Promise<number> => {
   const response: ApiResponse<number> = await apiDelete('/decision/history');
   if (!response.success) throw new Error(response.message || 'Failed to clear decision history');

@@ -1,0 +1,23 @@
+{
+  "description": {
+    "zh": "多语言主力（100+ 语言，~57ms / 内存~1.6GB（文件~360MB））。优势：概率经校准，低置信是可靠的升级信号。劣势：事实判断与紧急度分级中等，置信度偏保守。",
+    "en": "Multilingual workhorse (100+ languages, ~57ms / ~1.6GB RAM (file ~360MB)). Pros: calibrated probabilities — low confidence is a reliable escalation signal. Cons: mid-tier factuality and urgency grading, conservative confidence."
+  },
+  "toolDescriptions": {
+    "en": "Run a structured decision with the local Laya Multilingual model (322M, 100+ languages). Input: decisionType (choice = pick one option, score = rate on ordered levels, noul = true/false statement check), state (the context the decision is grounded in), question, and 2-20 candidate options in priority order. Output: per-option scores, calibrated probabilities and the selected option.\n\nLaya is the multilingual workhorse of the decision model family: ~57ms per call and ~1.6GB memory (model file ~360MB), reading requests in 100+ languages (Chinese, Japanese, Korean, Arabic, Hindi, Thai, European languages and more). Its probabilities are calibrated: when the input is out of its depth the distribution stays flat instead of reporting a false high confidence, so a low top probability is a reliable signal to escalate to a human or a stronger model.\n\nBest for: ticket/message routing, option picking, relevance scoring and yes/no (noul) policy checks in any language, especially when honest uncertainty matters. Known limits (measured over a 128-case benchmark): mid-strength on factual true/false checks and urgency grading; do not use it for factual, calculation or knowledge questions.",
+    "zh": "用本地 Laya Multilingual 决策模型（322M，100+ 语言）运行一次结构化决策。输入：decisionType（choice=从选项中挑选，score=按有序等级打分，noul=真假陈述判断）、state（决策所依据的上下文）、question 和 2-20 个按优先级排列的候选选项。输出：每个选项的分数、概率与选中项。\n\nLaya 是决策模型家族中的多语言主力：单次约 57ms、内存约 1.6GB（模型文件约 360MB），支持 100+ 语言（中、日、韩、阿拉伯语、印地语、泰语及欧洲语言等）。其概率经过校准：当输入超出模型能力时概率分布会保持平缓而不是虚报高置信度，因此最高概率偏低是可靠的升级信号（转人工或更强模型）。\n\n最适合：任意语言的工单/消息路由、选项挑选、相关度打分和 yes/no（noul）策略判断，尤其需要诚实不确定性的场景。已知局限（128 例基准实测）：事实性真假判断和紧急度分级中等；不要用于事实性、计算或知识类问题。"
+  },
+  "bundle": false,
+  "default": false,
+  "sort": 1,
+  "downloadUrls": {
+    "modelscope": {
+      "url": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=laya-multilingual.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
+      "enabled": true
+    },
+    "github": {
+      "url": "https://github.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=decision-laya_multilingual",
+      "enabled": true
+    }
+  }
+}

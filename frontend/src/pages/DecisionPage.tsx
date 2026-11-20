@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BrainCircuit, ChevronLeft, ChevronRight, Eye, Loader2, RefreshCw, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
+import { BrainCircuit, Eye, Loader2, RefreshCw, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
 import { Switch } from '@/components/ui/ToggleGroup';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import Pagination from '@/components/ui/Pagination';
 import {
   clearDecisionHistory,
+  countDecisionHistory,
   decideDecision,
   decisionSetEnabled,
   decisionStatus,
   getDecisionTools,
   listDecisionHistory,
-  selectDecisionModel,
+  listDecisionModels,
   type DecisionHistoryEntry,
 } from '@/services/decisionService';
 import { useToast } from '@/contexts/ToastContext';
@@ -19,10 +21,9 @@ import {
   decisionTypeLabelKey,
   formatProbability,
   formatScore,
-    pageSlice,
 } from '@/utils/decisionFormat';
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 10;
 
 /** 决策支持页（桌面端专属）：决策运行开关 + 请求决策历史（按请求时间倒序）。
  *  每行可查看详情（弹框）；支持一键清空全部历史。历史同时由全局定时清理
@@ -37,10 +38,11 @@ const DecisionPage: React.FC = () => {
   const [toggling, setToggling] = useState(false);
   const [loading, setLoading] = useState(true);
   const [entries, setEntries] = useState<DecisionHistoryEntry[]>([]);
-  // True while the backend still has rows beyond the loaded page (heuristic:
-  // fetch PAGE_SIZE+1 rows — an extra row is the only reliable "maybe more"
-  // signal short of a count query; it is sliced off before display).
-  const [hasMore, setHasMore] = useState(false);
+  // Total history rows (from the backend COUNT query) — drives the RAG-style
+  // pagination footer (showing x–x of total + page-number buttons).
+  const [total, setTotal] = useState(0);
+  // Rows per page for the offset-paged history list.
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
   // 1-based page number for the offset-paged history list.
   const [page, setPage] = useState(1);
   // Initial-load failure: distinct from "empty history" — the user must be
@@ -65,19 +67,39 @@ const DecisionPage: React.FC = () => {
   const statusGenRef = useRef(0);
   // Element that opened the detail dialog — focus is restored to it on close.
   const viewTriggerRef = useRef<HTMLElement | null>(null);
+  // History rows record the model selection key ("<family>/<size>", e.g.
+  // "julia/1") — map it to the friendly dropdown label for display.
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    listDecisionModels()
+      .then((models) => {
+        if (mounted.current) {
+          setModelLabels(Object.fromEntries(models.map((m) => [m.key ?? m.size, m.label])));
+        }
+      })
+      .catch(() => {});
+  }, []);
+  const modelLabel = useCallback(
+    (key?: string | null) => (key ? modelLabels[key] ?? key : key),
+    [modelLabels],
+  );
 
-  // Load one history page by offset (page is 1-based). Fetches PAGE_SIZE+1
-  // rows so an extra row can drive the next-page affordance. Failures set
-  // loadError (retry affordance) instead of leaving a dangling rejection.
-  const loadPage = useCallback(async (p: number) => {
+  // Load one history page by offset (page is 1-based), plus the total row
+  // count for the pagination footer. `size` overrides the page size when the
+  // per-page selector changes (always jumps back to page 1).
+  const loadPage = useCallback(async (p: number, size?: number) => {
+    const ps = size ?? pageSize;
     setPageLoading(true);
     try {
-      const list = await listDecisionHistory(PAGE_SIZE + 1, (p - 1) * PAGE_SIZE);
+      const [list, count] = await Promise.all([
+        listDecisionHistory(ps, (p - 1) * ps),
+        countDecisionHistory(),
+      ]);
       if (!mounted.current) return;
-      const { rows, hasMore } = pageSlice(list, PAGE_SIZE);
-      setEntries(rows);
-      setHasMore(hasMore);
+      setEntries(list);
+      setTotal(count);
       setPage(p);
+      if (size != null) setPageSize(size);
       setLoadError(false);
     } catch (e) {
       console.warn('[decision] failed to load history page', e);
@@ -85,15 +107,16 @@ const DecisionPage: React.FC = () => {
     } finally {
       if (mounted.current) setPageLoading(false);
     }
-  }, []);
+  }, [pageSize]);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     const gen = ++statusGenRef.current;
     try {
-      const [st, list] = await Promise.all([
+      const [st, list, count] = await Promise.all([
         decisionStatus(),
-        listDecisionHistory(PAGE_SIZE + 1, 0),
+        listDecisionHistory(PAGE_SIZE, 0),
+        countDecisionHistory(),
       ]);
       if (!mounted.current) return;
       // Discard a stale status: a toggle that started after this fetch (or
@@ -101,10 +124,10 @@ const DecisionPage: React.FC = () => {
       if (gen === statusGenRef.current && !togglingRef.current) {
         setEnabled(st.enabled);
       }
-      const { rows, hasMore } = pageSlice(list, PAGE_SIZE);
-      setEntries(rows);
-      setHasMore(hasMore);
+      setEntries(list);
+      setTotal(count);
       setPage(1);
+      setPageSize(PAGE_SIZE);
       setLoadError(false);
     } catch (e) {
       console.warn('[decision] failed to load page data', e);
@@ -149,7 +172,7 @@ const DecisionPage: React.FC = () => {
       const n = await clearDecisionHistory();
       if (mounted.current) {
         setEntries([]);
-        setHasMore(false);
+        setTotal(0);
         setPage(1);
         setClearConfirm(false);
         showToast(t('pages.decision.clearedToast', { count: n }), 'success');
@@ -162,26 +185,27 @@ const DecisionPage: React.FC = () => {
     }
   };
 
-  // Replay: switch to the entry's own model (the row records which model
-  // produced it), re-run the original request (recorded as a new history
-  // entry with source "ui"), then refresh the list so the new entry shows
-  // at the top.
+  // Replay: re-run the original request with the CURRENTLY selected model
+  // (do NOT switch back to the entry's recorded model — the user may have
+  // deliberately chosen another model), then refresh the list so the new
+  // entry shows at the top.
   const handleReplay = async (e: DecisionHistoryEntry) => {
     if (replayingId) return;
     setReplayingId(e.id);
     try {
-      if (e.model) {
-        await selectDecisionModel(e.model);
-      }
+      // DecisionOutput serializes camelCase: { decisionType, scores,
+      // probabilities, index, option } — the selected-option probability is
+      // probabilities[index] (NOT selectedIndex, which doesn't exist on the
+      // output and made the toast always show "概率 —").
       const out = await decideDecision({
         decisionType: e.decisionType,
         state: e.state ?? '',
         question: e.question,
         options: e.options,
-      }) as { selectedIndex?: number; probabilities?: number[]; option?: string } | null;
+      }) as { index?: number; probabilities?: number[]; option?: string } | null;
       if (mounted.current) {
         await loadPage(1);
-        const prob = out?.probabilities?.[out.selectedIndex ?? -1];
+        const prob = out?.probabilities?.[out.index ?? -1];
         showToast(
           t('pages.decision.replayDone', {
             option: out?.option ?? e.selectedOption,
@@ -341,7 +365,7 @@ const DecisionPage: React.FC = () => {
                       {t('pages.decision.selected')}: {e.selectedOption}
                     </span>
                     {e.durationMs != null && <span>{e.durationMs}ms</span>}
-                    {e.model && <span>{e.model}</span>}
+                    {e.model && <span>{modelLabel(e.model)}</span>}
                     {e.source && <span>{sourceLabel(e.source)}</span>}
                   </div>
                 </div>
@@ -377,28 +401,45 @@ const DecisionPage: React.FC = () => {
             ))}
           </ul>
           {entries.length > 0 && (
-            <div className="flex items-center justify-center gap-3 py-3 border-t border-[var(--hub-line-2)]">
-              <button
-                type="button"
-                className="hub-btn sm"
-                disabled={page <= 1 || pageLoading}
-                aria-label={t('common.prevPage')}
-                onClick={() => void loadPage(page - 1)}
-              >
-                <ChevronLeft size={12} /> {t('common.prevPage')}
-              </button>
-              <span className="text-xs text-[var(--hub-ink-3)]">
-                {t('pages.decision.pageInfo', { page })}
-              </span>
-              <button
-                type="button"
-                className="hub-btn sm"
-                disabled={!hasMore || pageLoading}
-                aria-label={t('common.nextPage')}
-                onClick={() => void loadPage(page + 1)}
-              >
-                {t('common.nextPage')} <ChevronRight size={12} />
-              </button>
+            <div
+              className="flex items-center flex-wrap gap-y-1 text-[12px]"
+              style={{ color: 'var(--hub-ink-3)', borderTop: '1px solid var(--hub-line-2)', padding: '8px 16px' }}
+            >
+              <div className="flex-[2] flex items-center gap-2 min-w-[200px]">
+                <span className="min-w-0">
+                  {t('common.showing', {
+                    start: total === 0 ? 0 : (page - 1) * pageSize + 1,
+                    end: Math.min(page * pageSize, total),
+                    total,
+                  })}
+                </span>
+              </div>
+              <div className="flex-[4] flex justify-center min-w-0">
+                {Math.ceil(total / pageSize) > 1 && (
+                  <Pagination
+                    currentPage={page}
+                    totalPages={Math.ceil(total / pageSize)}
+                    onPageChange={(p) => void loadPage(p)}
+                    disabled={pageLoading}
+                  />
+                )}
+              </div>
+              <div className="flex-[2] flex items-center justify-end gap-2 flex-shrink-0">
+                <label htmlFor="decisionPerPage">{t('common.itemsPerPage')}:</label>
+                <select
+                  id="decisionPerPage"
+                  value={pageSize}
+                  onChange={(e) => void loadPage(1, Number(e.target.value))}
+                  disabled={pageLoading}
+                  className="hub-input"
+                  style={{ height: 26, width: 70, padding: '0 6px', fontSize: 12 }}
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
             </div>
           )}
           </>
@@ -446,7 +487,7 @@ const DecisionPage: React.FC = () => {
               {viewing.model && (
                 <div>
                   <div className="text-[var(--hub-ink-3)] mb-1">{t('pages.decision.fieldModel')}</div>
-                  <div className="text-[var(--hub-ink)] hub-mono text-[12px]">{viewing.model}</div>
+                  <div className="text-[var(--hub-ink)] hub-mono text-[12px]">{modelLabel(viewing.model)}</div>
                 </div>
               )}
               {viewing.source && (
@@ -525,7 +566,7 @@ const DecisionPage: React.FC = () => {
           isOpen
           title={t('pages.decision.clearConfirmTitle')}
           message={
-            hasMore
+            total > entries.length
               ? t('pages.decision.clearConfirmAll')
               : t('pages.decision.clearConfirmMessage', { count: entries.length })
           }

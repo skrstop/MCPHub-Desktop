@@ -420,11 +420,15 @@ pub async fn decide_and_record(
         return Err(anyhow!("decision support is not enabled"));
     }
     let _permit = try_begin_decide()?;
+    // Start timing BEFORE model resolution: a cold cache load (mmap + tokenizer
+    // init of a multi-hundred-MB gguf) can take seconds and is part of the
+    // latency the user actually perceives — recording inference-only time
+    // under-reports it.
+    let start = std::time::Instant::now();
     let model = selected_model(app)
         .await
         .ok_or_else(|| anyhow!("no decision model is ready - download one first"))?;
     let m = cached_model(app, &model).await?;
-    let start = std::time::Instant::now();
     let req_for_task = req.clone();
     let out = tokio::task::spawn_blocking(move || m.decide(&req_for_task))
         .await
@@ -618,6 +622,14 @@ pub async fn clear_history() -> Result<u64> {
         .execute(db::pool())
         .await?;
     Ok(r.rows_affected())
+}
+
+/// Total number of history rows (pagination footer total).
+pub async fn count_history() -> Result<i64> {
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM decision_history")
+        .fetch_one(db::pool())
+        .await?;
+    Ok(n)
 }
 
 /// Delete history rows older than `days` (global periodic cleanup hook).

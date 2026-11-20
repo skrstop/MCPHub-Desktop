@@ -222,6 +222,17 @@ pub async fn decision_history_clear(
         .map_err(|e| e.to_string())
 }
 
+/// Total number of decision history rows (for pagination footers).
+#[tauri::command]
+pub async fn decision_history_count(
+    session: State<'_, crate::commands::auth::SessionState>,
+) -> Result<i64, String> {
+    crate::commands::config::require_admin(&session).await?;
+    crate::services::decision_service::count_history()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

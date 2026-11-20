@@ -1,0 +1,23 @@
+{
+  "description": {
+    "zh": "实时档最准（官方对齐 99.2%，~67ms / 内存~1.5GB（文件~357MB）），中英韩日均衡，默认模型。优势：准确率、长上下文（1024 token）。劣势：概率校准不如 Laya 保守，需参考前二分差。",
+    "en": "Most accurate real-time model (99.2% official agreement, ~67ms / ~1.5GB RAM (file ~357MB)), balanced across zh/en/ko/ja; the default. Pros: accuracy, long context (1024 tokens). Cons: probabilities less conservatively calibrated than Laya — check the top-2 margin."
+  },
+  "toolDescriptions": {
+    "en": "Run a structured decision with the local Statim Multilingual model (340M). Input: decisionType (choice = pick one option, score = rate on ordered levels, noul = true/false statement check), state (the context the decision is grounded in), question, and 2-20 candidate options in priority order. Output: per-option scores, probabilities and the selected option.\n\nStatim is the accuracy-focused real-time model of the decision family: ~67ms per call and ~1.5GB memory (model file ~357MB), with the highest agreement with its official reference engine among the fast models (99.2% over a 128-case benchmark spanning routing, sentiment, urgency, factuality, moderation and long-context scenarios in Chinese, English, Korean and Japanese).\n\nBest for: the default decision model — routing, scoring and true/false checks where you want strong multilingual quality at real-time speed, including long-context states (up to 1024 tokens). Known limits: occasional misses on factual true/false checks; probabilities are not as conservatively calibrated as Laya's, so also consider the margin between the top two options.",
+    "zh": "用本地 Statim Multilingual 决策模型（340M）运行一次结构化决策。输入：decisionType（choice=从选项中挑选，score=按有序等级打分，noul=真假陈述判断）、state（决策所依据的上下文）、question 和 2-20 个按优先级排列的候选选项。输出：每个选项的分数、概率与选中项。\n\nStatim 是决策模型家族中以准确率为先的实时模型：单次约 67ms、内存约 1.5GB（模型文件约 357MB），在快速模型中与官方参考引擎对齐率最高（128 例基准实测 99.2%，覆盖中英韩日的路由、情感、紧急度、事实判断、内容审核与长上下文场景）。\n\n最适合：作为默认决策模型——需要实时速度下较强多语言质量的路由、评分与真假判断，支持长上下文 state（最长 1024 token）。已知局限：事实性真假判断偶有失误；概率校准不如 Laya 保守，建议同时参考前两个选项的分差。"
+  },
+  "bundle": false,
+  "default": true,
+  "sort": 1,
+  "downloadUrls": {
+    "modelscope": {
+      "url": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=statim-multilingual-base.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
+      "enabled": true
+    },
+    "github": {
+      "url": "https://github.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=decision-statim_multilingual-base",
+      "enabled": true
+    }
+  }
+}

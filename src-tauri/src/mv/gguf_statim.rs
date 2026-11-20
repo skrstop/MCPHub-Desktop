@@ -678,7 +678,7 @@ mod tests {
     use std::io::BufReader;
     use std::path::PathBuf;
 
-    const TEMP_GGUF: &str = "runtimes/decision/model/statim/multilingual/model.gguf";
+    const TEMP_GGUF: &str = "runtimes/decision/model/statim/multilingual-base/model.gguf";
 
     fn load_model() -> Result<StatimModel> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TEMP_GGUF);

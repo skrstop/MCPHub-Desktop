@@ -1047,8 +1047,8 @@ mod tests {
         let models = [
             ("julia/1", "julia-1"),
             ("laya/multilingual", "laya-multilingual"),
-            ("statim/multilingual", "statim"),
-            ("jev/0.8b", "jev-style"),
+            ("statim/multilingual-base", "statim"),
+            ("jev-style/0.8b", "jev-style"),
         ];
         // (type, state, question, options) — covers choice / score / noul.
         let common = [
@@ -1329,8 +1329,8 @@ mod suite_tests {
         let models = [
             ("julia/1", "julia"),
             ("laya/multilingual", "laya"),
-            ("statim/multilingual", "statim"),
-            ("jev/0.8b", "jev-q8"),
+            ("statim/multilingual-base", "statim"),
+            ("jev-style/0.8b", "jev-q8"),
         ];
         let mut results: Vec<(String, Vec<Option<(usize, f32, f64)>>)> = Vec::new();
         let mut json_out: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
@@ -1424,8 +1424,8 @@ mod suite_tests {
         let models = [
             ("julia/1", "julia"),
             ("laya/multilingual", "laya"),
-            ("statim/multilingual", "statim"),
-            ("jev/0.8b", "jev-q8"),
+            ("statim/multilingual-base", "statim"),
+            ("jev-style/0.8b", "jev-q8"),
         ];
         for (rel, name) in models {
             let path = if rel.ends_with(".gguf") { base.join(rel) } else { base.join(rel).join("model.gguf") };

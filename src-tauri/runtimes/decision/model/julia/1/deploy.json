@@ -1,0 +1,23 @@
+{
+  "description": {
+    "zh": "最快最轻（~40ms / 内存~0.9GB（文件~168MB）），适合高频实时路由与选项挑选。优势：速度、体积、多语言路由。劣势：韩日情感与事实判断弱，模糊输入易出平票（top-prob<0.6 视为不确定）。",
+    "en": "Fastest and lightest (~40ms / ~0.9GB RAM (file ~168MB)) for high-frequency real-time routing and option picking. Pros: speed, size, multilingual routing. Cons: weak ko/ja sentiment and factuality, near-tied probs on ambiguous input (top-prob<0.6 = uncertain)."
+  },
+  "toolDescriptions": {
+    "en": "Run a structured decision with the local Julia-1 model (144M, multilingual). Input: decisionType (choice = pick one option, score = rate on ordered levels, noul = true/false statement check), state (the context the decision is grounded in), question, and 2-20 candidate options in priority order. Output: per-option scores, calibrated probabilities and the selected option.\n\nJulia-1 is the lightweight router of the decision model family: ~40ms per call and ~0.9GB memory (model file ~168MB), designed for real-time, high-frequency decisions — tool-call routing (which tool should handle the request), picking between candidate options, intent classification and relevance scoring across many languages.\n\nBest for: routing and picking tasks where speed matters more than nuance. Known limits (measured over a 128-case benchmark): weaker on sentiment nuance and factual true/false checks in Korean/Japanese, and it can produce near-tied probabilities (top prob ~0.5) on ambiguous inputs — treat a top probability below ~0.6 as 'uncertain' and fall back to a stronger model or a human. Do not use it for factual, calculation or knowledge questions: it answers those with high confidence but no grounding.",
+    "zh": "用本地 Julia-1 决策模型（144M，多语言）运行一次结构化决策。输入：decisionType（choice=从选项中挑选，score=按有序等级打分，noul=真假陈述判断）、state（决策所依据的上下文）、question 和 2-20 个按优先级排列的候选选项。输出：每个选项的分数、概率与选中项。\n\nJulia-1 是决策模型家族中的轻量路由模型：单次约 40ms、内存约 0.9GB（模型文件约 168MB），为实时高频决策设计——工具调用路由（该用哪个工具处理请求）、候选选项挑选、意图分类和相关度打分，支持多语言。\n\n最适合：速度优先于细粒度判断的路由与挑选任务。已知局限（128 例基准实测）：韩/日语的情感细粒度判断和事实性真假判断较弱；对模糊输入可能给出接近打平的概率（最高概率约 0.5）——最高概率低于约 0.6 时应视为'不确定'，回退到更强模型或人工。不要用于事实性、计算或知识类问题：它会高置信度地给出无依据的答案。"
+  },
+  "bundle": false,
+  "default": false,
+  "sort": 1,
+  "downloadUrls": {
+    "modelscope": {
+      "url": "https://modelscope.cn/models/skrstop4086824/MCPHub-Desktop-Embedding?useModelScope=true&file=julia-1.gguf&token=ms-10a42543-a908-46e1-a8f2-9c1910252d16",
+      "enabled": true
+    },
+    "github": {
+      "url": "https://github.com/skrstop/MCPHub-Desktop.git?useGit=true&branch=decision-julia_1",
+      "enabled": true
+    }
+  }
+}
